@@ -127,6 +127,14 @@ No public registration, and no change to how the service is distributed. It
 adds no second translation path: the same dictionary-first pipeline answers
 here, through the same objects rather than a second set of its own.
 
+It also deliberately offers less of the pipeline than the HTTP API, and the
+page footer says so instead of letting the gap read as an oversight: lookup
+here is exact-match only (no fuzzy candidates) and translation direction is
+always auto-detected (no direction selector). Both are a scope decision for a
+single-owner surface — the API's `/v1/terms` and `/v1/translations` remain
+the way to ask for fuzzy candidates or to force a direction. Revisit only if
+the owner actually misses either; do not add controls speculatively.
+
 Be precise about what that shares, because the two halves differ and an
 earlier version of this page ran them together:
 

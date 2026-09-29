@@ -105,8 +105,9 @@ class TermService:
         )
 
     def _exact(self, query: str) -> list[LookupCandidate]:
-        zh_norm = normalize_text(query)
-        en_norm = normalize_text(query)
+        # One normalization serves both sides: the query is matched against
+        # zh_norm and en_norm with the same normalized form.
+        norm = normalize_text(query)
         with connect(self.db_path) as conn:
             rows = conn.execute(
                 """
@@ -114,7 +115,7 @@ class TermService:
                 WHERE zh_norm = ? OR en_norm = ?
                 ORDER BY priority, length(zh), category, source_file, source_id
                 """,
-                (zh_norm, en_norm),
+                (norm, norm),
             ).fetchall()
         candidates = []
         seen: set[tuple[str, str, str]] = set()

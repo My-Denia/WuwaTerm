@@ -1613,11 +1613,6 @@ def _reply_index_last_save_status(reply_index: ChannelReplyIndex) -> str:
     return "ok" if last_save else "failed"
 
 
-def format_term_reply(service: TermService, query: str) -> str:
-    translator = SentenceTranslator(service.db_path)
-    return translate_query(service, translator, query)
-
-
 def _telegram_text(outcome: TranslationOutcome) -> str:
     """Telegram wording for a protocol-neutral outcome.
 
