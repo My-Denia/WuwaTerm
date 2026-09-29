@@ -42,7 +42,14 @@ const worker = {
       const input = await request.json();
       return proxyReviewRequest({ environment, input, fetchImpl });
     }
-    return new Response('Not found', { status: 404 });
+    return new Response(JSON.stringify({ status: 'unavailable', reason: 'not_found' }), {
+      status: 404,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow, noarchive',
+      },
+    });
   },
 };
 export default worker;
