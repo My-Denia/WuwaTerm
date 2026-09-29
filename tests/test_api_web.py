@@ -42,8 +42,11 @@ def run(coro):
 
 async def call(app, method: str, url: str, **kwargs) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
+    # Cookies belong on the client, not the request: per-request cookies are
+    # deprecated in httpx and warn on every call that passes them.
+    cookies = kwargs.pop("cookies", None)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://api.test"
+        transport=transport, base_url="http://api.test", cookies=cookies
     ) as client:
         return await client.request(method, url, **kwargs)
 
