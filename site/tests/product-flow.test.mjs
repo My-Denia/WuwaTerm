@@ -90,6 +90,9 @@ test('visitor journey edge: unknown route answers 404 with the no-store envelope
   try {
     const missing = await mf.dispatchFetch('http://site.test/api/nope');
     assert.equal(missing.status, 404);
+    assert.match(missing.headers.get('cache-control'), /no-store/);
+    assert.equal(missing.headers.get('content-type'), 'application/json; charset=utf-8');
+    assert.equal((await missing.json()).reason, 'not_found');
 
     const empty = await mf.dispatchFetch('http://site.test/api/terms?q=');
     assert.equal(empty.status, 400);
