@@ -199,7 +199,7 @@ export function ReviewWorkbench() {
     <div className="card-heading"><div><p className="section-kicker">03 / REVIEW</p><h2 id="review-title">双语稿件工作台</h2></div><span className="tag">本地续作</span></div>
     <p className="card-intro">保存稿件文件，下次导入继续修改。只有主动核对时才提交两框文本；不保存云端稿件，不调用整句模型。</p>
     {!latest && !source.trim() && !target.trim() && choices.length === 0 && (
-      <ol className="guide-steps" aria-label="上手步骤">
+      <ol className="guide-steps" aria-label="上手步骤" role="list">
         <li><strong>粘贴原文和已有译文</strong><span>两侧都填，并选择译文语言。</span></li>
         <li><strong>点「核对术语」</strong><span>只检查官方术语约束；空结果不算已核。</span></li>
         <li><strong>按发现选择官方词对</strong><span>选择会暂存，需再核对一次生效；合句拆句先在「分段对应」里确认范围。</span></li>
