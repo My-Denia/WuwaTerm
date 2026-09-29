@@ -35,6 +35,7 @@ from wuwaterm.channel import (
     CapacitySkipNotifier,
     channel_post_handler,
     count_cjk,
+    send_with_flood_retry,
     strip_telegram_html,
     validate_telegram_html,
 )
@@ -715,6 +716,23 @@ def test_flood_retry_aborts_when_authorization_revoked_during_wait(
 
     assert message.replies == []
     assert "flood-wait retry aborted: delivery gate closed" in caplog.text
+
+
+def test_flood_retry_accepts_timedelta_retry_after(monkeypatch):
+    # PTB >= 23 reports retry_after as datetime.timedelta (opt in early with
+    # PTB_TIMEDELTA=1); the flood retry must treat both shapes identically.
+    # A zero delay keeps the test instant.
+    monkeypatch.setenv("PTB_TIMEDELTA", "1")
+    attempts = []
+
+    async def send():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RetryAfter(timedelta(seconds=0))
+        return "sent"
+
+    assert asyncio.run(send_with_flood_retry(send)) == "sent"
+    assert len(attempts) == 2
 
 
 def test_html_content_failure_falls_back_to_plain_delivery(monkeypatch, sample_db):
