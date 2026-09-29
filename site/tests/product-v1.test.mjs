@@ -512,7 +512,7 @@ function sampleReviewBody(source, target, extraFindings = []) {
   };
 }
 
-function denseCappedReviewBody(source, target) {
+function denseCappedReviewBody(source) {
   const findings = [];
   const pad = 'N'.repeat(240);
   for (let index = 0; index < 32; index += 1) {
@@ -582,7 +582,7 @@ test('review proxy uses an independent endpoint and keeps exact keys', async () 
 test('dense 2000+2000 review responses stay 200 rather than upstream_response_too_large', async () => {
   const source = '今'.repeat(2000);
   const target = 'A'.repeat(2000);
-  const upstream = denseCappedReviewBody(source, target);
+  const upstream = denseCappedReviewBody(source);
   const encoded = Buffer.byteLength(JSON.stringify(upstream), 'utf8');
   assert.ok(encoded > 40_000, `stub too small: ${encoded}`);
   assert.ok(encoded <= 65_536, `stub over cap: ${encoded}`);
