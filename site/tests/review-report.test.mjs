@@ -128,8 +128,8 @@ test('review UI imports the report module and does not insert manuscripts as HTM
   assert.equal(component.includes('innerHTML'), false);
   assert.equal(page.includes('dangerouslySetInnerHTML'), false);
   assert.match(component, /discardInFlight/u);
-  assert.match(component, /setHistory\(\[\]\)/u);
-  // State transitions are exercised by manuscript.test and the hydrated GUI acceptance.
+  // Handoff and undo state transitions are exercised by the real browser
+  // regression, rather than requiring the former destructive history reset.
   assert.match(component, /parseWorkfile/u);
   assert.match(component, /reconcileChoice/u);
   assert.match(component, /forms\.includes\(finding\.target_span\.text\)/u);

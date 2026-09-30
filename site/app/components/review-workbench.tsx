@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { highlightSegments, revisionOf, summarizeReview } from '../../lib/review-report.js';
 import {
   MAX_CHOICES, MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, mentionId,
@@ -16,7 +16,7 @@ type Draft = { source: string; target: string; direction: 'en' | 'zh'; alignment
 type Choice = { source: string; direction: string; source_span: Span; scope: string; choice: string; candidate: Pick<Candidate, 'candidate_id' | 'zh' | 'en' | 'category'> | null; basis: ReturnType<typeof basisOf> };
 type Resolution = { mention_id: string; choice: string; candidate_id?: string };
 type Snapshot = Draft & { report: Report; trusted: boolean; signature: string; resolutions: Resolution[] | null };
-type Undo = { draft: Draft; choices: Choice[]; imported: Choice[] };
+type Undo = { draft: Draft; choices: Choice[]; imported: Choice[]; reports?: Snapshot[] };
 const EMPTY: Draft = { source: '', target: '', direction: 'en', alignments: null };
 const VERDICTS: Record<string, string> = { verified_constraint: '术语约束已核', confirmed_conflict: '与所选词对冲突', needs_review: '需要核对', not_evaluated: '未评估' };
 const MESSAGES: Record<string, string> = {
@@ -49,11 +49,18 @@ export function ReviewWorkbench() {
   const [phase, setPhase] = useState<'idle' | 'loading' | 'success' | 'error' | 'cancelled'>('idle');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
   const sourceBox = useRef<HTMLTextAreaElement>(null);
   const targetBox = useRef<HTMLTextAreaElement>(null);
   const fileBox = useRef<HTMLInputElement>(null);
   const controller = useRef<AbortController | null>(null);
   const generation = useRef(0);
+  const handoffDialog = useRef<HTMLDialogElement>(null);
+  const keepDraftButton = useRef<HTMLButtonElement>(null);
+  const work = useRef({ draft, choices, imported, reports, history });
+  // The window listener must see edits made after mount, including reports
+  // arriving while a replacement decision is open.
+  useLayoutEffect(() => { work.current = { draft, choices, imported, reports, history }; }, [draft, choices, imported, reports, history]);
   const latest = reports.at(-1) ?? null;
   const previous = reports.at(-2) ?? null;
   const reconciled = reconcileChoices(choices, draft, latest, imported);
@@ -65,9 +72,22 @@ export function ReviewWorkbench() {
   const comparison = latest && previous ? compareReports(previous, latest) : null;
   const basisChanged = !!latest?.trusted && choices.some(choice => !sameBasis(choice.basis, basisOf(latest.report)));
 
-  function discardInFlight() {
+  const discardInFlight = useCallback(() => {
     controller.current?.abort(); controller.current = null; generation.current += 1; setPhase('idle'); setError('');
-  }
+  }, []);
+  const receiveDraft = useCallback((next: Draft) => {
+    handoffDialog.current?.close(); setPendingDraft(null);
+    const before = work.current;
+    if (before.draft.source === next.source && before.draft.target === next.target && before.draft.direction === next.direction) return;
+    const saved: Undo = { draft: before.draft, choices: before.choices, imported: before.imported, reports: before.reports };
+    const nextHistory = [...before.history.slice(-19), saved];
+    // Update synchronously as well so successive events in one turn cannot
+    // mistake an already received manuscript for an empty workbench.
+    work.current = { draft: next, choices: [], imported: [], reports: [], history: nextHistory };
+    setHistory(nextHistory); discardInFlight(); setChoices([]); setImported([]); setReports([]); setDraft(next);
+    setNotice('已接收译文，可撤销此次交接。需要续作时，请主动保存稿件文件。');
+    sourceBox.current?.focus();
+  }, [discardInFlight]);
   function remember() { setHistory(stack => [...stack.slice(-19), { draft, choices, imported }]); }
   function edit(next: Draft, message = '') {
     remember(); discardInFlight(); setDraft(next); setNotice(message);
@@ -80,13 +100,24 @@ export function ReviewWorkbench() {
     function onDraft(event: Event) {
       const detail = (event as CustomEvent).detail;
       if (!detail || typeof detail.source !== 'string' || typeof detail.target !== 'string' || !['en', 'zh'].includes(detail.direction)) return;
-      discardInFlight(); setHistory([]); setChoices([]); setImported([]); setReports([]);
-      setDraft({ source: detail.source, target: detail.target, direction: detail.direction, alignments: null });
-      setNotice('已接收译文。需要续作时，请主动保存稿件文件。');
+      const before = work.current;
+      if (before.draft.source === detail.source && before.draft.target === detail.target && before.draft.direction === detail.direction) return;
+      const next: Draft = { source: detail.source, target: detail.target, direction: detail.direction, alignments: null };
+      const empty = before.draft.source === '' && before.draft.target === '' && before.draft.alignments === null
+        && !before.choices.length && !before.imported.length && !before.reports.length && !before.history.length;
+      if (empty) receiveDraft(next);
+      else setPendingDraft(next);
     }
     window.addEventListener('wuwaterm-send-review', onDraft);
-    return () => { window.removeEventListener('wuwaterm-send-review', onDraft); controller.current?.abort(); };
-  }, []);
+    return () => window.removeEventListener('wuwaterm-send-review', onDraft);
+  }, [receiveDraft]);
+  useEffect(() => () => { controller.current?.abort(); }, []);
+  useEffect(() => {
+    if (pendingDraft) {
+      if (!handoffDialog.current?.open) handoffDialog.current?.showModal();
+      keepDraftButton.current?.focus();
+    } else handoffDialog.current?.close();
+  }, [pendingDraft]);
 
   async function check(withChoices = true) {
     if (!validInput) return;
@@ -163,7 +194,8 @@ export function ReviewWorkbench() {
   function undo() {
     const last = history.at(-1); if (!last) return;
     discardInFlight(); setDraft(last.draft); setChoices(last.choices); setImported(last.imported); setHistory(stack => stack.slice(0, -1));
-    setNotice('已撤销本地修改；仍需重新核对。');
+    if (last.reports) setReports(last.reports);
+    setNotice(last.reports ? '已恢复交接前的稿件、选择与历史报告；仍需重新核对。' : '已撤销本地修改；仍需重新核对。');
   }
   async function importFile(file?: File) {
     if (!file) return;
@@ -196,6 +228,14 @@ export function ReviewWorkbench() {
     setNotice(current ? '已导出当前文本与术语检查结果；未认证整句语义。' : '已导出当前文本，并明确标记需要重新核对。');
   }
   return <section className="workspace-card review-card" aria-labelledby="review-title">
+    <dialog className="handoff-dialog" ref={handoffDialog} aria-labelledby="handoff-title" aria-describedby="handoff-description" onCancel={() => setPendingDraft(null)}>
+      <h3 id="handoff-title">替换审校稿件？</h3>
+      <p id="handoff-description">将替换当前稿件、术语选择、对应范围和报告，并停止等待当前检查。可以撤销此次替换；需要续作时请先保存稿件文件。</p>
+      <div className="actions">
+        <button ref={keepDraftButton} type="button" className="secondary-button" onClick={() => { handoffDialog.current?.close(); setPendingDraft(null); }}>保留当前稿件</button>
+        <button type="button" className="secondary-button" onClick={() => { if (pendingDraft) receiveDraft(pendingDraft); }}>替换稿件</button>
+      </div>
+    </dialog>
     <div className="card-heading"><div><p className="section-kicker">03 / REVIEW</p><h2 id="review-title">双语稿件工作台</h2></div><span className="tag">本地续作</span></div>
     <p className="card-intro">保存稿件文件，下次导入继续修改。只有主动核对时才提交两框文本；不保存云端稿件，不调用整句模型。</p>
     {!latest && !source.trim() && !target.trim() && choices.length === 0 && (

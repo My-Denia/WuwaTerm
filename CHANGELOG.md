@@ -5,6 +5,13 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Fixed
+
+- Site: sending a translation to review now preserves an identical manuscript,
+  asks before replacing existing work, and keeps a recoverable undo snapshot.
+  Cancelling a handoff leaves any running check intact; replacing a manuscript
+  rejects late results from its previous check.
+
 ## 0.5.0 - 2026-09-13
 
 The public product and `main` catch up to a tagged release. WuwaTerm is an
