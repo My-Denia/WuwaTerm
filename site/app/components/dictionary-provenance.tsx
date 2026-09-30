@@ -91,7 +91,7 @@ export function DictionaryProvenance() {
       </div>
       {open && (
         <>
-          <p>打开或重新读取各会计入一次今日词典信息共享额度。</p>
+          <p>第一次打开和每次重新读取各会计入一次今日词典信息共享额度。收起后再打开不会重新请求。</p>
           {view?.kind === 'loading' && <p role="status">正在读取当前服务报告的词典数据…</p>}
           {view?.kind === 'error' && <p role="status">当前版本无法确认。</p>}
           {view?.kind === 'success' && (
