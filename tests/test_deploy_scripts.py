@@ -1139,7 +1139,7 @@ def test_vps_update_success_publishes_verified_immutable_binding(deploy_harness)
     assert payload["image"]["id"] == NEW_IMAGE
     assert payload["database"]["sha256"] == new_hash
     assert payload["database"]["provenance"]["source_commit"] == (
-        "6ce8d5eda49f2930da84d8846c144432142c7465"
+        get_source_profile("arikatsu").pinned_commit
     )
     assert manifest_path.stat().st_mode & 0o222 == 0
 

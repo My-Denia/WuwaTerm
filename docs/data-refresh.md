@@ -5,8 +5,8 @@
 Primary source:
 
 - `https://github.com/Arikatsu/WutheringWaves_Data`
-- pinned commit: `6ce8d5eda49f2930da84d8846c144432142c7465`
-- pinned version: `GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
+- pinned commit: `9218d612ad815e398e064e577e42aaf878899968`
+- pinned version: `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
 
 Both source profiles, with their pinned commits, are defined in
 `src/wuwaterm/constants.py`.
@@ -77,7 +77,7 @@ clean tracked state, and all three version fields in the root README match the
 active source profile. The builder writes those observed values into DB
 metadata. The verifier opens the candidate read-only and checks integrity,
 exact tables/columns/indexes, schema and source metadata, every required
-category, and the 3.6 representative exact pair `景燃 -> Jingran` in both
+category, and the representative exact pair `景燃 -> Jingran` in both
 directions. It must pass before any production promotion. Generated candidates
 remain ignored and are not distributed.
 
@@ -90,12 +90,14 @@ remain ignored and are not distributed.
 
 ## Refresh Checks
 
-For 3.6, `景燃 -> Jingran` is the required representative new-term check. It
-replaced the 3.5 pair `穗穗 -> Suisui`, which 3.6 makes unusable for this check:
-the new data adds a second speaker row `穗穗（通讯中） -> Suisui`, so the reverse
-direction is no longer single-valued. A representative pair must stay
-single-valued in both directions in the built database; pick the replacement by
-measuring the candidate, not by reading upstream release notes.
+`景燃 -> Jingran` remains the required representative exact check. It was
+re-measured on the built 3.7 candidate and is still single-valued in both
+directions. The 3.5 pair `穗穗 -> Suisui` stays retired: `穗穗（通讯中） -> Suisui`
+still makes the reverse direction multi-valued. A pair that is new at 3.7 and
+single-valued both ways on that same candidate is `棠宁 -> Tangning`; it is the
+measured new-term sample, not a second required check. A representative pair
+must stay single-valued in both directions in the built database; pick or keep
+it by measuring the candidate, not by reading upstream release notes.
 Offline candidate verification proves the source and DB content; it does not
 prove that a VPS is running that DB. After an owner-authorized deployment, the
 immutable deployment manifest records the DB hash and provenance. A live

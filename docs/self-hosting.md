@@ -403,7 +403,7 @@ query can legitimately return several. The response above is one shape of that:
 this particular term exists as a resonator, an echo and a speaker, and its
 English string happens to be the same in all three. It is not the only shape.
 When the upstream data records more than one official English string for a term,
-those come back as separate matches **inside one category** — at the 3.6 pin,
+those come back as separate matches **inside one category** — at the 3.7 pin,
 `守岸人` returns both `Shorekeeper` and `The Shorekeeper` in `resonator`. A reverse
 (English) query can likewise return several Chinese strings — `Suisui` is both
 `穗穗` and `穗穗（通讯中）`, both `speaker`. So read `zh`, `en` and `category`

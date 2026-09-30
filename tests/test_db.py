@@ -87,8 +87,9 @@ def test_strong_verifier_accepts_complete_candidate_read_only(verified_db):
     result = _verify(verified_db)
 
     assert result.returncode == 0, result.stderr
-    assert "source_commit\t6ce8d5eda49f2930da84d8846c144432142c7465" in result.stdout
-    assert "source_changelist\t8464573" in result.stdout
+    profile = get_source_profile("arikatsu")
+    assert f"source_commit\t{profile.pinned_commit}" in result.stdout
+    assert f"source_changelist\t{profile.expected_changelist}" in result.stdout
     assert hashlib.sha256(verified_db.read_bytes()).hexdigest() == before
 
 

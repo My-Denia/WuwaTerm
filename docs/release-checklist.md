@@ -20,11 +20,11 @@ release. That boundary has not moved.
   `WuwaTerm-0.2.0-windows-x64.zip`
 - Supported source profile: `arikatsu`
 - Supported game data version:
-  `GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
+  `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
 - Pinned source repository:
   `https://github.com/Arikatsu/WutheringWaves_Data`
 - Pinned source commit:
-  `6ce8d5eda49f2930da84d8846c144432142c7465`
+  `9218d612ad815e398e064e577e42aaf878899968`
 - Fallback source profile: `dimbreath_legacy`
 - Fallback pinned commit:
   `e9234ffe094b2d944d16b222d31102e8ab32d954`
@@ -368,10 +368,10 @@ generated notes before publishing rather than assuming this page.
 
 - Source profile: arikatsu
 - Source repository: https://github.com/Arikatsu/WutheringWaves_Data
-- Pinned source commit: 6ce8d5eda49f2930da84d8846c144432142c7465
-- GameVer: 3.6.0
-- ResVer: 3.6.4
-- Changelist: 8464573
+- Pinned source commit: 9218d612ad815e398e064e577e42aaf878899968
+- GameVer: 3.7.0
+- ResVer: 3.7.8
+- Changelist: 8975829
 
 ### Validation
 
