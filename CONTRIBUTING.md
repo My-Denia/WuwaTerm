@@ -119,8 +119,9 @@ Continuous integration runs `python scripts/validate.py` on Python 3.11, 3.12,
 3.13 and 3.14 on `ubuntu-latest`, plus five more jobs: a uv lock-drift check, a
 wheel and sdist packaging audit with a clean-environment install smoke, a
 Windows desktop-client build, a Docker runtime/builder boundary check, and
-the Site suite (`npm test`, typecheck, lint, build, and
-`verify:no-client-secret` in `site/`). CI publishes nothing.
+the Site suite (`npm test`, typecheck, lint, build,
+`verify:no-client-secret`, and the browser handoff regression in `site/`).
+CI publishes nothing.
 
 ## Working On The Desktop Client
 

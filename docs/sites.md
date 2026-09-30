@@ -50,6 +50,15 @@ last two reports. Import is local and bounded to 1 MiB; it never sends a request
 There are no accounts, cloud manuscripts, automatic uploads or browser-storage
 history. The user must download and later import the file to resume.
 
+Sending a translation to review accepts an empty workbench directly. Sending
+the same source, translation and direction again preserves choices, ranges,
+reports, undo history and any running check. A different manuscript asks for
+confirmation, defaulting to keeping the current work. Cancelling leaves the
+current check running; confirming preserves a snapshot before replacing the
+draft and stopping the old check. Undo restores the prior work and historical
+reports, but a new explicit check is still required. Handoff and undo do not
+send review requests automatically.
+
 File reports are untrusted historical records, regardless of hashes or verdicts.
 The first explicit check after import obtains fresh authoritative candidates.
 Unchanged official choices can then be staged for a second explicit check;
