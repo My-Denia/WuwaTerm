@@ -438,6 +438,12 @@ test('schema mismatch is stable and allowlists no upstream fields', async () => 
     { source_game_version: '3.7.0' },
     { source_game_version: 1, source_resource_version: '3.7.8', source_changelist: '8975829' },
     { source_game_version: '', source_resource_version: '3.7.8', source_changelist: '8975829' },
+    {
+      source_game_version: '9.9.9',
+      source_resource_version: '8.8.8',
+      source_changelist: '111',
+      source_repo_url: 'https://example.invalid',
+    },
   ]) {
     const response = await proxyMetaRequest({
       environment: ENVIRONMENT,
