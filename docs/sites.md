@@ -13,7 +13,7 @@ and there is no SLA.
 
 - **Repository fact:** `site/` is a separately built Hosted / Cloudflare Worker
   BFF. The browser calls only same-origin `/api/pool`, `/api/terms`,
-  `/api/translations` and `/api/reviews`; the server-side proxy holds the device credential and
+  `/api/translations`, `/api/reviews` and the on-demand `/api/meta`; the server-side proxy holds the device credential and
   calls the published `/v1` contract. There is no visitor account system in
   this application code.
 - **Hosted platform control:** the hosting platform owns deployment versions,
