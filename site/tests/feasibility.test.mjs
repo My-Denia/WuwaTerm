@@ -136,6 +136,10 @@ test('200 uses the fixed metadata path and strict server-owned request', async (
   assertSafeHeaders(response);
   assert.deepEqual(await bodyOf(response), {
     schema_version: '3.6.0',
+    source_commit: 'abc123',
+    game_version: null,
+    resource_version: null,
+    changelist: null,
     term_count: 12_345,
     request_id: 'req-test-001',
   });
@@ -430,6 +434,10 @@ test('schema mismatch is stable and allowlists no upstream fields', async () => 
     { llm_configured: 'yes' },
     { schema_version: 1 },
     { source_profile: { secret: TOKEN } },
+    { source_repo_url: 'https://example.invalid' },
+    { source_game_version: '3.7.0' },
+    { source_game_version: 1, source_resource_version: '3.7.8', source_changelist: '8975829' },
+    { source_game_version: '', source_resource_version: '3.7.8', source_changelist: '8975829' },
   ]) {
     const response = await proxyMetaRequest({
       environment: ENVIRONMENT,
@@ -439,6 +447,70 @@ test('schema mismatch is stable and allowlists no upstream fields', async () => 
   }
 });
 
+test('the closed versioned meta shape projects reported values, nulls, and the unavailable sentinel', async () => {
+  const versions = {
+    source_game_version: '3.7.0',
+    source_resource_version: '3.7.8',
+    source_changelist: '8975829',
+  };
+  const reported = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => upstreamJson(200, metaBody(versions)),
+  });
+  assert.deepEqual(await bodyOf(reported), {
+    schema_version: '3.6.0',
+    source_commit: 'abc123',
+    game_version: '3.7.0',
+    resource_version: '3.7.8',
+    changelist: '8975829',
+    term_count: 12_345,
+    request_id: 'req-test-001',
+  });
+
+  const missing = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => upstreamJson(200, metaBody({
+      source_game_version: null,
+      source_resource_version: null,
+      source_changelist: null,
+    })),
+  });
+  assert.deepEqual(await bodyOf(missing), {
+    schema_version: '3.6.0',
+    source_commit: 'abc123',
+    game_version: null,
+    resource_version: null,
+    changelist: null,
+    term_count: 12_345,
+    request_id: 'req-test-001',
+  });
+
+  const unrecorded = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => upstreamJson(200, metaBody({
+      source_game_version: 'unavailable',
+      source_resource_version: 'unavailable',
+      source_changelist: 'unavailable',
+    })),
+  });
+  assert.equal((await bodyOf(unrecorded)).game_version, 'unavailable');
+});
+
+test('a token inside a reported version field is not returned to the browser', async () => {
+  const response = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => upstreamJson(200, metaBody({
+      source_game_version: TOKEN,
+      source_resource_version: '3.7.8',
+      source_changelist: '8975829',
+    })),
+  });
+  assert.equal(response.status, 502);
+  const text = await response.text();
+  assert.equal(text.includes(TOKEN), false);
+  assert.deepEqual(JSON.parse(text), { status: 'unavailable', reason: 'upstream_schema_mismatch' });
+});
+
 test('canary values in projected success fields are rejected rather than reflected', async () => {
   for (const overrides of [
     { service_version: TOKEN },
@@ -446,6 +518,8 @@ test('canary values in projected success fields are rejected rather than reflect
     { service_version: new URL(BASE_URL).origin },
     { api_version: ALLOWED_HOST },
     { request_id: `req-${TOKEN}` },
+    { source_commit: BASE_URL },
+    { source_commit: ALLOWED_HOST },
   ]) {
     const response = await proxyMetaRequest({
       environment: ENVIRONMENT,

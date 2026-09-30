@@ -59,8 +59,42 @@ test('metadata projects the backend revision fields without exposing private con
   assertSafeResponse(response);
   assert.deepEqual(await response.json(), {
     schema_version: '3.6.0',
+    source_commit: 'abc123',
+    game_version: null,
+    resource_version: null,
+    changelist: null,
     term_count: 12_345,
     request_id: 'req-meta',
+  });
+});
+
+test('metadata accepts the versioned meta shape and projects only the public fields', async () => {
+  const response = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => upstreamJson(200, {
+      service_version: '0.4.1',
+      api_version: 'v1',
+      schema_version: '2',
+      source_profile: 'official',
+      source_commit: 'abc123',
+      source_game_version: '3.7.0',
+      source_resource_version: '3.7.8',
+      source_changelist: '8975829',
+      term_count: 11_329,
+      llm_configured: true,
+      request_id: 'req-meta-new',
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    schema_version: '2',
+    source_commit: 'abc123',
+    game_version: '3.7.0',
+    resource_version: '3.7.8',
+    changelist: '8975829',
+    term_count: 11_329,
+    request_id: 'req-meta-new',
   });
 });
 
@@ -629,6 +663,17 @@ test('routes all delegate to the shared proxy and expose no environment names', 
     assert.equal(source.includes('WUWATERM_SITE_DEVICE_TOKEN'), false);
     assert.equal(source.includes('set-cookie'), false);
   }
+});
+
+test('provenance UI reads meta on demand and does not embed a repository game version', () => {
+  const pageSource = readFileSync(fileURLToPath(new URL('../app/page.tsx', import.meta.url)), 'utf8');
+  const source = readFileSync(fileURLToPath(new URL('../app/components/dictionary-provenance.tsx', import.meta.url)), 'utf8');
+  assert.equal(pageSource.includes('/api/meta'), false);
+  assert.equal(pageSource.includes('useEffect'), false);
+  assert.equal(source.includes('useEffect'), false);
+  assert.equal(source.includes('/api/meta'), true);
+  assert.equal(source.includes('3.7'), false);
+  assert.equal(source.includes('9218d612'), false);
 });
 
 test('Product v1 UI uses only same-origin APIs and does not sort, filter, or deduplicate matches', () => {

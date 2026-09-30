@@ -76,23 +76,31 @@ function plainOutputText(value) {
     && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 }
 
+const META_BASE_KEYS = [
+  'api_version', 'llm_configured', 'request_id', 'schema_version',
+  'service_version', 'source_commit', 'source_profile', 'term_count',
+];
+const META_VERSION_KEYS = [
+  'source_changelist', 'source_game_version', 'source_resource_version',
+];
+
 function validMetaBody(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  return (
-    boundedText(value.api_version, 128) &&
-    boundedText(value.service_version, 128) &&
-    Number.isInteger(value.term_count) &&
-    value.term_count >= 0 &&
-    boundedText(value.request_id) &&
-    typeof value.llm_configured === 'boolean' &&
-    nullableText(value.schema_version) &&
-    nullableText(value.source_profile) &&
-    nullableText(value.source_commit) &&
-    exactKeys(value, [
-      'api_version', 'llm_configured', 'request_id', 'schema_version',
-      'service_version', 'source_commit', 'source_profile', 'term_count',
-    ])
-  );
+  if (!plainObject(value)) return false;
+  if (
+    !boundedText(value.api_version, 128) ||
+    !boundedText(value.service_version, 128) ||
+    !Number.isInteger(value.term_count) ||
+    value.term_count < 0 ||
+    !boundedText(value.request_id) ||
+    typeof value.llm_configured !== 'boolean' ||
+    !nullableText(value.schema_version) ||
+    !nullableText(value.source_profile) ||
+    !nullableText(value.source_commit)
+  ) return false;
+  const versionCount = META_VERSION_KEYS.filter((key) => Object.hasOwn(value, key)).length;
+  if (versionCount !== 0 && versionCount !== META_VERSION_KEYS.length) return false;
+  if (versionCount === META_VERSION_KEYS.length && !META_VERSION_KEYS.every((key) => nullableText(value[key]))) return false;
+  return exactKeys(value, versionCount === 0 ? META_BASE_KEYS : [...META_BASE_KEYS, ...META_VERSION_KEYS]);
 }
 
 function validTermMatch(value) {
@@ -583,6 +591,10 @@ export async function proxyMetaRequest({
     validator: validMetaBody,
     projector: (body) => ({
       schema_version: body.schema_version,
+      source_commit: body.source_commit,
+      game_version: Object.hasOwn(body, 'source_game_version') ? body.source_game_version : null,
+      resource_version: Object.hasOwn(body, 'source_resource_version') ? body.source_resource_version : null,
+      changelist: Object.hasOwn(body, 'source_changelist') ? body.source_changelist : null,
       term_count: body.term_count,
       request_id: body.request_id,
     }),
