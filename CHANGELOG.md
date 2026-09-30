@@ -12,6 +12,41 @@ does not distribute generated game data or generated SQLite databases.
   Cancelling a handoff leaves any running check intact; replacing a manuscript
   rejects late results from its previous check.
 
+### Game Data
+
+- data: pin Arikatsu 3.7.0 — the active source profile moves to Wuthering
+  Waves 3.7.0 / resource 3.7.8 / changelist 8975829 at exact upstream commit
+  `9218d612ad815e398e064e577e42aaf878899968` (previously 3.6.0 / 3.6.4 /
+  8464573 at `6ce8d5eda49f2930da84d8846c144432142c7465`). The upstream README
+  at that commit labels the checkout Global / Release; that label is the data
+  repository's own status line. The candidate built from that checkout carries
+  11329 extracted records, up from 10951, with 378 added terms, 0 removed and
+  1 changed zh/en pair. The removed set is empty because the diff matches
+  source keys: nothing present at 3.6 was dropped. The one change is an
+  English spelling correction on the existing speaker row
+  `Speaker_800543_Name`: `Panicked Lolo Logistics Staff` becomes
+  `Panicked Lollo Logistics Staff`. Category deltas are echo +26, item +60,
+  location +17, resonator +5, skill +20, sonata +3, speaker +245 and weapon +2.
+  New resonator source rows are not all new names: `心 / Hsin` and
+  `锁暝 / Suoming` already occurred in 3.6, `维里奈 / Verina` gains another
+  source key, and the new strings are `棠宁 / Tangning` and
+  `心狐·漂泊者 / Moon Fox: Rover`. Offline gates (`verify_db.py`,
+  `verify_seed_terms.py`, `verify_exact_hits.py`, `verify_idempotent_build.py`)
+  pass on this candidate.
+- The required representative exact pair stays `景燃 -> Jingran`. It was
+  re-measured on the 3.7 candidate and is still single-valued in both
+  directions. `穗穗 -> Suisui` stays retired for the same reason as in 3.6.
+  `棠宁 -> Tangning` is a new pair that is also single-valued both ways; it
+  is the measured new-term sample, not a second required check.
+- A 3.6 review manuscript does not keep its certification under this
+  dictionary. The content-derived dictionary revisions differ, a saved 3.6
+  resolution context is rejected as stale by `review-v2`, and the site
+  manuscript reconciler marks the imported choice pending until the user
+  confirms it against the fresh basis. A fresh check on the 3.7 candidate
+  can accept the same sentence once its context carries the new revision.
+- No production data is shipped by this change. A deployment still has to
+  refresh the checkout and rebuild the candidate on the target host.
+
 ## 0.5.0 - 2026-09-13
 
 The public product and `main` catch up to a tagged release. WuwaTerm is an

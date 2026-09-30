@@ -99,8 +99,8 @@ Long polling is a decision with a record, not an accident of setup:
 ## Game data
 
 - Upstream: `https://github.com/Arikatsu/WutheringWaves_Data`
-- Pinned commit: `6ce8d5eda49f2930da84d8846c144432142c7465`
-- Pinned version: `GameVer 3.6.0 / ResVer 3.6.4 / Changelist 8464573`
+- Pinned commit: `9218d612ad815e398e064e577e42aaf878899968`
+- Pinned version: `GameVer 3.7.0 / ResVer 3.7.8 / Changelist 8975829`
 
 The pin is enforced, not documented: the refresh checks the remote, the commit
 and the upstream version-provenance file and stops rather than building from
