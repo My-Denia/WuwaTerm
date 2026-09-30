@@ -114,7 +114,7 @@ wuwa-translate-bot/
 | `lookup.py` | `TermService`：精确等值 + 全表模糊打分 |
 | `sentence.py` | 术语锁定、占位符、LLM HTTP |
 | `normalize.py` / `models.py` / `translation_policy.py` | 规范化、共享对象、长度/失败文案常量 |
-| `db.py` / `builder.py` / `build_pinyin.py` / `data_source.py` / `constants.py` | SQLite 与上游钉住（Arikatsu `9218d612ad815e398e064e577e42aaf878899968`，GameVer 3.7.0） |
+| `db.py` / `builder.py` / `build_pinyin.py` / `data_source.py` / `constants.py` | SQLite 与上游钉住（Arikatsu `6ce8d5eda49f2930da84d8846c144432142c7465`，GameVer 3.6.0） |
 | `bot.py` / `channel.py` / `channel_*.py` | Telegram 命令与关联频道自动翻译 |
 | `settings.py` | 群允许名单 / 公开模式（`chat_settings.json`） |
 | `telegram_html.py` / `telegram_text.py` | HTML 保护与 UTF-16 切分 |
