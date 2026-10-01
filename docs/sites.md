@@ -13,7 +13,7 @@ and there is no SLA.
 
 - **Repository fact:** `site/` is a separately built Hosted / Cloudflare Worker
   BFF. The browser calls only same-origin `/api/pool`, `/api/terms`,
-  `/api/translations` and `/api/reviews`; the server-side proxy holds the device credential and
+  `/api/translations`, `/api/reviews` and the on-demand `/api/meta`; the server-side proxy holds the device credential and
   calls the published `/v1` contract. There is no visitor account system in
   this application code.
 - **Hosted platform control:** the hosting platform owns deployment versions,
@@ -37,8 +37,17 @@ and there is no SLA.
   succeeded. The same limits apply: this is tested behavior, not an availability
   promise.
 
-Optional `/api/meta` exposes only term count, data schema version and the existing
-request correlation ID. The Telegram bot, Windows client and API contract are
+Optional `/api/meta` is not requested when the page loads. Opening 「词典版本」
+asks once for the dictionary the running service reports: database schema
+version, source commit, game version, resource version, changelist, term count,
+and the request id. Closing and reopening that panel reuses the read.
+「重新读取」asks again. Each ask spends one shared meta admission (60 per UTC
+day). If the service meta body has no game, resource, or changelist fields,
+those three are null and the page says they were not provided. A failed read
+says the current version cannot be confirmed. The page does not substitute the
+repository pin, a candidate database, or a deployment claim. The browser
+response does not include the device token, backend URL, `llm_configured`, or
+service configuration. The Telegram bot, Windows client and API contract are
 separate surfaces and are unchanged by public Site access.
 
 ## Resumable bilingual manuscripts

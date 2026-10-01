@@ -9,7 +9,7 @@ button,a,input,textarea,select,summary { -webkit-tap-highlight-color:transparent
 button { cursor:pointer; }
 button:disabled { opacity:.45; cursor:not-allowed; }
 .site-main { padding:0 clamp(18px,5vw,72px); }
-.topbar,.workbench,footer { width:min(1180px,100%); margin-inline:auto; }
+.topbar,.workbench,.provenance,footer { width:min(1180px,100%); margin-inline:auto; }
 .topbar { display:flex; justify-content:space-between; align-items:center; padding:24px 0; border-bottom:1px solid var(--line); gap:16px; }
 .brand { display:flex; align-items:center; gap:12px; text-decoration:none; }
 .brand-mark { display:grid; place-items:center; width:40px; height:40px; border:1px solid var(--accent); border-radius:10px; color:var(--accent); font-size:24px; font-weight:800; }
@@ -129,6 +129,13 @@ footer div { display:flex; gap:20px; }
 .review-card .term-pair small { color:var(--muted); }
 .report-changes h4 { margin:14px 0 5px; }
 .review-card .text-button:disabled { opacity:.45; }
+
+.provenance { margin: 8px auto 36px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 8px; }
+.provenance p { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.provenance-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.provenance dl { display: grid; gap: 12px; margin: 0 0 14px; }
+.provenance-row dt { color: var(--muted); font-size: 11px; }
+.provenance-row dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 14px; }
 
 /* First-run guide for the review workbench: three steps, shown only while
    the workbench is untouched, so it never competes with real content. */

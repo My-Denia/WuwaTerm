@@ -5,6 +5,15 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Added
+
+- Site: the public page can show the dictionary version reported by the
+  service that is actually running. The panel stays unread until the visitor
+  opens it, so a page view does not spend a meta admission. The site accepts
+  the current `/v1/meta` body and a later body that adds game version,
+  resource version, and changelist. Absent version fields and a failed read
+  stay unknown; the page does not fill them from the repository pin.
+
 ### Fixed
 
 - Site: pin Next.js to 16.3.6, the patched release for
