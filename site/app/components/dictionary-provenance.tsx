@@ -55,15 +55,14 @@ export function DictionaryProvenance() {
   const [view, setView] = useState<Snapshot | { kind: 'loading' } | null>(null);
 
   async function load(force: boolean) {
+    setOpen(true);
     if (inflight.current) return;
     if (!force && snapshot.current) {
       setView(snapshot.current);
-      setOpen(true);
       return;
     }
     inflight.current = true;
     setBusy(true);
-    setOpen(true);
     setView({ kind: 'loading' });
     try {
       const response = await fetch('/api/meta', { cache: 'no-store' });

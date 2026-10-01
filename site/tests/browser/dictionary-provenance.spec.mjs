@@ -117,6 +117,42 @@ for (const viewport of [
       expect(counts.meta).toBe(1);
       await expect(page.locator('.provenance')).not.toContainText('3.7');
     });
+
+    test('reopening an active first read or refresh keeps one request in flight', async ({ page }) => {
+      let releaseFirst;
+      let releaseRefresh;
+      const first = new Promise((resolve) => { releaseFirst = resolve; });
+      const refresh = new Promise((resolve) => { releaseRefresh = resolve; });
+      const counts = await openPage(page, async (route, call) => {
+        await (call === 1 ? first : refresh);
+        return route.fulfill({ json: { ...OLD, request_id: `req-held-${call}` } });
+      });
+      const loading = page.getByRole('status').filter({ hasText: '正在读取当前服务报告的词典数据' });
+      try {
+        await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
+        await expect(loading).toBeVisible();
+        expect(counts.meta).toBe(1);
+        await page.getByRole('button', { name: '收起', exact: true }).click();
+        await expect(loading).not.toBeVisible();
+        await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
+        await expect(loading).toBeVisible({ timeout: 1500 });
+        expect(counts.meta).toBe(1);
+        releaseFirst();
+        await expect(row(page, '问题反馈编号')).toContainText('req-held-1');
+        await page.getByRole('button', { name: '重新读取', exact: true }).click();
+        await expect(loading).toBeVisible();
+        expect(counts.meta).toBe(2);
+        await page.getByRole('button', { name: '收起', exact: true }).click();
+        await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
+        await expect(loading).toBeVisible({ timeout: 1500 });
+        expect(counts.meta).toBe(2);
+        releaseRefresh();
+        await expect(row(page, '问题反馈编号')).toContainText('req-held-2');
+      } finally {
+        releaseFirst();
+        releaseRefresh();
+      }
+    });
   });
 }
 
