@@ -131,7 +131,7 @@ for (const viewport of [
       try {
         await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
         await expect(loading).toBeVisible();
-        expect(counts.meta).toBe(1);
+        await expect.poll(() => counts.meta).toBe(1);
         await page.getByRole('button', { name: '收起', exact: true }).click();
         await expect(loading).not.toBeVisible();
         await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
@@ -141,7 +141,7 @@ for (const viewport of [
         await expect(row(page, '问题反馈编号')).toContainText('req-held-1');
         await page.getByRole('button', { name: '重新读取', exact: true }).click();
         await expect(loading).toBeVisible();
-        expect(counts.meta).toBe(2);
+        await expect.poll(() => counts.meta).toBe(2);
         await page.getByRole('button', { name: '收起', exact: true }).click();
         await page.getByRole('button', { name: '查看词典版本', exact: true }).click();
         await expect(loading).toBeVisible({ timeout: 1500 });
