@@ -16,6 +16,10 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Fixed
 
+- Site: pin Next.js to 16.3.6, the patched release for
+  GHSA-vcvr-r3jv-pc5j in Node.js `next/og` image generation. Refresh only
+  its locked runtime packages and platform compilers; the site continues to
+  use its static Open Graph image.
 - Site: the locked `brace-expansion` copies move to 1.1.21 and 5.0.12, the
   patched releases for GHSA-6j4f-fj2g-mc7p, GHSA-qhr7-859c-m2p7, and
   GHSA-q2hr-2g5m-vwhr. The two copies stay on their existing major lines, and
