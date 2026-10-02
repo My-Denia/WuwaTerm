@@ -1440,3 +1440,59 @@ def test_single_character_html_name_does_not_change_attributes(single_name_db):
     assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
         '<a href="https://example.invalid/椿">Camellya加入队伍。</a>'
     )
+
+
+@pytest.mark.parametrize("async_path", [False, True])
+@pytest.mark.parametrize(
+    ("html_text", "expected"),
+    [
+        ("香<b>椿</b>", "香<b>椿</b>"),
+        ("<b>香</b>椿", "<b>香</b>椿"),
+        ("<b>椿</b>树", "<b>椿</b>树"),
+        ("椿<b>树</b>", "椿<b>树</b>"),
+        ("香<b><i>椿</i></b>", "香<b><i>椿</i></b>"),
+        ("<b>香</b><i>椿</i>", "<b>香</b><i>椿</i>"),
+        ("香<b></b>椿", "香<b></b>椿"),
+        ("&#39321;<b>椿</b>", "&#39321;<b>椿</b>"),
+        ("&NotEqualTilde;香<b>椿</b>", "&NotEqualTilde;香<b>椿</b>"),
+        ("&NotEqualTilde;<b>椿</b>", "&NotEqualTilde;<b>Camellya</b>"),
+        ("<b>椿</b>&#26641;", "<b>椿</b>&#26641;"),
+        ("<b>椿</b><i>加入</i>队伍。", "<b>Camellya</b><i>加入</i>队伍。"),
+        ("椿<b>加</b>入队伍。", "Camellya<b>加</b>入队伍。"),
+        ("和<b>椿</b>加入队伍。", "和<b>Camellya</b>加入队伍。"),
+        ("香&amp;<b>椿</b>", "香&amp;<b>Camellya</b>"),
+        ("<b>椿</b>&#21152;入队伍。", "<b>Camellya</b>&#21152;入队伍。"),
+        ('<a href="https://example.invalid/香">椿</a>加入队伍。',
+         '<a href="https://example.invalid/香">Camellya</a>加入队伍。'),
+    ],
+)
+def test_html_single_character_visible_adjacency(
+    monkeypatch, single_name_db, async_path, html_text, expected
+):
+    # Identity model isolates dictionary locking from upstream translation.
+    def fake_call(locked_text, locks, **kwargs):
+        return locked_text
+
+    async def fake_async_call(locked_text, locks, **kwargs):
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_async_call)
+    translator = SentenceTranslator(single_name_db)
+    if async_path:
+        actual = asyncio.run(translator.translate_html_async(html_text))
+    else:
+        actual = translator.translate_html(html_text)
+    assert actual == expected
+
+
+def test_html_single_character_context_keeps_multichar_matching_segment_local(sample_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(sample_db)
+    protected = protect_telegram_html("声<b>骸</b>")
+    locked = translator._lock_html_terms(protected)
+    assert locked.locks == ()
+    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+        "声<b>骸</b>"
+    )

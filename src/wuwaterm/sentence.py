@@ -10,6 +10,7 @@ import json
 import asyncio
 import inspect
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -308,7 +309,9 @@ class SentenceTranslator:
         text: str,
         *,
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
+        single_character_context: tuple[str, int] | None = None,
     ) -> LockedSentence:
+        context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
             lockable = self._eligible_lockable_sources()
         spans: list[_TermSpan] = []
@@ -317,7 +320,10 @@ class SentenceTranslator:
             while start != -1:
                 end = start + len(source)
                 if _ascii_word_boundaries_ok(text, start, end, source) and (
-                    len(source) > 1 or _single_character_name_context_ok(text, start, end)
+                    len(source) > 1
+                    or _single_character_name_context_ok(
+                        context_text, context_offset + start, context_offset + end
+                    )
                 ):
                     spans.append(
                         _TermSpan(
@@ -369,10 +375,30 @@ class SentenceTranslator:
         """Lock terms only in visible segments, never in tags or attributes."""
 
         lockable = self._eligible_lockable_sources()
+        segments = protected.visible_segments()
+        # Formatting tags have no visible width; entities contribute decoded
+        # text to name context while their original bytes remain protected.
+        context_parts: list[str] = []
+        offsets: list[int] = []
+        offset = 0
+        for index, segment in enumerate(segments):
+            offsets.append(offset)
+            context_parts.append(segment)
+            offset += len(segment)
+            if index < len(protected.structures):
+                raw = protected.structures[index][1]
+                entity_text = unescape(raw) if raw.startswith("&") else ""
+                context_parts.append(entity_text)
+                offset += len(entity_text)
+        context_text = "".join(context_parts)
         locked_segments: list[str] = []
         locks: list[tuple[str, str, str]] = []
-        for segment in protected.visible_segments():
-            locked = self._lock_terms(segment, lockable=lockable)
+        for segment, offset in zip(segments, offsets, strict=True):
+            locked = self._lock_terms(
+                segment,
+                lockable=lockable,
+                single_character_context=(context_text, offset),
+            )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)
         return LockedSentence(
