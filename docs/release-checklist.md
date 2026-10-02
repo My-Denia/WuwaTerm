@@ -59,7 +59,16 @@ downloaded asset traceable to a commit without trusting the release page.
 `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder`
 (builder). The draft-time push writes only `sha-<7>`. After a maintainer
 publishes the GitHub draft, `promote-images` retags the exact digests recorded
-in that release's `release-manifest.json` as `vX.Y.Z` and `X.Y`. A discarded
+in that release's `release-manifest.json` as `vX.Y.Z` and `X.Y`. The full
+version tag is immutable; the `X.Y` registry tag advances to a newer patch only after
+its current OCI version label and immutable tag agree. Missing or conflicting
+version evidence, registry read failures and rollback attempts stop promotion.
+Both images are checked before any tag changes, and published-release runs
+share one concurrency group. A rerun skips tags already at the recorded digest.
+Final reads also refuse an externally changed immutable tag or a newer minor
+version. Inspection and retagging have no compare-and-swap guarantee, and the
+registry has no transaction across tags: a race or write failure can still leave a
+partial promotion, which a rerun completes after the failure is resolved. A discarded
 draft therefore cannot leave release-looking registry tags. Both images are
 published because the runtime image is useless without a terminology database,
 and that database is built by the builder image and is never distributed. The

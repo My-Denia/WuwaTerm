@@ -1395,11 +1395,18 @@ def _register_routes(app: FastAPI) -> None:
         # Before the expensive model call: a device revoked since admission
         # must not spend an LLM budget slot or a model round trip.
         await _require_active_device(request, device)
+
+        async def before_llm_call() -> None:
+            # Runs after the model slot is acquired: a queued request may
+            # have been revoked since the initial admission re-check.
+            await _require_active_device(request, device)
+            state.llm_budget()
+
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
             TranslationJob(text=body.text, forced_to_chinese=forced_to_chinese),
-            before_llm_call=state.llm_budget,
+            before_llm_call=before_llm_call,
             # The dictionary stage opens SQLite and can score every term row.
             # This process serves many requests on one loop, so that work runs
             # on a worker thread instead of blocking every other request (and

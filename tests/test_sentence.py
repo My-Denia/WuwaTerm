@@ -1374,3 +1374,69 @@ def test_translate_english_sentence_locks_and_restores_chinese(monkeypatch, samp
     assert (
         translator.translate("Jinhsi equips Echo", to_chinese=True) == "今汐装备了声骸"
     )
+
+
+@pytest.fixture()
+def single_name_db(sample_db):
+    # Synthetic records only: a real character category and ordinary words.
+    with connect(sample_db) as conn:
+        conn.execute("DELETE FROM terms")
+        insert_records(conn, [
+            TermRecord("resonator", "fixture", "1", "1", "椿", "Camellya"),
+            TermRecord("item", "fixture", "2", "2", "风", "Wind"),
+            TermRecord("speaker", "fixture", "3", "3", "你", "You"),
+            TermRecord("resonator", "fixture", "4", "4", "甲", "A"),
+        ])
+        conn.commit()
+    return sample_db
+
+
+@pytest.mark.parametrize("text", ["椿加入队伍。", "和椿加入队伍。", "请让椿加入队伍。"] )
+def test_single_character_resonator_is_locked_inside_sentence(single_name_db, text):
+    locked = SentenceTranslator(single_name_db).lock_terms(text)
+    assert [(zh, en) for _, zh, en in locked.locks] == [("椿", "Camellya")]
+    assert locked.restore(locked.locked_text) == text.replace("椿", "Camellya")
+
+
+@pytest.mark.parametrize("text", ["春天的风吹过。", "你加入队伍。", "A joins the party.", "椿树", "香椿", "香椿加入菜单", "欢迎椿"])
+def test_ordinary_single_characters_and_english_initial_are_not_locked(
+    single_name_db, text
+):
+    locked = SentenceTranslator(single_name_db).lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+
+def test_single_character_speaker_and_english_name_boundaries(single_name_db):
+    translator = SentenceTranslator(single_name_db)
+    locked = translator.lock_terms("椿：椿加入队伍。")
+    assert locked.restore(locked.locked_text) == "Camellya: Camellya加入队伍。"
+    assert len(locked.locks) == 2
+    english = translator.lock_terms("Camellya joins. Camellyaish stays.")
+    assert len(english.locks) == 1
+    assert english.restore(english.locked_text, to_en=False) == (
+        "椿 joins. Camellyaish stays."
+    )
+
+
+@pytest.mark.parametrize("copies", [0, 2])
+def test_single_character_name_keeps_placeholder_integrity(single_name_db, copies):
+    locked = SentenceTranslator(single_name_db).lock_terms("椿加入队伍。")
+    assert len(locked.locks) == 1
+    placeholder = locked.locks[0][0]
+    with pytest.raises(LLMTranslationError) as exc:
+        locked.restore(locked.locked_text.replace(placeholder, placeholder * copies))
+    assert exc.value.reason == "invalid_response"
+    assert exc.value.diagnostic.actual_count == copies
+
+
+def test_single_character_html_name_does_not_change_attributes(single_name_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(single_name_db)
+    protected = protect_telegram_html('<a href="https://example.invalid/椿">椿加入队伍。</a>')
+    locked = translator._lock_html_terms(protected)
+    assert len(locked.locks) == 1
+    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+        '<a href="https://example.invalid/椿">Camellya加入队伍。</a>'
+    )

@@ -211,9 +211,9 @@ class MarkupTranslation:
 
 MarkupTranslator = Callable[..., Awaitable[MarkupTranslation]]
 TextSplitter = Callable[[str, int], Sequence[str]]
-# Called (synchronously) immediately before each LLM request, after the
-# concurrency slot is held. Raise LLMTranslationError to refuse the call.
-LlmCallGuard = Callable[[], None]
+# Called immediately before each LLM request, after the concurrency slot is
+# held; awaitable results are awaited. Raise to refuse without an upstream call.
+LlmCallGuard = Callable[[], None | Awaitable[None]]
 # How an adapter runs the pipeline's BLOCKING stage. The dictionary stage opens
 # SQLite and, for short ASCII queries, scores every term row; an adapter with a
 # shared event loop (the HTTP server) passes ``asyncio.to_thread`` so that work
