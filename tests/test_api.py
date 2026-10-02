@@ -2287,10 +2287,10 @@ def test_a_transient_record_use_store_error_is_503_not_500(tmp_path, sample_db):
 def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
     monkeypatch, tmp_path, sample_db
 ):
-    """The re-check runs at two seams. A transient store error at the SECOND
-    (post-model) seam must not discard an already-completed translation and
-    invite a second paid retry: it logs and serves. The first (pre-model) seam
-    still fails closed.
+    """A transient store error after the model must not discard a completed
+    translation and invite a second paid retry: it logs and serves. Both
+    pre-model re-checks (before queuing and after acquiring the slot) still
+    fail closed.
 
     The body is a genuine model-answered translation, so the work being
     protected here really is a paid model round trip — exactly one of them.
@@ -2307,13 +2307,13 @@ def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
     enable_mock_llm(monkeypatch, model_calls, answer)
 
     real = DeviceStore.is_active
-    calls = {"n": 0}
+    checks = []
 
     def flaky(self, device_id):
-        calls["n"] += 1
-        if calls["n"] >= 2:  # the post-model seam only
+        checks.append(bool(model_calls))
+        if model_calls:  # the model has answered; independent of read count
             raise sqlite3.OperationalError("database is locked")
-        return real(self, device_id)  # pre-model seam: device is active
+        return real(self, device_id)  # pre-model seams: device is active
 
     DeviceStore.is_active = flaky
     try:
@@ -2332,7 +2332,7 @@ def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
     assert response.status_code == 200
     assert response.json()["kind"] == "llm"
     assert len(model_calls) == 1  # the paid call happened once and was not wasted
-    assert calls["n"] == 2  # both seams ran; the second hit the store error
+    assert checks == [False, False, True]  # two pre-model reads, one post-model failure
 
 
 def test_a_locked_store_on_the_auth_read_is_503_a_wrong_secret_is_401(
@@ -3393,3 +3393,93 @@ def test_review_v2_semantic_term_cut_and_stale_context_are_invalid_request(
     )
     assert stale.status_code == 400, stale.text
     assert stale.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("change, expected", [("revoke", 401), ("store_error", 503), ("active", 200)])
+def test_queued_translation_rechecks_device_before_spending(
+    tmp_path, sample_db, monkeypatch, change, expected
+):
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db, llm_max_concurrency=1)
+    device, token = issue_device(store, "queued synthetic device")
+    calls = []
+
+    async def response_factory(locked_text, locks):
+        return "Translated sentence."
+
+    enable_mock_llm(monkeypatch, calls, response_factory)
+
+    async def scenario():
+        slots = app.state.translator._current_llm_slots()
+        acquire = slots.acquire
+        await acquire()  # Occupied by a synthetic holder, no upstream/budget.
+        queued = asyncio.Event()
+
+        async def observed_acquire():
+            assert slots.locked()
+            queued.set()
+            return await acquire()
+
+        monkeypatch.setattr(slots, "acquire", observed_acquire)
+        task = asyncio.create_task(call(
+            app, "POST", "/v1/translations",
+            json={"text": "这是一句没有词典命中的完整句子。"},
+            headers=bearer(token),
+        ))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=5)
+            assert not task.done()
+            assert calls == []
+            assert app.state.llm_budget.in_window() == 0
+            if change == "revoke":
+                store.revoke(device.device_id)
+            elif change == "store_error":
+                def unavailable(device_id):
+                    raise sqlite3.OperationalError("synthetic store unavailable")
+                monkeypatch.setattr(store, "is_active", unavailable)
+            slots.release()
+            return await asyncio.wait_for(task, timeout=5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    response = run(scenario())
+    assert response.status_code == expected
+    spent = 1 if change == "active" else 0
+    assert len(calls) == spent
+    assert app.state.llm_budget.in_window() == spent
+    if change != "active":
+        assert response.json()["error"]["code"] == (
+            "unauthorized" if change == "revoke" else "internal"
+        )
+
+
+@pytest.mark.parametrize("change, expected", [("revoke", 401), ("store_error", 200)])
+def test_translation_retains_final_device_recheck_policy(
+    tmp_path, sample_db, monkeypatch, change, expected
+):
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    device, token = issue_device(store, "inflight synthetic device")
+    calls = []
+
+    async def response_factory(locked_text, locks):
+        if change == "revoke":
+            store.revoke(device.device_id)
+        else:
+            def unavailable(device_id):
+                raise sqlite3.OperationalError("synthetic store unavailable")
+            monkeypatch.setattr(store, "is_active", unavailable)
+        return "Translated sentence."
+
+    enable_mock_llm(monkeypatch, calls, response_factory)
+    response = run(call(
+        app, "POST", "/v1/translations",
+        json={"text": "这是一句没有词典命中的完整句子。"}, headers=bearer(token),
+    ))
+    assert response.status_code == expected
+    assert len(calls) == 1
+    assert app.state.llm_budget.in_window() == 1

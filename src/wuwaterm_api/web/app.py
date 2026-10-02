@@ -571,7 +571,7 @@ async def _translate_post(request: Request, device) -> Response:
     # spent a budget slot and paid for a round trip, and was only noticed by
     # the post-model check afterwards - by which time the cost was incurred.
     # Fail closed here: nothing has been spent yet, so a store error refuses.
-    from ..app import _require_active_device
+    from ..app import _device_llm_guard, _require_active_device
 
     await _require_active_device(request, device)
     outcome = await translate_request_async(
@@ -580,8 +580,9 @@ async def _translate_post(request: Request, device) -> Response:
         TranslationJob(text=text, forced_to_chinese=None),
         # The PARENT'S budget object. Not a new one, and not a copy: the whole
         # in-process argument rests on this being the same instance the API
-        # route spends from.
-        before_llm_call=state.llm_budget,
+        # route spends from. The shared guard rechecks after acquiring the
+        # model slot so revocation while queued spends nothing.
+        before_llm_call=_device_llm_guard(request, device),
         offload=asyncio.to_thread,
     )
     if outcome.kind == KIND_ERROR:

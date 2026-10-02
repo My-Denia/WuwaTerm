@@ -10,6 +10,7 @@ import json
 import asyncio
 import inspect
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +221,28 @@ def _require_nonblank_llm_output(content: str) -> str:
     return normalized
 
 
+def _is_cjk_character(char: str) -> bool:
+    return "\u3400" <= char <= "\u9fff"
+
+
+def _single_character_name_context_ok(text: str, start: int, end: int) -> bool:
+    """Admit bounded Chinese name mentions, avoiding compounds like 香椿/椿树.
+
+    Only newly eligible one-character resonators use this conservative rule.
+    Unlisted contexts (for example 欢迎椿) may remain unlocked; multi-character
+    names retain the existing matching policy.
+    """
+    if start and _is_cjk_character(text[start - 1]):
+        if text[start - 1] not in "和与让给由是用有":
+            return False
+    return (
+        end == len(text)
+        or not _is_cjk_character(text[end])
+        or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
+                            "加入", "离开", "登场", "使用", "说"), end)
+    )
+
+
 def _is_ascii_word_char(char: str) -> bool:
     return char.isascii() and char.isalnum()
 
@@ -270,7 +293,7 @@ class SentenceTranslator:
         self._llm_client: httpx.AsyncClient | None = None
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
-        self._lockable_sources_cache: tuple[tuple[str, tuple[str, str]], ...] = ()
+        self._lockable_sources_cache: tuple[tuple[str, tuple[str, str, str]], ...] = ()
 
     def prepare_text(self, text: str) -> str:
         text = normalize_user_text(text)
@@ -286,7 +309,9 @@ class SentenceTranslator:
         text: str,
         *,
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
+        single_character_context: tuple[str, int] | None = None,
     ) -> LockedSentence:
+        context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
             lockable = self._eligible_lockable_sources()
         spans: list[_TermSpan] = []
@@ -294,7 +319,12 @@ class SentenceTranslator:
             start = text.find(source)
             while start != -1:
                 end = start + len(source)
-                if _ascii_word_boundaries_ok(text, start, end, source):
+                if _ascii_word_boundaries_ok(text, start, end, source) and (
+                    len(source) > 1
+                    or _single_character_name_context_ok(
+                        context_text, context_offset + start, context_offset + end
+                    )
+                ):
                     spans.append(
                         _TermSpan(
                             start=start,
@@ -345,10 +375,30 @@ class SentenceTranslator:
         """Lock terms only in visible segments, never in tags or attributes."""
 
         lockable = self._eligible_lockable_sources()
+        segments = protected.visible_segments()
+        # Formatting tags have no visible width; entities contribute decoded
+        # text to name context while their original bytes remain protected.
+        context_parts: list[str] = []
+        offsets: list[int] = []
+        offset = 0
+        for index, segment in enumerate(segments):
+            offsets.append(offset)
+            context_parts.append(segment)
+            offset += len(segment)
+            if index < len(protected.structures):
+                raw = protected.structures[index][1]
+                entity_text = unescape(raw) if raw.startswith("&") else ""
+                context_parts.append(entity_text)
+                offset += len(entity_text)
+        context_text = "".join(context_parts)
         locked_segments: list[str] = []
         locks: list[tuple[str, str, str]] = []
-        for segment in protected.visible_segments():
-            locked = self._lock_terms(segment, lockable=lockable)
+        for segment, offset in zip(segments, offsets, strict=True):
+            locked = self._lock_terms(
+                segment,
+                lockable=lockable,
+                single_character_context=(context_text, offset),
+            )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)
         return LockedSentence(
@@ -540,7 +590,9 @@ class SentenceTranslator:
                 if name in supported:
                     kwargs[name] = value
             if before_llm_call is not None:
-                before_llm_call()
+                guarded = before_llm_call()
+                if inspect.isawaitable(guarded):
+                    await guarded
             return await _call_llm_async(
                 locked_text,
                 locks,
@@ -624,9 +676,17 @@ class SentenceTranslator:
 
     def _eligible_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
         return tuple(
-            (source, official)
+            (source, (official[0], official[1]))
             for source, official in self._lockable_sources()
-            if len(source) >= 2
+            if (
+                len(source) >= 2
+                or (
+                    len(source) == 1
+                    and source == official[0]
+                    and official[2] == "resonator"
+                    and _is_cjk_character(source)
+                )
+            )
             and official[0]
             and official[1]
             and "\n" not in official[0]
@@ -647,21 +707,22 @@ class SentenceTranslator:
             provenance,
         )
 
-    def _read_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
-        sources: dict[str, tuple[str, str]] = {}
+    def _read_lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
+        sources: dict[str, tuple[str, str, str]] = {}
         for entry in self.service.entries():
             if "\n" in entry.zh or "\n" in entry.en:
                 continue
-            official = (entry.zh, entry.en)
+            official = (entry.zh, entry.en, entry.category)
             if entry.zh:
                 sources.setdefault(entry.zh, official)
             if entry.en:
                 sources.setdefault(entry.en, official)
         return tuple(sources.items())
 
-    def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
+    def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
         # Each source text (Chinese OR English form) maps to the official
-        # (zh, en) pair, so a locked placeholder can be restored in either
+        # (zh, en, category) record, retaining single-character name provenance.
+        # The eligible lock pairs can be restored in either
         # direction. Cache by filesystem identity plus build provenance so an
         # atomic DB replacement invalidates the cache without repeated full
         # terms-table reads during normal operation.
