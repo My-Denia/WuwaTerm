@@ -1,7 +1,10 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { highlightSegments, revisionOf, summarizeReview } from '../../lib/review-report.js';
+import {
+  FILTERS, filterFindings, findingVerdictCounts, reconcileActiveId, compactScalarContext,
+} from '../../lib/review-navigation.js';
+import { highlightSegments, revisionOf, scalarToUtf16, summarizeReview } from '../../lib/review-report.js';
 import {
   MAX_CHOICES, MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, mentionId,
   parseWorkfile, reconcileChoices, recoverSpan, sameBasis, serializeWorkfile, validAlignments, validReport,
@@ -29,6 +32,17 @@ const MESSAGES: Record<string, string> = {
   upstream_rate_limited: '服务繁忙，请稍后重试。',
 };
 function signature(draft: Draft, resolutions: object[]) { return JSON.stringify({ ...draft, resolutions }); }
+function Excerpt({ text, span, missing }: { text: string; span: Span | null; missing: string }) {
+  const located = span ? highlightSegments(text, span) : null;
+  const compact = located && span ? compactScalarContext(text, span) : null;
+  if (!located || !compact) return <p className="review-excerpt">{missing}</p>;
+  return <>
+    <p className="review-excerpt">{compact.clippedBefore ? '…' : null}{compact.before}<mark>{compact.hit}</mark>{compact.after}{compact.clippedAfter ? '…' : null}</p>
+    {(compact.clippedBefore || compact.clippedAfter) && <details className="review-context"><summary>查看完整上下文</summary>
+      <p className="review-excerpt">{located.before}<mark>{located.hit}</mark>{located.after}</p>
+    </details>}
+  </>;
+}
 function downloadFile(name: string, content: string, type = 'application/json') {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement('a'); link.href = url; link.download = name; link.click();
@@ -50,6 +64,8 @@ export function ReviewWorkbench() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
+  const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
+  const [requestedFindingId, setRequestedFindingId] = useState<string | null>(null);
   const sourceBox = useRef<HTMLTextAreaElement>(null);
   const targetBox = useRef<HTMLTextAreaElement>(null);
   const fileBox = useRef<HTMLInputElement>(null);
@@ -63,6 +79,10 @@ export function ReviewWorkbench() {
   useLayoutEffect(() => { work.current = { draft, choices, imported, reports, history }; }, [draft, choices, imported, reports, history]);
   const latest = reports.at(-1) ?? null;
   const previous = reports.at(-2) ?? null;
+  const visibleFindings = latest ? filterFindings(latest.report.findings, verdictFilter) : [];
+  const findingCounts = findingVerdictCounts(latest?.report.findings ?? []);
+  const activeFindingId = reconcileActiveId(requestedFindingId, visibleFindings);
+  const activeVisibleIndex = visibleFindings.findIndex(finding => finding.id === activeFindingId);
   const reconciled = reconcileChoices(choices, draft, latest, imported);
   const ready = reconciled.flatMap(item => item.resolution ? [item.resolution] : []);
   const current = !!latest?.trusted && latest.signature === signature(draft, ready) && phase === 'success';
@@ -112,6 +132,10 @@ export function ReviewWorkbench() {
     return () => window.removeEventListener('wuwaterm-send-review', onDraft);
   }, [receiveDraft]);
   useEffect(() => () => { controller.current?.abort(); }, []);
+  useEffect(() => {
+    if (!activeFindingId) return;
+    document.querySelector(`[data-mention-id="${CSS.escape(activeFindingId)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeFindingId]);
   useEffect(() => {
     if (pendingDraft) {
       if (!handoffDialog.current?.open) handoffDialog.current?.showModal();
@@ -171,6 +195,16 @@ export function ReviewWorkbench() {
     setChoices(old => existing < 0 ? [...old, selected] : old.map((c, i) => i === existing ? selected : c));
     setImported(old => old.filter(c => c !== choices[existing]));
     setNotice('已暂存此处选择；可继续选择其他位置，最后统一重新核对。');
+  }
+  function jumpTo(box: HTMLTextAreaElement | null, text: string, span: Span) {
+    if (!box) return;
+    const located = highlightSegments(text, span);
+    const start = scalarToUtf16(text, span.start);
+    const end = scalarToUtf16(text, span.end);
+    if (!located || start === null || end === null) return;
+    box.focus({ preventScroll: true });
+    box.setSelectionRange(start, end);
+    box.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
   function replace(finding: Finding, candidate: Candidate) {
     if (!latest || latest.target !== target || !sourceCompatible || !finding.target_span) return;
@@ -292,16 +326,33 @@ export function ReviewWorkbench() {
         {([['new', '新发现'], ['resolved', '已解决的术语约束'], ['pending', '仍待确认'], ['incomparable', '无法比较']] as const).map(([key, label]) => <div key={key}><h4>{label} · {comparison[key].length}</h4>{comparison[key].map((item: { label: string; reason: string }, i: number) => <p key={i}>{item.label}：{item.reason}</p>)}</div>)}
         <p>发现消失不代表问题解决；通过术语约束也不代表整句语义正确。</p>
       </details>}
+      <div className="finding-nav" role="group" aria-label="按结论筛选发现">
+        {FILTERS.map(item => <button key={item.id} type="button" className="secondary-button" aria-pressed={verdictFilter === item.id} onClick={() => setVerdictFilter(item.id)}>{item.label} {findingCounts[item.id as keyof typeof findingCounts]}</button>)}
+      </div>
+      <div className="finding-nav" role="group" aria-label="在筛选结果中移动">
+        <button type="button" className="secondary-button" disabled={activeVisibleIndex <= 0} onClick={() => { const previousFinding = visibleFindings[activeVisibleIndex - 1]; if (previousFinding) setRequestedFindingId(previousFinding.id); }}>上一项</button>
+        <button type="button" className="secondary-button" disabled={activeVisibleIndex < 0 || activeVisibleIndex >= visibleFindings.length - 1} onClick={() => { const nextFinding = visibleFindings[activeVisibleIndex + 1]; if (nextFinding) setRequestedFindingId(nextFinding.id); }}>下一项</button>
+        <p className="finding-position">当前 {activeVisibleIndex < 0 ? 0 : activeVisibleIndex + 1} / {visibleFindings.length}</p>
+      </div>
       <div className="review-findings">{latest.report.findings.length === 0 && <p>没有术语发现，整句含义仍未评估。</p>}
-        {latest.report.findings.map(finding => {
-          const sourceHit = latest.source === source ? highlightSegments(source, finding.source_span) : null;
-          const targetHit = latest.target === target && finding.target_span ? highlightSegments(target, finding.target_span) : null;
-          return <article className="term-result" key={finding.id} data-mention-id={finding.id}><p className="result-summary">{VERDICTS[finding.verdict]} · 原文 {finding.source_span.start + 1}–{finding.source_span.end}{finding.candidates_truncated ? ' · 候选已截断' : ''}</p>
-            <p className="review-excerpt">{sourceHit ? <>{sourceHit.before}<mark>{sourceHit.hit}</mark>{sourceHit.after}</> : `${finding.source_span.text}（历史位置，请重新核对）`}</p>
-            <p className="review-excerpt">{targetHit ? <>{targetHit.before}<mark>{targetHit.hit}</mark>{targetHit.after}</> : '译文未可靠定位或已编辑，不使用旧位置。'}</p>
-            {finding.candidates.map(candidate => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{candidate.category}</small>
+        {visibleFindings.length === 0 && latest.report.findings.length > 0 && <p>当前筛选下没有发现。</p>}
+        {visibleFindings.map((finding: Finding) => {
+          const active = finding.id === activeFindingId;
+          const sourceLocated = latest.source === source && highlightSegments(source, finding.source_span) !== null;
+          const targetLocated = finding.target_span !== null && latest.target === target && highlightSegments(target, finding.target_span) !== null;
+          return <article className="term-result" key={finding.id} data-mention-id={finding.id} data-active={active ? 'true' : 'false'} aria-current={active ? 'true' : undefined}><p className="result-summary">{active ? '当前项 · ' : ''}{VERDICTS[finding.verdict]} · 原文 {finding.source_span.start + 1}–{finding.source_span.end}{finding.candidates_truncated ? ' · 候选已截断' : ''}</p>
+            <Excerpt text={source} span={sourceLocated ? finding.source_span : null} missing={`${finding.source_span.text}（历史位置，请重新核对）`} />
+            <Excerpt text={target} span={targetLocated ? finding.target_span : null} missing="译文未可靠定位或已编辑，不使用旧位置。" />
+            <div className="finding-jumps">
+              <button className="text-button" type="button" disabled={!sourceLocated} onClick={() => jumpTo(sourceBox.current, source, finding.source_span)}>定位原文</button>
+              <button className="text-button" type="button" disabled={!targetLocated} onClick={() => { if (finding.target_span) jumpTo(targetBox.current, target, finding.target_span); }}>定位译文</button>
+            </div>
+            {finding.candidates.map((candidate: Candidate) => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{candidate.category}</small>
               <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading' || latest.report.truncated} onClick={() => choose(finding, candidate)}>采用此官方词对</button>
-              {targetHit && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>替换已定位词语</button>}
+              {targetLocated && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>替换已定位词语</button>}
+              <details className="candidate-sources"><summary>查看来源</summary>
+                <ul>{candidate.sources.map(item => <li key={`${item.source_file}\u0000${item.source_id}`}><span>{item.source_file}</span><span>{item.source_id}</span></li>)}</ul>
+              </details>
             </div>)}
             <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => choose(finding, null)}>这里不是术语</button>
           </article>;

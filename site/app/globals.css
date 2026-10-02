@@ -86,6 +86,16 @@ form button:not(.secondary-button):hover:not(:disabled) { background:#d5f5de; }
 .review-excerpt { font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .review-excerpt mark { background:#2a4636; color:var(--accent); padding:0 2px; }
 .review-findings { margin-top:12px; }
+.finding-nav { display:flex; flex-wrap:wrap; gap:8px; align-items:center; max-width:100%; margin-top:12px; }
+.finding-nav .secondary-button { min-width:0; }
+.finding-nav .secondary-button[aria-pressed="true"] { border-color:var(--accent); outline:2px solid var(--accent); outline-offset:2px; }
+.finding-position { margin:0; font-size:13px; }
+.finding-jumps { display:flex; flex-wrap:wrap; gap:12px; }
+.term-result[data-active="true"] { border-left:3px solid var(--accent); padding-left:12px; outline:1px solid var(--accent); }
+.review-context { margin:4px 0 8px; }
+.candidate-sources { flex:1 1 100%; min-width:0; margin-top:4px; }
+.candidate-sources ul { margin:8px 0 0; padding-left:18px; }
+.candidate-sources li,.candidate-sources span { display:block; overflow-wrap:anywhere; word-break:break-word; }
 .translation-result { margin-top:20px; padding-top:20px; border-top:1px solid var(--line); }
 .result-meta { display:flex; gap:10px; color:var(--accent); font-size:11px; }
 .translated-text { font-size:16px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; margin:15px 0; }
