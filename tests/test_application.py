@@ -696,6 +696,10 @@ def test_service_metadata_exposes_no_paths_or_secrets(sample_db):
     assert meta.term_count > 0
     assert meta.source_profile == "dimbreath_legacy"
     assert meta.schema_version
+    assert meta.source_game_version == "fixture-unavailable"
+    assert meta.source_resource_version == "fixture-unavailable"
+    assert meta.source_changelist == "fixture-unavailable"
+    assert "3.7.0" not in repr(meta)
     rendered = repr(meta)
     assert str(sample_db) not in rendered
     assert "terms.db" not in rendered
