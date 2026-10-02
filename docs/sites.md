@@ -94,6 +94,17 @@ comparable positive check can resolve a prior conflict; disappearance,
 global report truncation, omission and changed basis never mean resolved. Imported history
 cannot establish resolution. Export includes current text and explicitly states
 whether its report is current; no export certifies sentence meaning.
+The findings list can be filtered by verdict, moved with previous/next, and
+one finding can be the active item. Those controls are a local projection:
+they do not call `/api/reviews`, and they do not change the report, choices,
+manuscript, or export. Filter badges count findings of that verdict. They are
+not `coverage.not_evaluated`, and the verified filter does not mean the
+manuscript is current. Source and target jumps run only when the current text
+still matches the report span exactly, converting Unicode scalar offsets to
+the textarea's UTF-16 selection. A stale or edited manuscript keeps the
+historical findings browsable and leaves an inexact jump disabled. Each
+candidate can expand the `source_file` and `source_id` stored on that report.
+That evidence is not the service's `/api/meta` dictionary provenance.
 Each runtime report also records the decisions actually submitted. A changed
 decision is incomparable, not a resolved old constraint. For a partially shown
 candidate/source list, only the identical explicitly selected, visible candidate

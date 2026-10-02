@@ -7,6 +7,11 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Added
 
+- Site: a review report with several findings can be filtered by verdict,
+  stepped through with previous/next, and jumped to an exact source or target
+  span. Candidate source file and id expand locally. Filtering, navigation,
+  jumps, and that expansion do not send a review request or change the
+  report, choices, manuscript, or export.
 - Site: the public page can show the dictionary version reported by the
   service that is actually running. The panel stays unread until the visitor
   opens it, so a page view does not spend a meta admission. The site accepts
