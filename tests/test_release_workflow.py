@@ -430,8 +430,14 @@ def test_release_events_share_a_non_cancelling_promotion_group():
     text = _workflow_text()
     concurrency = text.split("concurrency:\n", 1)[1].split("\njobs:", 1)[0]
     assert "github.event_name == 'release'" in concurrency
-    assert "&& 'promotion'" in concurrency
+    assert "&& format('promotion-run-{0}', github.run_id)" in concurrency
+    assert "&& 'dispatch'" in concurrency
+    assert "format('pr-{0}', github.ref)" in concurrency
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency
+    promotion = _job_block("promote-images")
+    assert "      group: ${{ github.workflow }}-promotion" in promotion
+    assert "      queue: max" in promotion
+    assert "      cancel-in-progress: false" in promotion
 
 
 @pytest.mark.parametrize("destination", ["immutable", "minor"])
@@ -461,3 +467,69 @@ def test_release_final_read_refuses_external_tag_changes(tmp_path, destination):
         # minor update is observed; cross-tag transactions are unavailable.
         assert final["creates"] == [runtime + ":v0.5.1"]
     assert all(not created.startswith(names["builder"]) for created in final["creates"])
+
+
+def _pending_release_contract(tags, policy):
+    # Documented Actions contract, not a hosted scheduler emulator. The first
+    # run is already active when every remaining release starts waiting.
+    assert 1 <= len(tags) <= 101
+    assert policy in {"single", "max"}
+    if policy == "max" or len(tags) == 1:
+        return tags
+    return [tags[0], tags[-1]]
+
+
+def _release_runs_retained_by_workflow(tags):
+    outer = _workflow_text().split("concurrency:\n", 1)[1].split("\njobs:", 1)[0]
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in outer
+    shared_outer = bool(re.search(r"'release'\s*&& 'promotion'", outer))
+    if shared_outer:
+        queue = re.search(r"^  queue: (single|max)$", outer, re.MULTILINE)
+        retained = _pending_release_contract(tags, queue.group(1) if queue else "single")
+    else:
+        assert re.search(
+            r"'release'\s*&& format\('promotion-run-\{0\}', github.run_id\)", outer
+        ), "published releases need unique outer groups before their job queue"
+        retained = tags
+    promotion = _job_block("promote-images")
+    shared_job = "    concurrency:\n" in promotion
+    if shared_job:
+        assert "      group: ${{ github.workflow }}-promotion" in promotion
+        assert "      cancel-in-progress: false" in promotion
+        queue = re.search(r"^      queue: (single|max)$", promotion, re.MULTILINE)
+        retained = _pending_release_contract(retained, queue.group(1) if queue else "single")
+    assert shared_outer or shared_job, "promotion writers must remain serialized"
+    return retained
+
+
+def test_three_published_releases_keep_every_immutable_image_tag(tmp_path):
+    # Uses the workflow's declared queue at BOTH layers and the actual retag
+    # bash against the existing PATH-pinned stub. No GitHub release or Docker
+    # daemon/registry is contacted. Source: GitHub Actions concurrency docs.
+    tags = ["v0.5.0", "v0.5.1", "v0.5.2"]
+    retained = _release_runs_retained_by_workflow(tags)
+    state, names, first_digests = _stub_registry(tmp_path, tag=tags[0])
+    expected = {tags[0]: first_digests}
+    for tag, characters in zip(tags[1:], [("c", "d"), ("e", "f")], strict=True):
+        expected[tag] = {}
+        for kind, character in zip(names, characters, strict=True):
+            digest = "sha256:" + character * 64
+            expected[tag][kind] = digest
+            state["images"][names[kind] + "@" + digest] = {
+                "config": {"Labels": {"org.opencontainers.image.version": tag[1:]}}
+            }
+    for tag in retained:
+        manifest = {"images": {
+            kind: {"name": name, "digest": expected[tag][kind]}
+            for kind, name in names.items()
+        }}
+        (tmp_path / "staging/release-manifest.json").write_text(json.dumps(manifest))
+        result, state = _run_promotion(tmp_path, state, tag)
+        assert result.returncode == 0, result.stdout + result.stderr
+    for tag in tags:
+        for kind, name in names.items():
+            assert state["tags"].get(name + ":" + tag) == expected[tag][kind], (
+                f"queued release {tag} was lost; retained={retained}"
+            )
+    for kind, name in names.items():
+        assert state["tags"][name + ":0.5"] == expected[tags[-1]][kind]

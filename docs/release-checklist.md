@@ -63,8 +63,14 @@ in that release's `release-manifest.json` as `vX.Y.Z` and `X.Y`. The full
 version tag is immutable; the `X.Y` registry tag advances to a newer patch only after
 its current OCI version label and immutable tag agree. Missing or conflicting
 version evidence, registry read failures and rollback attempts stop promotion.
-Both images are checked before any tag changes, and published-release runs
-share one concurrency group. A rerun skips tags already at the recorded digest.
+Both images are checked before any tag changes. Published-release workflow runs
+have unique groups; their promotion jobs share one group with `queue: max` and
+`cancel-in-progress: false`. This retains up to 100 pending jobs; further jobs
+are canceled when that queue is full. GitHub queues by when jobs start waiting,
+not release publication or version order. An older patch arriving after a newer
+promotion can therefore fail the rollback preflight without writing any tags.
+See the [Actions concurrency contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+A rerun skips tags already at the recorded digest.
 Final reads also refuse an externally changed immutable tag or a newer minor
 version. Inspection and retagging have no compare-and-swap guarantee, and the
 registry has no transaction across tags: a race or write failure can still leave a

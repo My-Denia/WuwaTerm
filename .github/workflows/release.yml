@@ -57,7 +57,7 @@ concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch'
     && 'dispatch' || github.event_name == 'release'
-    && 'promotion' || format('pr-{0}', github.ref) }}
+    && format('promotion-run-{0}', github.run_id) || format('pr-{0}', github.ref) }}
   # Never cancel a dispatch or promotion: it may be halfway through writing images.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -897,6 +897,10 @@ jobs:
   promote-images:
     name: promote GHCR release tags
     if: github.event_name == 'release' && github.event.action == 'published'
+    concurrency:
+      group: ${{ github.workflow }}-promotion
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
