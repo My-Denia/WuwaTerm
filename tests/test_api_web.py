@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 import httpx
+import pytest
 
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, DeviceStore
@@ -1458,3 +1459,124 @@ def test_stylesheet_uses_literal_decorative_glyphs():
     assert "◆" in style
     assert "—" in style
     assert all(ord(ch) >= 0x20 or ch in "\n\r\t" for ch in style)
+
+
+@pytest.mark.parametrize("change, expected", [("revoke", 401), ("store_error", 503), ("active", 200)])
+def test_queued_web_translation_rechecks_device_before_spending(
+    tmp_path, sample_db, monkeypatch, change, expected
+):
+    import sqlite3
+
+    app, store, device, _token = build_web_app(tmp_path, sample_db, llm_max_concurrency=1)
+    jar = session_cookie(app)
+    calls = []
+
+    async def fake_call(locked_text, locks, **kwargs):
+        calls.append(locked_text)
+        return "Translated synthetic sentence."
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://model.example.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "synthetic-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+
+    async def scenario():
+        slots = app.state.translator._current_llm_slots()
+        acquire = slots.acquire
+        await acquire()  # Synthetic holder uses no budget or upstream call.
+        queued = asyncio.Event()
+
+        async def observed_acquire():
+            assert slots.locked()
+            queued.set()
+            return await acquire()
+
+        monkeypatch.setattr(slots, "acquire", observed_acquire)
+        task = asyncio.create_task(call(
+            app, "POST", f"{WEB_MOUNT_PATH}/translate", headers=edge(), cookies=jar,
+            data=form(text="这是一句没有词典命中的完整句子。"),
+        ))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=5)
+            assert not task.done()
+            assert calls == []
+            assert app.state.llm_budget.in_window() == 0
+            if change == "revoke":
+                store.revoke(device.device_id)
+            elif change == "store_error":
+                def unavailable(device_id):
+                    raise sqlite3.OperationalError("synthetic store unavailable")
+                monkeypatch.setattr(store, "is_active", unavailable)
+            slots.release()
+            return await asyncio.wait_for(task, timeout=5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    response = run(scenario())
+    spent = 1 if change == "active" else 0
+    assert (len(calls), app.state.llm_budget.in_window(), response.status_code) == (
+        spent, spent, expected
+    ), response.text
+    if change == "active":
+        assert "Translated synthetic sentence." in response.text
+    else:
+        assert "Translated synthetic sentence." not in response.text
+
+
+@pytest.mark.parametrize("change, expected", [("revoke", 401), ("store_error", 200)])
+def test_web_translation_retains_final_device_recheck_policy(
+    tmp_path, sample_db, monkeypatch, change, expected
+):
+    import sqlite3
+
+    app, store, device, _token = build_web_app(tmp_path, sample_db)
+    jar = session_cookie(app)
+    calls = []
+
+    async def fake_call(locked_text, locks, **kwargs):
+        calls.append(locked_text)
+        if change == "revoke":
+            store.revoke(device.device_id)
+        else:
+            def unavailable(device_id):
+                raise sqlite3.OperationalError("synthetic final store unavailable")
+            monkeypatch.setattr(store, "is_active", unavailable)
+        return "Translated synthetic sentence."
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://model.example.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "synthetic-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    response = run(call(
+        app, "POST", f"{WEB_MOUNT_PATH}/translate", headers=edge(), cookies=jar,
+        data=form(text="这是一句没有词典命中的完整句子。"),
+    ))
+    assert response.status_code == expected, response.text
+    assert len(calls) == 1
+    assert app.state.llm_budget.in_window() == 1
+    assert ("Translated synthetic sentence." in response.text) == (change == "store_error")
+
+
+def test_web_dictionary_translation_spends_no_model_budget(tmp_path, sample_db, monkeypatch):
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    jar = session_cookie(app)
+    calls = []
+
+    async def fake_call(locked_text, locks, **kwargs):
+        calls.append(locked_text)
+        return "Unexpected model call."
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://model.example.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "synthetic-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    response = run(call(
+        app, "POST", f"{WEB_MOUNT_PATH}/translate", headers=edge(), cookies=jar,
+        data=form(text="共鸣者"),
+    ))
+    assert response.status_code == 200, response.text
+    assert "Resonator" in response.text
+    assert calls == []
+    assert app.state.llm_budget.in_window() == 0

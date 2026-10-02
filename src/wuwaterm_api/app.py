@@ -51,6 +51,7 @@ from wuwaterm.application import (
     REVIEW_MAX_SIDE_SCALARS,
     LLMFailureDiagnostic,
     LlmCallBudget,
+    LlmCallGuard,
     ReviewRequestError,
     SlidingWindowRateLimiter,
     TranslationJob,
@@ -967,6 +968,15 @@ async def _require_active_device(
         raise ApiError(ERROR_UNAUTHORIZED)
 
 
+def _device_llm_guard(request: Request, device: Device) -> LlmCallGuard:
+    """Recheck the device, then spend the shared budget inside the model slot."""
+    async def before_llm_call() -> None:
+        await _require_active_device(request, device)
+        request.app.state.llm_budget()
+
+    return before_llm_call
+
+
 async def authenticated_device(
     request: Request,
     presented: Annotated[
@@ -1396,17 +1406,11 @@ def _register_routes(app: FastAPI) -> None:
         # must not spend an LLM budget slot or a model round trip.
         await _require_active_device(request, device)
 
-        async def before_llm_call() -> None:
-            # Runs after the model slot is acquired: a queued request may
-            # have been revoked since the initial admission re-check.
-            await _require_active_device(request, device)
-            state.llm_budget()
-
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
             TranslationJob(text=body.text, forced_to_chinese=forced_to_chinese),
-            before_llm_call=before_llm_call,
+            before_llm_call=_device_llm_guard(request, device),
             # The dictionary stage opens SQLite and can score every term row.
             # This process serves many requests on one loop, so that work runs
             # on a worker thread instead of blocking every other request (and
