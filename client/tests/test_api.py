@@ -288,6 +288,46 @@ def test_get_meta_round_trip() -> None:
     assert result.request_id == "req-meta"
 
 
+def test_get_meta_keeps_known_fields_when_the_server_adds_fields() -> None:
+    """0.2.x parses the fields it knows and does not become an exact-key parser."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "service_version": "0.2.1",
+                "api_version": "v1",
+                "schema_version": "1",
+                "source_profile": "official",
+                "source_commit": "abc123",
+                "source_game_version": "3.7.0",
+                "source_resource_version": "3.7.8",
+                "source_changelist": "8975829",
+                "future_field": "not-read",
+                "term_count": 42,
+                "llm_configured": True,
+                "request_id": "req-meta",
+            },
+        )
+
+    client = _client(handler)
+
+    async def scenario():
+        result = await client.get_meta()
+        await client.aclose()
+        return result
+
+    result = asyncio.run(scenario())
+    assert result.service_version == "0.2.1"
+    assert result.schema_version == "1"
+    assert result.source_profile == "official"
+    assert result.source_commit == "abc123"
+    assert result.term_count == 42
+    assert result.llm_configured is True
+    assert result.request_id == "req-meta"
+    assert "source_game_version" not in result.__dataclass_fields__
+
+
 def test_a_request_without_a_stored_credential_sends_no_auth_header() -> None:
     """No credential must mean no header, not an empty or literal one."""
     captured: dict[str, str | None] = {}

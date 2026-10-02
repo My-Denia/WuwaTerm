@@ -657,6 +657,9 @@ class ServiceMetadata:
     schema_version: str | None
     source_profile: str | None
     source_commit: str | None
+    source_game_version: str | None
+    source_resource_version: str | None
+    source_changelist: str | None
     term_count: int
 
 
@@ -666,6 +669,9 @@ def service_metadata(service: TermService) -> ServiceMetadata:
         schema_version=metadata.get("schema_version"),
         source_profile=metadata.get("source_profile"),
         source_commit=metadata.get("source_commit"),
+        source_game_version=metadata.get("source_game_version"),
+        source_resource_version=metadata.get("source_resource_version"),
+        source_changelist=metadata.get("source_changelist"),
         term_count=service.term_count(),
     )
 

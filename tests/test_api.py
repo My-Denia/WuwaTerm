@@ -772,11 +772,94 @@ def test_meta_exposes_provenance_without_paths_or_secrets(
     assert body["source_profile"] == "dimbreath_legacy"
     assert body["api_version"] == "v1"
     assert body["llm_configured"] is False
+    assert body["source_game_version"] == "fixture-unavailable"
+    assert body["source_resource_version"] == "fixture-unavailable"
+    assert body["source_changelist"] == "fixture-unavailable"
     text = response.text
+    assert "3.7.0" not in text
+    assert "3.7.8" not in text
+    assert "8975829" not in text
     assert str(sample_db) not in text
     assert "terms.db" not in text
     assert "devices.db" not in text
     assert token not in text
+
+
+def test_meta_versions_stay_null_when_the_database_did_not_record_them(
+    monkeypatch, tmp_path, sample_db
+):
+    """An arikatsu profile name must not backfill versions the DB never stored."""
+    bare = tmp_path / "bare.db"
+    bare.write_bytes(sample_db.read_bytes())
+    with connect(bare) as conn:
+        conn.execute(
+            """
+            DELETE FROM metadata
+            WHERE key IN (
+                'source_game_version',
+                'source_resource_version',
+                'source_changelist'
+            )
+            """
+        )
+        conn.execute(
+            "UPDATE metadata SET value = 'arikatsu' WHERE key = 'source_profile'"
+        )
+
+    app, store = build_client_app(tmp_path, bare)
+    _, token = issue_device(store, "owner desktop")
+    disable_llm(monkeypatch)
+
+    response = run(call(app, "GET", "/v1/meta", headers=bearer(token)))
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["source_profile"] == "arikatsu"
+    assert body["source_game_version"] is None
+    assert body["source_resource_version"] is None
+    assert body["source_changelist"] is None
+    text = response.text
+    assert "3.7.0" not in text
+    assert "3.7.8" not in text
+    assert "8975829" not in text
+    assert "9218d612ad815e398e064e577e42aaf878899968" not in text
+
+
+def test_meta_versions_round_trip_the_strings_stored_in_the_open_database(
+    monkeypatch, tmp_path, sample_db
+):
+    recorded = tmp_path / "recorded.db"
+    recorded.write_bytes(sample_db.read_bytes())
+    with connect(recorded) as conn:
+        stored_commit = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'source_commit'"
+        ).fetchone()[0]
+        conn.executemany(
+            "UPDATE metadata SET value = ? WHERE key = ?",
+            (
+                ("recorded-game-9.9.9", "source_game_version"),
+                ("recorded-resource-8.8.8", "source_resource_version"),
+                ("recorded-changelist-111", "source_changelist"),
+            ),
+        )
+
+    app, store = build_client_app(tmp_path, recorded)
+    _, token = issue_device(store, "owner desktop")
+    disable_llm(monkeypatch)
+
+    response = run(call(app, "GET", "/v1/meta", headers=bearer(token)))
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["source_commit"] == stored_commit
+    assert body["source_game_version"] == "recorded-game-9.9.9"
+    assert body["source_resource_version"] == "recorded-resource-8.8.8"
+    assert body["source_changelist"] == "recorded-changelist-111"
+    text = response.text
+    assert "fixture-unavailable" not in text
+    assert "3.7.0" not in text
+    assert "3.7.8" not in text
+    assert "8975829" not in text
 
 
 # --------------------------------------------------------------------------

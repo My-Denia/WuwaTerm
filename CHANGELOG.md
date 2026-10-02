@@ -13,6 +13,10 @@ does not distribute generated game data or generated SQLite databases.
   the current `/v1/meta` body and a later body that adds game version,
   resource version, and changelist. Absent version fields and a failed read
   stay unknown; the page does not fill them from the repository pin.
+- API: `GET /v1/meta` adds `source_game_version`, `source_resource_version`,
+  and `source_changelist` from the open database. A database that never
+  recorded those keys returns null. The route does not copy the active source
+  profile.
 
 ### Fixed
 

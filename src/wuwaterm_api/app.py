@@ -251,6 +251,9 @@ class MetaResponseBody(BaseModel):
     schema_version: str | None
     source_profile: str | None
     source_commit: str | None
+    source_game_version: str | None
+    source_resource_version: str | None
+    source_changelist: str | None
     term_count: int
     llm_configured: bool
     request_id: str
@@ -1514,6 +1517,9 @@ def _register_routes(app: FastAPI) -> None:
             schema_version=meta.schema_version,
             source_profile=meta.source_profile,
             source_commit=meta.source_commit,
+            source_game_version=meta.source_game_version,
+            source_resource_version=meta.source_resource_version,
+            source_changelist=meta.source_changelist,
             term_count=meta.term_count,
             llm_configured=llm_configured(),
             request_id=_request_id(request),
