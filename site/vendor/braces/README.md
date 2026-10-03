@@ -47,6 +47,10 @@ parser-produced ASTs, nodes must be objects, children must be arrays and scalar
 `value` fields must be strings when present. Malformed values throw `TypeError`
 before array-to-string coercion can recurse. Existing parser-produced ASTs are
 unchanged; undocumented non-string scalar values are deliberately rejected.
+Child references must form a tree: repeated child object identities, including
+cycles and compact shared-child graphs, throw `TypeError` before recursive
+processing. Equal values in distinct nodes remain valid. Parent and previous-node
+backreferences from the parser are not traversed or rejected.
 
 The root has depth zero. Up to 100 nested containers remain valid. Deeper
 patterns/ASTs throw an explicit `SyntaxError` containing `maximum depth`, before
