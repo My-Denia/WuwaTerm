@@ -65,7 +65,7 @@ export function ReviewWorkbench() {
   const [error, setError] = useState('');
   const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
   const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
-  const [requestedFindingId, setRequestedFindingId] = useState<string | null>(null);
+  const [canonicalFindingId, setCanonicalFindingId] = useState<string | null>(null);
   const sourceBox = useRef<HTMLTextAreaElement>(null);
   const targetBox = useRef<HTMLTextAreaElement>(null);
   const fileBox = useRef<HTMLInputElement>(null);
@@ -81,7 +81,11 @@ export function ReviewWorkbench() {
   const previous = reports.at(-2) ?? null;
   const visibleFindings = latest ? filterFindings(latest.report.findings, verdictFilter) : [];
   const findingCounts = findingVerdictCounts(latest?.report.findings ?? []);
-  const activeFindingId = reconcileActiveId(requestedFindingId, visibleFindings);
+  const activeFindingId = reconcileActiveId(canonicalFindingId, visibleFindings);
+  // A displayed fallback is the real selection; empty projections keep memory.
+  if (activeFindingId !== null && activeFindingId !== canonicalFindingId) {
+    setCanonicalFindingId(activeFindingId);
+  }
   const activeVisibleIndex = visibleFindings.findIndex(finding => finding.id === activeFindingId);
   const reconciled = reconcileChoices(choices, draft, latest, imported);
   const ready = reconciled.flatMap(item => item.resolution ? [item.resolution] : []);
@@ -330,8 +334,8 @@ export function ReviewWorkbench() {
         {FILTERS.map(item => <button key={item.id} type="button" className="secondary-button" aria-pressed={verdictFilter === item.id} onClick={() => setVerdictFilter(item.id)}>{item.label} {findingCounts[item.id as keyof typeof findingCounts]}</button>)}
       </div>
       <div className="finding-nav" role="group" aria-label="在筛选结果中移动">
-        <button type="button" className="secondary-button" disabled={activeVisibleIndex <= 0} onClick={() => { const previousFinding = visibleFindings[activeVisibleIndex - 1]; if (previousFinding) setRequestedFindingId(previousFinding.id); }}>上一项</button>
-        <button type="button" className="secondary-button" disabled={activeVisibleIndex < 0 || activeVisibleIndex >= visibleFindings.length - 1} onClick={() => { const nextFinding = visibleFindings[activeVisibleIndex + 1]; if (nextFinding) setRequestedFindingId(nextFinding.id); }}>下一项</button>
+        <button type="button" className="secondary-button" disabled={activeVisibleIndex <= 0} onClick={() => { const previousFinding = visibleFindings[activeVisibleIndex - 1]; if (previousFinding) setCanonicalFindingId(previousFinding.id); }}>上一项</button>
+        <button type="button" className="secondary-button" disabled={activeVisibleIndex < 0 || activeVisibleIndex >= visibleFindings.length - 1} onClick={() => { const nextFinding = visibleFindings[activeVisibleIndex + 1]; if (nextFinding) setCanonicalFindingId(nextFinding.id); }}>下一项</button>
         <p className="finding-position">当前 {activeVisibleIndex < 0 ? 0 : activeVisibleIndex + 1} / {visibleFindings.length}</p>
       </div>
       <div className="review-findings">{latest.report.findings.length === 0 && <p>没有术语发现，整句含义仍未评估。</p>}

@@ -25,6 +25,10 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Fixed
 
+- Site: a finding displayed after a verdict filter hides the previous active
+  finding now becomes the navigation selection. Returning to a broader filter
+  preserves it; an empty filter retains the last selection without displaying
+  a finding. Navigation remains local and does not change report exports.
 - Site: pin Next.js to 16.3.6, the patched release for
   GHSA-vcvr-r3jv-pc5j in Node.js `next/og` image generation. Refresh only
   its locked runtime packages and platform compilers; the site continues to
