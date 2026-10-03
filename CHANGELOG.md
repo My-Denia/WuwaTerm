@@ -29,6 +29,10 @@ does not distribute generated game data or generated SQLite databases.
   finding now becomes the navigation selection. Returning to a broader filter
   preserves it; an empty filter retains the last selection without displaying
   a finding. Navigation remains local and does not change report exports.
+- Site: replace the vulnerable `braces` resolution with a transparent,
+  repository-owned 3.0.3 security patch that bounds nested pattern and direct
+  AST traversal. Both build/lint dependency paths use it; the audit policy is
+  unchanged. Keep the temporary fork until a verified upstream fix can replace it.
 - Site: pin Next.js to 16.3.6, the patched release for
   GHSA-vcvr-r3jv-pc5j in Node.js `next/og` image generation. Refresh only
   its locked runtime packages and platform compilers; the site continues to
