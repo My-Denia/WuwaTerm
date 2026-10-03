@@ -25,6 +25,10 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Fixed
 
+- Site: a finding displayed after a verdict filter hides the previous active
+  finding now becomes the navigation selection. Returning to a broader filter
+  preserves it; an empty filter retains the last selection without displaying
+  a finding. Navigation remains local and does not change report exports.
 - Site: replace the vulnerable `braces` resolution with a transparent,
   repository-owned 3.0.3 security patch that bounds nested pattern and direct
   AST traversal. Both build/lint dependency paths use it; the audit policy is

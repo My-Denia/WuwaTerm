@@ -36,7 +36,7 @@ test('verdict counts come from findings and ignore coverage', () => {
   assert.deepEqual(filterFindings(findings, 'confirmed_conflict').map((item) => item.id), ['b']);
 });
 
-test('an empty filter clears the active id and does not invent a finding', () => {
+test('an empty filter displays no active id and does not invent a finding', () => {
   const findings = [finding('a', 'needs_review')];
   assert.deepEqual(filterFindings(findings, 'confirmed_conflict'), []);
   assert.equal(reconcileActiveId('a', []), null);
