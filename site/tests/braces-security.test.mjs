@@ -91,7 +91,7 @@ test('direct ASTs, internal walkers and cyclic child/parent paths cannot bypass 
       rejected(() => internal(ast()));
       const cyclic = { type: 'root', nodes: [] };
       cyclic.nodes.push(cyclic);
-      rejected(() => braces[method](cyclic));
+      assert.throws(() => braces[method](cyclic), /AST children must form a tree/);
     }
     const parentCycle = { type: 'paren', nodes: [] };
     parentCycle.parent = parentCycle;
@@ -108,6 +108,25 @@ test('direct ASTs, internal walkers and cyclic child/parent paths cannot bypass 
         assert.throws(() => internal(invalid), /AST node value must be a string/);
       }
     }
+  `);
+});
+
+test('compact shared-child graphs are rejected before exponential traversal', () => {
+  isolated(`
+    for (const method of ['compile', 'expand', 'stringify']) {
+      let shared = { type: 'text', value: 'x' };
+      for (let i = 0; i < 30; i++) shared = { type: 'root', nodes: [shared, shared] };
+      assert.throws(() => braces[method](shared), /AST children must form a tree/);
+      const internal = require(path.join(path.dirname(target), 'lib', method));
+      assert.throws(() => internal(shared), /AST children must form a tree/);
+    }
+    // Identical values in distinct nodes are ordinary valid AST input.
+    const tree = () => ({ type: 'root', nodes: [
+      { type: 'text', value: 'x' }, { type: 'text', value: 'x' },
+    ] });
+    assert.equal(braces.compile(tree()), 'xx');
+    assert.equal(braces.stringify(tree()), 'xx');
+    assert.deepEqual(braces.expand(tree()), ['xx']);
   `);
 });
 

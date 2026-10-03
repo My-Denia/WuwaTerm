@@ -19,11 +19,16 @@ exports.checkDepth = (depth, options = {}) => {
 // Follow children only: normal ASTs contain parent/prev backreferences.
 exports.validateTree = (ast, options = {}) => {
   const pending = [{ node: ast, depth: 0 }];
+  const seen = new WeakSet();
   while (pending.length) {
     const { node, depth } = pending.pop();
     if (!node || typeof node !== 'object' || Array.isArray(node)) {
       throw new TypeError('Expected an AST node');
     }
+    // Parser-produced children form a tree. Shared children can encode
+    // exponentially many traversal paths in a small caller-provided graph.
+    if (seen.has(node)) throw new TypeError('AST children must form a tree');
+    seen.add(node);
     if (node.value !== undefined && typeof node.value !== 'string') {
       throw new TypeError('AST node value must be a string');
     }
