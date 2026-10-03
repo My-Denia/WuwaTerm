@@ -44,7 +44,8 @@
     "typescript": "5.9.3",
     "vinext": "1.0.0-beta.8",
     "vite": "8.2.2",
-    "wrangler": "4.125.0"
+    "wrangler": "4.125.0",
+    "braces": "file:vendor/braces"
   },
   "type": "module",
   "overrides": {
@@ -53,6 +54,7 @@
     "@esbuild-kit/core-utils": {
       "esbuild": "0.25.12"
     },
-    "undici": "7.29.1"
+    "undici": "7.29.1",
+    "braces": "$braces"
   }
 }
