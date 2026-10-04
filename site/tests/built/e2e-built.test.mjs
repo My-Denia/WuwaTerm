@@ -45,18 +45,28 @@ test('built site renders landing pages and serves the emitted client assets', as
 
 test('built real routes use bound environment and D1 for the review-v2 visitor journey', async t => {
   const { server, db, upstream, tick } = await boot(t);
+  async function admitted(path, options) {
+    const before = await counters(db);
+    const result = await json(await server.fetch(path, options), 200);
+    const after = await counters(db);
+    const expected = before?.minute_key === after.minute_key ? before.upstream_used + 1 : 1;
+    assert.equal(after.upstream_used, expected, 'each admission debits its actual minute window exactly once');
+    return result;
+  }
   const pool = await json(await server.fetch('/api/pool'), 200);
   assert.equal(pool.status, 'available');
-  await json(await server.fetch('/api/meta'), 200);
+  await admitted('/api/meta');
+  // Make the next admission enter a new minute without waiting on wall time.
+  await db.prepare('UPDATE shared_pool SET minute_key = minute_key - 1 WHERE id = 1').run();
   await tick();
-  const terms = await json(await server.fetch('/api/terms?q=%E4%BB%8A%E6%B1%90'), 200);
+  const terms = await admitted('/api/terms?q=%E4%BB%8A%E6%B1%90');
   assert.equal(terms.matches[0].en, 'Jinhsi');
   await tick();
-  const translation = await json(await server.fetch('/api/translations', post({ text: draft.source })), 200);
+  const translation = await admitted('/api/translations', post({ text: draft.source }));
   assert.equal(translation.text, draft.target);
   await tick();
   const input = { ...draft, alignments: [{ source: { start: 0, end: 2, text: draft.source }, target: { start: 0, end: 6, text: draft.target } }] };
-  const report = await json(await server.fetch('/api/reviews', post(input)), 200);
+  const report = await admitted('/api/reviews', post(input));
   assert.equal(report.rule_version, 'review-v2');
   assert.equal(report.source_revision, hash(draft.source));
   assert.equal(report.target_revision, hash(draft.target));
@@ -66,7 +76,7 @@ test('built real routes use bound environment and D1 for the review-v2 visitor j
   await tick();
   const selected = { ...input, resolutions: [{ mention_id: report.findings[0].id, choice: 'official_pair', candidate_id: report.findings[0].candidates[0].candidate_id }],
     resolution_context: { source_revision: report.source_revision, rule_version: 'review-v2', dictionary_revision: report.dictionary.revision } };
-  await json(await server.fetch('/api/reviews', post(selected)), 200);
+  await admitted('/api/reviews', post(selected));
   assert.deepEqual(upstream.calls.at(-1).body, selected);
   assert.equal(upstream.calls.at(-1).method, 'POST');
   assert.equal(upstream.calls.at(-1).headers['content-type'], 'application/json');
@@ -76,7 +86,7 @@ test('built real routes use bound environment and D1 for the review-v2 visitor j
   assert.equal(row.translation_used, 1);
   assert.equal(row.character_used, 2);
   assert.equal(row.review_used, 2);
-  assert.equal(row.upstream_used, 5);
+  assert.equal(upstream.calls.length, 5);
   const after = await json(await server.fetch('/api/pool'), 200);
   assert.equal(after.terms.remaining, pool.terms.remaining - 1);
   assert.equal(after.translations.remaining, pool.translations.remaining - 1);
