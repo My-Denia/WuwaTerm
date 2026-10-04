@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "npm@11.6.2",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "dev": "vinext dev",
@@ -16,6 +16,7 @@
     "test:product": "node --test tests/product-v1.test.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:browser": "playwright test",
+    "test:built": "node scripts/check-built-artifact.mjs && node --test tests/built/*.test.mjs",
     "verify:no-client-secret": "node scripts/verify-no-client-secret.mjs"
   },
   "dependencies": {

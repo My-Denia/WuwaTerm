@@ -690,12 +690,18 @@ test('Product v1 UI uses only same-origin APIs and does not sort, filter, or ded
     assert.equal(source.includes(field), true, `UI does not render ${field}`);
   }
   assert.equal(source.includes('AbortController'), true);
-  assert.match(source, /仅停止本页等待/u);
+  // UI copy lives in the zh catalog since the bilingual refactor; the copy
+  // contract is asserted there while structure stays asserted here.
+  const zhCatalog = readFileSync(fileURLToPath(new URL('../lib/messages.ts', import.meta.url)), 'utf8');
+  assert.match(zhCatalog, /仅停止本页等待/u);
+  assert.match(zhCatalog, /转到整句翻译/u);
+  assert.match(zhCatalog, /刷新额度/u);
+  assert.match(source, /m\.terms\.noneAction/u);
+  assert.match(source, /m\.pool\.refresh/u);
+  assert.match(source, /m\.translation\.loadingStatus/u);
   assert.match(source, /controller\.signal\.aborted \|\| translationController\.current !== controller/u);
   assert.match(source, /dictionary_miss/u);
   assert.equal(source.includes('dictionary hit'), false);
-  assert.match(source, /转到整句翻译/u);
-  assert.match(source, /刷新额度/u);
   const transfer = source.slice(
     source.indexOf('function moveQueryToTranslation()'),
     source.indexOf('return (', source.indexOf('function moveQueryToTranslation()')),

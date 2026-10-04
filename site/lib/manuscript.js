@@ -136,35 +136,40 @@ function validSubmittedResolutions(items) {
       && (item.choice === 'not_a_term' ? keys(item, ['mention_id', 'choice'])
         : item.choice === 'official_pair' && keys(item, ['mention_id', 'choice', 'candidate_id']) && HEX.test(item.candidate_id)));
 }
+// Localized UIs render reason codes from lib/messages.ts; the Chinese strings
+// stay the canonical data form (result JSON keeps them verbatim).
+function fail(message, code) {
+  return Object.assign(new Error(message), { code });
+}
 function safeTree(x, depth = 0) {
-  if (depth > 16) throw new Error('稿件文件嵌套过深。');
+  if (depth > 16) throw fail('稿件文件嵌套过深。', 'workfile_too_deep');
   if (Array.isArray(x)) {
-    if (x.length > 128) throw new Error('稿件文件条目过多。');
+    if (x.length > 128) throw fail('稿件文件条目过多。', 'workfile_too_many_entries');
     x.forEach(v => safeTree(v, depth + 1));
   } else if (object(x)) {
-    if (Object.keys(x).length > 32) throw new Error('稿件文件字段过多。');
+    if (Object.keys(x).length > 32) throw fail('稿件文件字段过多。', 'workfile_too_many_fields');
     for (const [key, value] of Object.entries(x)) {
-      if (['__proto__', 'constructor', 'prototype'].includes(key)) throw new Error('稿件文件含不支持的字段。');
+      if (['__proto__', 'constructor', 'prototype'].includes(key)) throw fail('稿件文件含不支持的字段。', 'workfile_forbidden_field');
       safeTree(value, depth + 1);
     }
   }
 }
 export function parseWorkfile(content) {
-  if (typeof content !== 'string' || new TextEncoder().encode(content).length > MAX_WORKFILE_BYTES) throw new Error('稿件文件不能超过 1 MiB。');
+  if (typeof content !== 'string' || new TextEncoder().encode(content).length > MAX_WORKFILE_BYTES) throw fail('稿件文件不能超过 1 MiB。', 'workfile_too_large');
   let x;
-  try { x = JSON.parse(content); } catch { throw new Error('无法读取 JSON 稿件文件。'); }
+  try { x = JSON.parse(content); } catch { throw fail('无法读取 JSON 稿件文件。', 'workfile_not_json'); }
   safeTree(x);
   if (!keys(x, ['format', 'source', 'target', 'direction', 'alignments', 'choices', 'history']) || x.format !== WORKFILE_FORMAT) {
-    throw new Error('不支持此稿件格式或版本。请导入“保存稿件”生成的文件。');
+    throw fail('不支持此稿件格式或版本。请导入“保存稿件”生成的文件。', 'workfile_unsupported_format');
   }
   if (!text(x.source) || !text(x.target) || !direction(x.direction) || !validAlignments(x.alignments, x.source, x.target)
     || !Array.isArray(x.choices) || x.choices.length > MAX_CHOICES || !x.choices.every(validChoice)
     || !Array.isArray(x.history) || x.history.length > MAX_HISTORY || !x.history.every(validSnapshot)) {
-    throw new Error('稿件内容、选择或位置依据无效；当前稿件未被替换。');
+    throw fail('稿件内容、选择或位置依据无效；当前稿件未被替换。', 'workfile_invalid_content');
   }
   const recoveredIds = x.choices.map(c => recoverSpan(c.source, c.source_span, x.source)).filter(Boolean).map(mentionId);
   const originalIds = x.choices.map(c => JSON.stringify([c.source, c.direction, mentionId(c.source_span)]));
-  if (new Set(recoveredIds).size !== recoveredIds.length || new Set(originalIds).size !== originalIds.length) throw new Error('稿件包含同一位置的重复选择，未导入。');
+  if (new Set(recoveredIds).size !== recoveredIds.length || new Set(originalIds).size !== originalIds.length) throw fail('稿件包含同一位置的重复选择，未导入。', 'workfile_duplicate_choices');
   // No runtime trust or active flags come from the file.
   return x;
 }
@@ -177,22 +182,23 @@ export function serializeWorkfile({ source, target, direction, alignments, choic
 /** A fresh report can recover intent; only a later request can check that decision. */
 export function reconcileChoice(choice, draft, fresh, imported = false) {
   const span = recoverSpan(choice.source, choice.source_span, draft.source);
-  const pending = reason => ({ status: 'pending', reason, span, resolution: null });
-  if (choice.direction !== draft.direction) return pending('翻译方向已变化，请重新选择');
-  if (!span) return pending('原文段落已改变、删除或重复，不能迁移位置');
-  if (choice.scope !== scopeOf(draft.alignments, span)) return pending('分段对应已变化，请重新确认');
-  if (!fresh || fresh.source !== draft.source || fresh.direction !== draft.direction || !fresh.trusted) return pending('等待当前原文的新依据');
-  if (!sameBasis(choice.basis, basisOf(fresh.report))) return pending('词典或规则依据已变化，请重新确认');
+  const pending = (reason, code) => ({ status: 'pending', reason, code, span, resolution: null });
+  if (choice.direction !== draft.direction) return pending('翻译方向已变化，请重新选择', 'direction_changed');
+  if (!span) return pending('原文段落已改变、删除或重复，不能迁移位置', 'source_block_changed');
+  if (choice.scope !== scopeOf(draft.alignments, span)) return pending('分段对应已变化，请重新确认', 'scope_changed');
+  if (!fresh || fresh.source !== draft.source || fresh.direction !== draft.direction || !fresh.trusted) return pending('等待当前原文的新依据', 'awaiting_fresh_basis');
+  if (!sameBasis(choice.basis, basisOf(fresh.report))) return pending('词典或规则依据已变化，请重新确认', 'basis_changed');
   const finding = fresh.report.findings.find(f => f.id === mentionId(span));
-  if (!finding || fresh.report.truncated) return pending('本次发现缺失或报告截断，请重新确认');
+  if (!finding || fresh.report.truncated) return pending('本次发现缺失或报告截断，请重新确认', 'finding_missing_or_truncated');
   if (choice.choice === 'not_a_term') {
-    if (imported) return pending('文件中的“不是术语”是历史决定，请重新确认');
-    return { status: 'applicable', reason: '用户决定；此处不评估术语', span, resolution: { mention_id: finding.id, choice: 'not_a_term' } };
+    if (imported) return pending('文件中的“不是术语”是历史决定，请重新确认', 'imported_not_a_term');
+    return { status: 'applicable', reason: '用户决定；此处不评估术语', code: 'user_not_a_term', span, resolution: { mention_id: finding.id, choice: 'not_a_term' } };
   }
   const candidate = finding.candidates.find(c => c.candidate_id === choice.candidate.candidate_id
     && c.zh === choice.candidate.zh && c.en === choice.candidate.en && c.category === choice.candidate.category);
-  if (!candidate) return pending('原词对或其来源已不在当前候选中');
-  return { status: 'applicable', reason: finding.candidates_truncated ? '展示来源不完整；具体词对身份与当前依据一致，提交时由服务端复核' : '位置与当前官方候选依据一致', span,
+  if (!candidate) return pending('原词对或其来源已不在当前候选中', 'candidate_gone');
+  return { status: 'applicable', reason: finding.candidates_truncated ? '展示来源不完整；具体词对身份与当前依据一致，提交时由服务端复核' : '位置与当前官方候选依据一致',
+    code: finding.candidates_truncated ? 'candidate_partial_visible' : 'position_basis_match', span,
     resolution: { mention_id: finding.id, choice: 'official_pair', candidate_id: candidate.candidate_id } };
 }
 
@@ -202,7 +208,7 @@ export function reconcileChoices(choices, draft, fresh, importedChoices = []) {
   const counts = new Map();
   for (const result of results) if (result.span) counts.set(mentionId(result.span), (counts.get(mentionId(result.span)) ?? 0) + 1);
   return results.map(result => result.span && counts.get(mentionId(result.span)) > 1
-    ? { ...result, status: 'pending', reason: '多份历史选择汇聚到同一位置，请移除冲突记录后重新选择', resolution: null } : result);
+    ? { ...result, status: 'pending', reason: '多份历史选择汇聚到同一位置，请移除冲突记录后重新选择', code: 'duplicate_position', resolution: null } : result);
 }
 
 function positionalSourceRegion(snapshot, span) {
@@ -259,20 +265,24 @@ export function compareReports(previous, current) {
       && oldDecision.candidate.zh === newDecision.candidate.zh && oldDecision.candidate.en === newDecision.candidate.en
       && oldDecision.candidate.category === newDecision.candidate.category;
     if (after) seen.add(after.id);
+    const mention = { text: before.source_span.text, start: (span ?? before.source_span).start, historical: !span };
     const label = `${before.source_span.text}（${span ? '原文' : '历史原文'} ${(span ?? before.source_span).start + 1}）`;
     if (!compatible || !after || !scopesMatch || !decisionsMatch
       || ((before.candidates_truncated || after.candidates_truncated) && !sameExplicitCandidate)
       || before.verdict === 'not_evaluated' || after.verdict === 'not_evaluated') {
-      result.incomparable.push({ label, reason: !previous.trusted ? '导入的历史报告未经本次验证'
-        : !decisionsMatch ? '前后选择不同或选择记录未知，不能视为同一约束已解决' : '位置、依据、覆盖或对应范围不可比；消失不代表解决' });
+      result.incomparable.push({ label, mention, reason: !previous.trusted ? '导入的历史报告未经本次验证'
+        : !decisionsMatch ? '前后选择不同或选择记录未知，不能视为同一约束已解决' : '位置、依据、覆盖或对应范围不可比；消失不代表解决',
+        code: !previous.trusted ? 'imported_history_unverified' : !decisionsMatch ? 'decision_changed_or_unknown' : 'scope_position_incomparable' });
     } else if (['needs_review', 'confirmed_conflict'].includes(before.verdict) && after.verdict === 'verified_constraint') {
-      result.resolved.push({ label, reason: '同一可比位置的新检查确认术语约束已满足，未评估句意' });
+      result.resolved.push({ label, mention, reason: '同一可比位置的新检查确认术语约束已满足，未评估句意', code: 'resolved_same_constraint' });
     } else if (['needs_review', 'confirmed_conflict'].includes(after.verdict)) {
-      result.pending.push({ label, reason: '本次仍需人工核对' });
+      result.pending.push({ label, mention, reason: '本次仍需人工核对', code: 'still_needs_review' });
     }
   }
   for (const finding of newFindings) {
-    if (!seen.has(finding.id)) result.new.push({ label: `${finding.source_span.text}（原文 ${finding.source_span.start + 1}）`, reason: '本次发现；没有可比的旧位置' });
+    if (!seen.has(finding.id)) result.new.push({ label: `${finding.source_span.text}（原文 ${finding.source_span.start + 1}）`,
+      mention: { text: finding.source_span.text, start: finding.source_span.start, historical: false },
+      reason: '本次发现；没有可比的旧位置', code: 'new_finding' });
   }
   return result;
 }

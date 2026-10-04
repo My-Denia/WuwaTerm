@@ -1,6 +1,9 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import { msg } from '../../lib/messages';
+import { numberLocale } from '../../lib/ui-language';
+import { useUiLanguage } from './ui-language-context';
 
 type Provenance = {
   schema_version: string | null;
@@ -37,22 +40,24 @@ function isProvenance(value: unknown): value is Provenance {
     && record.request_id.length > 0;
 }
 
-function reported(value: string | null): string {
-  if (value === null) return '版本字段未提供';
-  if (value === 'unavailable') return '当前服务未记录该版本';
-  return value;
-}
-
-function plain(value: string | null): string {
-  return value === null ? '未提供' : value;
-}
-
 export function DictionaryProvenance() {
+  const { lang } = useUiLanguage();
+  const m = msg(lang);
   const snapshot = useRef<Snapshot | null>(null);
   const inflight = useRef(false);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<Snapshot | { kind: 'loading' } | null>(null);
+
+  function reported(value: string | null): string {
+    if (value === null) return m.provenance.notProvided;
+    if (value === 'unavailable') return m.provenance.notRecorded;
+    return value;
+  }
+
+  function plain(value: string | null): string {
+    return value === null ? m.provenance.plainNotProvided : value;
+  }
 
   async function load(force: boolean) {
     setOpen(true);
@@ -83,30 +88,30 @@ export function DictionaryProvenance() {
   }
 
   return (
-    <section className="provenance" aria-label="词典版本">
-      <p>以下是当前服务实际报告的词典数据，不是本仓库的目标版本。</p>
+    <section className="provenance" aria-label={m.provenance.aria}>
+      <p>{m.provenance.intro}</p>
       <div className="provenance-actions">
-        <button className="secondary-button" type="button" onClick={() => void load(false)}>查看词典版本</button>
+        <button className="secondary-button" type="button" onClick={() => void load(false)}>{m.provenance.open}</button>
       </div>
       {open && (
         <>
-          <p>第一次打开和每次重新读取各会计入一次今日词典信息共享额度。收起后再打开不会重新请求。</p>
-          {view?.kind === 'loading' && <p role="status">正在读取当前服务报告的词典数据…</p>}
-          {view?.kind === 'error' && <p role="status">当前版本无法确认。</p>}
+          <p>{m.provenance.quotaNote}</p>
+          {view?.kind === 'loading' && <p role="status">{m.provenance.loading}</p>}
+          {view?.kind === 'error' && <p role="status">{m.provenance.error}</p>}
           {view?.kind === 'success' && (
             <dl>
-              <div className="provenance-row"><dt>游戏数据</dt><dd>{reported(view.data.game_version)}</dd></div>
-              <div className="provenance-row"><dt>资源版本</dt><dd>{reported(view.data.resource_version)}</dd></div>
-              <div className="provenance-row"><dt>Changelist</dt><dd>{reported(view.data.changelist)}</dd></div>
-              <div className="provenance-row"><dt>source commit</dt><dd>{plain(view.data.source_commit)}</dd></div>
-              <div className="provenance-row"><dt>词条数</dt><dd>{view.data.term_count.toLocaleString('zh-CN')}</dd></div>
-              <div className="provenance-row"><dt>数据库结构版本</dt><dd>{plain(view.data.schema_version)}</dd></div>
-              <div className="provenance-row"><dt>问题反馈编号</dt><dd>{view.data.request_id}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.game}</dt><dd>{reported(view.data.game_version)}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.resource}</dt><dd>{reported(view.data.resource_version)}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.changelist}</dt><dd>{reported(view.data.changelist)}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.sourceCommit}</dt><dd>{plain(view.data.source_commit)}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.terms}</dt><dd>{view.data.term_count.toLocaleString(numberLocale(lang))}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.schema}</dt><dd>{plain(view.data.schema_version)}</dd></div>
+              <div className="provenance-row"><dt>{m.provenance.requestId}</dt><dd>{view.data.request_id}</dd></div>
             </dl>
           )}
           <div className="provenance-actions">
-            <button className="secondary-button" type="button" disabled={busy} onClick={() => void load(true)}>重新读取</button>
-            <button className="secondary-button" type="button" onClick={() => setOpen(false)}>收起</button>
+            <button className="secondary-button" type="button" disabled={busy} onClick={() => void load(true)}>{m.provenance.reread}</button>
+            <button className="secondary-button" type="button" onClick={() => setOpen(false)}>{m.provenance.collapse}</button>
           </div>
         </>
       )}

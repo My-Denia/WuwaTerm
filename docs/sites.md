@@ -120,6 +120,36 @@ one upstream call per admitted explicit check; save/import/edit/select/compare
 and export perform none. Deploy the dual-protocol API before the v2 Site;
 roll back the Site to its v1 version before reverting the API.
 
+## Interface language and report exports
+
+The interface is bilingual (Chinese and English). The choice is a single
+`wuwaterm-lang` preference cookie (`zh`/`en`, one year, no other value),
+read server-side so the first paint matches the saved choice; first visits
+default to Chinese and any missing translation falls back to Chinese copy.
+Switching languages re-renders copy only: it never rewrites the manuscript,
+user input, terms, proper nouns, source evidence or the translation
+direction, keeps the active finding, expansions and report currency, and
+sends no translation, review or meta request. The no-client-secret scan
+permits exactly one content-pinned `wuwaterm-lang` cookie write and rejects
+every other browser-storage use; no input is ever written to browser
+storage.
+
+Downloads remain local: the manuscript JSON (`wuwaterm-manuscript-v1`), the
+result JSON (`wuwaterm-result-v2`), the translation TXT, and a readable
+Markdown snapshot of the full report (`wuwaterm-report.md`). The Markdown is
+generated from the current workbench state without requests and without
+state changes; it lists every finding unfiltered with spans, excerpts,
+official candidate pairs and their source records, the report's own rule
+version, dictionary revision, source commit, revisions and request id (never
+the application version), coverage including zero-coverage semantics,
+truncation flags, submitted decisions, kept local choices with honest
+status, and the previous-report comparison. Current, stale-edited and
+imported-untrusted reports are worded differently and never merged; zero
+findings does not mean the translation passed, and no export certifies
+sentence meaning. User text in the Markdown is literal (code spans and
+fences that grow past any backtick run), so report structure, links and
+HTML cannot be forged by manuscript content.
+
 ## Shared pool contract
 
 There is no per-visitor, per-IP or personal fair-use allowance. A single caller

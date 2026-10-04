@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { candidate, dictionary, echo, hash } from '../fixtures/manuscript.mjs';
 import { scalarToUtf16 } from '../../lib/review-report.js';
 
+const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 const PAD = '引'.repeat(70);
 const SOURCE = `😀${PAD}今汐与今汐声骸漂泊。`;
 const TARGET = '😀Jinhsi / Jinhsi / Echo.';
@@ -85,8 +86,11 @@ async function open(page, respond = reportFor) {
     }
     throw new Error(`Unexpected API request: ${path}`);
   });
-  await page.goto('/');
-  await expect(page.locator('.pool-strip')).toContainText('100');
+  await page.goto(BASE + '/');
+  // Warm-up gate, not the behavior under test: in built mode the worker
+  // cold-start can push the first pool read past the default 5s on shared
+  // CI runners, so allow a generous wait here.
+  await expect(page.locator('.pool-strip')).toContainText('100', { timeout: 30_000 });
   return reviews;
 }
 

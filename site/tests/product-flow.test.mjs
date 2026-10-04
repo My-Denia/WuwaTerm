@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { fixtureEnvironment } from './helpers/pool-fixture.mjs';
 
-const MODULES = ['tests/helpers/runtime-worker.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js']
+const MODULES = ['tests/helpers/runtime-worker.mjs', 'tests/helpers/synthetic-upstream.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js']
   .map(path => ({ type: 'ESModule', path: fileURLToPath(new URL('../' + path, import.meta.url)) }));
 
 async function boot() {
