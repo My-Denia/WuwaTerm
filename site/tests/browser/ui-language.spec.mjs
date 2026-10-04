@@ -139,6 +139,29 @@ test('document pages follow the language preference and disclose the cookie in E
   await expect(page.locator('h1')).toContainText('只为这一次查询与翻译。');
 });
 
+test('a reason-less review error body still shows the localized fallback, and re-localizes', async ({ page }) => {
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/pool') return route.fulfill({ json: {
+      status: 'available', translation_enabled: true,
+      terms: { used: 0, limit: 100, remaining: 100 },
+      translations: { used: 0, limit: 100, remaining: 100 },
+      characters: { used: 0, limit: 10000, remaining: 10000 },
+      reset_at: '2099-01-01T00:00:00Z',
+    } });
+    if (path === '/api/reviews') return route.fulfill({ status: 503, json: {} });
+    throw new Error(`Unexpected API request: ${path}`);
+  });
+  await page.goto(BASE + '/');
+  await expect(page.locator('.pool-strip')).toContainText('100', { timeout: 30_000 });
+  await page.locator('#review-source').fill('今汐。');
+  await page.locator('#review-target').fill('Jinhsi.');
+  await page.getByRole('button', { name: '核对术语', exact: true }).click();
+  await expect(page.locator('.error-panel')).toContainText('服务暂时不可用');
+  await switchTo(page, 'English');
+  await expect(page.locator('.error-panel')).toContainText('temporarily unavailable');
+});
+
 test('both languages fit the narrow viewport without horizontal overflow', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await open(page);

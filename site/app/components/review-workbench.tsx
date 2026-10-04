@@ -103,7 +103,9 @@ export function ReviewWorkbench() {
     ((m.choiceReasons as Record<string, string>)[item.code ?? ''] ?? item.reason);
   const noticeText = notice ? ((m.notices as Record<string, string>)[notice] ?? '') : '';
   const errorTextValue = !error ? ''
-    : error.reason ? ((m.rMsg as Record<string, string>)[error.reason] ?? m.rMsg.fallback)
+    // Nullish (not falsy) check: an empty reason string from a reason-less
+    // error body must still land on the localized fallback, not a blank alert.
+    : error.reason !== undefined && error.reason !== null ? ((m.rMsg as Record<string, string>)[error.reason] ?? m.rMsg.fallback)
     : error.code && (m.errors as Record<string, string>)[error.code] ? (m.errors as Record<string, string>)[error.code]!
     : error.text ?? '';
   const errorFrom = (cause: unknown, fallbackKey: string): ErrorState => {
