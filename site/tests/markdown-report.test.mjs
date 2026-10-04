@@ -234,6 +234,42 @@ test('edge spaces in inline literals survive CommonMark code-span stripping', ()
   assert.equal(markdown.includes('` 声骸 `'), false, 'unpadded form would lose its edge spaces when rendered');
 });
 
+test('valid empty basis values, duplicate-term choices and historical offsets stay readable', () => {
+  // Empty schema_version/source_commit are valid report values; they must
+  // not emit adjacent unmatched backticks.
+  const base = fixture('今汐。今汐。', 'Jinhsi. Jinhsi.', 'en');
+  const report = JSON.parse(JSON.stringify(base.report));
+  report.dictionary.schema_version = '';
+  report.dictionary.source_commit = '';
+  const latest = { source: base.source, target: base.target, direction: 'en', report, resolutions: null };
+  const markdown = renderMarkdownReport(inputFor(latest), 'zh');
+  assert.equal(/(?<!`)``(?!`)/u.test(markdown), false, 'adjacent backticks are unmatched delimiters, not empty code spans');
+  assert.equal((markdown.match(/`∅`/gu) ?? []).length, 2);
+
+  // Same term at two positions with two choices: each bullet carries its own
+  // source range so they stay distinguishable.
+  const choices = base.report.findings.map(finding => makeChoice({
+    source: base.source, direction: 'en', alignments: null, report: base.report, finding, candidate,
+  }));
+  const withChoices = renderMarkdownReport(inputFor(latest, {
+    currency: 'stale', choices,
+    reconciled: [
+      { status: 'applicable', reason: '位置与当前官方候选依据一致', code: 'position_basis_match', span: choices[0].source_span },
+      { status: 'pending', reason: '等待当前原文的新依据', code: 'awaiting_fresh_basis', span: choices[1].source_span },
+    ],
+  }), 'zh');
+  assert.equal(withChoices.includes('原文位置 1–2'), true);
+  assert.equal(withChoices.includes('原文位置 4–5'), true);
+
+  // A comparison mention that could not be recovered in the current source
+  // is labeled historical, like the UI.
+  const previous = { source: '前奏。今汐。', target: 'Prelude. Jinhsi.', direction: 'en', trusted: true, signature: 'p', alignments: null,
+    report: fixture('前奏。今汐。', 'Prelude. Jinhsi.', 'en').report, resolutions: [] };
+  const comparison = compareReports(previous, { ...latest, trusted: true });
+  const withComparison = renderMarkdownReport(inputFor(latest, { previous, currency: 'current', comparison }), 'zh');
+  assert.equal(withComparison.includes('历史原文'), true);
+});
+
 test('duplicate-term occurrences each get their own finding entry', () => {
   const base = fixture('今汐与今汐。', 'Jinhsi and Jinhsi.', 'en');
   assert.equal(base.report.findings.length, 2);

@@ -20,7 +20,7 @@ export type MarkdownReport = {
 };
 export type MarkdownSnapshot = { source: string; target: string; direction: 'en' | 'zh'; report: MarkdownReport; resolutions: { mention_id: string; choice: string; candidate_id?: string }[] | null };
 export type MarkdownChoice = { source: string; direction: string; source_span: MarkdownSpan; choice: string; candidate: { candidate_id: string; zh: string; en: string; category: string } | null; basis: { rule_version: string; dictionary: { revision: string; source_commit: string | null } } };
-export type MarkdownReconciled = { status: string; reason: string; code?: string };
+export type MarkdownReconciled = { status: string; reason: string; code?: string; span?: MarkdownSpan };
 export type MarkdownComparisonItem = { label: string; reason: string; code?: string; mention: { text: string; start: number; historical: boolean } };
 export type MarkdownComparison = { new: MarkdownComparisonItem[]; resolved: MarkdownComparisonItem[]; pending: MarkdownComparisonItem[]; incomparable: MarkdownComparisonItem[] };
 export type MarkdownCurrency = 'current' | 'stale' | 'imported' | 'none';
@@ -46,6 +46,11 @@ function inline(text: string): string {
   // Markdown normalizes LF, CRLF and a standalone CR to line breaks before
   // inline parsing, so every line-ending form must be flattened first.
   const flat = text.replace(/\r\n|\r|\n/gu, '⏎');
+  // Two adjacent backticks are unmatched delimiters in CommonMark, not an
+  // empty code span; a valid report may carry empty strings (schema_version,
+  // source_commit), so render emptiness with the same visible marker class
+  // as flattened newlines.
+  if (flat === '') return '`∅`';
   const run = backtickRun(flat);
   // CommonMark strips one leading and one trailing space from code-span
   // content that has both but is not all spaces; pad such values so the
@@ -192,7 +197,11 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
     const pair = choice.candidate
       ? inline(choice.candidate.zh) + ' / ' + inline(choice.candidate.en)
       : msg(lang).review.notTerm;
-    return inline(choice.source_span.text) + ' · ' + pair + ' · ' + status + (reason ? ' · ' + reason : '');
+    // The same term text can carry several per-occurrence choices; identify
+    // each by its source range, preferring the reconciled current span.
+    const span = input.reconciled[index]?.span ?? choice.source_span;
+    const occurrence = fill(md.spanLabel, { start: span.start + 1, end: span.end });
+    return inline(choice.source_span.text) + ' · ' + occurrence + ' · ' + pair + ' · ' + status + (reason ? ' · ' + reason : '');
   })), '');
   if (input.choices.length) {
     out.push(...bullets(input.choices.map(choice => fill(md.basisLine, {
@@ -216,9 +225,14 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
       const items = input.comparison[key];
       if (!items.length) continue;
       heading(3, counted(label, items.length, lang));
-      out.push(...bullets(items.map(item =>
-        inline(item.mention.text) + (lang === 'zh' ? '（' + (item.mention.start + 1) + '）：' : ' (' + (item.mention.start + 1) + '): ')
-        + ((msg(lang).comparisonReasons as Record<string, string>)[item.code ?? ''] ?? item.reason))), '');
+      out.push(...bullets(items.map(item => {
+        // A historical offset points into the OLD report's source, not the
+        // current manuscript; label it exactly like the UI does.
+        const template = item.mention.historical ? msg(lang).review.comparisonMentionHistorical : msg(lang).review.comparisonMention;
+        const [before, after] = template.split('{text}');
+        return before + inline(item.mention.text) + fill(after, { n: item.mention.start + 1 }) + colon(lang)
+          + ((msg(lang).comparisonReasons as Record<string, string>)[item.code ?? ''] ?? item.reason);
+      })), '');
     }
     paragraph(md.comparisonNote);
   }
