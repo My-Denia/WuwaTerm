@@ -214,6 +214,26 @@ test('a direction edited after the check is never stitched onto the older report
   assert.equal(current.includes(msg('zh').md.directionChangedNote.split('{direction}')[0]), false);
 });
 
+test('edge spaces in inline literals survive CommonMark code-span stripping', () => {
+  // CommonMark strips one leading and one trailing space from ` foo `;
+  // the serializer must pad so the stored value renders verbatim.
+  const base = fixture('今汐。', 'Jinhsi.', 'en');
+  const report = JSON.parse(JSON.stringify(base.report));
+  report.findings[0].candidates.push({
+    ...report.findings[0].candidates[0],
+    candidate_id: 'e'.repeat(64), zh: ' 声骸 ', en: ' Echo ', category: ' item ',
+    sources: [{ source_file: ' spaced.json ', source_id: ' spaced id ' }],
+  });
+  const latest = { source: base.source, target: base.target, direction: 'en', report, resolutions: null };
+  const markdown = renderMarkdownReport(inputFor(latest), 'zh');
+  assert.equal(markdown.includes('`  声骸  `'), true);
+  assert.equal(markdown.includes('`  Echo  `'), true);
+  assert.equal(markdown.includes('`  item  `'), true);
+  assert.equal(markdown.includes('`  spaced.json  `'), true);
+  assert.equal(markdown.includes('`  spaced id  `'), true);
+  assert.equal(markdown.includes('` 声骸 `'), false, 'unpadded form would lose its edge spaces when rendered');
+});
+
 test('duplicate-term occurrences each get their own finding entry', () => {
   const base = fixture('今汐与今汐。', 'Jinhsi and Jinhsi.', 'en');
   assert.equal(base.report.findings.length, 2);

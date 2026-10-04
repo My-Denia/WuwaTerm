@@ -47,8 +47,14 @@ function inline(text: string): string {
   // inline parsing, so every line-ending form must be flattened first.
   const flat = text.replace(/\r\n|\r|\n/gu, '⏎');
   const run = backtickRun(flat);
-  if (run === 0) return '`' + flat + '`';
-  return '`'.repeat(run + 1) + ' ' + flat + ' ' + '`'.repeat(run + 1);
+  // CommonMark strips one leading and one trailing space from code-span
+  // content that has both but is not all spaces; pad such values so the
+  // stored text survives verbatim.
+  const allSpace = flat.trim() === '';
+  const edgeSpace = !allSpace && (flat.startsWith(' ') || flat.endsWith(' '));
+  if (run === 0 && !edgeSpace) return '`' + flat + '`';
+  const delimiter = '`'.repeat(run + 1);
+  return delimiter + ' ' + flat + ' ' + delimiter;
 }
 
 /** Block literal: user text (possibly multi-line) inside an unclosable fence. */
