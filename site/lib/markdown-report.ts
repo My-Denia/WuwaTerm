@@ -14,7 +14,7 @@ export type MarkdownCandidate = { candidate_id: string; zh: string; en: string; 
 export type MarkdownFinding = { id: string; rule_id: string; verdict: string; source_span: MarkdownSpan; target_span: MarkdownSpan | null; candidates: MarkdownCandidate[]; candidates_truncated: boolean };
 export type MarkdownReport = {
   request_id: string; source_revision: string; target_revision: string; rule_version: string;
-  dictionary: { schema_version: string | null; source_commit: string | null; term_count: number; revision: string };
+  dictionary: { schema_version: string | null; source_commit: string | null; term_count: number; revision?: string };
   coverage: { evaluated: number; not_evaluated: number; rules: string[] };
   findings: MarkdownFinding[]; truncated: boolean;
 };
@@ -103,7 +103,9 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
     heading(2, md.basisHeading);
     out.push(...bullets([
       md.ruleLabel + colon(lang) + inline(report.rule_version),
-      md.revisionLabel + colon(lang) + inline(report.dictionary.revision),
+      // Imported review-v1 reports have no dictionary revision; keep the
+      // export working and mark it as not provided.
+      md.revisionLabel + colon(lang) + inline(report.dictionary.revision ?? md.notProvided),
       md.commitLabel + colon(lang) + inline(report.dictionary.source_commit ?? md.notProvided),
       md.schemaLabel + colon(lang) + inline(report.dictionary.schema_version ?? md.notProvided),
       md.termCountLabel + colon(lang) + report.dictionary.term_count,

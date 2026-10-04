@@ -199,9 +199,12 @@ export function ReviewWorkbench() {
     } catch (cause) {
       if (!abort.signal.aborted && generation.current === mine) {
         setPhase('error');
+        // Unmarked failures here are network-layer rejections or malformed
+        // JSON bodies; both use the fixed catalog copy instead of browser
+        // error text (public UI errors stay fixed copy and re-localizable).
         setError(cause instanceof Error && 'gahReason' in cause ? { reason: String((cause as Error & { gahReason?: unknown }).gahReason) }
           : cause instanceof Error && 'gahCode' in cause ? { code: String((cause as Error & { gahCode?: unknown }).gahCode) }
-          : cause instanceof Error && cause.message ? { text: cause.message } : { code: 'requestFailed' });
+          : { code: 'requestFailed' });
       }
     } finally { if (controller.current === abort) controller.current = null; }
   }

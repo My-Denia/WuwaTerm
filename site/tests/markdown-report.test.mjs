@@ -185,3 +185,21 @@ test('duplicate-term occurrences each get their own finding entry', () => {
   assert.equal(markdown.includes('术语发现（2）'), true);
   assert.equal((markdown.match(/`今汐`/gu) ?? []).length >= 3, true);
 });
+
+test('imported review-v1 history exports instead of throwing on the missing revision', () => {
+  // validReport accepts review-v1, whose dictionary has no revision and whose
+  // candidates have no candidate_id; an imported v1 snapshot can be the
+  // latest report.
+  const finding = { id: '0:2:今汐', rule_id: 'review.term_pair', verdict: 'verified_constraint',
+    source_span: { start: 0, end: 2, text: '今汐' }, target_span: null,
+    candidates: [{ zh: '今汐', en: 'Jinhsi', category: 'character', sources: [] }], candidates_truncated: false };
+  const report = { request_id: 'r1', source_revision: 'a'.repeat(64), target_revision: 'b'.repeat(64),
+    rule_version: 'review-v1', dictionary: { schema_version: '2', source_commit: 'old-commit', term_count: 1 },
+    coverage: { evaluated: 1, not_evaluated: 0, rules: ['review.term_pair'] }, findings: [finding], truncated: false };
+  const latest = { source: '今汐。', target: 'Jinhsi.', direction: 'en', report, resolutions: null };
+  const zh = renderMarkdownReport(inputFor(latest, { currency: 'imported' }), 'zh');
+  assert.equal(zh.includes('词典 revision'), true);
+  assert.equal(zh.includes('未提供'), true);
+  const en = renderMarkdownReport(inputFor(latest, { currency: 'imported' }), 'en');
+  assert.equal(en.includes('Not provided'), true);
+});
