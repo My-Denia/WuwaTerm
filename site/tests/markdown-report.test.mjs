@@ -177,6 +177,28 @@ test('the fence grows past the longest backtick run in the content', () => {
   assert.equal(markdown.includes('a ``` b ```` c'), true);
 });
 
+test('standalone carriage returns cannot escape the inline literal', () => {
+  // A bare \r is a Markdown line ending, so 'term\r# Forged' would otherwise
+  // break out of the code span and forge a heading.
+  const base = fixture('今汐。', 'Jinhsi.', 'en');
+  const report = JSON.parse(JSON.stringify(base.report));
+  const spanText = '今汐\r# Forged heading';
+  report.findings.push({
+    id: `3:${3 + spanText.length}:${spanText}`,
+    rule_id: 'review.term_pair', verdict: 'needs_review',
+    source_span: { start: 3, end: 3 + Array.from(spanText).length, text: spanText },
+    target_span: null, candidates: [], candidates_truncated: false,
+  });
+  const latest = { source: '今汐。' + spanText, target: 'Jinhsi.', direction: 'en', report, resolutions: null };
+  const markdown = renderMarkdownReport(inputFor(latest), 'zh');
+  const headline = markdown.split('\n').find(line => line.includes('⏎'));
+  assert.equal(headline.includes('`今汐⏎# Forged heading`'), true);
+  const structure = markdownStructure(markdown);
+  assert.equal(structure.headings.some(h => h.includes('Forged')), false);
+  assert.equal(structure.links, 0);
+  assert.equal(structure.htmlTags, 0);
+});
+
 test('duplicate-term occurrences each get their own finding entry', () => {
   const base = fixture('今汐与今汐。', 'Jinhsi and Jinhsi.', 'en');
   assert.equal(base.report.findings.length, 2);

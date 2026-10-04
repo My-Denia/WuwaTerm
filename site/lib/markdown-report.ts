@@ -43,7 +43,9 @@ function backtickRun(text: string): number {
 
 /** Inline literal: single-line user text inside a code span that no content can break out of. */
 function inline(text: string): string {
-  const flat = text.replace(/\r?\n/gu, '⏎');
+  // Markdown normalizes LF, CRLF and a standalone CR to line breaks before
+  // inline parsing, so every line-ending form must be flattened first.
+  const flat = text.replace(/\r\n|\r|\n/gu, '⏎');
   const run = backtickRun(flat);
   if (run === 0) return '`' + flat + '`';
   return '`'.repeat(run + 1) + ' ' + flat + ' ' + '`'.repeat(run + 1);
