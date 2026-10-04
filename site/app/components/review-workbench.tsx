@@ -235,7 +235,10 @@ export function ReviewWorkbench() {
     const end = scalarToUtf16(text, span.end);
     if (!located || start === null || end === null) return;
     box.focus({ preventScroll: true });
-    box.setSelectionRange(start, end);
+    // Textareas expose LF line endings even when an imported file retains CRLF.
+    // Keep the report coordinates and saved text raw; map only the DOM offsets.
+    const domOffset = (offset: number) => text.slice(0, offset).replace(/\r\n?/g, '\n').length;
+    box.setSelectionRange(domOffset(start), domOffset(end));
     box.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
   function replace(finding: Finding, candidate: Candidate) {
@@ -245,13 +248,24 @@ export function ReviewWorkbench() {
     if (!parts || !forms.includes(finding.target_span.text)) return;
     editText('target', parts.before + (direction === 'en' ? candidate.en : candidate.zh) + parts.after);
   }
-  function selectedSpan(box: HTMLTextAreaElement | null): Span | null {
+  function selectedSpan(box: HTMLTextAreaElement | null, text: string): Span | null {
     if (!box || box.selectionStart === box.selectionEnd) return null;
-    return { start: Array.from(box.value.slice(0, box.selectionStart)).length, end: Array.from(box.value.slice(0, box.selectionEnd)).length, text: box.value.slice(box.selectionStart, box.selectionEnd) };
+    const rawOffset = (offset: number) => {
+      let raw = 0;
+      for (let dom = 0; dom < offset; dom += 1) {
+        if (raw >= text.length) return null;
+        raw += text[raw] === '\r' && text[raw + 1] === '\n' ? 2 : 1;
+      }
+      return raw;
+    };
+    const start = rawOffset(box.selectionStart);
+    const end = rawOffset(box.selectionEnd);
+    if (start === null || end === null) return null;
+    return { start: Array.from(text.slice(0, start)).length, end: Array.from(text.slice(0, end)).length, text: text.slice(start, end) };
   }
   function addAlignment(omit = false, whole = false) {
-    const a = whole ? { start: 0, end: sourceLength, text: source } : selectedSpan(sourceBox.current);
-    const b = omit ? null : whole ? { start: 0, end: targetLength, text: target } : selectedSpan(targetBox.current);
+    const a = whole ? { start: 0, end: sourceLength, text: source } : selectedSpan(sourceBox.current, source);
+    const b = omit ? null : whole ? { start: 0, end: targetLength, text: target } : selectedSpan(targetBox.current, target);
     if (!a || (!omit && !b)) { setNotice('alignmentHint'); return; }
     const next = [...(whole ? [] : alignments ?? []), { source: a, target: b }].sort((x, y) => x.source.start - y.source.start);
     if (!validAlignments(next, source, target)) { setNotice('alignmentInvalid'); return; }
