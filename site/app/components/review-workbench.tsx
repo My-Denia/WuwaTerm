@@ -11,6 +11,7 @@ import {
 } from '../../lib/manuscript.js';
 import { fill, msg, summarySentence } from '../../lib/messages';
 import { numberLocale } from '../../lib/ui-language';
+import { renderMarkdownReport, type MarkdownCurrency } from '../../lib/markdown-report';
 import { useUiLanguage } from './ui-language-context';
 
 type Span = { start: number; end: number; text: string };
@@ -276,6 +277,25 @@ export function ReviewWorkbench() {
     }, null, 2));
     setNotice(current ? m.notices.exportCurrent : m.notices.exportStale);
   }
+  function exportMarkdown() {
+    // Read-only local snapshot: no requests, no state change; the document
+    // renders the full report regardless of the UI's finding filter.
+    const currency: MarkdownCurrency = !latest ? 'none' : current ? 'current' : latest.trusted ? 'stale' : 'imported';
+    const strip = (snapshot: Snapshot) => ({
+      source: snapshot.source, target: snapshot.target, direction: snapshot.direction,
+      report: snapshot.report, resolutions: snapshot.resolutions,
+    });
+    downloadFile('wuwaterm-report.md', renderMarkdownReport({
+      draft: { source, target, direction },
+      latest: latest ? strip(latest) : null,
+      previous: previous ? strip(previous) : null,
+      currency,
+      choices,
+      reconciled,
+      comparison,
+    }, lang), 'text/markdown;charset=utf-8');
+    setNotice(m.notices.exportMarkdown);
+  }
   const summaryParts = latest ? summarizeReviewParts(latest.report) : null;
   const comparisonGroups = ([['new', m.review.comparisonNew], ['resolved', m.review.comparisonResolved], ['pending', m.review.comparisonPending], ['incomparable', m.review.comparisonIncomparable]] as const)
     .map(([key, label]) => ({ key, label, items: comparison ? comparison[key] : [] }));
@@ -301,6 +321,7 @@ export function ReviewWorkbench() {
       <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
       <button type="button" className="secondary-button" onClick={() => downloadFile('wuwaterm-translation.txt', target, 'text/plain;charset=utf-8')}>{m.review.exportTxt}</button>
       <button type="button" className="secondary-button" onClick={exportResult}>{m.review.exportResult}</button>
+      <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
     </div>
     <form onSubmit={submit}>
       <div className="label-row"><label htmlFor="review-source">{m.review.sourceLabel}</label><select aria-label={m.review.directionAria} value={direction} onChange={e => edit({ ...draft, direction: e.target.value as 'en' | 'zh', alignments: alignments === null ? null : [] }, m.notices.directionChanged)}><option value="en">{m.review.directionEn}</option><option value="zh">{m.review.directionZh}</option></select></div>
