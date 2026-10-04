@@ -24,6 +24,12 @@ type Choice = { source: string; direction: string; source_span: Span; scope: str
 type Resolution = { mention_id: string; choice: string; candidate_id?: string };
 type Snapshot = Draft & { report: Report; trusted: boolean; signature: string; resolutions: Resolution[] | null };
 type Undo = { draft: Draft; choices: Choice[]; imported: Choice[]; reports?: Snapshot[] };
+// Status messages store language-independent codes (catalog notice keys, or
+// structured error identities); the visible text resolves from the catalog on
+// each render, so switching interface language re-localizes a message that is
+// still on screen, including one stored by an async check or import.
+type NoticeState = string | null;
+type ErrorState = { reason?: string; code?: string; text?: string } | null;
 const EMPTY: Draft = { source: '', target: '', direction: 'en', alignments: null };
 function signature(draft: Draft, resolutions: object[]) { return JSON.stringify({ ...draft, resolutions }); }
 function Excerpt({ text, span, missing }: { text: string; span: Span | null; missing: string }) {
@@ -57,8 +63,8 @@ export function ReviewWorkbench() {
   const [reports, setReports] = useState<Snapshot[]>([]);
   const [history, setHistory] = useState<Undo[]>([]);
   const [phase, setPhase] = useState<'idle' | 'loading' | 'success' | 'error' | 'cancelled'>('idle');
-  const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
+  const [notice, setNotice] = useState<NoticeState>(null);
+  const [error, setError] = useState<ErrorState>(null);
   const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
   const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [canonicalFindingId, setCanonicalFindingId] = useState<string | null>(null);
@@ -95,9 +101,19 @@ export function ReviewWorkbench() {
   const locale = numberLocale(lang);
   const reasonText = (item: { reason: string; code?: string }) =>
     ((m.choiceReasons as Record<string, string>)[item.code ?? ''] ?? item.reason);
+  const noticeText = notice ? ((m.notices as Record<string, string>)[notice] ?? '') : '';
+  const errorTextValue = !error ? ''
+    : error.reason ? ((m.rMsg as Record<string, string>)[error.reason] ?? m.rMsg.fallback)
+    : error.code && (m.errors as Record<string, string>)[error.code] ? (m.errors as Record<string, string>)[error.code]!
+    : error.text ?? '';
+  const errorFrom = (cause: unknown, fallbackKey: string): ErrorState => {
+    const code = cause instanceof Error && 'code' in cause ? String((cause as Error & { code?: unknown }).code) : '';
+    if (code && (msg(lang).errors as Record<string, string>)[code]) return { code };
+    return cause instanceof Error && cause.message ? { text: cause.message } : { code: fallbackKey };
+  };
 
   const discardInFlight = useCallback(() => {
-    controller.current?.abort(); controller.current = null; generation.current += 1; setPhase('idle'); setError('');
+    controller.current?.abort(); controller.current = null; generation.current += 1; setPhase('idle'); setError(null);
   }, []);
   const receiveDraft = useCallback((next: Draft) => {
     handoffDialog.current?.close(); setPendingDraft(null);
@@ -109,16 +125,16 @@ export function ReviewWorkbench() {
     // mistake an already received manuscript for an empty workbench.
     work.current = { draft: next, choices: [], imported: [], reports: [], history: nextHistory };
     setHistory(nextHistory); discardInFlight(); setChoices([]); setImported([]); setReports([]); setDraft(next);
-    setNotice(msg(lang).notices.receivedDraft);
+    setNotice('receivedDraft');
     sourceBox.current?.focus();
-  }, [discardInFlight, lang]);
+  }, [discardInFlight]);
   function remember() { setHistory(stack => [...stack.slice(-19), { draft, choices, imported }]); }
   function edit(next: Draft, message = '') {
     remember(); discardInFlight(); setDraft(next); setNotice(message);
   }
   function editText(side: 'source' | 'target', value: string) {
     edit({ ...draft, [side]: value, alignments: alignments === null ? null : [] },
-      alignments !== null ? m.notices.editedAlignments : m.notices.editedText);
+      alignments !== null ? 'editedAlignments' : 'editedText');
   }
   useEffect(() => {
     function onDraft(event: Event) {
@@ -153,7 +169,7 @@ export function ReviewWorkbench() {
     const resolutions = withChoices ? ready : [];
     const submitted = draft;
     const submittedSignature = signature(submitted, resolutions);
-    setPhase('loading'); setNotice('');
+    setPhase('loading'); setNotice(null);
     const body = {
       source, target, direction, review_version: 'review-v2',
       ...(alignments === null ? {} : { alignments }),
@@ -162,7 +178,7 @@ export function ReviewWorkbench() {
       } } : {}),
     };
     if (new TextEncoder().encode(JSON.stringify(body)).length > 32768) {
-      controller.current = null; setPhase('error'); setError(m.errors.bodyTooLarge); return;
+      controller.current = null; setPhase('error'); setError({ code: 'bodyTooLarge' }); return;
     }
     try {
       const response = await fetch('/api/reviews', { method: 'POST', headers: { 'content-type': 'application/json' }, cache: 'no-store', body: JSON.stringify(body), signal: abort.signal });
@@ -170,18 +186,23 @@ export function ReviewWorkbench() {
       if (abort.signal.aborted || generation.current !== mine) return;
       if (!response.ok) {
         const reason = value && typeof value === 'object' && 'reason' in value && typeof value.reason === 'string' ? value.reason : '';
-        throw new Error((m.rMsg as Record<string, string>)[reason] ?? m.rMsg.fallback);
+        throw Object.assign(new Error((m.rMsg as Record<string, string>)[reason] ?? m.rMsg.fallback), { gahReason: reason });
       }
-      if (!validReport(value, source, target)) throw new Error(m.errors.responseInvalid);
+      if (!validReport(value, source, target)) throw Object.assign(new Error(m.errors.responseInvalid), { gahCode: 'responseInvalid' });
       const report = value as Report;
       if (report.rule_version !== 'review-v2' || report.source_revision !== await revisionOf(source)
-        || report.target_revision !== await revisionOf(target)) throw new Error(m.errors.responseBasisMismatch);
+        || report.target_revision !== await revisionOf(target)) throw Object.assign(new Error(m.errors.responseBasisMismatch), { gahCode: 'responseBasisMismatch' });
       if (abort.signal.aborted || generation.current !== mine) return;
       const snapshot: Snapshot = { ...submitted, report, trusted: true, signature: submittedSignature, resolutions };
       setReports(stack => [...stack.slice(-1), snapshot]); setPhase('success');
-      setNotice(m.notices.checked);
+      setNotice('checked');
     } catch (cause) {
-      if (!abort.signal.aborted && generation.current === mine) { setPhase('error'); setError(cause instanceof Error ? cause.message : m.errors.requestFailed); }
+      if (!abort.signal.aborted && generation.current === mine) {
+        setPhase('error');
+        setError(cause instanceof Error && 'gahReason' in cause ? { reason: String((cause as Error & { gahReason?: unknown }).gahReason) }
+          : cause instanceof Error && 'gahCode' in cause ? { code: String((cause as Error & { gahCode?: unknown }).gahCode) }
+          : cause instanceof Error && cause.message ? { text: cause.message } : { code: 'requestFailed' });
+      }
     } finally { if (controller.current === abort) controller.current = null; }
   }
   async function submit(event: FormEvent) { event.preventDefault(); await check(); }
@@ -194,11 +215,11 @@ export function ReviewWorkbench() {
       const recovered = recoverSpan(c.source, c.source_span, source);
       return recovered && mentionId(recovered) === mentionId(span);
     });
-    if (existing < 0 && choices.length >= MAX_CHOICES) { setNotice(m.notices.choiceLimit); return; }
+    if (existing < 0 && choices.length >= MAX_CHOICES) { setNotice('choiceLimit'); return; }
     remember(); discardInFlight();
     setChoices(old => existing < 0 ? [...old, selected] : old.map((c, i) => i === existing ? selected : c));
     setImported(old => old.filter(c => c !== choices[existing]));
-    setNotice(m.notices.choiceStaged);
+    setNotice('choiceStaged');
   }
   function jumpTo(box: HTMLTextAreaElement | null, text: string, span: Span) {
     if (!box) return;
@@ -224,44 +245,40 @@ export function ReviewWorkbench() {
   function addAlignment(omit = false, whole = false) {
     const a = whole ? { start: 0, end: sourceLength, text: source } : selectedSpan(sourceBox.current);
     const b = omit ? null : whole ? { start: 0, end: targetLength, text: target } : selectedSpan(targetBox.current);
-    if (!a || (!omit && !b)) { setNotice(m.notices.alignmentHint); return; }
+    if (!a || (!omit && !b)) { setNotice('alignmentHint'); return; }
     const next = [...(whole ? [] : alignments ?? []), { source: a, target: b }].sort((x, y) => x.source.start - y.source.start);
-    if (!validAlignments(next, source, target)) { setNotice(m.notices.alignmentInvalid); return; }
-    edit({ ...draft, alignments: next }, m.notices.alignmentRecorded);
+    if (!validAlignments(next, source, target)) { setNotice('alignmentInvalid'); return; }
+    edit({ ...draft, alignments: next }, 'alignmentRecorded');
   }
   function undo() {
     const last = history.at(-1); if (!last) return;
     discardInFlight(); setDraft(last.draft); setChoices(last.choices); setImported(last.imported); setHistory(stack => stack.slice(0, -1));
     if (last.reports) setReports(last.reports);
-    setNotice(last.reports ? m.notices.undoWithReports : m.notices.undoLocal);
+    setNotice(last.reports ? 'undoWithReports' : 'undoLocal');
   }
   async function importFile(file?: File) {
     if (!file) return;
-    if (file.size > MAX_WORKFILE_BYTES) { setError(m.errors.workfile_too_large); return; }
+    if (file.size > MAX_WORKFILE_BYTES) { setError({ code: 'workfile_too_large' }); return; }
     const mine = generation.current;
     try {
       const value = parseWorkfile(await file.text());
-      if (generation.current !== mine) { setNotice(m.notices.importChangedDuringRead); return; }
+      if (generation.current !== mine) { setNotice('importChangedDuringRead'); return; }
       remember(); discardInFlight();
       setDraft({ source: value.source, target: value.target, direction: value.direction, alignments: value.alignments });
       setChoices(value.choices); setImported(value.choices);
       setReports(value.history.map((s: Draft & { report: Report; resolutions?: Resolution[] }) => ({ ...s, resolutions: s.resolutions ?? null, trusted: false, signature: '' })));
-      setNotice(m.notices.imported);
+      setNotice('imported');
     } catch (cause) {
-      const code = cause instanceof Error && 'code' in cause ? String((cause as Error & { code?: unknown }).code) : '';
-      setError(code && (m.errors as Record<string, string>)[code] ? (m.errors as Record<string, string>)[code]
-        : cause instanceof Error ? cause.message : m.errors.importInvalid);
+      setError(errorFrom(cause, 'importInvalid'));
     }
     finally { if (fileBox.current) fileBox.current.value = ''; }
   }
   function save() {
     try {
       downloadFile('wuwaterm-manuscript.json', serializeWorkfile({ ...draft, choices, history: reports.map(cleanSnapshot) }));
-      setNotice(m.notices.saved);
+      setNotice('saved');
     } catch (cause) {
-      const code = cause instanceof Error && 'code' in cause ? String((cause as Error & { code?: unknown }).code) : '';
-      setError(code && (m.errors as Record<string, string>)[code] ? (m.errors as Record<string, string>)[code]
-        : cause instanceof Error ? cause.message : m.errors.saveFailed);
+      setError(errorFrom(cause, 'saveFailed'));
     }
   }
   function exportResult() {
@@ -275,7 +292,7 @@ export function ReviewWorkbench() {
       changes: current && comparison ? { new: strip(comparison.new), resolved: strip(comparison.resolved), pending: strip(comparison.pending), incomparable: strip(comparison.incomparable) } : null,
       verified_stamp: { valid: false },
     }, null, 2));
-    setNotice(current ? m.notices.exportCurrent : m.notices.exportStale);
+    setNotice(current ? 'exportCurrent' : 'exportStale');
   }
   function exportMarkdown() {
     // Read-only local snapshot: no requests, no state change; the document
@@ -294,7 +311,7 @@ export function ReviewWorkbench() {
       reconciled,
       comparison,
     }, lang), 'text/markdown;charset=utf-8');
-    setNotice(m.notices.exportMarkdown);
+    setNotice('exportMarkdown');
   }
   const summaryParts = latest ? summarizeReviewParts(latest.report) : null;
   const comparisonGroups = ([['new', m.review.comparisonNew], ['resolved', m.review.comparisonResolved], ['pending', m.review.comparisonPending], ['incomparable', m.review.comparisonIncomparable]] as const)
@@ -324,7 +341,7 @@ export function ReviewWorkbench() {
       <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
     </div>
     <form onSubmit={submit}>
-      <div className="label-row"><label htmlFor="review-source">{m.review.sourceLabel}</label><select aria-label={m.review.directionAria} value={direction} onChange={e => edit({ ...draft, direction: e.target.value as 'en' | 'zh', alignments: alignments === null ? null : [] }, m.notices.directionChanged)}><option value="en">{m.review.directionEn}</option><option value="zh">{m.review.directionZh}</option></select></div>
+      <div className="label-row"><label htmlFor="review-source">{m.review.sourceLabel}</label><select aria-label={m.review.directionAria} value={direction} onChange={e => edit({ ...draft, direction: e.target.value as 'en' | 'zh', alignments: alignments === null ? null : [] }, 'directionChanged')}><option value="en">{m.review.directionEn}</option><option value="zh">{m.review.directionZh}</option></select></div>
       <textarea ref={sourceBox} id="review-source" value={source} onChange={e => editText('source', e.target.value)} rows={5} placeholder={m.review.sourcePlaceholder} />
       <label htmlFor="review-target">{m.review.targetLabel}</label>
       <textarea ref={targetBox} id="review-target" value={target} onChange={e => editText('target', e.target.value)} rows={5} placeholder={m.review.targetPlaceholder} />
@@ -335,20 +352,20 @@ export function ReviewWorkbench() {
           <button type="button" className="secondary-button" onClick={() => addAlignment()}>{m.review.alignmentConfirm}</button>
           <button type="button" className="secondary-button" onClick={() => addAlignment(true)}>{m.review.alignmentOmit}</button>
           <button type="button" className="secondary-button" disabled={!validInput} onClick={() => addAlignment(false, true)}>{m.review.alignmentWhole}</button>
-          <button type="button" className="secondary-button" onClick={() => edit({ ...draft, alignments: [] }, m.notices.alignmentsCleared)}>{m.review.alignmentClear}</button>
-          <button type="button" className="secondary-button" onClick={() => edit({ ...draft, alignments: null }, m.notices.alignmentsReset)}>{m.review.alignmentReset}</button>
+          <button type="button" className="secondary-button" onClick={() => edit({ ...draft, alignments: [] }, 'alignmentsCleared')}>{m.review.alignmentClear}</button>
+          <button type="button" className="secondary-button" onClick={() => edit({ ...draft, alignments: null }, 'alignmentsReset')}>{m.review.alignmentReset}</button>
         </div>
-        {alignments?.map((a, i) => <div className="alignment-row" key={i}><p>{fill(m.review.alignmentRowSource, { start: a.source.start + 1, end: a.source.end, text: a.source.text })}</p><p>{a.target ? fill(m.review.alignmentRowTarget, { start: a.target.start + 1, end: a.target.end, text: a.target.text }) : m.review.alignmentRowOmit}</p><button type="button" className="text-button" onClick={() => edit({ ...draft, alignments: alignments.filter((_, j) => i !== j) }, m.notices.alignmentRemoved)}>{m.review.alignmentRemove}</button></div>)}
+        {alignments?.map((a, i) => <div className="alignment-row" key={i}><p>{fill(m.review.alignmentRowSource, { start: a.source.start + 1, end: a.source.end, text: a.source.text })}</p><p>{a.target ? fill(m.review.alignmentRowTarget, { start: a.target.start + 1, end: a.target.end, text: a.target.text }) : m.review.alignmentRowOmit}</p><button type="button" className="text-button" onClick={() => edit({ ...draft, alignments: alignments.filter((_, j) => i !== j) }, 'alignmentRemoved')}>{m.review.alignmentRemove}</button></div>)}
       </details>
       <div className="actions">
         <button type="submit" disabled={!validInput || phase === 'loading'}>{phase === 'loading' ? m.review.checkLoading : m.review.checkIdle}</button>
         <button className="secondary-button" type="button" disabled={!validInput || phase === 'loading'} onClick={() => void check(false)}>{m.review.freshBasis}</button>
-        {phase === 'loading' && <button className="secondary-button" type="button" onClick={() => { discardInFlight(); setPhase('cancelled'); setNotice(m.notices.cancelledWait); }}>{m.review.cancelWait}</button>}
+        {phase === 'loading' && <button className="secondary-button" type="button" onClick={() => { discardInFlight(); setPhase('cancelled'); setNotice('cancelledWait'); }}>{m.review.cancelWait}</button>}
         <button className="secondary-button" type="button" onClick={undo} disabled={!history.length}>{m.review.undo}</button>
       </div>
     </form>
-    {notice && <p className="notice-state" role="status">{notice}</p>}
-    {error && <p className="error-panel" role="alert">{error}</p>}
+    {notice && <p className="notice-state" role="status">{noticeText}</p>}
+    {error && <p className="error-panel" role="alert">{errorTextValue}</p>}
     {phase === 'loading' && <p role="status">{m.review.loadingStatus}</p>}
     {basisChanged && <p className="review-stale">{m.review.staleBasis}</p>}
     {choices.length > 0 && <div className="choice-records"><h3>{fill(m.review.choiceHeader, { ready: ready.length, pending: choices.length - ready.length })}</h3>

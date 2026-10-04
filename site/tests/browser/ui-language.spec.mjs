@@ -60,6 +60,9 @@ test('toggling language switches copy in place, keeps workbench state, and sends
   await prepare(page);
   await page.getByRole('button', { name: '采用此官方词对', exact: true }).first().click();
   await expect(page.locator('.choice-records')).toContainText('今汐 / Jinhsi');
+  // The staged-choice notice stays visible and re-localizes when the language
+  // switches (notices store catalog keys, not rendered strings).
+  await expect(page.locator('.notice-state')).toContainText('已暂存此处选择');
   await switchTo(page, '中文'); // active filter stays Chinese while in Chinese…
   await page.getByRole('button', { name: '已核 2', exact: false }).click();
   const activeBefore = await page.locator('.review-findings [aria-current="true"]').getAttribute('data-mention-id');
@@ -83,6 +86,7 @@ test('toggling language switches copy in place, keeps workbench state, and sends
   await expect(page.locator('.choice-records')).toContainText('今汐 / Jinhsi');
   await expect(page.locator('.review-findings [aria-current="true"]')).toHaveAttribute('data-mention-id', activeBefore);
   await expect(page.locator('.candidate-sources').first()).toHaveAttribute('open', '');
+  await expect(page.locator('.notice-state')).toContainText('Choice staged here');
   expect(await page.evaluate(() => window.__survivesToggle)).toBe('marker');
   await switchTo(page, '中文');
   await expect(page.getByRole('button', { name: '核对术语', exact: true })).toBeVisible();
