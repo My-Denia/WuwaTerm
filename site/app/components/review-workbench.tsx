@@ -108,10 +108,12 @@ export function ReviewWorkbench() {
     : error.reason !== undefined && error.reason !== null ? ((m.rMsg as Record<string, string>)[error.reason] ?? m.rMsg.fallback)
     : error.code && (m.errors as Record<string, string>)[error.code] ? (m.errors as Record<string, string>)[error.code]!
     : error.text ?? '';
+  // Library throws (parse/serialize) always carry stable codes; an uncoded
+  // failure is a browser-level error (unreadable file and similar), whose
+  // raw message is neither localizable nor fixed copy — use the catalog key.
   const errorFrom = (cause: unknown, fallbackKey: string): ErrorState => {
     const code = cause instanceof Error && 'code' in cause ? String((cause as Error & { code?: unknown }).code) : '';
-    if (code && (msg(lang).errors as Record<string, string>)[code]) return { code };
-    return cause instanceof Error && cause.message ? { text: cause.message } : { code: fallbackKey };
+    return code && (msg(lang).errors as Record<string, string>)[code] ? { code } : { code: fallbackKey };
   };
 
   const discardInFlight = useCallback(() => {

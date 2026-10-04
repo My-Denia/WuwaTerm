@@ -53,3 +53,10 @@ WUWATERM_BROWSER_BUILT=1 npm run test:browser
 
 The build server URL is allocated by the harness and captured by Playwright;
 the browser API responses remain synthetic.
+
+## Node requirement
+
+`npm test` imports the TypeScript message catalog and Markdown renderer
+directly (node-side type stripping), so the suite needs Node >= 22.18.0
+(the version where type stripping no longer requires a flag). CI runs
+Node 24.
