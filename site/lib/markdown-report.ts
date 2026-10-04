@@ -64,6 +64,14 @@ function counted(label: string, count: number, lang: UiLanguage): string {
   return lang === 'zh' ? `${label}（${count}）` : `${label} (${count})`;
 }
 
+/** Localized label-value separators. */
+function colon(lang: UiLanguage): string {
+  return lang === 'zh' ? '：' : ': ';
+}
+function semicolon(lang: UiLanguage): string {
+  return lang === 'zh' ? '；' : '; ';
+}
+
 export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguage): string {
   const m = msg(lang);
   const md = m.md;
@@ -81,7 +89,7 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
   paragraph(input.currency === 'current' ? md.currencyCurrent : input.currency === 'stale' ? md.currencyStale
     : input.currency === 'imported' ? md.currencyImported : md.noReportLine);
 
-  paragraph(md.directionLabel + '：' + (input.draft.direction === 'en' ? md.directionToEn : md.directionToZh));
+  paragraph(md.directionLabel + colon(lang) + (input.draft.direction === 'en' ? md.directionToEn : md.directionToZh));
 
   heading(2, md.sourceHeading);
   out.push(...block(input.draft.source), '');
@@ -90,25 +98,25 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
 
   if (report && input.latest && parts) {
     heading(2, md.summaryHeading);
-    paragraph(summaryHeadline(parts, lang) + '：' + summarySentence(parts, lang));
+    paragraph(summaryHeadline(parts, lang) + colon(lang) + summarySentence(parts, lang));
 
     heading(2, md.basisHeading);
     out.push(...bullets([
-      md.ruleLabel + '：' + inline(report.rule_version),
-      md.revisionLabel + '：' + inline(report.dictionary.revision),
-      md.commitLabel + '：' + inline(report.dictionary.source_commit ?? md.notProvided),
-      md.schemaLabel + '：' + inline(report.dictionary.schema_version ?? md.notProvided),
-      md.termCountLabel + '：' + report.dictionary.term_count,
-      md.requestIdLabel + '：' + inline(report.request_id),
-      md.sourceRevisionLabel + '：' + inline(report.source_revision),
-      md.targetRevisionLabel + '：' + inline(report.target_revision),
+      md.ruleLabel + colon(lang) + inline(report.rule_version),
+      md.revisionLabel + colon(lang) + inline(report.dictionary.revision),
+      md.commitLabel + colon(lang) + inline(report.dictionary.source_commit ?? md.notProvided),
+      md.schemaLabel + colon(lang) + inline(report.dictionary.schema_version ?? md.notProvided),
+      md.termCountLabel + colon(lang) + report.dictionary.term_count,
+      md.requestIdLabel + colon(lang) + inline(report.request_id),
+      md.sourceRevisionLabel + colon(lang) + inline(report.source_revision),
+      md.targetRevisionLabel + colon(lang) + inline(report.target_revision),
     ]), '');
 
     heading(2, md.coverageHeading);
     out.push(...bullets([
-      md.evaluatedLabel + '：' + report.coverage.evaluated,
-      md.notEvaluatedLabel + '：' + report.coverage.not_evaluated,
-      md.rulesLabel + '：' + (report.coverage.rules.length ? report.coverage.rules.map(rule => inline(rule)).join(' · ') : md.notProvided),
+      md.evaluatedLabel + colon(lang) + report.coverage.evaluated,
+      md.notEvaluatedLabel + colon(lang) + report.coverage.not_evaluated,
+      md.rulesLabel + colon(lang) + (report.coverage.rules.length ? report.coverage.rules.map(rule => inline(rule)).join(' · ') : md.notProvided),
     ]), '');
     if (parts.zeroCoverage) paragraph(md.zeroCoverageLine);
     if (report.truncated) paragraph(md.truncatedLine);
@@ -120,23 +128,23 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
       out.push('### ' + (index + 1) + '. ' + verdict + ' · ' + inline(finding.source_span.text), '');
       out.push(...bullets([
         fill(md.spanLabel, { start: finding.source_span.start + 1, end: finding.source_span.end })
-          + ' · ' + md.ruleLabelShort + '：' + inline(finding.rule_id),
+          + ' · ' + md.ruleLabelShort + colon(lang) + inline(finding.rule_id),
         finding.target_span
-          ? fill(md.targetSpanLabel, { start: finding.target_span.start + 1, end: finding.target_span.end }) + '：' + inline(finding.target_span.text)
+          ? fill(md.targetSpanLabel, { start: finding.target_span.start + 1, end: finding.target_span.end }) + colon(lang) + inline(finding.target_span.text)
           : md.noTargetSpan,
       ]), '');
       const context = compactScalarContext(input.latest!.source, finding.source_span);
       if (context) {
-        out.push(md.excerptLabel + '：', ...block((context.clippedBefore ? '…' : '') + context.before + context.hit + context.after + (context.clippedAfter ? '…' : '')), '');
+        out.push(md.excerptLabel + colon(lang), ...block((context.clippedBefore ? '…' : '') + context.before + context.hit + context.after + (context.clippedAfter ? '…' : '')), '');
       } else {
-        paragraph(md.excerptLabel + '：' + md.excerptMissing);
+        paragraph(md.excerptLabel + colon(lang) + md.excerptMissing);
       }
       paragraph(counted(md.candidatesHeading, finding.candidates.length, lang));
       if (!finding.candidates.length) paragraph(md.noCandidates);
       for (const candidate of finding.candidates) {
         out.push('- ' + inline(candidate.zh) + ' / ' + inline(candidate.en) + ' · ' + inline(candidate.category));
-        out.push('  - ' + md.sourceRecordsLabel + '：' + (candidate.sources.length
-          ? candidate.sources.map(item => inline(item.source_file) + ' · ' + inline(item.source_id)).join('；')
+        out.push('  - ' + md.sourceRecordsLabel + colon(lang) + (candidate.sources.length
+          ? candidate.sources.map(item => inline(item.source_file) + ' · ' + inline(item.source_id)).join(semicolon(lang))
           : md.notProvided));
       }
       if (finding.candidates_truncated) paragraph(md.candidatesTruncatedLine);
@@ -189,7 +197,7 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
       if (!items.length) continue;
       heading(3, counted(label, items.length, lang));
       out.push(...bullets(items.map(item =>
-        inline(item.mention.text) + '（' + (item.mention.start + 1) + '）：'
+        inline(item.mention.text) + (lang === 'zh' ? '（' + (item.mention.start + 1) + '）：' : ' (' + (item.mention.start + 1) + '): ')
         + ((msg(lang).comparisonReasons as Record<string, string>)[item.code ?? ''] ?? item.reason))), '');
     }
     paragraph(md.comparisonNote);
