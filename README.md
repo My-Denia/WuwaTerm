@@ -37,7 +37,7 @@ A general-purpose translator sees game names as ordinary words, so an official n
 <p align="center">
   <a href="https://wuwaterm.denia-official.chatgpt.site"><img src="docs/assets/readme/screenshot-workbench.png" alt="The WuwaTerm public beta: looking up 声骸 returns the official English Echo, and translating 今汐装备了声骸 keeps both official names"></a>
   <br>
-  <sub>The public beta, captured 2026-09-13. Its interface is in Chinese, and you can type in either language. 声骸 is listed twice because the game uses the term in two categories.</sub>
+  <sub>The public beta, captured 2026-09-13 (the interface then offered Chinese only; it now offers Chinese and English). You can type in either language. 声骸 is listed twice because the game uses the term in two categories.</sub>
 </p>
 
 ## What you can do
@@ -74,7 +74,7 @@ Telegram commands and the HTTP API share one dictionary-first application layer,
 
 ### Try it now
 
-Open the [public beta](https://wuwaterm.denia-official.chatgpt.site). There is no sign-up. The interface is in Chinese, but you can type English, and lookups show both languages. Everyone shares the same first-come daily limits, counted separately for lookups, translations and reviews and reset at 00:00 UTC, so it can be busy or run out, and there is no SLA. Please do not paste personal or sensitive text. Limits are in [Public Beta Site](docs/sites.md) and privacy details in [Privacy and LLM](docs/privacy-and-llm.md#anonymous-public-beta-site).
+Open the [public beta](https://wuwaterm.denia-official.chatgpt.site). There is no sign-up. The interface offers Chinese and English, first visits start in Chinese, and you can type English; lookups show both languages. Everyone shares the same first-come daily limits, counted separately for lookups, translations and reviews and reset at 00:00 UTC, so it can be busy or run out, and there is no SLA. Please do not paste personal or sensitive text. Limits are in [Public Beta Site](docs/sites.md) and privacy details in [Privacy and LLM](docs/privacy-and-llm.md#anonymous-public-beta-site).
 
 ### Run your own
 

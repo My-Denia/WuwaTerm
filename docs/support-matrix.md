@@ -80,7 +80,7 @@ the desktop client ([Public Beta Site](sites.md)).
 | | |
 | --- | --- |
 | Tree | `site/` — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.1.0 |
-| Tested in CI | job `site` (`site feasibility security`) on `ubuntu-latest` with Node 24: `npm ci`, `npm test`, typecheck, lint, production build, `verify:no-client-secret` |
+| Tested in CI | job `site` (`site feasibility security`) on `ubuntu-latest` with Node 24: `npm ci`, the full and production-only npm audits, `npm test`, typecheck, lint, production build, `verify:no-client-secret`, the built-artifact suite (`test:built`), a Playwright Chromium install, and the browser suite against the emitted bundle (`WUWATERM_BROWSER_BUILT=1 npm run test:browser`) |
 | Public service status | Best-effort anonymous beta at <https://wuwaterm.denia-official.chatgpt.site>; no account and no SLA, fixed-availability promise or per-visitor fairness guarantee |
 | Not in `scripts/validate.py` | by design; the server matrix does not install Node |
 | Visitor authentication | **none in application code.** Crawler `noindex` is not an ACL |
