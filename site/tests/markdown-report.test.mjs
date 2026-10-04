@@ -199,6 +199,21 @@ test('standalone carriage returns cannot escape the inline literal', () => {
   assert.equal(structure.htmlTags, 0);
 });
 
+test('a direction edited after the check is never stitched onto the older report', () => {
+  const latest = snapshotFor();
+  const flipped = inputFor(latest, { currency: 'stale', draft: { source: latest.source, target: latest.target, direction: 'zh' } });
+  const zh = renderMarkdownReport(flipped, 'zh');
+  assert.equal(zh.includes(msg('zh').md.reportDirectionLabel), true);
+  assert.equal(zh.includes('中文 → 英文'), true, 'report direction line must come from the report (en)');
+  assert.equal(zh.includes(msg('zh').md.directionChangedNote.includes('{direction}') ? msg('zh').md.directionChangedNote.replace('{direction}', '英文 → 中文（译文为中文）') : msg('zh').md.directionChangedNote), true);
+  const english = renderMarkdownReport(flipped, 'en');
+  assert.equal(english.includes(msg('en').md.reportDirectionLabel), true);
+  assert.equal(english.includes('Chinese → English'), true);
+  // A current export (direction matches) carries no mismatch note.
+  const current = renderMarkdownReport(inputFor(latest), 'zh');
+  assert.equal(current.includes(msg('zh').md.directionChangedNote.split('{direction}')[0]), false);
+});
+
 test('duplicate-term occurrences each get their own finding entry', () => {
   const base = fixture('今汐与今汐。', 'Jinhsi and Jinhsi.', 'en');
   assert.equal(base.report.findings.length, 2);

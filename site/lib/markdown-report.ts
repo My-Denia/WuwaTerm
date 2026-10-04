@@ -91,7 +91,17 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
   paragraph(input.currency === 'current' ? md.currencyCurrent : input.currency === 'stale' ? md.currencyStale
     : input.currency === 'imported' ? md.currencyImported : md.noReportLine);
 
-  paragraph(md.directionLabel + colon(lang) + (input.draft.direction === 'en' ? md.directionToEn : md.directionToZh));
+  // The direction line comes from the report itself whenever one exists;
+  // a draft whose direction was edited after the check must not be stitched
+  // onto the older report, so a mismatch is stated explicitly.
+  if (input.latest) {
+    paragraph(md.reportDirectionLabel + colon(lang) + (input.latest.direction === 'en' ? md.directionToEn : md.directionToZh));
+    if (input.draft.direction !== input.latest.direction) {
+      paragraph(fill(md.directionChangedNote, { direction: input.draft.direction === 'en' ? md.directionToEn : md.directionToZh }));
+    }
+  } else {
+    paragraph(md.directionLabel + colon(lang) + (input.draft.direction === 'en' ? md.directionToEn : md.directionToZh));
+  }
 
   heading(2, md.sourceHeading);
   out.push(...block(input.draft.source), '');
