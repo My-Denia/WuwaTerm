@@ -36,11 +36,29 @@ const forbiddenClientPatterns = [
   /\bnavigator\.sendBeacon\b/u,
 ];
 
+// The interface-language preference is the single sanctioned browser-storage
+// write. The exemption is content-pinned: the allowlisted file must contain
+// exactly one document.cookie occurrence and it must be this exact assignment
+// of the fixed wuwaterm-lang cookie, so "still strict" is a property this
+// script itself enforces rather than a review judgment.
+const languageCookieFile = 'app/ui-language-cookie.ts';
+const languageCookieDocumentCookieCount = 1;
+const pinnedLanguageCookieWrite = /document\.cookie\s*=\s*`wuwaterm-lang=\$\{value\}; Max-Age=31536000; Path=\/; SameSite=Lax\$\{secure\}`;/u;
+
 for (const source of clientSources) {
   const text = readFileSync(join(root, source), 'utf8');
   for (const name of envNames) assert.equal(text.includes(name), false, `${source} references ${name}`);
-  for (const pattern of forbiddenClientPatterns) assert.equal(pattern.test(text), false, `${source} matches ${pattern}`);
+  for (const pattern of forbiddenClientPatterns) {
+    if (source === languageCookieFile && String(pattern) === String(/document\.cookie/u)) continue;
+    assert.equal(pattern.test(text), false, `${source} matches ${pattern}`);
+  }
   assert.equal(/https?:\/\//u.test(text), false, `${source} contains an absolute network target`);
+  if (source === languageCookieFile) {
+    assert.equal((text.match(/document\.cookie/gu) ?? []).length, languageCookieDocumentCookieCount,
+      `${source} must reference document.cookie exactly ${languageCookieDocumentCookieCount} time(s)`);
+    assert.equal(pinnedLanguageCookieWrite.test(text), true,
+      `${source} must only write the pinned wuwaterm-lang preference cookie`);
+  }
 }
 
 const clientComponent = readFileSync(join(root, 'app/components/translation-workbench.tsx'), 'utf8');

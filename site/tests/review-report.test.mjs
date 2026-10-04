@@ -134,9 +134,16 @@ test('review UI imports the report module and does not insert manuscripts as HTM
   assert.match(component, /reconcileChoice/u);
   assert.match(component, /forms\.includes\(finding\.target_span\.text\)/u);
   assert.match(component, /generation\.current !== mine/u);
-  const limits = readFileSync(fileURLToPath(new URL('../app/limits/page.tsx', import.meta.url)), 'utf8');
-  assert.match(limits, /译文审校[\s\S]{0,80}reviewsPerDay/u);
-  assert.match(component, /原文 \{sourceLength\.toLocaleString\(\)\} \/ 2,000/u);
+  const limits = readFileSync(fileURLToPath(new URL('../app/components/limits-body.tsx', import.meta.url)), 'utf8');
+  assert.match(limits, /reviewsPerDay/u);
+  assert.match(limits, /rowReviewCeiling/u);
+  // The review quota copy contract lives in the zh catalog since the
+  // bilingual refactor.
+  const zhCatalog = readFileSync(fileURLToPath(new URL('../lib/messages.ts', import.meta.url)), 'utf8');
+  assert.match(zhCatalog, /rowReview: '译文审校'/u);
+  assert.match(zhCatalog, /rowReviewCeiling: '\{n\} 次 \/ UTC 日'/u);
+  assert.match(component, /fill\(m\.review\.charCounts/u);
+  assert.match(zhCatalog, /charCounts: '原文 \{s\} \/ 2,000 · 译文 \{t\} \/ 2,000'/u);
   assert.match(component, /validReport\(value, source, target\)/u);
   assert.match(translation, /const result = state\.data/u);
 });

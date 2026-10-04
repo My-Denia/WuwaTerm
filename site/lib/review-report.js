@@ -24,30 +24,45 @@ export function isTruncated(report) {
     && report.findings.some((finding) => finding.candidates_truncated === true);
 }
 
+// Structured summary for localized rendering (see lib/messages.ts); the zh
+// strings below remain the canonical data form used by exports.
+/** @returns {{ verified: number, conflicts: number, needs: number, notEvaluated: number, truncated: boolean, zeroCoverage: boolean, headline: 'fail' | 'needs_check' | 'partial_verified' } | null} */
+export function summarizeReviewParts(report) {
+  if (!report || !Array.isArray(report.findings) || !report.coverage) return null;
+  const truncated = isTruncated(report);
+  const notEvaluated = Number(report.coverage.not_evaluated) || 0;
+  const verified = report.findings.filter((item) => item.verdict === 'verified_constraint').length;
+  const conflicts = report.findings.filter((item) => item.verdict === 'confirmed_conflict').length;
+  const needs = report.findings.filter((item) => item.verdict === 'needs_review').length;
+  return {
+    verified,
+    conflicts,
+    needs,
+    notEvaluated,
+    truncated,
+    zeroCoverage: report.findings.length === 0 || report.coverage.evaluated === 0,
+    headline: conflicts > 0 ? 'fail' : (needs > 0 || notEvaluated > 0 || truncated || report.findings.length === 0 ? 'needs_check' : 'partial_verified'),
+  };
+}
+
 export function summarizeReview(report) {
-  if (!report || !Array.isArray(report.findings) || !report.coverage) {
+  const parts = summarizeReviewParts(report);
+  if (!parts) {
     return {
       headline: '未通过',
       detail: '没有可用的审校报告，不能视为已核。',
       allPassed: false,
     };
   }
-  const truncated = isTruncated(report);
-  const unevaluated = Number(report.coverage.not_evaluated) > 0;
-  const verified = report.findings.filter((item) => item.verdict === 'verified_constraint').length;
-  const conflicts = report.findings.filter((item) => item.verdict === 'confirmed_conflict').length;
-  const needs = report.findings.filter((item) => item.verdict === 'needs_review').length;
-  const parts = [`约束已核 ${verified}`, `冲突 ${conflicts}`, `需核对 ${needs}`];
-  if (unevaluated) parts.push(`未评估 ${report.coverage.not_evaluated}`);
-  if (truncated) parts.push('结果已截断，不能当作完整核对');
-  if (report.findings.length === 0 || report.coverage.evaluated === 0) {
-    parts.push('零覆盖');
-  }
-  parts.push('未评估完整句意');
-  const headline = conflicts > 0 ? '未通过' : (needs > 0 || unevaluated || truncated || report.findings.length === 0 ? '需核对' : '部分已核');
+  const segments = [`约束已核 ${parts.verified}`, `冲突 ${parts.conflicts}`, `需核对 ${parts.needs}`];
+  if (parts.notEvaluated > 0) segments.push(`未评估 ${parts.notEvaluated}`);
+  if (parts.truncated) segments.push('结果已截断，不能当作完整核对');
+  if (parts.zeroCoverage) segments.push('零覆盖');
+  segments.push('未评估完整句意');
+  const headline = parts.headline === 'fail' ? '未通过' : parts.headline === 'needs_check' ? '需核对' : '部分已核';
   return {
     headline,
-    detail: `本次检查：词典术语与基础结构；${parts.join('；')}。`,
+    detail: `本次检查：词典术语与基础结构；${segments.join('；')}。`,
     allPassed: false,
   };
 }
