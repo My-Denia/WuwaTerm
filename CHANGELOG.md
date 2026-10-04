@@ -51,6 +51,11 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Fixed
 
+- Site: imported CRLF manuscripts now locate the exact source and translation
+  terms and record manually selected alignment ranges in the report's original
+  coordinates. Saved manuscript and translation bytes retain their line endings.
+  The English header also wraps within narrow content widths, including a
+  390-pixel viewport with a classic scrollbar.
 - Site: a finding displayed after a verdict filter hides the previous active
   finding now becomes the navigation selection. Returning to a broader filter
   preserves it; an empty filter retains the last selection without displaying
