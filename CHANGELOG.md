@@ -7,6 +7,32 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Added
 
+- Site: the whole interface renders in Chinese and English. A topbar toggle
+  switches in place without reloading, keeps the manuscript, choices, active
+  finding, expansion state and report currency, and sends no request. The
+  preference persists in one `wuwaterm-lang` cookie read server-side, so the
+  first paint matches the choice with no hydration mismatch; first visits
+  default to Chinese and missing translations fall back to Chinese copy.
+  Interface language never changes the manuscript, translation direction,
+  terms or evidence. The storage scanner allows exactly that one
+  content-pinned cookie write and rejects everything else.
+- Site: the review workbench exports a readable Markdown snapshot of the
+  full report (`wuwaterm-report.md`) beside the manuscript JSON, result JSON
+  and translation TXT. It is generated locally without requests, is never
+  clipped by the findings filter, and states the report's own rule version,
+  dictionary revision, source commit, revisions and request id — never the
+  app version. Current, stale-edited and imported-untrusted reports carry
+  distinct wording; zero findings and zero coverage keep their true meaning
+  and nothing certifies sentence meaning. User text is rendered as literals
+  inside code spans and fences, so report structure, links and HTML cannot
+  be forged.
+- Site: `npm run test:built` runs the landing, review-v2 journey,
+  shared-quota accounting, parser-rejection, 404, redaction and fail-closed
+  checks against the real production build artifact (`dist/`) through the
+  wrangler test harness with a synthetic upstream and local D1 — no real
+  model calls and no beta quota. `WUWATERM_BROWSER_BUILT=1 npm run
+  test:browser` serves the built bundle to the Playwright suite instead of
+  the dev server, and CI runs both.
 - Site: a review report with several findings can be filtered by verdict,
   stepped through with previous/next, and jumped to an exact source or target
   span. Candidate source file and id expand locally. Filtering, navigation,
