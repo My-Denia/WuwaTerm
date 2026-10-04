@@ -39,9 +39,17 @@ test('0000 then 0001 D1 admits mixed traffic, keeps review off the translation c
     const admitted = results.filter(r => r.status === 200).length;
     assert.ok(admitted >= 1 && admitted <= 6);
     assert.ok(results.every(r => [200, 429].includes(r.status)));
-    const row = await db.prepare('SELECT * FROM shared_pool').first();
-    assert.equal(row.upstream_used, admitted);
-    assert.equal(row.terms_used + row.meta_used, admitted);
+    // Cross-worker D1 reads can settle just after the responses under CI
+    // scheduling; poll briefly for the counters to match the admissions
+    // instead of racing one immediate read. A genuinely lost update still
+    // fails once the bounded wait expires.
+    let row;
+    for (let attempt = 0; ; attempt++) {
+      row = await db.prepare('SELECT * FROM shared_pool').first();
+      if (row.terms_used + row.meta_used === admitted && row.upstream_used === admitted) break;
+      assert.ok(attempt < 80, `counters did not settle: admitted=${admitted} terms+meta=${row.terms_used + row.meta_used} upstream=${row.upstream_used}`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     assert.equal(row.translation_used, 0);
     assert.equal(row.review_used, 0);
     assert.equal((await db.prepare('SELECT count(*) n FROM shared_pool').first()).n, 1);
