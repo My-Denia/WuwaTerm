@@ -8,7 +8,7 @@ import { fixtureEnvironment } from './helpers/pool-fixture.mjs';
 test('0000-only D1 schema keeps the original 10 columns and is not exercised by review UPSERT', async () => {
   const bindings = fixtureEnvironment(null);
   delete bindings.DB;
-  const workerOptions = { modulesRoot: fileURLToPath(new URL('../', import.meta.url)), modules: ['tests/helpers/runtime-worker.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js'].map(path => ({type: 'ESModule', path: fileURLToPath(new URL('../' + path, import.meta.url))})), compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], d1Databases: { DB: 'shared-beta' }, bindings };
+  const workerOptions = { modulesRoot: fileURLToPath(new URL('../', import.meta.url)), modules: ['tests/helpers/runtime-worker.mjs', 'tests/helpers/synthetic-upstream.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js'].map(path => ({type: 'ESModule', path: fileURLToPath(new URL('../' + path, import.meta.url))})), compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], d1Databases: { DB: 'shared-beta' }, bindings };
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ ...workerOptions, name: 'first' }], cf: false }));
   try {
     const db = await mf.getD1Database('DB', 'first');
@@ -23,7 +23,7 @@ test('0000-only D1 schema keeps the original 10 columns and is not exercised by 
 test('0000 then 0001 D1 admits mixed traffic, keeps review off the translation counter, and exhausts reviews independently', async () => {
   const bindings = fixtureEnvironment(null);
   delete bindings.DB;
-  const workerOptions = { modulesRoot: fileURLToPath(new URL('../', import.meta.url)), modules: ['tests/helpers/runtime-worker.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js'].map(path => ({type: 'ESModule', path: fileURLToPath(new URL('../' + path, import.meta.url))})), compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], d1Databases: { DB: 'shared-beta' }, bindings };
+  const workerOptions = { modulesRoot: fileURLToPath(new URL('../', import.meta.url)), modules: ['tests/helpers/runtime-worker.mjs', 'tests/helpers/synthetic-upstream.mjs', 'lib/wuwaterm-proxy.js', 'lib/shared-pool.js', 'lib/manuscript.js', 'lib/review-report.js'].map(path => ({type: 'ESModule', path: fileURLToPath(new URL('../' + path, import.meta.url))})), compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'], d1Databases: { DB: 'shared-beta' }, bindings };
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ ...workerOptions, name: 'first' }, { ...workerOptions, name: 'second' }], cf: false }));
   try {
     const db = await mf.getD1Database('DB', 'first');

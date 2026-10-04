@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 
+const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 const POOL = {
   status: 'available',
   translation_enabled: true,
@@ -52,7 +53,7 @@ async function openPage(page, metaFor) {
     }
     throw new Error(`Unexpected API request: ${path}`);
   });
-  await page.goto('/');
+  await page.goto(BASE + '/');
   await expect(page.locator('.pool-strip')).toContainText('100');
   expect(counts.meta).toBe(0);
   return counts;

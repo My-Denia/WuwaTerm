@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { fixture } from '../fixtures/manuscript.mjs';
 import { makeChoice, serializeWorkfile } from '../../lib/manuscript.js';
 
+const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 const A = { source: '今汐。', target: 'Jinhsi.', direction: 'en' };
 const B = { source: '声骸。', target: 'Echo.', direction: 'en' };
 
@@ -31,7 +32,7 @@ async function open(page) {
     }
     throw new Error(`Unexpected API request: ${path}`);
   });
-  await page.goto('/');
+  await page.goto(BASE + '/');
   // Proves hydration and effects ran before the workbench is edited.
   await expect(page.locator('.pool-strip')).toContainText('100');
   return { reviews, gate };

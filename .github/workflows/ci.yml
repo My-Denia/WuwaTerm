@@ -67,8 +67,11 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm run verify:no-client-secret
+      - run: npm run test:built
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+        env:
+          WUWATERM_BROWSER_BUILT: "1"
 
   package:
     name: wheel/sdist build, audit, install
