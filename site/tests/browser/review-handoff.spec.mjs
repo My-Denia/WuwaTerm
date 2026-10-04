@@ -34,7 +34,10 @@ async function open(page) {
   });
   await page.goto(BASE + '/');
   // Proves hydration and effects ran before the workbench is edited.
-  await expect(page.locator('.pool-strip')).toContainText('100');
+  // Warm-up gate, not the behavior under test: in built mode the worker
+  // cold-start can push the first pool read past the default 5s on shared
+  // CI runners, so allow a generous wait here.
+  await expect(page.locator('.pool-strip')).toContainText('100', { timeout: 30_000 });
   return { reviews, gate };
 }
 

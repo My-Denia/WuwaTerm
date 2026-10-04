@@ -54,7 +54,10 @@ async function openPage(page, metaFor) {
     throw new Error(`Unexpected API request: ${path}`);
   });
   await page.goto(BASE + '/');
-  await expect(page.locator('.pool-strip')).toContainText('100');
+  // Warm-up gate, not the behavior under test: in built mode the worker
+  // cold-start can push the first pool read past the default 5s on shared
+  // CI runners, so allow a generous wait here.
+  await expect(page.locator('.pool-strip')).toContainText('100', { timeout: 30_000 });
   expect(counts.meta).toBe(0);
   return counts;
 }
