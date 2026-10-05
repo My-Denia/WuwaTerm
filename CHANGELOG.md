@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Site: lookup results, review candidates, and the Markdown review report show dictionary categories and lookup match types in the active interface language. Unknown values stay as returned. The API and the JSON exports still carry the original keys.
+
 ## 0.6.0 - 2026-10-05
 
 ### Highlights

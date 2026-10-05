@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { categoryLabel, reasonLabel } from '../../lib/dictionary-labels';
 import { fill, msg } from '../../lib/messages';
 import { numberLocale } from '../../lib/ui-language';
 import { useUiLanguage } from './ui-language-context';
@@ -148,7 +149,7 @@ function TermsView({ state, onTranslate }: { state: State<TermsResult>; onTransl
   if (state.kind === 'error') return <FailureView value={state.error} />;
   if (state.kind !== 'success') return null;
   if (!state.data.matches.length) return <div className="empty-state"><p>{m.terms.noneFound}</p><button className="text-button" type="button" onClick={onTranslate}>{m.terms.noneAction}</button></div>;
-  return <div className="terms-results" aria-live="polite"><p className="result-summary">{fill(m.terms.matchesFound, { n: state.data.matches.length })}</p>{state.data.matches.map((match,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{match.zh}</strong><span>{match.en}</span></div><dl><div><dt>{m.terms.category}</dt><dd>{match.category}</dd></div><div><dt>{m.terms.matchReason}</dt><dd>{match.reason}</dd></div><div><dt>{m.terms.matchScore}</dt><dd>{match.score}</dd></div></dl></article>)}<RequestId value={state.data.request_id} /></div>;
+  return <div className="terms-results" aria-live="polite"><p className="result-summary">{fill(m.terms.matchesFound, { n: state.data.matches.length })}</p>{state.data.matches.map((match,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{match.zh}</strong><span>{match.en}</span></div><dl><div><dt>{m.terms.category}</dt><dd>{categoryLabel(lang, match.category)}</dd></div><div><dt>{m.terms.matchReason}</dt><dd>{reasonLabel(lang, match.reason)}</dd></div><div><dt>{m.terms.matchScore}</dt><dd>{match.score}</dd></div></dl></article>)}<RequestId value={state.data.request_id} /></div>;
 }
 function TranslationView({ state, copied, copyFailed, onCopy, source }: { state: State<TranslationResult>; copied: boolean; copyFailed: boolean; onCopy: () => void; source: string }) {
   const { lang } = useUiLanguage();

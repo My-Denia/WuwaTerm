@@ -1,3 +1,4 @@
+import { categoryLabel, labelJoiner } from './dictionary-labels.ts';
 import { fill, msg, summaryHeadline, summarySentence } from './messages.ts';
 import type { UiLanguage } from './ui-language';
 import { compactScalarContext } from './review-navigation.js';
@@ -167,7 +168,7 @@ export function renderMarkdownReport(input: MarkdownReportInput, lang: UiLanguag
       paragraph(counted(md.candidatesHeading, finding.candidates.length, lang));
       if (!finding.candidates.length) paragraph(md.noCandidates);
       for (const candidate of finding.candidates) {
-        out.push('- ' + inline(candidate.zh) + ' / ' + inline(candidate.en) + ' · ' + inline(candidate.category));
+        out.push('- ' + inline(candidate.zh) + ' / ' + inline(candidate.en) + ' · ' + m.terms.category + labelJoiner(lang) + inline(categoryLabel(lang, candidate.category)));
         out.push('  - ' + md.sourceRecordsLabel + colon(lang) + (candidate.sources.length
           ? candidate.sources.map(item => inline(item.source_file) + ' · ' + inline(item.source_id)).join(semicolon(lang))
           : md.notProvided));
