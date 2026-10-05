@@ -16,6 +16,7 @@ async function open(page) {
       terms: { used: 0, limit: 100, remaining: 100 },
       translations: { used: 0, limit: 100, remaining: 100 },
       characters: { used: 0, limit: 10000, remaining: 10000 },
+      reviews: { used: 0, limit: 60, remaining: 60 },
       reset_at: '2099-01-01T00:00:00Z',
     } });
     if (path === '/api/translations') {

@@ -11,6 +11,7 @@ import {
 } from '../../lib/manuscript.js';
 import { categoryLabel, labelJoiner } from '../../lib/dictionary-labels';
 import { fill, msg, summarySentence } from '../../lib/messages';
+import { isPool, POOL_REFRESH_EVENT, requestPoolRefresh, type Pool } from '../../lib/pool-snapshot';
 import { numberLocale } from '../../lib/ui-language';
 import { renderMarkdownReport, type MarkdownCurrency } from '../../lib/markdown-report';
 import { useUiLanguage } from './ui-language-context';
@@ -32,6 +33,10 @@ type Undo = { draft: Draft; choices: Choice[]; imported: Choice[]; reports?: Sna
 type NoticeState = string | null;
 type ErrorState = { reason?: string; code?: string; text?: string } | null;
 const EMPTY: Draft = { source: '', target: '', direction: 'en', alignments: null };
+type PoolView = { kind: 'loading' } | { kind: 'success'; data: Pool } | { kind: 'error' };
+async function poolPayload(response: Response): Promise<unknown> {
+  try { return await response.json(); } catch { return null; }
+}
 function signature(draft: Draft, resolutions: object[]) { return JSON.stringify({ ...draft, resolutions }); }
 function Excerpt({ text, span, missing }: { text: string; span: Span | null; missing: string }) {
   const { lang } = useUiLanguage();
@@ -69,6 +74,8 @@ export function ReviewWorkbench() {
   const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
   const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [canonicalFindingId, setCanonicalFindingId] = useState<string | null>(null);
+  const [pool, setPool] = useState<PoolView>({ kind: 'loading' });
+  const [poolAttempt, setPoolAttempt] = useState(0);
   const sourceBox = useRef<HTMLTextAreaElement>(null);
   const targetBox = useRef<HTMLTextAreaElement>(null);
   const fileBox = useRef<HTMLInputElement>(null);
@@ -95,6 +102,7 @@ export function ReviewWorkbench() {
   const current = !!latest?.trusted && latest.signature === signature(draft, ready) && phase === 'success';
   const sourceLength = Array.from(source).length; const targetLength = Array.from(target).length;
   const validInput = !!source.trim() && !!target.trim() && sourceLength <= 2000 && targetLength <= 2000;
+  const reviewsClosed = pool.kind === 'success' && pool.data.reviews.remaining === 0;
   const sourceCompatible = !!latest?.trusted && latest.source === source && latest.direction === direction;
   const comparison = latest && previous ? compareReports(previous, latest) : null;
   const basisChanged = !!latest?.trusted && choices.some(choice => !sameBasis(choice.basis, basisOf(latest.report)));
@@ -158,6 +166,22 @@ export function ReviewWorkbench() {
   }, [receiveDraft]);
   useEffect(() => () => { controller.current?.abort(); }, []);
   useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch('/api/pool', { cache: 'no-store', signal: controller.signal });
+        const value = await poolPayload(response);
+        if (!controller.signal.aborted) setPool(response.ok && isPool(value) ? { kind: 'success', data: value } : { kind: 'error' });
+      } catch { if (!controller.signal.aborted) setPool({ kind: 'error' }); }
+    })();
+    return () => controller.abort();
+  }, [poolAttempt]);
+  useEffect(() => {
+    const onRefresh = () => setPoolAttempt(count => count + 1);
+    window.addEventListener(POOL_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(POOL_REFRESH_EVENT, onRefresh);
+  }, []);
+  useEffect(() => {
     if (!activeFindingId) return;
     document.querySelector(`[data-mention-id="${CSS.escape(activeFindingId)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [activeFindingId]);
@@ -169,7 +193,7 @@ export function ReviewWorkbench() {
   }, [pendingDraft]);
 
   async function check(withChoices = true) {
-    if (!validInput) return;
+    if (!validInput || reviewsClosed) return;
     discardInFlight(); const mine = generation.current; const abort = new AbortController(); controller.current = abort;
     const resolutions = withChoices ? ready : [];
     const submitted = draft;
@@ -201,6 +225,7 @@ export function ReviewWorkbench() {
       const snapshot: Snapshot = { ...submitted, report, trusted: true, signature: submittedSignature, resolutions };
       setReports(stack => [...stack.slice(-1), snapshot]); setPhase('success');
       setNotice('checked');
+      requestPoolRefresh();
     } catch (cause) {
       if (!abort.signal.aborted && generation.current === mine) {
         setPhase('error');
@@ -210,6 +235,7 @@ export function ReviewWorkbench() {
         setError(cause instanceof Error && 'gahReason' in cause ? { reason: String((cause as Error & { gahReason?: unknown }).gahReason) }
           : cause instanceof Error && 'gahCode' in cause ? { code: String((cause as Error & { gahCode?: unknown }).gahCode) }
           : { code: 'requestFailed' });
+        requestPoolRefresh();
       }
     } finally { if (controller.current === abort) controller.current = null; }
   }
@@ -379,10 +405,16 @@ export function ReviewWorkbench() {
         </div>
         {alignments?.map((a, i) => <div className="alignment-row" key={i}><p>{fill(m.review.alignmentRowSource, { start: a.source.start + 1, end: a.source.end, text: a.source.text })}</p><p>{a.target ? fill(m.review.alignmentRowTarget, { start: a.target.start + 1, end: a.target.end, text: a.target.text }) : m.review.alignmentRowOmit}</p><button type="button" className="text-button" onClick={() => edit({ ...draft, alignments: alignments.filter((_, j) => i !== j) }, 'alignmentRemoved')}>{m.review.alignmentRemove}</button></div>)}
       </details>
+      <div className="review-quota">
+        {pool.kind === 'success' ? <>
+          <p>{fill(m.review.quotaSnapshot, { n: pool.data.reviews.remaining, limit: pool.data.reviews.limit })}</p>
+          {reviewsClosed && <p>{m.rMsg.reviews_pool_exhausted}</p>}
+        </> : <p>{pool.kind === 'loading' ? m.pool.loading : m.pool.unavailable}</p>}
+      </div>
       <div className="actions">
-        <button type="submit" disabled={!validInput || phase === 'loading'}>{phase === 'loading' ? m.review.checkLoading : m.review.checkIdle}</button>
-        <button className="secondary-button" type="button" disabled={!validInput || phase === 'loading'} onClick={() => void check(false)}>{m.review.freshBasis}</button>
-        {phase === 'loading' && <button className="secondary-button" type="button" onClick={() => { discardInFlight(); setPhase('cancelled'); setNotice('cancelledWait'); }}>{m.review.cancelWait}</button>}
+        <button type="submit" disabled={!validInput || phase === 'loading' || reviewsClosed}>{phase === 'loading' ? m.review.checkLoading : m.review.checkIdle}</button>
+        <button className="secondary-button" type="button" disabled={!validInput || phase === 'loading' || reviewsClosed} onClick={() => void check(false)}>{m.review.freshBasis}</button>
+        {phase === 'loading' && <button className="secondary-button" type="button" onClick={() => { discardInFlight(); setPhase('cancelled'); setNotice('cancelledWait'); requestPoolRefresh(); }}>{m.review.cancelWait}</button>}
         <button className="secondary-button" type="button" onClick={undo} disabled={!history.length}>{m.review.undo}</button>
       </div>
     </form>

@@ -14,6 +14,7 @@ async function open(page) {
       terms: { used: 0, limit: 100, remaining: 100 },
       translations: { used: 0, limit: 100, remaining: 100 },
       characters: { used: 0, limit: 10000, remaining: 10000 },
+      reviews: { used: 0, limit: 60, remaining: 60 },
       reset_at: '2099-01-01T00:00:00Z',
     } });
     if (path === '/api/reviews') {
@@ -147,6 +148,7 @@ test('a reason-less review error body still shows the localized fallback, and re
       terms: { used: 0, limit: 100, remaining: 100 },
       translations: { used: 0, limit: 100, remaining: 100 },
       characters: { used: 0, limit: 10000, remaining: 10000 },
+      reviews: { used: 0, limit: 60, remaining: 60 },
       reset_at: '2099-01-01T00:00:00Z',
     } });
     if (path === '/api/reviews') return route.fulfill({ status: 503, json: {} });

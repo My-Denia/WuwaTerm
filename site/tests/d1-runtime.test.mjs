@@ -83,7 +83,7 @@ test('0000 then 0001 D1 admits mixed traffic, keeps review off the translation c
     const status = await mf.dispatchFetch('http://site.test/api/pool');
     const poolBody = await status.json();
     assert.equal(poolBody.translations.remaining, 0);
-    assert.equal('reviews' in poolBody, false);
+    assert.equal(poolBody.reviews.remaining, poolBody.reviews.limit - 1);
     await db.prepare('UPDATE shared_pool SET second_key=0,minute_key=0,day_key=unixepoch()/86400,upstream_used=0,review_used=60').run();
     const reviewDenied = await mf.dispatchFetch('http://site.test/api/reviews', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: '今汐', target: 'Jinhsi', direction: 'en' }) });
     assert.equal(reviewDenied.status, 429);

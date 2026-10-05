@@ -140,7 +140,32 @@ test('review admission does not increment translation_used and survives translat
   assert.equal((await refused.response.json()).reason, 'translation_pool_exhausted');
   assert.equal((await admitRequest(env, 'review', 0)).ok, true);
   const status = await (await poolStatus(env)).json();
-  assert.equal('reviews' in status, false);
+  assert.equal(status.reviews.remaining, POOL_LIMITS.reviewsPerDay - 2);
+});
+
+test('pool snapshot projects review allowance across unused, exhausted, and next UTC day', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  const unused = await (await poolStatus(env)).json();
+  assert.equal(unused.reviews.used, 0);
+  assert.equal(unused.reviews.remaining, unused.reviews.limit);
+  assert.equal(unused.reviews.limit, POOL_LIMITS.reviewsPerDay);
+  assert.equal(unused.shared, true);
+  assert.equal(unused.fairness_guaranteed, false);
+  for (let i = 0; i < POOL_LIMITS.reviewsPerDay; i++) {
+    db.advance(61);
+    assert.equal((await admitRequest(env, 'review', 0)).ok, true);
+  }
+  const exhausted = await (await poolStatus(env)).json();
+  assert.equal(exhausted.reviews.remaining, 0);
+  assert.equal(exhausted.reviews.used, POOL_LIMITS.reviewsPerDay);
+  const denied = await admitRequest(env, 'review', 0);
+  assert.equal((await denied.response.json()).reason, 'reviews_pool_exhausted');
+  assert.equal(exhausted.translations.remaining, POOL_LIMITS.translationsPerDay);
+  db.advance(86400);
+  const rolled = await (await poolStatus(env)).json();
+  assert.equal(rolled.reviews.used, 0);
+  assert.equal(rolled.reviews.remaining, POOL_LIMITS.reviewsPerDay);
+  assert.equal((await admitRequest(env, 'review', 0)).ok, true);
 });
 
 test('review daily exhaustion is independent of translation remaining', async () => {

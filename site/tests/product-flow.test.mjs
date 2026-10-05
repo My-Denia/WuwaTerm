@@ -82,6 +82,7 @@ test('visitor journey: pool snapshot, term lookup, translation, and review, with
     assert.equal(after.terms.remaining, snapshot.terms.limit - 1);
     assert.equal(after.translations.remaining, snapshot.translations.limit - 1);
     assert.equal(after.characters.remaining, snapshot.characters.limit - 2);
+    assert.equal(after.reviews.remaining, after.reviews.limit - 1);
   } finally { await mf.dispose(); }
 });
 

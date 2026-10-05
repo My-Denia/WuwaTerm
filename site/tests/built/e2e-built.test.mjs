@@ -91,6 +91,7 @@ test('built real routes use bound environment and D1 for the review-v2 visitor j
   assert.equal(after.terms.remaining, pool.terms.remaining - 1);
   assert.equal(after.translations.remaining, pool.translations.remaining - 1);
   assert.equal(after.characters.remaining, pool.characters.remaining - 2);
+  assert.equal(after.reviews.remaining, pool.reviews.remaining - 2);
 });
 
 test('built production parser rejects malformed bodies and v2 fields before consuming quota', async t => {
