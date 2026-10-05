@@ -40,6 +40,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+RECOVERY = ROOT / ".github" / "workflows" / "promote-v060-recovery.yml"
+PROMOTION = ROOT / "scripts" / "promote_release_images.sh"
 CHECKLIST = ROOT / "docs" / "release-checklist.md"
 
 # The list entries of the notes generator: `              "### Assets",`.
@@ -211,6 +213,133 @@ def _job_block(name: str) -> str:
     return "\n".join(block)
 
 
+def _step_run(block: str, name: str) -> str:
+    """Execute a workflow step's shell in a clean runner directory."""
+    start = block.index(f"      - name: {name}")
+    run = block.index("        run: |\n", start) + len("        run: |\n")
+    end = block.find("\n      - ", run)
+    return textwrap.dedent(block[run:end if end != -1 else None])
+
+
+def test_promotion_download_resolves_repository_without_a_checkout(tmp_path):
+    """The release runner starts outside Git; gh needs explicit repository context."""
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:2] != ['release', 'download']:
+    sys.exit(2)
+if '--repo' not in args and not os.environ.get('GH_REPO'):
+    print('fatal: not a git repository', file=sys.stderr)
+    sys.exit(1)
+dest = Path(args[args.index('--dir') + 1])
+dest.mkdir(parents=True, exist_ok=True)
+(dest / 'release-manifest.json').write_text('''{"dry_run":false,"tag":"v0.6.0","images":{"runtime":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"builder":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}''')
+""")
+    gh.chmod(0o755)
+    block = _job_block("promote-images")
+    step = _step_run(block, "Download the published release manifest")
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "TAG": "v0.6.0", "GH_TOKEN": "fixture"}
+    env.pop("GH_REPO", None)
+    if "GH_REPO: ${{ github.repository }}" in block:
+        env["GH_REPO"] = "My-Denia/WuwaTerm"
+    result = subprocess.run(["bash", "-c", step], cwd=tmp_path, env=env,
+                            text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_v060_recovery_is_one_release_promotion_only():
+    text = RECOVERY.read_text(encoding="utf-8")
+    assert _trigger_keys(text) == ["workflow_dispatch"]
+    assert "if: github.ref == 'refs/heads/main'" in text
+    assert "ref: ${{ github.sha }}" in text
+    assert "permissions:\n  contents: read" in text
+    assert text.count("packages: write") == 1
+    assert text.count("bash scripts/promote_release_images.sh") == 1
+    assert "group: ${{ github.repository }}-release-promotion" in text
+    assert "group: ${{ github.repository }}-release-promotion" in _job_block("promote-images")
+    for forbidden in ("release create", "release edit", "upload-artifact", "docker buildx build",
+                      "docker buildx imagetools create", "git tag", "git push"):
+        assert forbidden not in text
+
+
+@pytest.mark.parametrize("drift", ["release_id", "tag", "source", "asset_digest",
+                                   "git_tag", "manifest_bytes"])
+def test_v060_recovery_guard_stops_drift_before_registry_write(tmp_path, drift):
+    """Run the actual guard with local GitHub/Git fixtures; no registry exists."""
+    workflow = RECOVERY.read_text(encoding="utf-8")
+    guard_name = "Verify published release, Git tag, five assets and pinned manifest"
+    guard = _step_run(workflow, guard_name)
+    assert workflow.index(guard_name) < workflow.index("Log in to the container registry")
+    assert workflow.index(guard_name) < workflow.index("Retag the recorded digests")
+    assert "docker " not in guard
+    hashes = {
+        "SHA256SUMS": "08983706421e9def6652cfe851505efc65661e9653dccd2bfd14f8b42bc51b72",
+        "WuwaTerm-0.2.0-windows-x64.zip": "df1d2dd86727634da6514223f7aeeffb7c49e3dc00658f680fb9b17b7e10bb17",
+        "release-manifest.json": "078c0f63bbe6637f79e4247f99cfe3da07595f4c4ad906b7ee685ace95ad527d",
+        "wuwaterm-0.6.0-py3-none-any.whl": "285ddd0ec699dd872ee5cf376785c51b22ab89926ab7d2894f05327a6b6d8ba6",
+        "wuwaterm-0.6.0.tar.gz": "216267af7b637086451435fcf1a5278d320a1877eda4d55109d084f3b9993252",
+    }
+    source = "cfe07f7bb90cf0555755cfabae28eb6f3eed86c9"
+    release = {
+        "id": 403374996, "tag_name": "v0.6.0", "target_commitish": source,
+        "draft": False, "prerelease": False, "published_at": "2026-10-05T05:36:00Z",
+        "assets": [{"name": name, "digest": "sha256:" + digest, "state": "uploaded"}
+                   for name, digest in hashes.items()],
+    }
+    if drift == "release_id":
+        release["id"] += 1
+    elif drift == "tag":
+        release["tag_name"] = "v0.6.1"
+    elif drift == "source":
+        release["target_commitish"] = "f" * 40
+    elif drift == "asset_digest":
+        release["assets"][2]["digest"] = "sha256:" + "f" * 64
+    (tmp_path / "release.json").write_text(json.dumps(release))
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+if sys.argv[1] == 'api':
+    print(Path(os.environ['STUB_RELEASE']).read_text())
+elif sys.argv[1:3] == ['release', 'download']:
+    dest = Path(sys.argv[sys.argv.index('--dir') + 1])
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ('SHA256SUMS', 'WuwaTerm-0.2.0-windows-x64.zip', 'release-manifest.json',
+                 'wuwaterm-0.6.0-py3-none-any.whl', 'wuwaterm-0.6.0.tar.gz'):
+        (dest / name).write_text('fixture bytes')
+else:
+    sys.exit(2)
+""")
+    gh.chmod(0o755)
+    git = tmp_path / "git"
+    git.write_text("""#!/usr/bin/env python3
+import os
+print(os.environ['STUB_TAG_SOURCE'] + '\\trefs/tags/v0.6.0')
+""")
+    git.chmod(0o755)
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\ntouch docker-was-called\nexit 97\n")
+    docker.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "GH_REPO": "My-Denia/WuwaTerm", "TAG": "v0.6.0",
+           "RELEASE_ID": "403374996", "EXPECTED_SOURCE": source,
+           "GH_TOKEN": "fixture", "STUB_RELEASE": str(tmp_path / "release.json"),
+           "STUB_TAG_SOURCE": "f" * 40 if drift == "git_tag" else source}
+    result = subprocess.run(["bash", "-c", guard], cwd=tmp_path, env=env,
+                            text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0, result.stdout
+    assert not (tmp_path / "docker-was-called").exists()
+    if drift == "manifest_bytes":
+        assert "published asset bytes differ" in result.stderr
+    else:
+        assert not (tmp_path / "staging").exists(), result.stderr
+
+
 def test_build_jobs_skip_the_release_event():
     for job in ("preflight", "python-package", "client", "images", "assemble"):
         block = _job_block(job)
@@ -231,7 +360,8 @@ def test_draft_image_tags_are_sha_class_only():
 
 def test_promote_images_retags_published_manifest_digests():
     block = _job_block("promote-images")
-    assert "imagetools" in block
+    assert "bash scripts/promote_release_images.sh" in block
+    assert "imagetools" in PROMOTION.read_text()
     assert "release-manifest.json" in block
     assert "deploy/Dockerfile" not in block
     assert "docker buildx build" not in block
@@ -278,10 +408,7 @@ def test_the_client_zip_has_one_name_across_every_file_that_names_it():
 # Execute the actual promotion step with a stateful local registry stub.
 # No Docker daemon, credentials, socket, or upstream registry is used.
 def _promotion_script():
-    block = _job_block("promote-images")
-    start = block.index("      - name: Retag the recorded digests")
-    run = block.index("        run: |\n", start) + len("        run: |\n")
-    return textwrap.dedent(block[run:])
+    return PROMOTION.read_text(encoding="utf-8")
 
 
 REGISTRY_STUB = r"""#!/usr/bin/env python3
@@ -435,7 +562,7 @@ def test_release_events_share_a_non_cancelling_promotion_group():
     assert "format('pr-{0}', github.ref)" in concurrency
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency
     promotion = _job_block("promote-images")
-    assert "      group: ${{ github.workflow }}-promotion" in promotion
+    assert "      group: ${{ github.repository }}-release-promotion" in promotion
     assert "      queue: max" in promotion
     assert "      cancel-in-progress: false" in promotion
 
@@ -494,7 +621,7 @@ def _release_runs_retained_by_workflow(tags):
     promotion = _job_block("promote-images")
     shared_job = "    concurrency:\n" in promotion
     if shared_job:
-        assert "      group: ${{ github.workflow }}-promotion" in promotion
+        assert "      group: ${{ github.repository }}-release-promotion" in promotion
         assert "      cancel-in-progress: false" in promotion
         queue = re.search(r"^      queue: (single|max)$", promotion, re.MULTILINE)
         retained = _pending_release_contract(retained, queue.group(1) if queue else "single")
