@@ -12,9 +12,10 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current project version is `0.5.0`. Set
+  published tag. The current project version is `0.6.0`; `v0.5.0` is the
+  previous published release. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
-  below; `v0.4.0` is the previous historical release.
+  below.
 - Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
   independently of the server and carried in the release as
   `WuwaTerm-0.2.0-windows-x64.zip`

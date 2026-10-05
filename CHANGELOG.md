@@ -5,6 +5,14 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-05
+
+### Highlights
+
+- Site: Chinese and English interface support, plus a full Markdown review-report export.
+- Site: filter and navigate findings, then jump to exact source or target spans.
+- Data: the Arikatsu 3.7.0 candidate contains 11,329 extracted records.
+
 ### Added
 
 - Site: the whole interface renders in Chinese and English. A topbar toggle
@@ -109,8 +117,8 @@ does not distribute generated game data or generated SQLite databases.
   manuscript reconciler marks the imported choice pending until the user
   confirms it against the fresh basis. A fresh check on the 3.7 candidate
   can accept the same sentence once its context carries the new revision.
-- No production data is shipped by this change. A deployment still has to
-  refresh the checkout and rebuild the candidate on the target host.
+- Generated databases and raw game data are excluded from release artifacts.
+  Operators build `terms.db` locally from the pinned source.
 
 ## 0.5.0 - 2026-09-13
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwaterm"
-version = "0.5.0"
+version = "0.6.0"
 description = "WuwaTerm: dictionary-first Wuthering Waves Chinese-English terminology and term-locked translation service."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,10 +17,10 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://wuwaterm.denia-official.chatgpt.site"
-Repository = "https://github.com/My-Denia/wuwa-translate-bot"
-Issues = "https://github.com/My-Denia/wuwa-translate-bot/issues"
-Documentation = "https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/README.md"
-Changelog = "https://github.com/My-Denia/wuwa-translate-bot/blob/main/CHANGELOG.md"
+Repository = "https://github.com/My-Denia/WuwaTerm"
+Issues = "https://github.com/My-Denia/WuwaTerm/issues"
+Documentation = "https://github.com/My-Denia/WuwaTerm/blob/main/docs/README.md"
+Changelog = "https://github.com/My-Denia/WuwaTerm/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 build = [
