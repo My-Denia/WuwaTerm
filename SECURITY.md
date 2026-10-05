@@ -12,9 +12,13 @@ deployed them. Security reports are read and handled best-effort — please read
 Fixes are made on `main` and ship in the next release. Only the latest published
 release line receives them; earlier tags are historical and get nothing.
 
+The table below applies when v0.6.0 is published. Until then, 0.5.x remains
+the latest supported published line.
+
 | Version | Supported |
 |---|---|
-| 0.5.x — the latest published release | Yes |
+| 0.6.x | Yes |
+| 0.5.x | No |
 | 0.4.x | No |
 | 0.3.x | No |
 | 0.2.x | No |

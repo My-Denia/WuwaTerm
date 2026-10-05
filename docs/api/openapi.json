@@ -834,7 +834,7 @@
   "info": {
     "description": "Read-only translation surface for the Wuthering Waves terminology service.\n\nThis API uses the application pipeline also used by Telegram command routes\nand the in-process private web layer: official dictionary hit first, then a\ntrusted pinyin hit, then a term-locked model call. Linked-channel\nauto-translation has specialized channel orchestration and is not part of this\nAPI contract. Responses are plain text; rich-text markup is never part of this\ncontract.\n\nAuthentication is a bearer device token issued by the operator. There is no\nregistration endpoint: tokens are created out of band and can be revoked.",
     "title": "wuwaterm API",
-    "version": "0.5.0"
+    "version": "0.6.0"
   },
   "openapi": "3.1.0",
   "paths": {
