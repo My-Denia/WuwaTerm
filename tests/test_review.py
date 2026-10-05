@@ -12,7 +12,9 @@ from wuwaterm.application import (
     ReviewRequestError,
     review_pair,
 )
+from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
+from wuwaterm.models import TermRecord
 from wuwaterm.review import (
     CHOICE_NOT_A_TERM,
     CHOICE_OFFICIAL_PAIR,
@@ -594,3 +596,51 @@ def test_development_and_validation_templates_are_not_renames(sample_db):
     }
     assert _finding(first, "守岸人").verdict == VERDICT_VERIFIED
     assert _finding(second, "云陵谷").verdict == VERDICT_VERIFIED
+
+
+def _one_character_service(tmp_path: Path) -> TermService:
+    path = tmp_path / "one-character-v1.db"
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")),
+        )
+        insert_records(conn, _ONE_CHARACTER_RECORDS)
+        conn.commit()
+    return TermService(path)
+
+
+_ONE_CHARACTER_RECORDS = (
+    TermRecord("speaker", "fixture", "wo", "wo", "我", "Rover"),
+    TermRecord("core_term", "fixture", "rover", "rover", "漂泊者", "Rover"),
+    TermRecord("resonator", "fixture", "xin", "xin", "心", "Hsin"),
+    TermRecord("speaker", "fixture", "xin-speaker", "xin-speaker", "心", "Hsin"),
+    TermRecord("resonator", "fixture", "chun", "chun", "椿", "Camellya"),
+    TermRecord("echo", "fixture", "jiao", "jiao", "角", "Jué"),
+    TermRecord("item", "fixture", "yan", "yan", "盐", "Salt"),
+    TermRecord("item", "fixture", "mi", "mi", "米", "Rice"),
+    TermRecord("resonator", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
+    TermRecord("core_term", "fixture", "echo", "echo", "声骸", "Echo"),
+    TermRecord("resonator", "fixture", "jia", "jia", "甲", "A"),
+)
+
+
+def test_review_v1_still_reports_one_character_dictionary_collisions(tmp_path):
+    # v1-collision: the frozen collector still reports every one-character
+    # surface that review-v2 now drops, including both surfaces in one sentence.
+    service = _one_character_service(tmp_path)
+    expected = {
+        "盐和米不是一句术语。": {"盐", "米"},
+        "我是漂泊者。": {"我", "漂泊者"},
+        "心里想着今汐。": {"心", "今汐"},
+        "角色提到香椿和声骸。": {"角", "椿", "声骸"},
+        "香椿": {"椿"},
+        "椿树": {"椿"},
+        "欢迎椿": {"椿"},
+        "A joins the party.": {"A"},
+    }
+    for source, surfaces in expected.items():
+        report = review_pair(service, source, "placeholder", "en")
+        assert report.rule_version == "review-v1"
+        assert {item.source_span.text for item in report.findings} == surfaces

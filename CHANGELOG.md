@@ -5,6 +5,7 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Review: `review-v2` now ignores the same one-character dictionary collisions that sentence locking already refuses. Ordinary one-character items, echoes, and speakers such as `我`, `角`, `盐`, and `米` are not findings, and a one-character resonator is a finding only in a name-like context (`椿加入队伍`, not `香椿` or `心里`). Longer official terms are unchanged. `review-v1` still reports the old spans.
 - Site: lookup results, review candidates, and the Markdown review report show dictionary categories and lookup match types in the active interface language. Unknown values stay as returned. The API and the JSON exports still carry the original keys.
 
 ## 0.6.0 - 2026-10-05
