@@ -9,6 +9,7 @@ import {
   MAX_CHOICES, MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, mentionId,
   parseWorkfile, reconcileChoices, recoverSpan, sameBasis, serializeWorkfile, validAlignments, validReport,
 } from '../../lib/manuscript.js';
+import { categoryLabel, labelJoiner } from '../../lib/dictionary-labels';
 import { fill, msg, summarySentence } from '../../lib/messages';
 import { numberLocale } from '../../lib/ui-language';
 import { renderMarkdownReport, type MarkdownCurrency } from '../../lib/markdown-report';
@@ -423,7 +424,7 @@ export function ReviewWorkbench() {
               <button className="text-button" type="button" disabled={!sourceLocated} onClick={() => jumpTo(sourceBox.current, source, finding.source_span)}>{m.review.jumpSource}</button>
               <button className="text-button" type="button" disabled={!targetLocated} onClick={() => { if (finding.target_span) jumpTo(targetBox.current, target, finding.target_span); }}>{m.review.jumpTarget}</button>
             </div>
-            {finding.candidates.map((candidate: Candidate) => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{candidate.category}</small>
+            {finding.candidates.map((candidate: Candidate) => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{m.terms.category}{labelJoiner(lang)}{categoryLabel(lang, candidate.category)}</small>
               <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading' || latest.report.truncated} onClick={() => choose(finding, candidate)}>{m.review.adopt}</button>
               {targetLocated && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>{m.review.replace}</button>}
               <details className="candidate-sources"><summary>{m.review.viewSources}</summary>
