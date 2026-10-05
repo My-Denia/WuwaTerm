@@ -17,8 +17,9 @@ just-merged feature branch each require separate current authorization
 for that exact action. After an authorized merge is on `origin/main`,
 the workspace tidy below deletes that feature branch locally, and
 deletes its remote head only when GitHub has not already removed it
-(`delete_branch_on_merge` is on for this repository). That tidy is not
-permission to delete any other branch. After the
+(`delete_branch_on_merge` is on for this repository). That cleanup needs
+no second authorization. Skip it when the user explicitly asks to keep
+the branch. That tidy is not permission to delete any other branch. After the
 owner has authorized a pull request, a later fast-forward push on that
 same branch is already authorized when it only fixes a confirmed
 in-scope review finding, as defined in Code Review Rules. The procedures
@@ -120,9 +121,10 @@ that work under the existing authorization.
   request's remote head is still present, delete that remote head. GitHub
   usually removes it first (`delete_branch_on_merge` is on). Do not delete
   a remote head that is already gone. Classify leftover dirty files;
-  archive reusable run evidence under a named `goal-runs/` path. This tidy
-  does not authorize deleting any other branch, a new PR, deploy, or
-  force-push.
+  archive reusable run evidence under a named `goal-runs/` path. Skip that
+  branch deletion when the user explicitly asks to keep the branch. This
+  tidy needs no second authorization. It does not authorize deleting any
+  other branch, a new PR, deploy, or force-push.
 - PR creation, merge, deploy, and deletion of any branch other than that
   just-merged feature branch must each be independently authorized in the
   current turn. A fast-forward fix push on an already authorized pull
@@ -216,14 +218,17 @@ that work under the existing authorization.
   after the executor.
 - Before changing branches or deleting a branch, record the current branch,
   `git status --short --branch`, and the branch tip SHA.
-- After work is merged to `main`, and only when the corresponding local and
-  remote deletion actions are separately authorized, clean up the source
-  branch locally and on GitHub unless the user explicitly asks to keep it.
+- After an authorized merge is on `origin/main`, clean up that feature
+  branch in the same turn by the workspace tidy above. Merge authorization
+  already includes it: delete the local branch, and delete the remote head
+  only when it is still present. That cleanup needs no second authorization.
+  Skip it when the user explicitly asks to keep the branch. Deletion of any
+  other branch still needs its own current authorization.
 - Before deleting a branch, verify one of these is true:
-  - The branch is an ancestor of `main`:
-    `git merge-base --is-ancestor <branch> main`.
+  - The branch is an ancestor of `origin/main`:
+    `git merge-base --is-ancestor <branch> origin/main`.
   - The branch was squash-merged or otherwise patch-equivalent:
-    `git cherry main <branch>` prints only `-` lines.
+    `git cherry origin/main <branch>` prints only `-` lines.
 - Record the restore command before deletion:
   `git branch <branch> <sha>` and, for remote restore,
   `git push origin <sha>:refs/heads/<branch>`.
@@ -235,7 +240,9 @@ that work under the existing authorization.
 ## Main, PRs, and Merge Semantics
 
 - This section describes repository mechanics after authorization. It does not
-  authorize branch creation, commit, push, PR creation, merge, or deletion.
+  authorize branch creation, commit, push, PR creation, merge, or deletion of
+  any branch other than the just-merged feature branch. That branch is removed
+  by the post-merge tidy and needs no second authorization.
 
 - This is a public repository. Do not push directly to `main` or locally merge
   into `main` for normal work. Put changes on a conventionally named branch,

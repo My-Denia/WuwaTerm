@@ -40,6 +40,10 @@ def test_post_merge_tidy_deletes_only_the_merged_feature_branch():
     assert "delete_branch_on_merge" in text
     assert "if that pull request's remote head is still present" in text
     assert "does not authorize deleting any other branch" in text
+    assert "needs no second authorization" in text
+    assert "## Git Branches" in text
+    assert "only when the corresponding local and" not in text
+    assert "clean up the source branch locally and on GitHub" not in text
     assert "does not perform that deletion" not in text
     assert "Otherwise delete them" not in text
 
