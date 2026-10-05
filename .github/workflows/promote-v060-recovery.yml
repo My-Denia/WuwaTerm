@@ -1,0 +1,142 @@
+name: Promote v0.6.0 images (recovery)
+
+# This one-release entry repairs a published release whose original promotion
+# job stopped before registry login. It neither builds nor edits release assets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  promote-images:
+    name: promote audited v0.6.0 digests
+    if: github.ref == 'refs/heads/main' && github.repository == 'My-Denia/WuwaTerm'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.repository }}-release-promotion
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify published release, Git tag, five assets and pinned manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v0.6.0
+          RELEASE_ID: '403374996'
+          EXPECTED_SOURCE: cfe07f7bb90cf0555755cfabae28eb6f3eed86c9
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ['GH_REPO']
+          tag = os.environ['TAG']
+          release_id = int(os.environ['RELEASE_ID'])
+          source = os.environ['EXPECTED_SOURCE']
+          if (repo, tag, release_id, source) != (
+              'My-Denia/WuwaTerm', 'v0.6.0', 403374996,
+              'cfe07f7bb90cf0555755cfabae28eb6f3eed86c9',
+          ):
+              raise SystemExit('recovery target context changed')
+          release = json.loads(subprocess.check_output(
+              ['gh', 'api', f'repos/{repo}/releases/{release_id}'], text=True,
+          ))
+          if (release.get('id') != release_id or release.get('tag_name') != tag
+                  or release.get('target_commitish') != source
+                  or release.get('draft') is not False
+                  or release.get('prerelease') is not False
+                  or not release.get('published_at')):
+              raise SystemExit('published release provenance changed')
+          expected = {
+              'SHA256SUMS': '08983706421e9def6652cfe851505efc65661e9653dccd2bfd14f8b42bc51b72',
+              'WuwaTerm-0.2.0-windows-x64.zip': 'df1d2dd86727634da6514223f7aeeffb7c49e3dc00658f680fb9b17b7e10bb17',
+              'release-manifest.json': '078c0f63bbe6637f79e4247f99cfe3da07595f4c4ad906b7ee685ace95ad527d',
+              'wuwaterm-0.6.0-py3-none-any.whl': '285ddd0ec699dd872ee5cf376785c51b22ab89926ab7d2894f05327a6b6d8ba6',
+              'wuwaterm-0.6.0.tar.gz': '216267af7b637086451435fcf1a5278d320a1877eda4d55109d084f3b9993252',
+          }
+          assets = release.get('assets')
+          if not isinstance(assets, list) or len(assets) != len(expected):
+              raise SystemExit('published release asset count changed')
+          if {a.get('name'): a.get('digest') for a in assets} != {
+              name: f'sha256:{digest}' for name, digest in expected.items()
+          } or any(a.get('state') != 'uploaded' for a in assets):
+              raise SystemExit('published release asset metadata changed')
+          output = subprocess.check_output([
+              'git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}',
+          ], text=True)
+          refs = {ref: sha for sha, ref in (line.split() for line in output.splitlines())}
+          if f'refs/tags/{tag}' not in refs or (
+              refs.get(f'refs/tags/{tag}^{{}}') or refs[f'refs/tags/{tag}']
+          ) != source:
+              raise SystemExit('Git release tag does not peel to frozen source')
+          PY
+          mkdir -p staging
+          gh release download "$TAG" --repo "$GH_REPO" --dir staging
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          staging = Path('staging')
+          expected = {
+              'SHA256SUMS': '08983706421e9def6652cfe851505efc65661e9653dccd2bfd14f8b42bc51b72',
+              'WuwaTerm-0.2.0-windows-x64.zip': 'df1d2dd86727634da6514223f7aeeffb7c49e3dc00658f680fb9b17b7e10bb17',
+              'release-manifest.json': '078c0f63bbe6637f79e4247f99cfe3da07595f4c4ad906b7ee685ace95ad527d',
+              'wuwaterm-0.6.0-py3-none-any.whl': '285ddd0ec699dd872ee5cf376785c51b22ab89926ab7d2894f05327a6b6d8ba6',
+              'wuwaterm-0.6.0.tar.gz': '216267af7b637086451435fcf1a5278d320a1877eda4d55109d084f3b9993252',
+          }
+          files = {p.name: p for p in staging.iterdir() if p.is_file()}
+          if set(files) != set(expected) or any(
+              hashlib.sha256(files[name].read_bytes()).hexdigest() != digest
+              for name, digest in expected.items()
+          ):
+              raise SystemExit('published asset bytes differ from frozen release')
+          manifest = json.loads(files['release-manifest.json'].read_text())
+          if (manifest.get('tag'), manifest.get('version'),
+                  manifest.get('client_version'), manifest.get('source_commit'),
+                  manifest.get('dry_run')) != (
+                  'v0.6.0', '0.6.0', '0.2.0',
+                  'cfe07f7bb90cf0555755cfabae28eb6f3eed86c9', False):
+              raise SystemExit('published manifest provenance changed')
+          if manifest.get('data') != {
+              'profile': 'arikatsu',
+              'repo': 'https://github.com/Arikatsu/WutheringWaves_Data.git',
+              'commit': '9218d612ad815e398e064e577e42aaf878899968',
+              'game_version': '3.7.0', 'resource_version': '3.7.8',
+              'changelist': '8975829',
+          }:
+              raise SystemExit('published data pin changed')
+          if manifest.get('images') != {
+              'runtime': {
+                  'name': 'ghcr.io/my-denia/wuwaterm', 'tags': ['sha-cfe07f7'],
+                  'digest': 'sha256:4af3630238944718fe7673343b5e4c1304333271076c4c80e68029503ebc1ab9',
+              },
+              'builder': {
+                  'name': 'ghcr.io/my-denia/wuwaterm-builder', 'tags': ['sha-cfe07f7'],
+                  'digest': 'sha256:08aa538dbaf50d3b36830ea896f3dfc4b09d06d6ea7b5528db64cb4fddccba75',
+              },
+          }:
+              raise SystemExit('published image namespace or digest changed')
+          PY
+          (cd staging && sha256sum -c SHA256SUMS)
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to the container registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Retag the recorded digests as vX.Y.Z and X.Y
+        env:
+          TAG: v0.6.0
+        run: bash scripts/promote_release_images.sh
