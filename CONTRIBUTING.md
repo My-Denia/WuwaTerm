@@ -247,6 +247,12 @@ Pull requests are reviewed by automated reviewers and by the maintainer:
 Automated review is advisory. A bot comment that is wrong should be answered,
 not silently obeyed — say why in the thread.
 
+Severity and scope are different questions. A true comment can still sit
+outside this pull request. [AGENTS.md](AGENTS.md) says what the current pull
+request must fix, what is a follow-up, and when a confirmed in-scope fix may
+be pushed on the same branch. Merge, deploy, and production changes still
+need their own authorization.
+
 ## Reporting Instead Of Fixing
 
 Reporting is a contribution. The issue forms ask for the fields that make a
