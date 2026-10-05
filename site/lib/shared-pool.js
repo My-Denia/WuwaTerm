@@ -96,6 +96,7 @@ function snapshot(row, environment) {
     terms: daily('terms_used', POOL_LIMITS.termsPerDay),
     translations: daily('translation_used', POOL_LIMITS.translationsPerDay),
     characters: daily('character_used', POOL_LIMITS.charactersPerDay),
+    reviews: daily('review_used', POOL_LIMITS.reviewsPerDay),
     upstream: { used: sameMinute ? row.upstream_used : 0, limit: POOL_LIMITS.upstreamPerMinute },
     reset_at: new Date((Math.floor(row.clock / 86400) + 1) * 86400_000).toISOString(),
     retry_after_seconds: 60 - row.clock % 60,

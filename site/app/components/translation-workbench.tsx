@@ -3,12 +3,11 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { categoryLabel, reasonLabel } from '../../lib/dictionary-labels';
 import { fill, msg } from '../../lib/messages';
+import { isPool, POOL_REFRESH_EVENT, requestPoolRefresh, type Pool } from '../../lib/pool-snapshot';
 import { numberLocale } from '../../lib/ui-language';
 import { useUiLanguage } from './ui-language-context';
 
 type Failure = { status: 'unavailable'; reason: string; request_id?: string; retry_after_seconds?: number };
-type Allowance = { used: number; limit: number; remaining: number };
-type Pool = { status: 'available'; translation_enabled: boolean; terms: Allowance; translations: Allowance; characters: Allowance; reset_at: string };
 type TermMatch = { zh: string; en: string; category: string; reason: string; score: number };
 type TermsResult = { query: string; matches: TermMatch[]; request_id: string };
 type TranslationResult = { kind: 'noop' | 'exact' | 'fuzzy' | 'llm'; text: string; direction: 'en' | 'zh'; dictionary_miss: boolean; request_id: string };
@@ -18,7 +17,6 @@ function failure(value: unknown): value is Failure { return !!value && typeof va
 async function payload(r: Response): Promise<unknown> { try { return await r.json(); } catch { return FALLBACK; } }
 function isTerms(v: unknown): v is TermsResult { const x = v as TermsResult; return !!x && typeof x.request_id === 'string' && Array.isArray(x.matches) && x.matches.every(m => typeof m.zh === 'string' && typeof m.en === 'string' && typeof m.category === 'string' && typeof m.reason === 'string' && typeof m.score === 'number'); }
 function isTranslation(v: unknown): v is TranslationResult { const x = v as TranslationResult; return !!x && typeof x.text === 'string' && typeof x.request_id === 'string' && ['noop', 'exact', 'fuzzy', 'llm'].includes(x.kind) && ['en', 'zh'].includes(x.direction) && typeof x.dictionary_miss === 'boolean'; }
-function isPool(v: unknown): v is Pool { const x = v as Pool; return !!x && x.status === 'available' && typeof x.translation_enabled === 'boolean' && [x.terms,x.translations,x.characters].every(a => a && Number.isInteger(a.remaining) && Number.isInteger(a.limit) && a.remaining >= 0 && a.limit >= a.remaining) && typeof x.reset_at === 'string'; }
 
 export function TranslationWorkbench() {
   const { lang } = useUiLanguage();
@@ -46,6 +44,11 @@ export function TranslationWorkbench() {
     })();
     return () => controller.abort();
   }, [poolAttempt]);
+  useEffect(() => {
+    const onRefresh = () => setPoolAttempt(n => n + 1);
+    window.addEventListener(POOL_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(POOL_REFRESH_EVENT, onRefresh);
+  }, []);
   useEffect(() => () => { termsController.current?.abort(); translationController.current?.abort(); }, []);
 
   async function lookup(event: FormEvent) {
@@ -110,9 +113,10 @@ export function TranslationWorkbench() {
         <div><span>{m.pool.termsLabel}</span><strong>{pool.data.terms.remaining}<small>{' / ' + pool.data.terms.limit + m.pool.termsUnit}</small></strong></div>
         <div><span>{m.pool.translationsLabel}</span><strong>{pool.data.translation_enabled ? pool.data.translations.remaining : m.pool.translationsClosed}<small>{pool.data.translation_enabled ? ' / ' + pool.data.translations.limit : ''}</small></strong></div>
         <div><span>{m.pool.charactersLabel}</span><strong>{pool.data.characters.remaining.toLocaleString(locale)}<small>{m.pool.charactersUnit}</small></strong></div>
+        <div><span>{m.pool.reviewsLabel}</span><strong>{pool.data.reviews.remaining}<small>{' / ' + pool.data.reviews.limit + m.pool.termsUnit}</small></strong></div>
         <p>{m.pool.resetNote}</p>
       </> : <p>{pool.kind === 'loading' ? m.pool.loading : m.pool.unavailable}</p>}
-      <button className="text-button" type="button" onClick={() => setPoolAttempt(n => n + 1)}>{m.pool.refresh}</button>
+      <button className="text-button" type="button" onClick={() => requestPoolRefresh()}>{m.pool.refresh}</button>
     </section>
     <div className="workspace-grid">
       <section className="workspace-card terms-card" aria-labelledby="terms-title">

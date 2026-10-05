@@ -172,8 +172,9 @@ another admission. This is not a time-based deletion promise.
 
 Terms, translations and reviews have independent daily counters. Disabling translation,
 exhausting its count or character pool, or VPS model unavailability does not
-disable terms or reviews. The public `/api/pool` JSON does not include a `reviews`
-key. Terms can still be busy under the total short window, its own
+disable terms or reviews. An available snapshot includes `reviews` in the same
+shape as `terms`; it is a shared snapshot, not a personal reserve; a response
+that omits the key is not a complete quota snapshot. Terms can still be busy under the total short window, its own
 daily cap or infrastructure failure.
 
 One atomic conditional SQLite UPSERT checks and increments all applicable
