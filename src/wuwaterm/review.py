@@ -359,15 +359,74 @@ def _surface_index(
     return surfaces
 
 
+def _is_cjk_character(char: str) -> bool:
+    # Same range as sentence._is_cjk_character. This module must not import
+    # sentence; the review tests pin the shared one-character results.
+    return "\u3400" <= char <= "\u9fff"
+
+
+def _single_character_name_context_ok(text: str, start: int, end: int) -> bool:
+    """Admit bounded Chinese name mentions, avoiding compounds like 香椿/椿树.
+
+    Verbatim copy of sentence._single_character_name_context_ok. Only
+    one-character resonators use it. Unlisted contexts (for example 欢迎椿)
+    stay ineligible; multi-character names keep the existing match.
+    """
+    if start and _is_cjk_character(text[start - 1]):
+        if text[start - 1] not in "和与让给由是用有":
+            return False
+    return (
+        end == len(text)
+        or not _is_cjk_character(text[end])
+        or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
+                            "加入", "离开", "登场", "使用", "说"), end)
+    )
+
+
+def _v2_one_character_eligible(
+    text: str,
+    start: int,
+    end: int,
+    surface: str,
+    entries: Sequence[TermEntry],
+) -> bool:
+    """Match sentence locking: ordinary one-character surfaces are not terms.
+
+    The winning entry is the lowest CATEGORY_ORDER record for this surface,
+    which is the record entries() yields first. A one-character span stays
+    only when that record is the surface's own Chinese resonator name and
+    the surrounding characters look like a name mention.
+    """
+    if len(surface) != 1:
+        return True
+    winner = min(
+        entries, key=lambda entry: CATEGORY_ORDER.get(entry.category, 999)
+    )
+    return (
+        surface == winner.zh
+        and winner.category == "resonator"
+        and _is_cjk_character(surface)
+        and _single_character_name_context_ok(text, start, end)
+    )
+
+
 def _collect_mentions(
-    source: str, surfaces: dict[str, list[TermEntry]]
+    source: str,
+    surfaces: dict[str, list[TermEntry]],
+    *,
+    eligible: object = None,
 ) -> list[_TermSpan]:
     spans: list[_TermSpan] = []
     for order, surface in enumerate(surfaces):
         start = source.find(surface)
         while start != -1:
             end = start + len(surface)
-            if _ascii_word_boundaries_ok(source, start, end, surface):
+            # eligible is set only by review-v2. The default leaves the
+            # frozen v1 span set unchanged.
+            allowed = _ascii_word_boundaries_ok(source, start, end, surface)
+            if allowed and eligible is not None:
+                allowed = eligible(start, end, surface, surfaces[surface])
+            if allowed:
                 spans.append(
                     _TermSpan(start=start, end=end, source=surface, order=order)
                 )
@@ -1111,7 +1170,13 @@ def _review_pair_v2(
         _coerce_resolution_context(resolution_context)
 
     surfaces = _surface_index(entries)
-    mentions = _collect_mentions(source, surfaces)
+    mentions = _collect_mentions(
+        source,
+        surfaces,
+        eligible=lambda start, end, surface, entries: _v2_one_character_eligible(
+            source, start, end, surface, entries
+        ),
+    )
     if alignments is None:
         source_sentences = _sentence_ranges_v2(source)
         target_sentences = _sentence_ranges_v2(target)

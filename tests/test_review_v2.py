@@ -604,3 +604,84 @@ def test_frozen_before_after_measurement(v2_service):
     assert matrix["repeat-shortage"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 1
 
     print("FROZEN_REVIEW_METRICS=" + json.dumps(matrix, ensure_ascii=False, sort_keys=True))
+
+
+_ONE_CHARACTER_RECORDS = (
+    TermRecord("speaker", "fixture", "wo", "wo", "我", "Rover"),
+    TermRecord("core_term", "fixture", "rover", "rover", "漂泊者", "Rover"),
+    TermRecord("resonator", "fixture", "xin", "xin", "心", "Hsin"),
+    TermRecord("speaker", "fixture", "xin-speaker", "xin-speaker", "心", "Hsin"),
+    TermRecord("resonator", "fixture", "chun", "chun", "椿", "Camellya"),
+    TermRecord("echo", "fixture", "jiao", "jiao", "角", "Jué"),
+    TermRecord("item", "fixture", "yan", "yan", "盐", "Salt"),
+    TermRecord("item", "fixture", "mi", "mi", "米", "Rice"),
+    TermRecord("resonator", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
+    TermRecord("core_term", "fixture", "echo", "echo", "声骸", "Echo"),
+    TermRecord("resonator", "fixture", "jia", "jia", "甲", "A"),
+)
+
+
+def _one_character_service(tmp_path: Path) -> TermService:
+    path = tmp_path / "one-character-v2.db"
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")),
+        )
+        insert_records(conn, _ONE_CHARACTER_RECORDS)
+        conn.commit()
+    return TermService(path)
+
+
+def _v2_surfaces(service: TermService, source: str) -> set[str]:
+    report = review_pair(
+        service, source, "placeholder", "en", review_version=RULE_VERSION_V2
+    )
+    assert report.rule_version == RULE_VERSION_V2
+    return {item.source_span.text for item in report.findings}
+
+
+def test_review_v2_one_character_mentions_follow_sentence_locking(tmp_path):
+    # empty: item category rejects 盐 and 米 even though 和 would pass context.
+    # admitted-name: 椿 stays in a name-like context, including a permitted left edge.
+    # kept-multichar: 今汐 and 声骸 are untouched by the one-character filter.
+    service = _one_character_service(tmp_path)
+    assert _v2_surfaces(service, "盐和米不是一句术语。") == set()
+    assert _v2_surfaces(service, "椿加入队伍。") == {"椿"}
+    assert _v2_surfaces(service, "和椿加入队伍。") == {"椿"}
+    assert _v2_surfaces(service, "请让椿加入队伍。") == {"椿"}
+    assert _v2_surfaces(service, "今汐装备了声骸。") == {"今汐", "声骸"}
+    assert _v2_surfaces(service, "我是漂泊者。") == {"漂泊者"}
+    assert _v2_surfaces(service, "心里想着今汐。") == {"今汐"}
+    assert _v2_surfaces(service, "角色提到香椿和声骸。") == {"声骸"}
+    assert _v2_surfaces(service, "香椿") == set()
+    assert _v2_surfaces(service, "椿树") == set()
+    assert _v2_surfaces(service, "欢迎椿") == set()
+    assert _v2_surfaces(service, "A joins the party.") == set()
+
+
+def test_review_v2_unknown_mention_id_stays_invalid_request(tmp_path):
+    # error-path: a resolution for a span the new collector did not emit is
+    # still rejected. The fresh report is what makes the context current.
+    service = _one_character_service(tmp_path)
+    source = "椿加入队伍。"
+    baseline = review_pair(
+        service, source, "placeholder", "en", review_version=RULE_VERSION_V2
+    )
+    context = {
+        "source_revision": baseline.source_revision,
+        "rule_version": baseline.rule_version,
+        "dictionary_revision": baseline.dictionary.revision,
+    }
+    with pytest.raises(ReviewRequestError, match="does not match a finding") as caught:
+        review_pair(
+            service,
+            source,
+            "placeholder",
+            "en",
+            resolutions=({"mention_id": "0:1:nope", "choice": "not_a_term"},),
+            review_version=RULE_VERSION_V2,
+            resolution_context=context,
+        )
+    assert caught.value.code == "invalid_request"
