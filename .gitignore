@@ -28,7 +28,6 @@ channel_replies.json
 .env
 .env.*
 !.env.example
-AGENTS.md
 CLAUDE.md
 
 # OS/editor noise.
