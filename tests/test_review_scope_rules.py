@@ -32,6 +32,18 @@ def test_in_scope_fix_push_does_not_authorize_merge_or_deploy():
     assert "outside the original scope is not a reason" in text
 
 
+def test_post_merge_tidy_deletes_only_the_merged_feature_branch():
+    text = _flat(AGENTS)
+    assert "tidy the workspace in that same turn" in text
+    assert "update local `main` to `origin/main`" in text
+    assert "delete the local merged feature branch" in text
+    assert "delete_branch_on_merge" in text
+    assert "if that pull request's remote head is still present" in text
+    assert "does not authorize deleting any other branch" in text
+    assert "does not perform that deletion" not in text
+    assert "Otherwise delete them" not in text
+
+
 def test_contributing_keeps_wrong_comments_advisory():
     text = _flat(CONTRIBUTING)
     assert "not silently obeyed" in text
