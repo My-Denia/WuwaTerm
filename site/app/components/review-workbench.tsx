@@ -6,8 +6,9 @@ import {
 } from '../../lib/review-navigation.js';
 import { highlightSegments, revisionOf, scalarToUtf16, summarizeReviewParts } from '../../lib/review-report.js';
 import {
-  MAX_CHOICES, MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, mentionId,
-  parseWorkfile, reconcileChoices, recoverSpan, sameBasis, serializeWorkfile, validAlignments, validReport,
+  MAX_CHOICES, MAX_WORKFILE_BYTES, basisOf, canonicalManuscript, compareReports, leaveGuardActive,
+  makeChoice, manuscriptSaveView, mentionId, parseWorkfile, reconcileChoices, recoverableWorkPresent,
+  recoverSpan, sameBasis, serializeWorkfile, validAlignments, validReport,
 } from '../../lib/manuscript.js';
 import { categoryLabel, labelJoiner } from '../../lib/dictionary-labels';
 import { fill, msg, summarySentence } from '../../lib/messages';
@@ -59,6 +60,18 @@ function cleanSnapshot(snapshot: Snapshot) {
   const { source, target, direction, alignments, report } = snapshot;
   return { source, target, direction, alignments, report, ...(snapshot.resolutions === null ? {} : { resolutions: snapshot.resolutions }) };
 }
+function manuscriptBody(nextDraft: Draft, nextChoices: Choice[], nextReports: Snapshot[]) {
+  return { ...nextDraft, choices: nextChoices, history: nextReports.map(cleanSnapshot) };
+}
+function unloadUrl(anchor: HTMLAnchorElement): string | null {
+  if (anchor.hasAttribute('download') || anchor.target === '_blank') return null;
+  const raw = anchor.getAttribute('href');
+  if (!raw || raw.startsWith('#')) return null;
+  let url: URL;
+  try { url = new URL(anchor.href, window.location.href); } catch { return null; }
+  if (url.origin === window.location.origin && url.pathname === window.location.pathname && url.search === window.location.search) return null;
+  return url.href;
+}
 
 export function ReviewWorkbench() {
   const { lang } = useUiLanguage();
@@ -72,6 +85,9 @@ export function ReviewWorkbench() {
   const [notice, setNotice] = useState<NoticeState>(null);
   const [error, setError] = useState<ErrorState>(null);
   const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
+  const [importedCanonical, setImportedCanonical] = useState<string | null>(null);
+  const [downloadedCanonical, setDownloadedCanonical] = useState<string | null>(null);
+  const [pendingLeaveUrl, setPendingLeaveUrl] = useState<string | null>(null);
   const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [canonicalFindingId, setCanonicalFindingId] = useState<string | null>(null);
   const [pool, setPool] = useState<PoolView>({ kind: 'loading' });
@@ -83,6 +99,9 @@ export function ReviewWorkbench() {
   const generation = useRef(0);
   const handoffDialog = useRef<HTMLDialogElement>(null);
   const keepDraftButton = useRef<HTMLButtonElement>(null);
+  const leaveDialog = useRef<HTMLDialogElement>(null);
+  const stayLeaveButton = useRef<HTMLButtonElement>(null);
+  const leaveBypass = useRef(false);
   const work = useRef({ draft, choices, imported, reports, history });
   // The window listener must see edits made after mount, including reports
   // arriving while a replacement decision is open.
@@ -106,7 +125,19 @@ export function ReviewWorkbench() {
   const sourceCompatible = !!latest?.trusted && latest.source === source && latest.direction === direction;
   const comparison = latest && previous ? compareReports(previous, latest) : null;
   const basisChanged = !!latest?.trusted && choices.some(choice => !sameBasis(choice.basis, basisOf(latest.report)));
+  const canonical = canonicalManuscript(manuscriptBody(draft, choices, reports));
+  const holdsWork = recoverableWorkPresent({ source, target, choices, alignments, reports });
+  const saveView = manuscriptSaveView({ holdsWork, canonical, importedCanonical, downloadedCanonical });
+  const guard = leaveGuardActive({ view: saveView, checkInFlight: phase === 'loading' });
   const m = msg(lang);
+  const saveStateText = {
+    empty: m.review.saveStateEmpty,
+    'page-only': m.review.saveStatePageOnly,
+    'matches-import': m.review.saveStateMatchesImport,
+    'matches-download': m.review.saveStateMatchesDownload,
+    diverged: m.review.saveStateDiverged,
+    'not-serializable': m.review.saveStateNotSerializable,
+  }[saveView];
   const locale = numberLocale(lang);
   const reasonText = (item: { reason: string; code?: string }) =>
     ((m.choiceReasons as Record<string, string>)[item.code ?? ''] ?? item.reason);
@@ -191,6 +222,38 @@ export function ReviewWorkbench() {
       keepDraftButton.current?.focus();
     } else handoffDialog.current?.close();
   }, [pendingDraft]);
+  useEffect(() => {
+    if (pendingLeaveUrl) {
+      if (!leaveDialog.current?.open) leaveDialog.current?.showModal();
+      stayLeaveButton.current?.focus();
+    } else leaveDialog.current?.close();
+  }, [pendingLeaveUrl]);
+  useEffect(() => {
+    if (!guard) return;
+    function onClick(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!(event.target instanceof Element)) return;
+      const anchor = event.target.closest('a');
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      const url = unloadUrl(anchor);
+      if (!url) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPendingLeaveUrl(url);
+    }
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [guard]);
+  useEffect(() => {
+    if (!guard) return;
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      if (leaveBypass.current) return;
+      event.preventDefault();
+      event.returnValue = '1';
+    }
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [guard]);
 
   async function check(withChoices = true) {
     if (!validInput || reviewsClosed) return;
@@ -312,9 +375,12 @@ export function ReviewWorkbench() {
       const value = parseWorkfile(await file.text());
       if (generation.current !== mine) { setNotice('importChangedDuringRead'); return; }
       remember(); discardInFlight();
-      setDraft({ source: value.source, target: value.target, direction: value.direction, alignments: value.alignments });
-      setChoices(value.choices); setImported(value.choices);
-      setReports(value.history.map((s: Draft & { report: Report; resolutions?: Resolution[] }) => ({ ...s, resolutions: s.resolutions ?? null, trusted: false, signature: '' })));
+      const nextDraft: Draft = { source: value.source, target: value.target, direction: value.direction, alignments: value.alignments };
+      const nextChoices = value.choices as Choice[];
+      const nextReports: Snapshot[] = value.history.map((s: Draft & { report: Report; resolutions?: Resolution[] }) => ({ ...s, resolutions: s.resolutions ?? null, trusted: false, signature: '' }));
+      const importedBody = canonicalManuscript(manuscriptBody(nextDraft, nextChoices, nextReports));
+      setDraft(nextDraft); setChoices(nextChoices); setImported(nextChoices); setReports(nextReports);
+      if (importedBody) setImportedCanonical(importedBody);
       setNotice('imported');
     } catch (cause) {
       setError(errorFrom(cause, 'importInvalid'));
@@ -323,11 +389,18 @@ export function ReviewWorkbench() {
   }
   function save() {
     try {
-      downloadFile('wuwaterm-manuscript.json', serializeWorkfile({ ...draft, choices, history: reports.map(cleanSnapshot) }));
+      const content = serializeWorkfile(manuscriptBody(draft, choices, reports));
+      downloadFile('wuwaterm-manuscript.json', content);
+      setDownloadedCanonical(content);
+      setError(null);
       setNotice('saved');
     } catch (cause) {
       setError(errorFrom(cause, 'saveFailed'));
     }
+  }
+  function exportTxt() {
+    downloadFile('wuwaterm-translation.txt', target, 'text/plain;charset=utf-8');
+    setNotice('exportTxt');
   }
   function exportResult() {
     // The exported JSON keeps the lib's canonical Chinese reason/label strings
@@ -365,6 +438,19 @@ export function ReviewWorkbench() {
   const comparisonGroups = ([['new', m.review.comparisonNew], ['resolved', m.review.comparisonResolved], ['pending', m.review.comparisonPending], ['incomparable', m.review.comparisonIncomparable]] as const)
     .map(([key, label]) => ({ key, label, items: comparison ? comparison[key] : [] }));
   return <section className="workspace-card review-card" aria-labelledby="review-title">
+    <dialog className="handoff-dialog" ref={leaveDialog} aria-labelledby="leave-title" aria-describedby="leave-description" onCancel={() => setPendingLeaveUrl(null)}>
+      <h3 id="leave-title">{m.review.leaveTitle}</h3>
+      <div id="leave-description">
+        {phase === 'loading' && <p>{m.review.leaveInFlight}</p>}
+        <p>{saveView === 'matches-download' ? m.review.leaveDownload : m.review.leaveUnsaved}</p>
+      </div>
+      {error && <p role="alert">{errorTextValue}</p>}
+      <div className="actions">
+        <button ref={stayLeaveButton} type="button" onClick={() => setPendingLeaveUrl(null)}>{m.review.leaveStay}</button>
+        <button type="button" className="secondary-button" onClick={save}>{m.review.leaveSaveStay}</button>
+        <button type="button" className="secondary-button" onClick={() => { const url = pendingLeaveUrl; if (!url) { setPendingLeaveUrl(null); return; } leaveBypass.current = true; window.location.assign(url); }}>{m.review.leaveAnyway}</button>
+      </div>
+    </dialog>
     <dialog className="handoff-dialog" ref={handoffDialog} aria-labelledby="handoff-title" aria-describedby="handoff-description" onCancel={() => setPendingDraft(null)}>
       <h3 id="handoff-title">{m.review.dialogTitle}</h3>
       <p id="handoff-description">{m.review.dialogBody}</p>
@@ -380,11 +466,12 @@ export function ReviewWorkbench() {
         {m.review.guide.map((step, i) => <li key={i}><strong>{step.title}</strong><span>{step.body}</span></li>)}
       </ol>
     )}
+    <p className="manuscript-save-state" role="status">{saveStateText}{guard ? ` ${m.review.saveStateLeaveNote}` : ''}</p>
     <div className="actions draft-actions">
       <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
       <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
       <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
-      <button type="button" className="secondary-button" onClick={() => downloadFile('wuwaterm-translation.txt', target, 'text/plain;charset=utf-8')}>{m.review.exportTxt}</button>
+      <button type="button" className="secondary-button" onClick={exportTxt}>{m.review.exportTxt}</button>
       <button type="button" className="secondary-button" onClick={exportResult}>{m.review.exportResult}</button>
       <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
     </div>
