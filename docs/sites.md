@@ -57,7 +57,11 @@ It contains source, target, direction, up to 32 occurrence-specific decisions,
 their dictionary/rule/candidate basis, explicit scalar correspondences and the
 last two reports. Import is local and bounded to 1 MiB; it never sends a request.
 There are no accounts, cloud manuscripts, automatic uploads or browser-storage
-history. The user must download and later import the file to resume.
+history. The user must download and later import the file to resume. The page
+can show whether current work still matches the latest manuscript download or
+the file imported in this visit, but it cannot confirm that download reached
+disk. Ordinary leave and refresh ask first when the work cannot be restored
+from that imported file. A crash or forced quit can still discard the page.
 
 Sending a translation to review accepts an empty workbench directly. Sending
 the same source, translation and direction again preserves choices, ranges,

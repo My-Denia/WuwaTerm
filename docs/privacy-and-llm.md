@@ -28,7 +28,10 @@ The WuwaTerm application does not create visitor profiles or history and does
 not read, parse, store or infer visitor IP addresses. Its shared-pool row stores
 aggregate time windows, admitted request counts and translation input-character
 totals — not input, output, request IDs, browser identifiers or per-person
-allowances. Results remain only in the current page and are cleared by refresh.
+allowances. Results remain in the current page. The review workbench asks before
+an ordinary leave or refresh when that page cannot restore the work from the
+manuscript imported in the visit. The site cannot confirm a manuscript
+download reached disk, and a crash or forced quit can still discard the page.
 
 That application boundary is not a promise that every infrastructure layer has
 zero logs or retention. Hosting, network transport and the configured model

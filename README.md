@@ -45,7 +45,7 @@ A general-purpose translator sees game names as ordinary words, so an official n
 - **Look up a term in either direction.** Type Chinese or English and get the official pair. Short romanised queries such as `shenghai` can also match by pinyin.
 - **Translate a sentence with the names locked.** The direction is detected from the script, or you choose it. If a locked term goes missing or comes back altered, you get an error instead of a wrong name.
 - **Review a translation you already have.** Paste the source and your translation; WuwaTerm shows which official terms are confirmed and which need a look, and offers the official pair for each. It checks terminology only, not sentence meaning, and never calls a model.
-- **Pick up where you left off.** The review workbench saves your draft as a manuscript file on your own computer, and you import it later to continue. There are no accounts and no cloud copy of your manuscript.
+- **Pick up where you left off.** The review workbench downloads your draft as a manuscript file on your own computer, and you import it later to continue. The page cannot confirm the download reached disk. Ordinary leave and refresh ask first when the work cannot be restored from the manuscript imported in this visit. A crash or forced quit can still discard the page. There are no accounts and no cloud copy of your manuscript.
 
 <p align="center">
   <img src="docs/assets/readme/screenshot-review.png" alt="The review workbench: 今汐 is confirmed as Jinhsi, while 声骸 needs a look and the official Echo is offered">

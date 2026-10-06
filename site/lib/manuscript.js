@@ -179,6 +179,30 @@ export function serializeWorkfile({ source, target, direction, alignments, choic
   return content;
 }
 
+/** Same bytes Save would hand to the browser, or null when that file cannot be built. */
+export function canonicalManuscript(payload) {
+  try { return serializeWorkfile(payload); } catch { return null; }
+}
+
+export function recoverableWorkPresent({ source, target, choices, alignments, reports }) {
+  return source.length > 0 || target.length > 0 || choices.length > 0 || alignments !== null || reports.length > 0;
+}
+
+export function manuscriptSaveView({ holdsWork, canonical, importedCanonical, downloadedCanonical }) {
+  if (!holdsWork) return 'empty';
+  if (canonical == null) return 'not-serializable';
+  if (importedCanonical != null && canonical === importedCanonical) return 'matches-import';
+  if (downloadedCanonical != null && canonical === downloadedCanonical) return 'matches-download';
+  if (importedCanonical != null || downloadedCanonical != null) return 'diverged';
+  return 'page-only';
+}
+
+/** A matching download does not turn this off: the page never saw the file reach disk. */
+export function leaveGuardActive({ view, checkInFlight = false }) {
+  if (checkInFlight) return true;
+  return view === 'page-only' || view === 'matches-download' || view === 'diverged' || view === 'not-serializable';
+}
+
 /** A fresh report can recover intent; only a later request can check that decision. */
 export function reconcileChoice(choice, draft, fresh, imported = false) {
   const span = recoverSpan(choice.source, choice.source_span, draft.source);
