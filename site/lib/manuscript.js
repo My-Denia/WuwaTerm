@@ -156,6 +156,9 @@ function safeTree(x, depth = 0) {
 }
 export function parseWorkfile(content) {
   if (typeof content !== 'string' || new TextEncoder().encode(content).length > MAX_WORKFILE_BYTES) throw fail('稿件文件不能超过 1 MiB。', 'workfile_too_large');
+  return parseWorkfileContent(content);
+}
+function parseWorkfileContent(content) {
   let x;
   try { x = JSON.parse(content); } catch { throw fail('无法读取 JSON 稿件文件。', 'workfile_not_json'); }
   safeTree(x);
@@ -173,15 +176,23 @@ export function parseWorkfile(content) {
   // No runtime trust or active flags come from the file.
   return x;
 }
-export function serializeWorkfile({ source, target, direction, alignments, choices, history }) {
-  const content = JSON.stringify({ format: WORKFILE_FORMAT, source, target, direction, alignments, choices, history: history.slice(-MAX_HISTORY) }, null, 2);
+function prettyManuscript({ source, target, direction, alignments, choices, history }) {
+  return JSON.stringify({ format: WORKFILE_FORMAT, source, target, direction, alignments, choices, history: history.slice(-MAX_HISTORY) }, null, 2);
+}
+export function serializeWorkfile(payload) {
+  const content = prettyManuscript(payload);
   parseWorkfile(content);
   return content;
 }
 
-/** Same bytes Save would hand to the browser, or null when that file cannot be built. */
+/** Pretty form of a valid manuscript. Save still rejects a string over the size cap;
+ *  this returns that string so an imported compact file can stay the restore baseline. */
 export function canonicalManuscript(payload) {
-  try { return serializeWorkfile(payload); } catch { return null; }
+  try {
+    const content = prettyManuscript(payload);
+    parseWorkfileContent(content);
+    return content;
+  } catch { return null; }
 }
 
 export function recoverableWorkPresent({ source, target, choices, alignments, reports }) {
