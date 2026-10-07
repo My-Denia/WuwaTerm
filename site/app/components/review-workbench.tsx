@@ -10,6 +10,8 @@ import {
   makeChoice, manuscriptSaveView, mentionId, parseWorkfile, reconcileChoices, recoverableWorkPresent,
   recoverSpan, sameBasis, serializeWorkfile, validAlignments, validReport,
 } from '../../lib/manuscript.js';
+import { fragmentOccurrences, spliceOccurrence } from '../../lib/target-revision.js';
+import { validSpan } from '../../lib/manuscript.js';
 import { categoryLabel, labelJoiner } from '../../lib/dictionary-labels';
 import { fill, msg, summarySentence } from '../../lib/messages';
 import { isPool, POOL_REFRESH_EVENT, requestPoolRefresh, type Pool } from '../../lib/pool-snapshot';
@@ -26,6 +28,7 @@ type Draft = { source: string; target: string; direction: 'en' | 'zh'; alignment
 type Choice = { source: string; direction: string; source_span: Span; scope: string; choice: string; candidate: Pick<Candidate, 'candidate_id' | 'zh' | 'en' | 'category'> | null; basis: ReturnType<typeof basisOf> };
 type Resolution = { mention_id: string; choice: string; candidate_id?: string };
 type Snapshot = Draft & { report: Report; trusted: boolean; signature: string; resolutions: Resolution[] | null };
+type RevisionIntent = { snapshot: Snapshot; generation: number; draft: Draft; choices: Choice[]; imported: Choice[]; finding: Finding; candidate: Candidate; trigger: HTMLButtonElement; fragment: string; selected: Span | null };
 type Undo = { draft: Draft; choices: Choice[]; imported: Choice[]; reports?: Snapshot[] };
 // Status messages store language-independent codes (catalog notice keys, or
 // structured error identities); the visible text resolves from the catalog on
@@ -91,6 +94,10 @@ export function ReviewWorkbench() {
   const [verdictFilter, setVerdictFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [canonicalFindingId, setCanonicalFindingId] = useState<string | null>(null);
   const [pool, setPool] = useState<PoolView>({ kind: 'loading' });
+  const [revision, setRevision] = useState<RevisionIntent | null>(null);
+  const revisionRef = useRef<RevisionIntent | null>(null);
+  const revisionDialog = useRef<HTMLDialogElement>(null);
+  const fragmentBox = useRef<HTMLTextAreaElement>(null);
   const [poolAttempt, setPoolAttempt] = useState(0);
   const sourceBox = useRef<HTMLTextAreaElement>(null);
   const targetBox = useRef<HTMLTextAreaElement>(null);
@@ -156,9 +163,58 @@ export function ReviewWorkbench() {
     return code && (msg(lang).errors as Record<string, string>)[code] ? { code } : { code: fallbackKey };
   };
 
-  const discardInFlight = useCallback(() => {
-    controller.current?.abort(); controller.current = null; generation.current += 1; setPhase('idle'); setError(null);
+  const cancelRevision = useCallback((message = '') => {
+    const intent = revisionRef.current;
+    revisionRef.current = null; setRevision(null); revisionDialog.current?.close();
+    if (intent?.trigger.isConnected) intent.trigger.focus({ preventScroll: true });
+    if (message) setNotice(message);
   }, []);
+  function updateRevision(intent: RevisionIntent) { revisionRef.current = intent; setRevision(intent); }
+  function eligibleRevision(snapshot: Snapshot | null, finding: Finding, candidate: Candidate, value: Draft) {
+    return !!snapshot?.trusted && snapshot.report.rule_version === 'review-v2' && !snapshot.report.truncated
+      && snapshot.source === value.source && snapshot.target === value.target && snapshot.direction === value.direction
+      && JSON.stringify(snapshot.alignments) === JSON.stringify(value.alignments)
+      && finding.target_span === null && validSpan(finding.source_span, value.source)
+      && snapshot.report.findings.includes(finding) && finding.candidates.includes(candidate);
+  }
+  function revisionCurrent(intent: RevisionIntent) {
+    const now = work.current;
+    const snapshot = now.reports.at(-1) ?? null;
+    return generation.current === intent.generation && controller.current === null && snapshot === intent.snapshot
+      && now.draft === intent.draft && now.choices === intent.choices && now.imported === intent.imported
+      && eligibleRevision(snapshot, intent.finding, intent.candidate, now.draft);
+  }
+  useLayoutEffect(() => {
+    const intent = revisionRef.current;
+    if (intent && (draft !== intent.draft || choices !== intent.choices || imported !== intent.imported || reports.at(-1) !== intent.snapshot)) cancelRevision('revisionStale');
+  }, [draft, choices, imported, reports, cancelRevision]);
+  useEffect(() => {
+    if (revision) {
+      if (!revisionDialog.current?.open) { revisionDialog.current?.showModal(); fragmentBox.current?.focus(); }
+    } else revisionDialog.current?.close();
+  }, [revision]);
+  const occurrences: Span[] = revision ? fragmentOccurrences(target, revision.fragment) : [];
+  const revisionReplacement = revision ? (direction === 'en' ? revision.candidate.en : revision.candidate.zh) : '';
+  const revisionPreview = revision?.selected ? spliceOccurrence(target, revision.fragment, revision.selected, revisionReplacement) : null;
+  function openRevision(finding: Finding, candidate: Candidate, trigger: HTMLButtonElement) {
+    const now = work.current, snapshot = now.reports.at(-1) ?? null;
+    if (controller.current || phase === 'loading' || !eligibleRevision(snapshot, finding, candidate, now.draft) || !snapshot) return;
+    updateRevision({ snapshot, generation: generation.current, draft: now.draft, choices: now.choices, imported: now.imported, finding, candidate, trigger, fragment: '', selected: null });
+  }
+  function confirmRevision() {
+    const intent = revisionRef.current;
+    if (!intent) return;
+    if (!revisionCurrent(intent)) { cancelRevision('revisionStale'); return; }
+    const replacement = intent.draft.direction === 'en' ? intent.candidate.en : intent.candidate.zh;
+    const result = spliceOccurrence(work.current.draft.target, intent.fragment, intent.selected, replacement);
+    if (result.error || result.target === undefined || !result.span) return;
+    cancelRevision(); editText('target', result.target);
+    requestAnimationFrame(() => jumpTo(targetBox.current, result.target!, result.span!));
+  }
+  const discardInFlight = useCallback(() => {
+    cancelRevision(revisionRef.current ? 'revisionStale' : '');
+    controller.current?.abort(); controller.current = null; generation.current += 1; setPhase('idle'); setError(null);
+  }, [cancelRevision]);
   const receiveDraft = useCallback((next: Draft) => {
     handoffDialog.current?.close(); setPendingDraft(null);
     const before = work.current;
@@ -186,6 +242,7 @@ export function ReviewWorkbench() {
       if (!detail || typeof detail.source !== 'string' || typeof detail.target !== 'string' || !['en', 'zh'].includes(detail.direction)) return;
       const before = work.current;
       if (before.draft.source === detail.source && before.draft.target === detail.target && before.draft.direction === detail.direction) return;
+      cancelRevision(revisionRef.current ? 'revisionStale' : '');
       const next: Draft = { source: detail.source, target: detail.target, direction: detail.direction, alignments: null };
       const empty = before.draft.source === '' && before.draft.target === '' && before.draft.alignments === null
         && !before.choices.length && !before.imported.length && !before.reports.length && !before.history.length;
@@ -194,7 +251,7 @@ export function ReviewWorkbench() {
     }
     window.addEventListener('wuwaterm-send-review', onDraft);
     return () => window.removeEventListener('wuwaterm-send-review', onDraft);
-  }, [receiveDraft]);
+  }, [receiveDraft, cancelRevision]);
   useEffect(() => () => { controller.current?.abort(); }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -439,6 +496,32 @@ export function ReviewWorkbench() {
   const comparisonGroups = ([['new', m.review.comparisonNew], ['resolved', m.review.comparisonResolved], ['pending', m.review.comparisonPending], ['incomparable', m.review.comparisonIncomparable]] as const)
     .map(([key, label]) => ({ key, label, items: comparison ? comparison[key] : [] }));
   return <section className="workspace-card review-card" aria-labelledby="review-title">
+    <dialog className="handoff-dialog revision-dialog" ref={revisionDialog} aria-labelledby="revision-title" aria-describedby="revision-description" onCancel={() => cancelRevision()}>
+      <h3 id="revision-title">{m.review.revisionTitle}</h3>
+      <p id="revision-description">{m.review.revisionDescription}</p>
+      {revision && <>
+        <p>{fill(m.review.spanRange, { start: revision.finding.source_span.start + 1, end: revision.finding.source_span.end })}</p>
+        <Excerpt text={revision.draft.source} span={revision.finding.source_span} missing={m.review.excerptMissingTarget} />
+        <p className="revision-pair">{revision.candidate.zh} ↔ {revision.candidate.en}<br />{m.review.revisionReplacement}: <strong>{revisionReplacement}</strong></p>
+        <p>{m.review.revisionAlignments}</p>
+        <label htmlFor="revision-fragment">{m.review.revisionFragment}</label>
+        <textarea id="revision-fragment" ref={fragmentBox} rows={2} value={revision.fragment} onChange={event => updateRevision({ ...revision, fragment: event.target.value, selected: null })} />
+        <details><summary>{m.review.revisionFullTarget}</summary><p className="review-excerpt">{target}</p></details>
+        <p role="status" aria-live="polite">{!revision.fragment.trim() ? m.review.revisionEnter : occurrences.length ? fill(m.review.revisionMatches, { n: occurrences.length }) : m.review.revisionNoMatches}</p>
+        <fieldset className="revision-occurrences"><legend>{m.review.revisionOccurrences}</legend>
+          {occurrences.map((span, index) => <label className="revision-occurrence" key={`${span.start}:${span.end}`}>
+            <input type="radio" name="revision-occurrence" value={`${span.start}:${span.end}`} checked={revision.selected?.start === span.start && revision.selected?.end === span.end} onChange={() => updateRevision({ ...revision, selected: span })} />
+            <span>{fill(m.review.revisionPosition, { i: index + 1, start: span.start + 1, end: span.end })}<Excerpt text={target} span={span} missing={m.review.excerptMissingTarget} /></span>
+          </label>)}
+        </fieldset>
+        {revision.selected && <div className="revision-preview"><p>{m.review.revisionPreview}</p><p className="review-excerpt"><del>{revision.selected.text}</del> → <ins>{revisionReplacement}</ins></p></div>}
+        {revisionPreview?.error && <p role="alert">{(m.review as Record<string, unknown>)[revisionPreview.error] as string}</p>}
+        <div className="actions">
+          <button type="button" className="secondary-button" onClick={() => cancelRevision()}>{m.review.revisionCancel}</button>
+          <button type="button" disabled={!revisionPreview || !!revisionPreview.error} onClick={confirmRevision}>{m.review.revisionConfirm}</button>
+        </div>
+      </>}
+    </dialog>
     <dialog className="handoff-dialog" ref={leaveDialog} aria-labelledby="leave-title" aria-describedby="leave-description" onCancel={() => setPendingLeaveUrl(null)}>
       <h3 id="leave-title">{m.review.leaveTitle}</h3>
       <div id="leave-description">
@@ -547,6 +630,7 @@ export function ReviewWorkbench() {
             {finding.candidates.map((candidate: Candidate) => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{m.terms.category}{labelJoiner(lang)}{categoryLabel(lang, candidate.category)}</small>
               <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading' || latest.report.truncated} onClick={() => choose(finding, candidate)}>{m.review.adopt}</button>
               {targetLocated && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>{m.review.replace}</button>}
+              {finding.target_span === null && <button className="text-button" type="button" disabled={phase === 'loading' || !eligibleRevision(latest, finding, candidate, draft)} onClick={event => openRevision(finding, candidate, event.currentTarget)}>{m.review.revisionOpen}</button>}
               <details className="candidate-sources"><summary>{m.review.viewSources}</summary>
                 <ul>{candidate.sources.map(item => <li key={`${item.source_file}\u0000${item.source_id}`}><span>{item.source_file}</span><span>{item.source_id}</span></li>)}</ul>
               </details>

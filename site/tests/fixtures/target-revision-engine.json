@@ -1,0 +1,862 @@
+{
+  "evidence": "actual local Python engine with complete synthetic SQLite metadata; no production/network",
+  "script_sha256": "fd4752d03a417b20e155a86bc7ff1bdcc1c52cb97ba5dc9e3a836d36b18fdec2",
+  "cases": [
+    {
+      "name": "sound-shell",
+      "before_request": {
+        "source": "装备声骸。",
+        "target": "Equip sound shell.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "before_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+        "target_revision": "b23e6bf33c13d0fdb0f4e84a8ed0f4a16bf36d4f4b045a8e3f98b953244176c2",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "needs_review",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "after_request": {
+        "source": "装备声骸。",
+        "target": "Equip Echo.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "after_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+        "target_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": {
+              "start": 6,
+              "end": 10,
+              "text": "Echo"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "choice_recheck_request": {
+        "source": "装备声骸。",
+        "target": "Equip Echo.",
+        "direction": "en",
+        "review_version": "review-v2",
+        "resolutions": [
+          {
+            "mention_id": "2:4:声骸",
+            "choice": "official_pair",
+            "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+          }
+        ],
+        "resolution_context": {
+          "source_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+          "rule_version": "review-v2",
+          "dictionary_revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705",
+          "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf"
+        }
+      },
+      "choice_recheck_report": {
+        "request_id": "local-engine-choice-recheck",
+        "source_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+        "target_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": {
+              "start": 6,
+              "end": 10,
+              "text": "Echo"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "selected_finding_id": "2:4:声骸"
+    },
+    {
+      "name": "jinxi",
+      "before_request": {
+        "source": "今汐登场。",
+        "target": "Jinxi appears.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "before_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "6cb19ec60a4876d5e7e7887466d452f712ac4969aea2516f1c7241ccd89b3287",
+        "target_revision": "f57fa7295468c57cc25b07a82ecad0a51ffed0a92af3ca0145693ad1927b32e8",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "0:2:今汐",
+            "verdict": "needs_review",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 0,
+              "end": 2,
+              "text": "今汐"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "今汐",
+                "en": "Jinhsi",
+                "category": "character",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "jinhsi"
+                  }
+                ],
+                "candidate_id": "3a3807f89107c17fa7b30735c22161fd255660131f195d106c7353f275ab7ffe"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "after_request": {
+        "source": "今汐登场。",
+        "target": "Jinhsi appears.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "after_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "6cb19ec60a4876d5e7e7887466d452f712ac4969aea2516f1c7241ccd89b3287",
+        "target_revision": "4b3ffa40ade7da88f4994f7e3033056979975c9c6060c2f383c68198116aaec0",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "0:2:今汐",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 0,
+              "end": 2,
+              "text": "今汐"
+            },
+            "target_span": {
+              "start": 0,
+              "end": 6,
+              "text": "Jinhsi"
+            },
+            "candidates": [
+              {
+                "zh": "今汐",
+                "en": "Jinhsi",
+                "category": "character",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "jinhsi"
+                  }
+                ],
+                "candidate_id": "3a3807f89107c17fa7b30735c22161fd255660131f195d106c7353f275ab7ffe"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "choice_recheck_request": {
+        "source": "今汐登场。",
+        "target": "Jinhsi appears.",
+        "direction": "en",
+        "review_version": "review-v2",
+        "resolutions": [
+          {
+            "mention_id": "0:2:今汐",
+            "choice": "official_pair",
+            "candidate_id": "3a3807f89107c17fa7b30735c22161fd255660131f195d106c7353f275ab7ffe"
+          }
+        ],
+        "resolution_context": {
+          "source_revision": "6cb19ec60a4876d5e7e7887466d452f712ac4969aea2516f1c7241ccd89b3287",
+          "rule_version": "review-v2",
+          "dictionary_revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705",
+          "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf"
+        }
+      },
+      "choice_recheck_report": {
+        "request_id": "local-engine-choice-recheck",
+        "source_revision": "6cb19ec60a4876d5e7e7887466d452f712ac4969aea2516f1c7241ccd89b3287",
+        "target_revision": "4b3ffa40ade7da88f4994f7e3033056979975c9c6060c2f383c68198116aaec0",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "0:2:今汐",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 0,
+              "end": 2,
+              "text": "今汐"
+            },
+            "target_span": {
+              "start": 0,
+              "end": 6,
+              "text": "Jinhsi"
+            },
+            "candidates": [
+              {
+                "zh": "今汐",
+                "en": "Jinhsi",
+                "category": "character",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "jinhsi"
+                  }
+                ],
+                "candidate_id": "3a3807f89107c17fa7b30735c22161fd255660131f195d106c7353f275ab7ffe"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "selected_finding_id": "0:2:今汐"
+    },
+    {
+      "name": "huiyin",
+      "before_request": {
+        "source": "Equip Echo.",
+        "target": "装备回音。",
+        "direction": "zh",
+        "review_version": "review-v2"
+      },
+      "before_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+        "target_revision": "1fa46cff03324e9c21bb4ad71a9b9f024e00050ba011bbeb2edfb30fcb004c95",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "6:10:Echo",
+            "verdict": "needs_review",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 6,
+              "end": 10,
+              "text": "Echo"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "after_request": {
+        "source": "Equip Echo.",
+        "target": "装备声骸。",
+        "direction": "zh",
+        "review_version": "review-v2"
+      },
+      "after_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+        "target_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "6:10:Echo",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 6,
+              "end": 10,
+              "text": "Echo"
+            },
+            "target_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "choice_recheck_request": {
+        "source": "Equip Echo.",
+        "target": "装备声骸。",
+        "direction": "zh",
+        "review_version": "review-v2",
+        "resolutions": [
+          {
+            "mention_id": "6:10:Echo",
+            "choice": "official_pair",
+            "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+          }
+        ],
+        "resolution_context": {
+          "source_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+          "rule_version": "review-v2",
+          "dictionary_revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705",
+          "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf"
+        }
+      },
+      "choice_recheck_report": {
+        "request_id": "local-engine-choice-recheck",
+        "source_revision": "e0351ba7c69f479f657ef306b19bfa101e9fcb73138448527295f6d152734289",
+        "target_revision": "cdf0345866ed6806cad84fa4c7fde474eff9d05e5237c33a32dd377256e003b1",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "6:10:Echo",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 6,
+              "end": 10,
+              "text": "Echo"
+            },
+            "target_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "selected_finding_id": "6:10:Echo"
+    },
+    {
+      "name": "repeated-second",
+      "before_request": {
+        "source": "装备声骸。再次装备声骸。",
+        "target": "Equip sound shell. Equip sound shell again.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "before_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "6733495b6e494db5929907d37e0d7dc2ff85db8777e6ceb34f85ba8a7fdf2ae4",
+        "target_revision": "cf83d543e1fc8166fef92e2e2166077c1d2cfc3ab2f4cde5dea45cf89e1766a7",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 2,
+          "not_evaluated": 1,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "needs_review",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          },
+          {
+            "id": "9:11:声骸",
+            "verdict": "needs_review",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 9,
+              "end": 11,
+              "text": "声骸"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "after_request": {
+        "source": "装备声骸。再次装备声骸。",
+        "target": "Equip sound shell. Equip Echo again.",
+        "direction": "en",
+        "review_version": "review-v2"
+      },
+      "after_report": {
+        "request_id": "local-engine-revision",
+        "source_revision": "6733495b6e494db5929907d37e0d7dc2ff85db8777e6ceb34f85ba8a7fdf2ae4",
+        "target_revision": "8315870ce964709cdac3c73078e5a1e44c847867b6c1f1a3b4d39910d5a1673c",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 2,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "not_evaluated",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          },
+          {
+            "id": "9:11:声骸",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 9,
+              "end": 11,
+              "text": "声骸"
+            },
+            "target_span": {
+              "start": 25,
+              "end": 29,
+              "text": "Echo"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "choice_recheck_request": {
+        "source": "装备声骸。再次装备声骸。",
+        "target": "Equip sound shell. Equip Echo again.",
+        "direction": "en",
+        "review_version": "review-v2",
+        "resolutions": [
+          {
+            "mention_id": "9:11:声骸",
+            "choice": "official_pair",
+            "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+          }
+        ],
+        "resolution_context": {
+          "source_revision": "6733495b6e494db5929907d37e0d7dc2ff85db8777e6ceb34f85ba8a7fdf2ae4",
+          "rule_version": "review-v2",
+          "dictionary_revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705",
+          "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf"
+        }
+      },
+      "choice_recheck_report": {
+        "request_id": "local-engine-choice-recheck",
+        "source_revision": "6733495b6e494db5929907d37e0d7dc2ff85db8777e6ceb34f85ba8a7fdf2ae4",
+        "target_revision": "8315870ce964709cdac3c73078e5a1e44c847867b6c1f1a3b4d39910d5a1673c",
+        "rule_version": "review-v2",
+        "matcher_revision": "5e5755100ea7632184f302593404bf9bc6a3e8297f02c0c143c09141122e51cf",
+        "dictionary": {
+          "schema_version": "synthetic-v1",
+          "source_commit": "local-revision-fixture",
+          "term_count": 2,
+          "revision": "cab210aa45d5888aee2a909dc4193768b353be483347100086c7c8a9501a8705"
+        },
+        "coverage": {
+          "evaluated": 1,
+          "not_evaluated": 2,
+          "rules": [
+            "review.term_pair",
+            "review.sentence_meaning"
+          ]
+        },
+        "findings": [
+          {
+            "id": "2:4:声骸",
+            "verdict": "not_evaluated",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 2,
+              "end": 4,
+              "text": "声骸"
+            },
+            "target_span": null,
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          },
+          {
+            "id": "9:11:声骸",
+            "verdict": "verified_constraint",
+            "rule_id": "review.term_pair",
+            "source_span": {
+              "start": 9,
+              "end": 11,
+              "text": "声骸"
+            },
+            "target_span": {
+              "start": 25,
+              "end": 29,
+              "text": "Echo"
+            },
+            "candidates": [
+              {
+                "zh": "声骸",
+                "en": "Echo",
+                "category": "item",
+                "sources": [
+                  {
+                    "source_file": "Synthetic.json",
+                    "source_id": "echo"
+                  }
+                ],
+                "candidate_id": "0dcc7f590b45b1194c3a30a1a7a6d375ea19007dcc6c90f2de3017dfe7d54e80"
+              }
+            ],
+            "candidates_truncated": false
+          }
+        ],
+        "truncated": false
+      },
+      "selected_finding_id": "9:11:声骸"
+    }
+  ],
+  "provenance": {
+    "generator": "real-engine-recheck.py retained in review-local-revision-20261007 run evidence",
+    "engine": "wuwaterm.application.review_pair/project_review_report and TermService",
+    "source_head": "4f30fda35e0e6f27e4c13e02733965956065db65",
+    "data": "Synthetic.json terms and synthetic-v1/local-revision-fixture metadata; no production inputs"
+  }
+}

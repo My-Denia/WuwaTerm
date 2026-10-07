@@ -72,6 +72,13 @@ draft and stopping the old check. Undo restores the prior work and historical
 reports, but a new explicit check is still required. Handoff and undo do not
 send review requests automatically.
 
+When a fresh check cannot locate a target term, a visible candidate can open a
+local revision dialog. The user enters an exact translation fragment, explicitly
+selects one occurrence and previews its replacement before confirming. This
+changes only that occurrence; adopting an official pair and requesting another
+service check remain separate actions. Choices and historical reports are kept,
+the report becomes stale, and confirmed alignment ranges need reconfirmation.
+
 File reports are untrusted historical records, regardless of hashes or verdicts.
 The first explicit check after import obtains fresh authoritative candidates.
 Unchanged official choices can then be staged for a second explicit check;
