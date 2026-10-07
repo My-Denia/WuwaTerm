@@ -50,7 +50,7 @@
   },
   "type": "module",
   "overrides": {
-    "sharp": "0.35.4",
+    "sharp": "0.35.5",
     "js-yaml": "4.3.2",
     "@esbuild-kit/core-utils": {
       "esbuild": "0.25.12"
