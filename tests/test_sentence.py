@@ -1498,6 +1498,36 @@ def test_html_single_character_context_keeps_multichar_matching_segment_local(sa
     )
 
 
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("回<b>声骸</b>骨", set()),
+        ("<i>回</i><b>声骸</b><u>骨</u>", set()),
+        ("平<b>安可</b>贵", set()),
+        ("随遇而<b>安可</b>以", set()),
+        ("&#22238;<b>声骸</b>&#39592;", set()),
+        ("今汐装备了<b>声骸</b>。", {"今汐", "声骸"}),
+        ("给<b>安可</b>装备<i>声骸</i>。", {"安可", "声骸"}),
+        ("香椿和<b>声骸</b>。", {"声骸"}),
+        ("她有<b>声骸</b>。", {"声骸"}),
+    ],
+)
+def test_html_cjk_boundaries_use_visible_context_across_tags_and_entities(
+    sample_db, html, expected
+):
+    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
+
+    translator = SentenceTranslator(sample_db)
+    protected = protect_telegram_html(html)
+    locked = translator._lock_html_terms(protected)
+    assert {zh for _, zh, _ in locked.locks} == expected
+    # The same displayed text gets the same locking decision in plain text.
+    plain = translator.lock_terms(strip_telegram_html(html))
+    assert {zh for _, zh, _ in plain.locks} == expected
+    # Structural bytes stay protected even when a cross-word span is refused.
+    assert protected.restore(locked.restore(locked.locked_text, to_en=False)) == html
+
+
 def _locked_zh(translator: SentenceTranslator, text: str) -> set[str]:
     return {zh for _placeholder, zh, _en in translator.lock_terms(text).locks}
 

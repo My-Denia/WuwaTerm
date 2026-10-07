@@ -328,7 +328,9 @@ class SentenceTranslator:
                             context_text, context_offset + start, context_offset + end
                         )
                     )
-                    and not crosses_cjk_word_boundary(text, start, end)
+                    and not crosses_cjk_word_boundary(
+                        context_text, context_offset + start, context_offset + end
+                    )
                 ):
                     spans.append(
                         _TermSpan(
@@ -382,7 +384,7 @@ class SentenceTranslator:
         lockable = self._eligible_lockable_sources()
         segments = protected.visible_segments()
         # Formatting tags have no visible width; entities contribute decoded
-        # text to name context while their original bytes remain protected.
+        # text to term context while their original bytes remain protected.
         context_parts: list[str] = []
         offsets: list[int] = []
         offset = 0
