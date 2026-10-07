@@ -269,12 +269,21 @@ def test_v2_wire_additions_are_raw_hex_and_top_level_is_unchanged(v2_service):
         "coverage",
         "dictionary",
         "findings",
+        "matcher_revision",
         "request_id",
         "rule_version",
         "source_revision",
         "target_revision",
         "truncated",
     }
+    assert body["rule_version"] == RULE_VERSION_V2
+    assert HEX64.fullmatch(body["matcher_revision"])
+    legacy = project_review_report(
+        review_pair(v2_service, "今汐。", "Jinhsi.", "en"),
+        "request-v1",
+    )
+    assert legacy["rule_version"] == "review-v1"
+    assert "matcher_revision" not in legacy
     assert set(body["dictionary"]) == {
         "schema_version",
         "source_commit",
@@ -347,6 +356,7 @@ def test_current_candidate_resolution_requires_and_accepts_exact_context(v2_serv
         "source_revision": baseline.source_revision,
         "rule_version": baseline.rule_version,
         "dictionary_revision": baseline.dictionary.revision,
+        "matcher_revision": baseline.matcher_revision,
     }
 
     resolved = _v2(
@@ -393,6 +403,7 @@ def test_v2_not_a_term_keeps_its_two_field_shape_but_requires_context(v2_service
         "source_revision": baseline.source_revision,
         "rule_version": baseline.rule_version,
         "dictionary_revision": baseline.dictionary.revision,
+        "matcher_revision": baseline.matcher_revision,
     }
     report = _v2(
         v2_service,
@@ -673,6 +684,7 @@ def test_review_v2_unknown_mention_id_stays_invalid_request(tmp_path):
         "source_revision": baseline.source_revision,
         "rule_version": baseline.rule_version,
         "dictionary_revision": baseline.dictionary.revision,
+        "matcher_revision": baseline.matcher_revision,
     }
     with pytest.raises(ReviewRequestError, match="does not match a finding") as caught:
         review_pair(
@@ -685,3 +697,106 @@ def test_review_v2_unknown_mention_id_stays_invalid_request(tmp_path):
             resolution_context=context,
         )
     assert caught.value.code == "invalid_request"
+
+
+def test_review_v2_drops_cross_word_spans_and_rejects_their_old_ids(sample_db):
+    service = TermService(sample_db)
+    source = "回声骸骨"
+    current = review_pair(
+        service, source, "placeholder", "en", review_version=RULE_VERSION_V2
+    )
+    assert current.rule_version == RULE_VERSION_V2
+    assert {item.source_span.text for item in current.findings} == set()
+    historical = review_pair(service, source, "placeholder", "en")
+    removed = next(item for item in historical.findings if item.source_span.text == "声骸")
+    context = {
+        "source_revision": current.source_revision,
+        "rule_version": current.rule_version,
+        "dictionary_revision": current.dictionary.revision,
+        "matcher_revision": current.matcher_revision,
+    }
+    with pytest.raises(ReviewRequestError, match="does not match a finding") as caught:
+        review_pair(
+            service,
+            source,
+            "placeholder",
+            "en",
+            resolutions=({"mention_id": removed.id, "choice": "not_a_term"},),
+            review_version=RULE_VERSION_V2,
+            resolution_context=context,
+        )
+    assert caught.value.code == "invalid_request"
+    kept = review_pair(
+        service,
+        "给安可装备声骸。",
+        "placeholder",
+        "en",
+        review_version=RULE_VERSION_V2,
+    )
+    assert {item.source_span.text for item in kept.findings} == {"安可", "声骸"}
+
+
+def test_kept_span_without_current_matcher_revision_is_stale(sample_db):
+    # A span both the old and new matchers keep is still a different rule
+    # basis. Omitting matcher_revision is stale, not a missing finding.
+    service = TermService(sample_db)
+    source = "给安可装备声骸。"
+    report = review_pair(
+        service, source, "placeholder", "en", review_version=RULE_VERSION_V2
+    )
+    assert report.rule_version == RULE_VERSION_V2
+    assert HEX64.fullmatch(report.matcher_revision or "")
+    assert {item.source_span.text for item in report.findings} == {"安可", "声骸"}
+    finding = next(item for item in report.findings if item.source_span.text == "安可")
+    resolutions = ({"mention_id": finding.id, "choice": "not_a_term"},)
+    old = {
+        "source_revision": report.source_revision,
+        "rule_version": report.rule_version,
+        "dictionary_revision": report.dictionary.revision,
+    }
+    with pytest.raises(ReviewRequestError, match="stale") as stale:
+        review_pair(
+            service,
+            source,
+            "placeholder",
+            "en",
+            resolutions=resolutions,
+            review_version=RULE_VERSION_V2,
+            resolution_context=old,
+        )
+    assert stale.value.code == "invalid_request"
+    with pytest.raises(ReviewRequestError, match="not valid") as blank:
+        review_pair(
+            service,
+            source,
+            "placeholder",
+            "en",
+            resolutions=resolutions,
+            review_version=RULE_VERSION_V2,
+            resolution_context={**old, "matcher_revision": ""},
+        )
+    assert blank.value.code == "invalid_request"
+    with pytest.raises(ReviewRequestError, match="stale") as other:
+        review_pair(
+            service,
+            source,
+            "placeholder",
+            "en",
+            resolutions=resolutions,
+            review_version=RULE_VERSION_V2,
+            resolution_context={**old, "matcher_revision": "0" * 64},
+        )
+    assert other.value.code == "invalid_request"
+    accepted = review_pair(
+        service,
+        source,
+        "placeholder",
+        "en",
+        resolutions=resolutions,
+        review_version=RULE_VERSION_V2,
+        resolution_context={**old, "matcher_revision": report.matcher_revision},
+    )
+    assert accepted.rule_version == RULE_VERSION_V2
+    assert {item.source_span.text for item in accepted.findings} == {"安可", "声骸"}
+    kept_finding = next(item for item in accepted.findings if item.id == finding.id)
+    assert kept_finding.verdict == VERDICT_NOT_EVALUATED

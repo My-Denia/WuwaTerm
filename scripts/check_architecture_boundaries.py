@@ -3,7 +3,7 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     lookup, normalize, models, review
+  domain core:     lookup, normalize, models, review, cjk_span
   domain+LLM:      sentence  (may use telegram_html; must not import bot/channel)
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
@@ -93,7 +93,7 @@ STALE_CONTRACT_FRAGMENTS = tuple(
     )
 )
 
-DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review"})
+DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review", "cjk_span"})
 DOMAIN_LLM = frozenset({"sentence"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel

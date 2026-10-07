@@ -176,7 +176,10 @@ function validReviewFinding(value, source, target) {
 }
 
 function validReviewBody(value, input) {
-  if (input.review_version === 'review-v2') return validReport(value, input.source, input.target) && value.rule_version === 'review-v2';
+  if (input.review_version === 'review-v2') {
+    return validReport(value, input.source, input.target) && value.rule_version === 'review-v2'
+      && typeof value.matcher_revision === 'string' && /^[0-9a-f]{64}$/u.test(value.matcher_revision);
+  }
   if (!plainObject(value) || !exactKeys(value, [
     'coverage', 'dictionary', 'findings', 'request_id', 'rule_version',
     'source_revision', 'target_revision', 'truncated',
@@ -225,9 +228,10 @@ function validReviewInput(value) {
         && typeof item.candidate_id === 'string' && /^[0-9a-f]{64}$/u.test(item.candidate_id)))) return false;
     const context = value.resolution_context;
     if (resolutions.length || Object.hasOwn(value, 'resolution_context')) {
-      if (!plainObject(context) || !exactKeys(context, ['source_revision', 'rule_version', 'dictionary_revision'])
+      if (!plainObject(context) || !exactKeys(context, ['dictionary_revision', 'matcher_revision', 'rule_version', 'source_revision'])
         || context.rule_version !== 'review-v2' || typeof context.source_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.source_revision)
-        || typeof context.dictionary_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.dictionary_revision)) return false;
+        || typeof context.dictionary_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.dictionary_revision)
+        || typeof context.matcher_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.matcher_revision)) return false;
     }
     return true;
   }
@@ -714,6 +718,7 @@ export async function proxyReviewRequest({
       accept: 'application/json',
       authorization: `Bearer ${configured.token}`,
       'content-type': 'application/json',
+      ...(input.review_version === 'review-v2' ? { 'X-WuwaTerm-Matcher-Basis': '1' } : {}),
     };
     const upstream = await fetchImpl(upstreamUrl, {
       method: 'POST',
@@ -771,6 +776,9 @@ export async function proxyReviewRequest({
       source_revision: upstreamBody.source_revision,
       target_revision: upstreamBody.target_revision,
       rule_version: upstreamBody.rule_version,
+      ...(input.review_version === 'review-v2'
+        ? { matcher_revision: upstreamBody.matcher_revision }
+        : {}),
       dictionary: {
         schema_version: upstreamBody.dictionary.schema_version,
         source_commit: upstreamBody.dictionary.source_commit,

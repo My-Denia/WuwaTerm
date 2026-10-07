@@ -711,6 +711,7 @@ def review_pair(
     review_version: str = "review-v1",
     alignments: object = None,
     resolution_context: object = None,
+    require_matcher_revision: bool = True,
 ) -> ReviewReport:
     """Unique application entry for pair review. Adapters must not import review."""
     try:
@@ -723,6 +724,7 @@ def review_pair(
             review_version=review_version,
             alignments=alignments,
             resolution_context=resolution_context,
+            require_matcher_revision=require_matcher_revision,
         )
     except ReviewRequestError:
         raise
@@ -813,6 +815,11 @@ def project_review_report(report: ReviewReport, request_id: str) -> dict[str, ob
         "source_revision": report.source_revision,
         "target_revision": report.target_revision,
         "rule_version": report.rule_version,
+        **(
+            {"matcher_revision": report.matcher_revision}
+            if report.matcher_revision is not None
+            else {}
+        ),
         "dictionary": dictionary,
         "coverage": {
             "evaluated": report.coverage.evaluated,

@@ -21,7 +21,7 @@ type Span = { start: number; end: number; text: string };
 type Alignment = { source: Span; target: Span | null };
 type Candidate = { candidate_id: string; zh: string; en: string; category: string; sources: { source_file: string; source_id: string }[] };
 type Finding = { id: string; rule_id: string; verdict: string; source_span: Span; target_span: Span | null; candidates: Candidate[]; candidates_truncated: boolean };
-type Report = { request_id: string; source_revision: string; target_revision: string; rule_version: string; dictionary: { schema_version: string | null; source_commit: string | null; term_count: number; revision: string }; coverage: { evaluated: number; not_evaluated: number; rules: string[] }; findings: Finding[]; truncated: boolean };
+type Report = { request_id: string; source_revision: string; target_revision: string; rule_version: string; matcher_revision?: string; dictionary: { schema_version: string | null; source_commit: string | null; term_count: number; revision: string }; coverage: { evaluated: number; not_evaluated: number; rules: string[] }; findings: Finding[]; truncated: boolean };
 type Draft = { source: string; target: string; direction: 'en' | 'zh'; alignments: Alignment[] | null };
 type Choice = { source: string; direction: string; source_span: Span; scope: string; choice: string; candidate: Pick<Candidate, 'candidate_id' | 'zh' | 'en' | 'category'> | null; basis: ReturnType<typeof basisOf> };
 type Resolution = { mention_id: string; choice: string; candidate_id?: string };
@@ -266,7 +266,7 @@ export function ReviewWorkbench() {
       source, target, direction, review_version: 'review-v2',
       ...(alignments === null ? {} : { alignments }),
       ...(resolutions.length && latest ? { resolutions, resolution_context: {
-        source_revision: latest.report.source_revision, rule_version: latest.report.rule_version, dictionary_revision: latest.report.dictionary.revision,
+        source_revision: latest.report.source_revision, rule_version: latest.report.rule_version, dictionary_revision: latest.report.dictionary.revision, matcher_revision: latest.report.matcher_revision,
       } } : {}),
     };
     if (new TextEncoder().encode(JSON.stringify(body)).length > 32768) {
@@ -282,7 +282,8 @@ export function ReviewWorkbench() {
       }
       if (!validReport(value, source, target)) throw Object.assign(new Error(m.errors.responseInvalid), { gahCode: 'responseInvalid' });
       const report = value as Report;
-      if (report.rule_version !== 'review-v2' || report.source_revision !== await revisionOf(source)
+      if (report.rule_version !== 'review-v2' || !/^[0-9a-f]{64}$/u.test(report.matcher_revision ?? '')
+        || report.source_revision !== await revisionOf(source)
         || report.target_revision !== await revisionOf(target)) throw Object.assign(new Error(m.errors.responseBasisMismatch), { gahCode: 'responseBasisMismatch' });
       if (abort.signal.aborted || generation.current !== mine) return;
       const snapshot: Snapshot = { ...submitted, report, trusted: true, signature: submittedSignature, resolutions };

@@ -14,6 +14,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .cjk_span import MATCHER_REVISION, crosses_cjk_word_boundary
 from .constants import CATEGORY_ORDER
 from .lookup import TermService
 from .models import TermEntry
@@ -110,6 +111,7 @@ class ReviewReport:
     coverage: ReviewCoverage
     findings: tuple[ReviewFinding, ...]
     truncated: bool = False
+    matcher_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,7 @@ class ReviewResolutionContext:
     source_revision: str
     rule_version: str
     dictionary_revision: str
+    matcher_revision: str | None = None
 
 
 def mention_id(start: int, end: int, text: str) -> str:
@@ -277,11 +280,9 @@ def _coerce_resolution_v2(item: object) -> ReviewResolution:
 
 
 def _coerce_resolution_context(item: object) -> ReviewResolutionContext:
-    if not isinstance(item, dict) or set(item) != {
-        "source_revision",
-        "rule_version",
-        "dictionary_revision",
-    }:
+    base = {"source_revision", "rule_version", "dictionary_revision"}
+    allowed = (base, base | {"matcher_revision"})
+    if not isinstance(item, dict) or set(item) not in allowed:
         raise ReviewRequestError("invalid_request", "resolution_context is not valid")
     values = tuple(
         item[key]
@@ -291,9 +292,15 @@ def _coerce_resolution_context(item: object) -> ReviewResolutionContext:
             "dictionary_revision",
         )
     )
+    matcher = item.get("matcher_revision")
+    if "matcher_revision" in item and (not isinstance(matcher, str) or not matcher):
+        raise ReviewRequestError("invalid_request", "resolution_context is not valid")
     if any(not isinstance(value, str) or not value for value in values):
         raise ReviewRequestError("invalid_request", "resolution_context is not valid")
-    return ReviewResolutionContext(*values)
+    return ReviewResolutionContext(
+        *values,
+        matcher_revision=matcher if isinstance(matcher, str) else None,
+    )
 
 
 def _dictionary_snapshot(service: TermService) -> ReviewDictionary:
@@ -370,7 +377,7 @@ def _single_character_name_context_ok(text: str, start: int, end: int) -> bool:
 
     Verbatim copy of sentence._single_character_name_context_ok. Only
     one-character resonators use it. Unlisted contexts (for example 欢迎椿)
-    stay ineligible; multi-character names keep the existing match.
+    stay ineligible. This function does not decide multi-character spans.
     """
     if start and _is_cjk_character(text[start - 1]):
         if text[start - 1] not in "和与让给由是用有":
@@ -1031,6 +1038,7 @@ def review_pair(
     review_version: str = RULE_VERSION,
     alignments: object = None,
     resolution_context: object = None,
+    require_matcher_revision: bool = True,
 ) -> ReviewReport:
     """Review a pair under the explicitly selected additive protocol."""
     if review_version == RULE_VERSION:
@@ -1048,6 +1056,7 @@ def review_pair(
             resolutions,
             alignments=alignments,
             resolution_context=resolution_context,
+            require_matcher_revision=require_matcher_revision,
         )
     raise ReviewRequestError("invalid_request", "review_version is not supported")
 
@@ -1138,6 +1147,7 @@ def _review_pair_v2(
     *,
     alignments: object,
     resolution_context: object,
+    require_matcher_revision: bool,
 ) -> ReviewReport:
     source = _validate_side("source", source)
     target = _validate_side("target", target)
@@ -1164,6 +1174,10 @@ def _review_pair_v2(
             context.source_revision != current_source_revision
             or context.rule_version != RULE_VERSION_V2
             or context.dictionary_revision != dictionary_revision
+            or (
+                (require_matcher_revision or context.matcher_revision is not None)
+                and context.matcher_revision != MATCHER_REVISION
+            )
         ):
             raise ReviewRequestError("invalid_request", "resolution_context is stale")
     elif resolution_context is not None:
@@ -1173,8 +1187,9 @@ def _review_pair_v2(
     mentions = _collect_mentions(
         source,
         surfaces,
-        eligible=lambda start, end, surface, entries: _v2_one_character_eligible(
-            source, start, end, surface, entries
+        eligible=lambda start, end, surface, entries: (
+            _v2_one_character_eligible(source, start, end, surface, entries)
+            and not crosses_cjk_word_boundary(source, start, end)
         ),
     )
     if alignments is None:
@@ -1242,6 +1257,7 @@ def _review_pair_v2(
         source_revision=current_source_revision,
         target_revision=text_revision(target),
         rule_version=RULE_VERSION_V2,
+        matcher_revision=MATCHER_REVISION,
         dictionary=dictionary,
         coverage=ReviewCoverage(
             evaluated=evaluated,

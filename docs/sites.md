@@ -123,6 +123,20 @@ context and are checked against the authoritative snapshot. The Site performs
 one upstream call per admitted explicit check; save/import/edit/select/compare
 and export perform none. Deploy the dual-protocol API before the v2 Site;
 roll back the Site to its v1 version before reverting the API.
+`review-v2` stays the request protocol. Its default response retains the old
+key set and omits `matcher_revision`. Without a capability header, nonempty
+three-key resolution contexts remain fresh when source, rule, and dictionary
+revisions match. An explicitly supplied matcher revision must also match.
+
+The new Site sends `X-WuwaTerm-Matcher-Basis: 1` on v2 upstream requests.
+Only that exact value opts into reports carrying `matcher_revision`, a separate
+identity for the ordinary-word span rule. In this mode a nonempty resolution
+context must carry the current matcher revision; omission or mismatch is stale.
+Other header values are invalid for v2; v1 ignores the header and omits the field.
+Deploy the compatible API first, then the Site that sends this header. Roll back
+that Site first, while the new API still accepts legacy three-key resolutions,
+then revert the API. A historical manuscript still imports, but a kept span
+whose saved basis lacks the new matcher is `basis_changed` on the new Site.
 
 ## Interface language and report exports
 

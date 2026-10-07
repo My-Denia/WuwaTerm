@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { fixture } from '../fixtures/manuscript.mjs';
+import { fixture, freshApiReport } from '../fixtures/manuscript.mjs';
 
 const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 const SOURCE = '今汐。\n声骸。';
@@ -20,7 +20,7 @@ async function open(page) {
     if (path === '/api/reviews') {
       const body = route.request().postDataJSON();
       reviews.push(body);
-      return route.fulfill({ json: fixture(body.source, body.target, body.direction).report });
+      return route.fulfill({ json: freshApiReport(fixture(body.source, body.target, body.direction).report) });
     }
     throw new Error(`Unexpected API request: ${path}`);
   });

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { fixture } from '../fixtures/manuscript.mjs';
+import { fixture, freshApiReport } from '../fixtures/manuscript.mjs';
 
 const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 const SOURCE = '今汐。';
@@ -79,7 +79,7 @@ test('a full review quota disables the two admission buttons and leaves local ac
     if (path === '/api/pool') return route.fulfill({ json: poolBody(0) });
     if (path === '/api/reviews') {
       reviews.push(route.request().postDataJSON());
-      return route.fulfill({ json: fixture(SOURCE, TARGET).report });
+      return route.fulfill({ json: freshApiReport(fixture(SOURCE, TARGET).report) });
     }
     throw new Error(`Unexpected API request: ${path}`);
   });
@@ -120,7 +120,7 @@ test('adopt and not-term stay available after a check once the snapshot reaches 
     if (path === '/api/pool') return route.fulfill({ json: poolBody(remaining) });
     if (path === '/api/reviews') {
       const body = route.request().postDataJSON();
-      return route.fulfill({ json: fixture(body.source, body.target, body.direction).report });
+      return route.fulfill({ json: freshApiReport(fixture(body.source, body.target, body.direction).report) });
     }
     throw new Error(`Unexpected API request: ${path}`);
   });

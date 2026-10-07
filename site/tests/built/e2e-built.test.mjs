@@ -75,7 +75,7 @@ test('built real routes use bound environment and D1 for the review-v2 visitor j
   assert.deepEqual(upstream.calls.at(-1).body, input);
   await tick();
   const selected = { ...input, resolutions: [{ mention_id: report.findings[0].id, choice: 'official_pair', candidate_id: report.findings[0].candidates[0].candidate_id }],
-    resolution_context: { source_revision: report.source_revision, rule_version: 'review-v2', dictionary_revision: report.dictionary.revision } };
+    resolution_context: { source_revision: report.source_revision, rule_version: 'review-v2', dictionary_revision: report.dictionary.revision, matcher_revision: report.matcher_revision } };
   await admitted('/api/reviews', post(selected));
   assert.deepEqual(upstream.calls.at(-1).body, selected);
   assert.equal(upstream.calls.at(-1).method, 'POST');
@@ -144,7 +144,7 @@ test('built upstream failures have redacted no-store errors and retain admitted 
     assert.equal((await json(await server.fetch('/api/reviews', post(draft)), expected)).reason, reason);
     await tick();
   }
-  upstream.reply = () => Response.json({ ...fixture(draft.source, draft.target).report, source_revision: '0'.repeat(64) });
+  upstream.reply = () => Response.json({ ...fixture(draft.source, draft.target).report, matcher_revision: 'ab'.repeat(32), source_revision: '0'.repeat(64) });
   assert.equal((await json(await server.fetch('/api/reviews', post(draft)), 502)).reason, 'upstream_schema_mismatch');
   const row = await counters(db);
   assert.equal(row.review_used, 4);
