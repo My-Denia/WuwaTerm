@@ -54,9 +54,13 @@ function validCandidate(x, version) {
     && (version !== V2 || HEX.test(x.candidate_id));
 }
 export function validReport(x, source, target) {
-  return keys(x, ['request_id', 'source_revision', 'target_revision', 'rule_version', 'dictionary', 'coverage', 'findings', 'truncated'])
+  if (!object(x)) return false;
+  const fields = ['request_id', 'source_revision', 'target_revision', 'rule_version', 'dictionary', 'coverage', 'findings', 'truncated'];
+  if (Object.hasOwn(x, 'matcher_revision')) fields.push('matcher_revision');
+  return keys(x, fields)
     && text(x.request_id, 256, false) && HEX.test(x.source_revision) && HEX.test(x.target_revision)
     && ['review-v1', V2].includes(x.rule_version) && validDictionary(x.dictionary, x.rule_version)
+    && (!Object.hasOwn(x, 'matcher_revision') || HEX.test(x.matcher_revision))
     && keys(x.coverage, ['evaluated', 'not_evaluated', 'rules'])
     && Number.isSafeInteger(x.coverage.evaluated) && x.coverage.evaluated >= 0
     && Number.isSafeInteger(x.coverage.not_evaluated) && x.coverage.not_evaluated >= 0
@@ -70,14 +74,25 @@ export function validReport(x, source, target) {
       && typeof f.candidates_truncated === 'boolean' && Array.isArray(f.candidates) && f.candidates.length <= 8
       && f.candidates.every(c => validCandidate(c, x.rule_version)));
 }
-export function basisOf(report) { return { rule_version: report.rule_version, dictionary: { ...report.dictionary } }; }
+export function basisOf(report) {
+  const basis = { rule_version: report.rule_version, dictionary: { ...report.dictionary } };
+  if (Object.hasOwn(report, 'matcher_revision')) basis.matcher_revision = report.matcher_revision;
+  return basis;
+}
+function matcherId(basis) {
+  if (!basis || !Object.hasOwn(basis, 'matcher_revision')) return null;
+  return HEX.test(basis.matcher_revision) ? basis.matcher_revision : false;
+}
 export function sameBasis(a, b) {
+  const left = matcherId(a);
+  const right = matcherId(b);
   return !!a && !!b && a.rule_version === V2 && b.rule_version === V2
     && text(a.dictionary?.schema_version, 4096, false) && text(b.dictionary?.schema_version, 4096, false)
     && text(a.dictionary?.source_commit, 4096, false) && text(b.dictionary?.source_commit, 4096, false)
     && HEX.test(a.dictionary?.revision) && a.dictionary.revision === b.dictionary?.revision
     && a.dictionary.source_commit === b.dictionary.source_commit
-    && a.dictionary.schema_version === b.dictionary.schema_version && a.dictionary.term_count === b.dictionary.term_count;
+    && a.dictionary.schema_version === b.dictionary.schema_version && a.dictionary.term_count === b.dictionary.term_count
+    && left !== false && right !== false && left === right;
 }
 export function mentionId(span) { return `${span.start}:${span.end}:${span.text}`; }
 export function scopeOf(alignments, span) {
@@ -114,10 +129,17 @@ export function makeChoice({ source, direction, alignments, report, finding, can
     basis: basisOf(report),
   };
 }
+function validBasis(x) {
+  if (!object(x)) return false;
+  const fields = ['rule_version', 'dictionary'];
+  if (Object.hasOwn(x, 'matcher_revision')) fields.push('matcher_revision');
+  return keys(x, fields) && x.rule_version === V2 && validDictionary(x.dictionary, V2)
+    && (!Object.hasOwn(x, 'matcher_revision') || HEX.test(x.matcher_revision));
+}
 function validChoice(x) {
   return keys(x, ['source', 'direction', 'source_span', 'scope', 'choice', 'candidate', 'basis'])
     && text(x.source) && direction(x.direction) && validSpan(x.source_span, x.source) && text(x.scope, 20000)
-    && keys(x.basis, ['rule_version', 'dictionary']) && x.basis.rule_version === V2 && validDictionary(x.basis.dictionary, V2)
+    && validBasis(x.basis)
     && (x.choice === 'not_a_term' ? x.candidate === null : x.choice === 'official_pair'
       && keys(x.candidate, ['candidate_id', 'zh', 'en', 'category']) && HEX.test(x.candidate.candidate_id)
       && text(x.candidate.zh, 2000, false) && text(x.candidate.en, 2000, false) && text(x.candidate.category, 256, false));

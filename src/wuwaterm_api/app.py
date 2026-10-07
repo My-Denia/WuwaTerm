@@ -302,6 +302,9 @@ class ReviewResolutionContextBody(BaseModel):
     source_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
     rule_version: Literal["review-v2"]
     dictionary_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Required for nonempty resolutions only after the client opts into
+    # matcher basis. Legacy v2 clients retain their three-key contract.
+    matcher_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ReviewRequestBody(BaseModel):
@@ -437,6 +440,7 @@ class ReviewResponseBody(BaseModel):
     source_revision: str
     target_revision: str
     rule_version: str
+    matcher_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     dictionary: ReviewDictionaryBody
     coverage: ReviewCoverageBody
     findings: list[ReviewFindingBody]
@@ -460,9 +464,7 @@ ErrorCode = Literal[
 
 
 class ErrorDetailBody(BaseModel):
-    code: ErrorCode = Field(
-        description="Enumerated, stable failure classification."
-    )
+    code: ErrorCode = Field(description="Enumerated, stable failure classification.")
     message: str = Field(description="Short operator-facing text.")
 
 
@@ -973,6 +975,7 @@ async def _require_active_device(
 
 def _device_llm_guard(request: Request, device: Device) -> LlmCallGuard:
     """Recheck the device, then spend the shared budget inside the model slot."""
+
     async def before_llm_call() -> None:
         await _require_active_device(request, device)
         request.app.state.llm_budget()
@@ -1152,7 +1155,9 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     ):
         nested = schema.get("json_schema_extra")
         if isinstance(nested, dict) and "maxLength" in nested:
-            remaining = {key: value for key, value in nested.items() if key != "maxLength"}
+            remaining = {
+                key: value for key, value in nested.items() if key != "maxLength"
+            }
             if remaining:
                 schema["json_schema_extra"] = remaining
             else:
@@ -1258,7 +1263,9 @@ def create_app(
     # failure produced by an inner middleware carries it. The body read and the
     # handler each carry the same time budget, applied where each of them
     # actually runs.
-    app.add_middleware(TimeoutMiddleware, timeout_seconds=resolved.request_timeout_seconds)
+    app.add_middleware(
+        TimeoutMiddleware, timeout_seconds=resolved.request_timeout_seconds
+    )
     app.add_middleware(
         BodyLimitMiddleware,
         max_body_bytes=resolved.max_body_bytes,
@@ -1305,9 +1312,7 @@ def create_app(
         # here is what left the first version of this fix answering 405 (from
         # the parent, unhardened) to an off-edge POST while GET was correctly
         # refused — the same oracle reached by a different verb.
-        app.router.routes.insert(
-            0, _PlainRoute(WEB_MOUNT_PATH, bare_mount_guard(app))
-        )
+        app.router.routes.insert(0, _PlainRoute(WEB_MOUNT_PATH, bare_mount_guard(app)))
     _install_openapi_client_limits(app)
     return app
 
@@ -1388,7 +1393,9 @@ def _register_routes(app: FastAPI) -> None:
         """Readiness: the terminology database is readable right now. No auth."""
         ok = await asyncio.to_thread(probe_database, request.app.state.term_service)
         if not ok:
-            raise ApiError(ERROR_INTERNAL, "dictionary is not readable", status_code=503)
+            raise ApiError(
+                ERROR_INTERNAL, "dictionary is not readable", status_code=503
+            )
         return HealthResponseBody(status="ready")
 
     @app.post(
@@ -1439,9 +1446,7 @@ def _register_routes(app: FastAPI) -> None:
                 "translation refused: no model configured request_id=%s",
                 _request_id(request),
             )
-            raise ApiError(
-                ERROR_LLM_UNAVAILABLE, "no translation model is configured"
-            )
+            raise ApiError(ERROR_LLM_UNAVAILABLE, "no translation model is configured")
         # Before returning: close the window between the model call and the
         # response, so a revocation that commits mid-flight is not served. The
         # work is already paid for here, so a transient store read error serves
@@ -1508,9 +1513,7 @@ def _register_routes(app: FastAPI) -> None:
         device: Annotated[Device, Depends(require_scope(SCOPE_META))],
     ) -> MetaResponseBody:
         """Service and data provenance. No paths, no secrets, no chat ids."""
-        meta = await asyncio.to_thread(
-            service_metadata, request.app.state.term_service
-        )
+        meta = await asyncio.to_thread(service_metadata, request.app.state.term_service)
         return MetaResponseBody(
             service_version=service_version(),
             api_version=API_VERSION,
@@ -1538,6 +1541,12 @@ def _register_routes(app: FastAPI) -> None:
     ) -> JSONResponse:
         """Review a submitted source/target pair against dictionary constraints."""
         await _require_active_device(request, device)
+        matcher_basis = request.headers.get("X-WuwaTerm-Matcher-Basis")
+        use_matcher_basis = body.review_version == "review-v2" and matcher_basis == "1"
+        if body.review_version == "review-v2" and matcher_basis not in (None, "1"):
+            raise ApiError(
+                ERROR_INVALID_REQUEST, "matcher basis capability is not valid"
+            )
         resolutions = []
         for item in body.resolutions or ():
             dumped = item.model_dump()
@@ -1553,7 +1562,7 @@ def _register_routes(app: FastAPI) -> None:
             else None
         )
         resolution_context = (
-            body.resolution_context.model_dump()
+            body.resolution_context.model_dump(exclude_unset=True)
             if body.resolution_context is not None
             else None
         )
@@ -1568,10 +1577,13 @@ def _register_routes(app: FastAPI) -> None:
                 review_version=body.review_version,
                 alignments=alignments,
                 resolution_context=resolution_context,
+                require_matcher_revision=use_matcher_basis,
             )
         except ReviewRequestError as exc:
             raise ApiError(exc.code, exc.message)
         projected = project_review_report(report, _request_id(request))
+        if not use_matcher_basis:
+            projected.pop("matcher_revision", None)
         LOGGER.info(
             "review device=%s findings=%s truncated=%s request_id=%s",
             redact_id(device.device_id),

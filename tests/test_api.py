@@ -3238,7 +3238,7 @@ def test_review_capped_json_fits_max_upstream_bytes(tmp_path, sample_db):
         )
 
 
-def test_review_v2_success_has_only_the_two_nested_wire_additions(tmp_path, sample_db):
+def test_review_v2_matcher_opt_in_adds_matcher_to_wire(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "owner desktop")
 
@@ -3253,14 +3253,18 @@ def test_review_v2_success_has_only_the_two_nested_wire_additions(tmp_path, samp
                 "target": "Jinhsi got an Echo.",
                 "direction": "en",
             },
-            headers=bearer(token),
+            headers={**bearer(token), "X-WuwaTerm-Matcher-Basis": "1"},
         )
     )
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == REVIEW_TOP_KEYS
+    assert set(body) == REVIEW_TOP_KEYS | {"matcher_revision"}
     assert body["rule_version"] == "review-v2"
+    assert len(body["matcher_revision"]) == 64
+    assert all(
+        character in "0123456789abcdef" for character in body["matcher_revision"]
+    )
     assert set(body["dictionary"]) == {
         "revision",
         "schema_version",
@@ -3286,15 +3290,14 @@ def test_review_v2_success_has_only_the_two_nested_wire_additions(tmp_path, samp
 def test_review_v2_current_candidate_resolution_round_trip(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "owner desktop")
+    headers = {**bearer(token), "X-WuwaTerm-Matcher-Basis": "1"}
     request = {
         "review_version": "review-v2",
         "source": "今汐拿到了声骸。",
         "target": "Jinhsi got something.",
         "direction": "en",
     }
-    baseline = run(
-        call(app, "POST", "/v1/reviews", json=request, headers=bearer(token))
-    )
+    baseline = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
     assert baseline.status_code == 200, baseline.text
     body = baseline.json()
     echo = next(
@@ -3317,10 +3320,13 @@ def test_review_v2_current_candidate_resolution_round_trip(tmp_path, sample_db):
         "rule_version": body["rule_version"],
         "dictionary_revision": body["dictionary"]["revision"],
     }
+    stale = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
+    assert stale.status_code == 400, stale.text
+    assert stale.json()["error"]["code"] == "invalid_request"
+    assert "stale" in stale.json()["error"]["message"]
+    request["resolution_context"]["matcher_revision"] = body["matcher_revision"]
 
-    resolved = run(
-        call(app, "POST", "/v1/reviews", json=request, headers=bearer(token))
-    )
+    resolved = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
     assert resolved.status_code == 200, resolved.text
     resolved_echo = next(
         item
@@ -3328,6 +3334,114 @@ def test_review_v2_current_candidate_resolution_round_trip(tmp_path, sample_db):
         if item["source_span"]["text"] == "声骸"
     )
     assert resolved_echo["verdict"] == "confirmed_conflict"
+
+
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_review_v2_rollout_resolution_compatibility(tmp_path, sample_db, opt_in):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "synthetic desktop")
+    headers = bearer(token)
+    if opt_in:
+        headers["X-WuwaTerm-Matcher-Basis"] = "1"
+    request = {
+        "review_version": "review-v2",
+        "source": "今汐拿到了声骸。",
+        "target": "Jinhsi got something.",
+        "direction": "en",
+    }
+    baseline = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
+    assert baseline.status_code == 200, baseline.text
+    report = baseline.json()
+    assert set(report) == REVIEW_TOP_KEYS | ({"matcher_revision"} if opt_in else set())
+    finding = next(x for x in report["findings"] if x["source_span"]["text"] == "声骸")
+    request["resolutions"] = [{"mention_id": finding["id"], "choice": "not_a_term"}]
+    request["resolution_context"] = {
+        "source_revision": report["source_revision"],
+        "rule_version": report["rule_version"],
+        "dictionary_revision": report["dictionary"]["revision"],
+    }
+    # The intermediate deploy and rollback state is the new API with old Site.
+    legacy = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
+    if opt_in:
+        assert legacy.status_code == 400, legacy.text
+        assert legacy.json()["error"]["code"] == "invalid_request"
+        assert "stale" in legacy.json()["error"]["message"]
+    else:
+        assert legacy.status_code == 200, legacy.text
+        assert "matcher_revision" not in legacy.json()
+        assert (
+            next(x for x in legacy.json()["findings"] if x["id"] == finding["id"])[
+                "verdict"
+            ]
+            == "not_evaluated"
+        )
+
+    # Explicit matcher values are authoritative even for a legacy request.
+    request["resolution_context"]["matcher_revision"] = "0" * 64
+    stale = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
+    assert stale.status_code == 400, stale.text
+    assert stale.json()["error"]["code"] == "invalid_request"
+    assert "stale" in stale.json()["error"]["message"]
+    current = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                k: v
+                for k, v in request.items()
+                if k not in ("resolutions", "resolution_context")
+            },
+            headers={**bearer(token), "X-WuwaTerm-Matcher-Basis": "1"},
+        )
+    ).json()
+    request["resolution_context"]["matcher_revision"] = current["matcher_revision"]
+    accepted = run(call(app, "POST", "/v1/reviews", json=request, headers=headers))
+    assert accepted.status_code == 200, accepted.text
+
+
+@pytest.mark.parametrize("value", ["", "0", "2", "true", " 1", "1, 1"])
+def test_review_v2_rejects_unknown_matcher_capability(tmp_path, sample_db, value):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "synthetic desktop")
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+            },
+            headers={**bearer(token), "X-WuwaTerm-Matcher-Basis": value},
+        )
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("value", ["1", "unknown"])
+def test_review_v1_ignores_matcher_capability(tmp_path, sample_db, value):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "synthetic desktop")
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v1",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+            },
+            headers={**bearer(token), "X-WuwaTerm-Matcher-Basis": value},
+        )
+    )
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == REVIEW_TOP_KEYS
 
 
 @pytest.mark.parametrize(

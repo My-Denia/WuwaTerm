@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { requireBuiltArtifact } from '../../scripts/check-built-artifact.mjs';
-import { fixture } from '../fixtures/manuscript.mjs';
+import { fixture, freshApiReport } from '../fixtures/manuscript.mjs';
 import { fixtureEnvironment } from './pool-fixture.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -18,7 +18,7 @@ function reply(call) {
   });
   if (call.path === '/wuwaterm-api/v1/reviews') {
     assert.equal(call.body.review_version, 'review-v2');
-    return Response.json({ ...fixture(call.body.source, call.body.target, call.body.direction).report, request_id });
+    return Response.json({ ...freshApiReport(fixture(call.body.source, call.body.target, call.body.direction).report), request_id });
   }
   assert.equal(call.path, '/wuwaterm-api/v1/meta');
   return Response.json({ api_version: 'v1', service_version: '0.4.1', term_count: 12345,

@@ -1496,3 +1496,19 @@ def test_html_single_character_context_keeps_multichar_matching_segment_local(sa
     assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
         "声<b>骸</b>"
     )
+
+
+def _locked_zh(translator: SentenceTranslator, text: str) -> set[str]:
+    return {zh for _placeholder, zh, _en in translator.lock_terms(text).locks}
+
+
+def test_cross_word_cjk_terms_stay_unlocked_until_both_edges_are_ordinary_words(sample_db):
+    translator = SentenceTranslator(sample_db)
+    assert _locked_zh(translator, "随遇而安可以，但别放弃。") == set()
+    assert _locked_zh(translator, "祝你平安可以吗？") == set()
+    assert _locked_zh(translator, "平安可贵。") == set()
+    assert _locked_zh(translator, "回声骸骨") == set()
+    assert _locked_zh(translator, "今汐装备了声骸。") == {"今汐", "声骸"}
+    assert _locked_zh(translator, "给安可装备声骸。") == {"安可", "声骸"}
+    assert _locked_zh(translator, "安可加入队伍。") == {"安可"}
+    assert _locked_zh(translator, "一声骸") == {"声骸"}

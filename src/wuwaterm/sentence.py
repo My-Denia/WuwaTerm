@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from .cjk_span import crosses_cjk_word_boundary
 from .lookup import TermService
 from .normalize import normalize_user_text
 from .telegram_html import (
@@ -251,9 +252,9 @@ def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> b
     """Reject a term match glued to surrounding ASCII word characters.
 
     Without this, "New Echoes" locks the "Echo" span and restores to
-    "New 声骸es". Only the ASCII sides are guarded: CJK text has no word
-    boundaries, and cross-word CJK mis-locks (回声骸骨) need segmentation,
-    which is out of scope.
+    "New 声骸es". CJK terms use crosses_cjk_word_boundary instead: a
+    multi-character term is dropped only when ordinary words cross both
+    of its edges, as in 回声骸骨. Neighboring CJK text alone is not a veto.
     """
     if _is_ascii_word_char(source[0]) and start > 0 and _is_ascii_word_char(
         text[start - 1]
@@ -319,11 +320,15 @@ class SentenceTranslator:
             start = text.find(source)
             while start != -1:
                 end = start + len(source)
-                if _ascii_word_boundaries_ok(text, start, end, source) and (
-                    len(source) > 1
-                    or _single_character_name_context_ok(
-                        context_text, context_offset + start, context_offset + end
+                if (
+                    _ascii_word_boundaries_ok(text, start, end, source)
+                    and (
+                        len(source) > 1
+                        or _single_character_name_context_ok(
+                            context_text, context_offset + start, context_offset + end
+                        )
                     )
+                    and not crosses_cjk_word_boundary(text, start, end)
                 ):
                     spans.append(
                         _TermSpan(

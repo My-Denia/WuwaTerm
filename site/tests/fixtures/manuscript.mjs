@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 export const hash = value => createHash('sha256').update(value).digest('hex');
+/** Stand-in identity for a fresh review-v2 API report. Historical fixtures omit it. */
+export const FRESH_MATCHER_REVISION = 'ab'.repeat(32);
+export const freshApiReport = report => ({ ...report, matcher_revision: FRESH_MATCHER_REVISION });
 export const dictionary = { schema_version: '2', source_commit: 'synthetic-fixture', term_count: 2, revision: hash('dictionary-v1') };
 export const candidate = { zh: '今汐', en: 'Jinhsi', category: 'character', sources: [{ source_file: 'Fixture.json', source_id: 'fixture_jinhsi' }], candidate_id: hash('candidate-jinhsi') };
 export const echo = { zh: '声骸', en: 'Echo', category: 'item', sources: [{ source_file: 'Fixture.json', source_id: 'fixture_echo' }], candidate_id: hash('candidate-echo') };

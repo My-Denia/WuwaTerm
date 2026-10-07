@@ -544,6 +544,18 @@
             "title": "Dictionary Revision",
             "type": "string"
           },
+          "matcher_revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Revision"
+          },
           "rule_version": {
             "const": "review-v2",
             "title": "Rule Version",
@@ -578,6 +590,18 @@
             },
             "title": "Findings",
             "type": "array"
+          },
+          "matcher_revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Revision"
           },
           "request_id": {
             "title": "Request Id",

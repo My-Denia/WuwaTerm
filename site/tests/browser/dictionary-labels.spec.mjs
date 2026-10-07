@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { fixture } from '../fixtures/manuscript.mjs';
+import { fixture, freshApiReport } from '../fixtures/manuscript.mjs';
 
 const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
 
@@ -21,7 +21,7 @@ function reviewBody() {
     candidate_id: 'a'.repeat(64),
     category: 'not_a_category',
   });
-  return body.report;
+  return freshApiReport(body.report);
 }
 
 async function open(page) {

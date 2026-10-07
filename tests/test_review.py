@@ -644,3 +644,17 @@ def test_review_v1_still_reports_one_character_dictionary_collisions(tmp_path):
         report = review_pair(service, source, "placeholder", "en")
         assert report.rule_version == "review-v1"
         assert {item.source_span.text for item in report.findings} == surfaces
+
+
+def test_review_v1_still_reports_multi_character_cross_word_spans(sample_db):
+    service = _service(sample_db)
+    expected = {
+        "随遇而安可以，但别放弃。": "安可",
+        "祝你平安可以吗？": "安可",
+        "平安可贵。": "安可",
+        "回声骸骨": "声骸",
+    }
+    for source, term in expected.items():
+        report = review_pair(service, source, "placeholder", "en")
+        assert report.rule_version == "review-v1"
+        assert term in {item.source_span.text for item in report.findings}

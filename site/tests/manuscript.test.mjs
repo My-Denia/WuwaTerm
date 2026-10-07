@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, parseWorkfile, reconcileChoice, recoverSpan, serializeWorkfile, validAlignments, validReport } from '../lib/manuscript.js';
+import { MAX_WORKFILE_BYTES, basisOf, compareReports, makeChoice, mentionId, parseWorkfile, reconcileChoice, recoverSpan, serializeWorkfile, validAlignments, validReport } from '../lib/manuscript.js';
 import { fixture, hash } from './fixtures/manuscript.mjs';
 const choiceFor = (s, i = 0, c = s.report.findings[i].candidates[0]) => makeChoice({ ...s, finding: s.report.findings[i], candidate: c });
 const clean = s => { const { source, target, direction, alignments, report, resolutions } = s; return { source, target, direction, alignments, report, resolutions }; };
@@ -102,6 +102,25 @@ test('report validator accepts exact v2 and rejects corrupted provenance/span sh
   assert.equal(validReport({ ...s.report, injected: true }, s.source, s.target), false);
   assert.equal(validReport({ ...s.report, dictionary: { ...s.report.dictionary, revision: 'fake' } }, s.source, s.target), false);
   assert.equal(basisOf(s.report).dictionary.revision.length, 64);
+});
+test('a kept finding whose saved basis omits matcher revision must be confirmed again', () => {
+  const historical = fixture();
+  const fresh = structuredClone(historical);
+  fresh.report.matcher_revision = 'a'.repeat(64);
+  const oldChoice = choiceFor(historical);
+  assert.equal(Object.hasOwn(oldChoice.basis, 'matcher_revision'), false);
+  assert.equal(validReport(historical.report, historical.source, historical.target), true);
+  assert.equal(validReport(fresh.report, fresh.source, fresh.target), true);
+  const restored = parseWorkfile(save(historical));
+  assert.equal(restored.choices.length, historical.report.findings.length);
+  assert.equal(Object.hasOwn(restored.choices[0].basis, 'matcher_revision'), false);
+  const pending = reconcileChoice(oldChoice, fresh, fresh);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.code, 'basis_changed');
+  assert.ok(fresh.report.findings.some(finding => finding.id === mentionId(oldChoice.source_span)));
+  const current = reconcileChoice(choiceFor(fresh), fresh, fresh);
+  assert.equal(current.status, 'applicable');
+  assert.equal(compareReports(historical, fresh).resolved.length, 0);
 });
 
 test('missing dictionary provenance never auto-restores intent or resolves a finding', () => {

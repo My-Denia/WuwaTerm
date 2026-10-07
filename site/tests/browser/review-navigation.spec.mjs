@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
-import { candidate, dictionary, echo, hash } from '../fixtures/manuscript.mjs';
+import { FRESH_MATCHER_REVISION, candidate, dictionary, echo, hash } from '../fixtures/manuscript.mjs';
 import { scalarToUtf16 } from '../../lib/review-report.js';
 
 const BASE = process.env.WUWATERM_BROWSER_URL ?? '';
@@ -44,6 +44,7 @@ function reportFor(source, target) {
     source_revision: hash(source),
     target_revision: hash(target),
     rule_version: 'review-v2',
+    matcher_revision: FRESH_MATCHER_REVISION,
     dictionary,
     coverage: { evaluated: 3, not_evaluated: 7, rules: ['review.term_pair'] },
     findings,
