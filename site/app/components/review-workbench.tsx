@@ -432,11 +432,16 @@ export function ReviewWorkbench() {
     try {
       const value = parseWorkfile(await file.text());
       if (generation.current !== mine) { setNotice('importChangedDuringRead'); return; }
-      remember(); discardInFlight();
       const nextDraft: Draft = { source: value.source, target: value.target, direction: value.direction, alignments: value.alignments };
       const nextChoices = value.choices as Choice[];
       const nextReports: Snapshot[] = value.history.map((s: Draft & { report: Report; resolutions?: Resolution[] }) => ({ ...s, resolutions: s.resolutions ?? null, trusted: false, signature: '' }));
       const importedBody = canonicalManuscript(manuscriptBody(nextDraft, nextChoices, nextReports));
+      // File reads can overlap a check finishing. Snapshot the accepted-time
+      // work, including its reports; ordinary edit undo keeps its own semantics.
+      const before = work.current;
+      const saved: Undo = { draft: before.draft, choices: before.choices, imported: before.imported, reports: before.reports };
+      setHistory([...before.history.slice(-19), saved]);
+      discardInFlight();
       setDraft(nextDraft); setChoices(nextChoices); setImported(nextChoices); setReports(nextReports);
       if (importedBody) setImportedCanonical(importedBody);
       setNotice('imported');

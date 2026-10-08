@@ -48,13 +48,17 @@ async function translate(page, draft = B) {
   await expect(page.locator('.translated-text')).toHaveText(draft.target);
 }
 
-async function workfile(page, button = '保存稿件') {
+async function downloadText(page, button) {
   const waiting = page.waitForEvent('download');
   await page.getByRole('button', { name: button, exact: true }).click();
   const stream = await (await waiting).createReadStream();
   const parts = [];
   for await (const part of stream) parts.push(part);
-  return JSON.parse(Buffer.concat(parts).toString());
+  return Buffer.concat(parts).toString();
+}
+
+async function workfile(page, button = '保存稿件') {
+  return JSON.parse(await downloadText(page, button));
 }
 
 async function prepare(page) {
@@ -232,4 +236,129 @@ test('undo preserves imported choice provenance instead of treating it as a new 
   await expect(page.locator('.choice-records')).toContainText('0 处适用 / 1 处待确认');
   expect(reviews).toHaveLength(1);
   expect(reviews[0].resolutions).toBeUndefined();
+});
+
+function savedManuscript(draft = B) {
+  const saved = fixture(draft.source, draft.target, draft.direction);
+  return serializeWorkfile({ ...draft, alignments: null, choices: [],
+    history: [{ ...draft, alignments: null, report: saved.report, resolutions: [] }] });
+}
+
+async function importManuscript(page, content) {
+  await page.getByLabel('选择稿件文件').setInputFiles({ name: 'draft.json', mimeType: 'application/json', buffer: Buffer.from(content) });
+}
+
+for (const origin of ['checked', 'imported']) test(`import undo restores both ${origin} reports and the full manuscript without certifying it`, async ({ page }, info) => {
+  const { reviews } = await open(page);
+  await prepare(page);
+  await page.getByRole('button', { name: '核对术语', exact: true }).click();
+  await expect(page.locator('.review-current')).toBeVisible();
+  if (origin === 'imported') {
+    await importManuscript(page, JSON.stringify(await workfile(page)));
+    await expect(page.locator('.choice-records')).toContainText('待确认');
+  }
+  const before = await workfile(page);
+  expect(before.history).toHaveLength(2);
+  await importManuscript(page, savedManuscript());
+  await expect(page.locator('#review-source')).toHaveValue(B.source);
+  await page.getByRole('button', { name: '撤销修订', exact: true }).click();
+  const restored = await workfile(page);
+  await info.attach('restored-manuscript', { body: JSON.stringify({ before, restored }), contentType: 'application/json' });
+  expect(restored).toEqual(before);
+  const result = await workfile(page, '导出当前结果');
+  expect(result.report_is_current).toBe(false);
+  expect(result.sentence_meaning_evaluated).toBe(false);
+  expect(result.verified_stamp.valid).toBe(false);
+  expect(result.report).toEqual(before.history.at(-1));
+  const markdown = await downloadText(page, '导出 Markdown 报告');
+  expect(markdown).toContain(A.source);
+  expect(markdown).not.toContain(B.source);
+  expect(markdown).toContain(origin === 'imported' ? '导入的历史报告' : '需要重新核对');
+  await expect(page.locator('.review-current')).toHaveCount(0);
+  if (origin === 'imported') await expect(page.locator('.choice-records')).toContainText('待确认');
+  // The earlier ordinary choice undo entry still exists beneath both imports.
+  await page.getByRole('button', { name: '撤销修订', exact: true }).click();
+  if (origin === 'imported') await page.getByRole('button', { name: '撤销修订', exact: true }).click();
+  await expect(page.locator('.choice-records')).toHaveCount(0);
+  expect(reviews).toHaveLength(2);
+});
+
+test('import undo clears imported reports when the previous manuscript had none', async ({ page }) => {
+  const { reviews } = await open(page);
+  await page.locator('#review-source').fill(A.source);
+  await page.locator('#review-target').fill(A.target);
+  const before = await workfile(page);
+  expect(before.history).toEqual([]);
+  await importManuscript(page, savedManuscript());
+  await expect(page.locator('.review-findings')).toBeVisible();
+  await page.getByRole('button', { name: '撤销修订', exact: true }).click();
+  expect(await workfile(page)).toEqual(before);
+  await expect(page.locator('.review-findings')).toHaveCount(0);
+  expect((await workfile(page, '导出当前结果')).report).toBeNull();
+  expect(reviews).toHaveLength(0);
+});
+
+test('import undo snapshots reports completed during the pending file read', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = File.prototype.text;
+    File.prototype.text = function () {
+      const read = () => original.call(this);
+      window.importReadStarted = true;
+      return new Promise(resolve => { window.finishImportRead = async () => resolve(await read()); });
+    };
+  });
+  const { reviews, gate } = await open(page);
+  await prepare(page);
+  let release;
+  gate.next = new Promise(resolve => { release = resolve; });
+  await page.getByRole('button', { name: '核对术语', exact: true }).click();
+  await expect.poll(() => reviews.length).toBe(2);
+  await importManuscript(page, savedManuscript());
+  await expect.poll(() => page.evaluate(() => window.importReadStarted)).toBe(true);
+  release();
+  await expect(page.locator('.review-current')).toBeVisible();
+  const acceptedTime = await workfile(page);
+  expect(acceptedTime.history).toHaveLength(2);
+  await page.evaluate(() => window.finishImportRead());
+  await expect(page.locator('#review-source')).toHaveValue(B.source);
+  await page.getByRole('button', { name: '撤销修订', exact: true }).click();
+  expect(await workfile(page)).toEqual(acceptedTime);
+  expect((await workfile(page, '导出当前结果')).report_is_current).toBe(false);
+  expect(reviews).toHaveLength(2);
+});
+
+// The synthetic responder proves client request/local currency behavior only;
+// it does not evaluate the engine's not_a_term verdict.
+test('a narrow keyboard resume fetches fresh basis before explicitly reconfirming not_a_term and rechecking', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { reviews } = await open(page);
+  const saved = fixture(A.source, A.target, A.direction);
+  const choice = makeChoice({ ...saved, finding: saved.report.findings[0], candidate: null });
+  await importManuscript(page, serializeWorkfile({ ...A, alignments: null, choices: [choice], history: [{ ...A, alignments: null, report: saved.report, resolutions: [] }] }));
+  await expect(page.locator('.choice-records')).toContainText('0 处适用 / 1 处待确认');
+  expect(reviews).toHaveLength(0);
+  const fresh = page.getByRole('button', { name: '仅获取新依据', exact: true });
+  await fresh.focus();
+  await page.keyboard.press('Enter');
+  // Imported history already displays its rule; wait for the fresh check.
+  await expect(page.locator('.review-current')).toBeVisible();
+  expect(reviews).toHaveLength(1);
+  expect(reviews[0].resolutions).toBeUndefined();
+  await expect(page.locator('.choice-records')).toContainText('0 处适用 / 1 处待确认');
+  const confirm = page.getByRole('button', { name: '这里不是术语', exact: true });
+  await confirm.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.choice-records')).toContainText('1 处适用 / 0 处待确认');
+  expect(reviews).toHaveLength(1);
+  const check = page.getByRole('button', { name: '核对术语', exact: true });
+  await check.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => reviews.length).toBe(2);
+  await expect(page.locator('.review-current')).toBeVisible();
+  expect(reviews[1].resolutions).toEqual([{ mention_id: '0:2:今汐', choice: 'not_a_term' }]);
+  expect(reviews[1].resolution_context.matcher_revision).toMatch(/^[0-9a-f]{64}$/u);
+  const result = await workfile(page, '导出当前结果');
+  expect(result.sentence_meaning_evaluated).toBe(false);
+  expect(result.verified_stamp.valid).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
