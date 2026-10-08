@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .cjk_span import MATCHER_REVISION, crosses_cjk_word_boundary
@@ -668,6 +668,15 @@ def _find_occurrences(text: str, needle: str) -> list[tuple[int, int]]:
     return found
 
 
+def _find_occurrences_v2(text: str, needle: str) -> list[tuple[int, int]]:
+    """Review-v2 target search: a cross-word CJK substring is not an occurrence."""
+    found: list[tuple[int, int]] = []
+    for start, end in _find_occurrences(text, needle):
+        if not crosses_cjk_word_boundary(text, start, end):
+            found.append((start, end))
+    return found
+
+
 def _official_form(candidate: ReviewCandidate, direction: str) -> str:
     return candidate.en if direction == "en" else candidate.zh
 
@@ -680,10 +689,12 @@ def _elsewhere_has_form(
     target: str,
     sentence: tuple[int, int],
     forms: Sequence[str],
+    *,
+    occurrences: Callable[[str, str], list[tuple[int, int]]] = _find_occurrences,
 ) -> bool:
     lo, hi = sentence
     for form in forms:
-        for start, end in _find_occurrences(target, form):
+        for start, end in occurrences(target, form):
             if start < lo or end > hi:
                 return True
     return False
@@ -935,6 +946,8 @@ def _judge_mention_v2(
         local = []
         for start, end in _find_occurrences(region, form):
             absolute = (lo + start, lo + end)
+            if crosses_cjk_word_boundary(target, absolute[0], absolute[1]):
+                continue
             if _span_available(absolute, used_target):
                 local.append(absolute)
         in_region[form] = local
@@ -954,7 +967,9 @@ def _judge_mention_v2(
                 target_span=_span_at(target, hit[0], hit[1]),
                 candidates=candidates,
             )
-        if _elsewhere_has_form(target, corresponding, forms):
+        if _elsewhere_has_form(
+            target, corresponding, forms, occurrences=_find_occurrences_v2
+        ):
             return ReviewFinding(
                 id=finding_id,
                 verdict=VERDICT_NOT_EVALUATED,
@@ -1009,7 +1024,9 @@ def _judge_mention_v2(
                 candidates=candidates,
             )
 
-    if _elsewhere_has_form(target, corresponding, forms):
+    if _elsewhere_has_form(
+        target, corresponding, forms, occurrences=_find_occurrences_v2
+    ):
         return ReviewFinding(
             id=finding_id,
             verdict=VERDICT_NOT_EVALUATED,

@@ -37,6 +37,9 @@ of the canonical filter, commit, and sorted word list.
 A term is removed only when one listed word crosses its start and one crosses
 its end. Touching just one side is not enough, and the term's own exact span
 is not a veto.
+
+wuwaterm-cjk-matcher-v2 keeps the v1 slice and also gates review-v2 target
+occurrences; review-v2 source mentions already did.
 """
 
 from __future__ import annotations
@@ -66401,7 +66404,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v1", JIEBA_COMMIT, LEXICON_FILTER, sorted(words)],
+        ["wuwaterm-cjk-matcher-v2", JIEBA_COMMIT, LEXICON_FILTER, sorted(words)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
