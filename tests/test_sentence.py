@@ -1706,3 +1706,23 @@ def test_case_variant_follows_the_record_its_official_casing_locks_to(
     translator = SentenceTranslator(case_variant_db)
     assert _locked_pairs(translator, "Velmira joins.") == [("维米拉", "Velmira")]
     assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+
+
+@pytest.mark.parametrize(
+    "html", ["<b>velmira</b>s join", "x<b>velmira</b> joins", "<b>élodie ruè</b>s wave"]
+)
+def test_case_variant_boundaries_span_html_structures(case_variant_db, html):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(case_variant_db)
+    locked = translator._lock_html_terms(protect_telegram_html(html))
+    assert locked.locks == ()
+
+
+def test_case_variant_locks_inside_html_formatting(case_variant_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(case_variant_db)
+    protected = protect_telegram_html("我和<b>velmira</b>组队")
+    locked = translator._lock_html_terms(protected)
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]

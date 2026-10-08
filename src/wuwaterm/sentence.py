@@ -420,7 +420,9 @@ class SentenceTranslator:
                     _ascii_word_boundaries_ok(text, start, end, source)
                     and (
                         source in official
-                        or _case_variant_boundaries_ok(text, start, end)
+                        or _case_variant_boundaries_ok(
+                            context_text, context_offset + start, context_offset + end
+                        )
                     )
                     and (
                         len(source) > 1
