@@ -1678,3 +1678,31 @@ def test_case_variants_follow_atomic_db_replacement(case_variant_db):
 
     assert _locked_pairs(translator, "velmira joins") == []
     assert _locked_pairs(translator, "velmyra joins") == [("维米拉", "Velmyra")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["xélodie ruè waves.", "élodie ruès wave.", "ÉLODIE RUÈS wave.", "élodie ruè2 waves."],
+)
+def test_case_variant_rejects_glue_at_non_ascii_latin_edges(case_variant_db, text):
+    assert _locked_pairs(SentenceTranslator(case_variant_db), text) == []
+
+
+def test_case_variant_allows_cjk_next_to_non_ascii_latin_edges(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "我和élodie ruè组队") == [("艾洛蒂", "Élodie Ruè")]
+
+
+def test_case_variant_follows_the_record_its_official_casing_locks_to(
+    case_variant_db,
+):
+    # A lower-priority row with the same exact English surface never locks,
+    # so the variant restores the same record as the official casing.
+    with connect(case_variant_db) as conn:
+        insert_records(
+            conn, [TermRecord("item", "fixture", "20", "20", "维米拉草", "Velmira")]
+        )
+        conn.commit()
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "Velmira joins.") == [("维米拉", "Velmira")]
+    assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]

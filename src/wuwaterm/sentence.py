@@ -307,10 +307,12 @@ def _case_variant_sources(
     """Return lowercase/uppercase surfaces for case-variant category names.
 
     A variant is the exact Unicode lower() or upper() of an eligible English
-    surface, never a mixed casing. Surfaces whose casefold key is shared by
-    eligible sources with a different (zh, en) record in any category get no
-    variant, and a variant that is itself a dictionary source is left to that
-    exact entry.
+    surface, never a mixed casing. ``sources`` maps each surface to the record
+    it already locks to, so a variant inherits exactly the record its official
+    casing restores; lower-priority rows sharing that same surface never lock
+    and do not block it. Distinct surfaces in any category that share a
+    casefold key but lock to different (zh, en) records get no variant, and a
+    variant that is itself a dictionary source is left to that exact entry.
     """
     records_by_key: dict[str, set[tuple[str, str]]] = {}
     for source, official in sources.items():
@@ -339,6 +341,26 @@ def _case_variant_sources(
                 emitted.add(variant)
                 variants.append((variant, official))
     return variants
+
+
+def _is_latin_word_char(char: str) -> bool:
+    return _is_ascii_word_char(char) or (
+        char.isalpha() and unicodedata.name(char, "").startswith("LATIN ")
+    )
+
+
+def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
+    """Reject a case-variant match glued to Latin letters or ASCII digits.
+
+    Variants may start or end with non-ASCII Latin letters (jué, élodie),
+    which the ASCII-only check does not cover, so xélodie or élodie ruès
+    would otherwise lock. Adjacent CJK text stays allowed.
+    """
+    if start > 0 and _is_latin_word_char(text[start - 1]):
+        return False
+    if end < len(text) and _is_latin_word_char(text[end]):
+        return False
+    return True
 
 
 def _new_placeholder_prefix(source_text: str) -> str:
@@ -396,6 +418,10 @@ class SentenceTranslator:
                 end = start + len(source)
                 if (
                     _ascii_word_boundaries_ok(text, start, end, source)
+                    and (
+                        source in official
+                        or _case_variant_boundaries_ok(text, start, end)
+                    )
                     and (
                         len(source) > 1
                         or _single_character_name_context_ok(
