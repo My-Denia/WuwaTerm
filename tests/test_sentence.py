@@ -1542,3 +1542,187 @@ def test_cross_word_cjk_terms_stay_unlocked_until_both_edges_are_ordinary_words(
     assert _locked_zh(translator, "给安可装备声骸。") == {"安可", "声骸"}
     assert _locked_zh(translator, "安可加入队伍。") == {"安可"}
     assert _locked_zh(translator, "一声骸") == {"声骸"}
+
+
+@pytest.fixture()
+def case_variant_db(sample_db):
+    # Synthetic records only. Resonators get lowercase/all-caps variants;
+    # other categories, and casefold keys shared by different records, do not.
+    with connect(sample_db) as conn:
+        conn.execute("DELETE FROM terms")
+        insert_records(conn, [
+            TermRecord("resonator", "fixture", "1", "1", "维米拉", "Velmira"),
+            TermRecord("resonator", "fixture", "2", "2", "凯尔", "Kael"),
+            TermRecord("resonator", "fixture", "3", "3", "凯尔·莫罗", "Kael Morrow"),
+            TermRecord("resonator", "fixture", "4", "4", "艾洛蒂", "Élodie Ruè"),
+            TermRecord("resonator", "fixture", "5", "5", "施特劳", "Straß"),
+            TermRecord("resonator", "fixture", "6", "6", "艾林", "Arin Vale"),
+            TermRecord("speaker", "fixture", "7", "7", "艾林瓦", "Arin vale"),
+            TermRecord("resonator", "fixture", "8", "8", "柯林", "Corin"),
+            TermRecord("item", "fixture", "9", "9", "柯林草", "corin"),
+            TermRecord("weapon", "fixture", "10", "10", "维米拉之刃", "Velmira Blade"),
+            TermRecord("item", "fixture", "11", "11", "羽毛", "Feather"),
+            TermRecord("speaker", "fixture", "12", "12", "人群", "Crowd"),
+            TermRecord("core_term", "fixture", "13", "13", "潮核", "Tidecore"),
+        ])
+        conn.commit()
+    return sample_db
+
+
+def _locked_pairs(translator: SentenceTranslator, text: str) -> list[tuple[str, str]]:
+    return [(zh, en) for _placeholder, zh, en in translator.lock_terms(text).locks]
+
+
+@pytest.mark.parametrize("name", ["velmira", "VELMIRA"])
+def test_case_variant_resonator_name_locks_and_restores_both_ways(
+    case_variant_db, name
+):
+    translator = SentenceTranslator(case_variant_db)
+    locked = translator.lock_terms(f"{name} joins the team.")
+
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert name not in locked.locked_text
+    assert locked.restore(locked.locked_text) == "Velmira joins the team."
+    assert locked.restore(locked.locked_text, to_en=False) == "维米拉 joins the team."
+
+
+@pytest.mark.parametrize(
+    "text", ["vElmira joins.", "VelMira joins.", "velmiras join.", "xvelmira joins."]
+)
+def test_case_variant_refuses_mixed_casing_and_word_glue(case_variant_db, text):
+    locked = SentenceTranslator(case_variant_db).lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["feather and FEATHER", "the crowd cheers", "TIDECORE", "velmira blade"],
+)
+def test_case_variant_is_limited_to_resonator_category(case_variant_db, text):
+    pairs = _locked_pairs(SentenceTranslator(case_variant_db), text)
+    # "velmira blade" keeps only the resonator variant; the weapon stays exact.
+    assert pairs == ([("维米拉", "Velmira")] if text == "velmira blade" else [])
+
+
+def test_case_variant_skips_casefold_keys_shared_across_categories(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    # Resonator "Arin Vale" and speaker "Arin vale" share a casefold key with
+    # different records, so neither casing gains a variant.
+    assert _locked_pairs(translator, "arin vale waves.") == []
+    assert _locked_pairs(translator, "ARIN VALE waves.") == []
+    assert _locked_pairs(translator, "Arin Vale waves.") == [("艾林", "Arin Vale")]
+    assert _locked_pairs(translator, "Arin vale waves.") == [("艾林瓦", "Arin vale")]
+
+
+def test_case_variant_never_overrides_an_exact_dictionary_source(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "corin grows here.") == [("柯林草", "corin")]
+    assert _locked_pairs(translator, "Corin is here.") == [("柯林", "Corin")]
+    # The shared casefold key also suppresses the all-caps variant.
+    assert _locked_pairs(translator, "CORIN is here.") == []
+
+
+def test_case_variant_longest_span_wins(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "kael morrow and kael") == [
+        ("凯尔·莫罗", "Kael Morrow"),
+        ("凯尔", "Kael"),
+    ]
+
+
+def test_case_variant_uses_unicode_case_mapping_with_same_length(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "élodie ruè waves.") == [("艾洛蒂", "Élodie Ruè")]
+    assert _locked_pairs(translator, "ÉLODIE RUÈ waves.") == [("艾洛蒂", "Élodie Ruè")]
+    # Accent-stripped spellings are a different surface, not a case variant.
+    assert _locked_pairs(translator, "elodie rue waves.") == []
+    # str.upper("Straß") changes length, so only the lowercase variant exists.
+    assert _locked_pairs(translator, "straß waves.") == [("施特劳", "Straß")]
+    assert _locked_pairs(translator, "STRASS waves.") == []
+
+
+def test_case_variant_locks_inside_mixed_chinese_text(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    locked = translator.lock_terms("我把velmira练满了")
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert locked.restore(locked.locked_text) == "我把Velmira练满了"
+
+
+def test_case_variant_html_lock_keeps_attributes_byte_identical(case_variant_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(case_variant_db)
+    html = '<a href="https://example.invalid/velmira">velmira joins</a>'
+    protected = protect_telegram_html(html)
+    locked = translator._lock_html_terms(protected)
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+        '<a href="https://example.invalid/velmira">Velmira joins</a>'
+    )
+
+
+def test_case_variants_follow_atomic_db_replacement(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "velmira joins") == [("维米拉", "Velmira")]
+
+    candidate = case_variant_db.with_name("terms.candidate.db")
+    shutil.copy2(case_variant_db, candidate)
+    with connect(candidate) as conn:
+        conn.execute(
+            "UPDATE terms SET en = ?, en_norm = ? WHERE zh = ?",
+            ("Velmyra", "velmyra", "维米拉"),
+        )
+        conn.commit()
+    os.replace(candidate, case_variant_db)
+
+    assert _locked_pairs(translator, "velmira joins") == []
+    assert _locked_pairs(translator, "velmyra joins") == [("维米拉", "Velmyra")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["xélodie ruè waves.", "élodie ruès wave.", "ÉLODIE RUÈS wave.", "élodie ruè2 waves."],
+)
+def test_case_variant_rejects_glue_at_non_ascii_latin_edges(case_variant_db, text):
+    assert _locked_pairs(SentenceTranslator(case_variant_db), text) == []
+
+
+def test_case_variant_allows_cjk_next_to_non_ascii_latin_edges(case_variant_db):
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "我和élodie ruè组队") == [("艾洛蒂", "Élodie Ruè")]
+
+
+def test_case_variant_follows_the_record_its_official_casing_locks_to(
+    case_variant_db,
+):
+    # A lower-priority row with the same exact English surface never locks,
+    # so the variant restores the same record as the official casing.
+    with connect(case_variant_db) as conn:
+        insert_records(
+            conn, [TermRecord("item", "fixture", "20", "20", "维米拉草", "Velmira")]
+        )
+        conn.commit()
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "Velmira joins.") == [("维米拉", "Velmira")]
+    assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+
+
+@pytest.mark.parametrize(
+    "html", ["<b>velmira</b>s join", "x<b>velmira</b> joins", "<b>élodie ruè</b>s wave"]
+)
+def test_case_variant_boundaries_span_html_structures(case_variant_db, html):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(case_variant_db)
+    locked = translator._lock_html_terms(protect_telegram_html(html))
+    assert locked.locks == ()
+
+
+def test_case_variant_locks_inside_html_formatting(case_variant_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(case_variant_db)
+    protected = protect_telegram_html("我和<b>velmira</b>组队")
+    locked = translator._lock_html_terms(protected)
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]

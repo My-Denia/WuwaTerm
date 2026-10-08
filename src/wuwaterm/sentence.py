@@ -9,6 +9,7 @@ import re
 import json
 import asyncio
 import inspect
+import unicodedata
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
@@ -267,6 +268,101 @@ def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> b
     return True
 
 
+def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
+    return (
+        (
+            len(source) >= 2
+            or (
+                len(source) == 1
+                and source == official[0]
+                and official[2] == "resonator"
+                and _is_cjk_character(source)
+            )
+        )
+        and bool(official[0])
+        and bool(official[1])
+        and "\n" not in official[0]
+        and "\n" not in official[1]
+    )
+
+
+# Categories whose English surfaces also lock when typed all-lowercase or
+# all-caps. On the 3.7 dictionary resonator surfaces almost never appear in
+# another casing in official English text, while speaker, item, skill and
+# core_term surfaces often are ordinary words in other casings (It, Wish,
+# Focus, Echo). Other categories keep exact-surface matching.
+CASE_VARIANT_CATEGORIES = frozenset({"resonator"})
+
+
+def _has_latin_letter(text: str) -> bool:
+    return any(
+        char.isalpha() and unicodedata.name(char, "").startswith("LATIN ")
+        for char in text
+    )
+
+
+def _case_variant_sources(
+    sources: dict[str, tuple[str, str, str]],
+) -> list[tuple[str, tuple[str, str, str]]]:
+    """Return lowercase/uppercase surfaces for case-variant category names.
+
+    A variant is the exact Unicode lower() or upper() of an eligible English
+    surface, never a mixed casing. ``sources`` maps each surface to the record
+    it already locks to, so a variant inherits exactly the record its official
+    casing restores; lower-priority rows sharing that same surface never lock
+    and do not block it. Distinct surfaces in any category that share a
+    casefold key but lock to different (zh, en) records get no variant, and a
+    variant that is itself a dictionary source is left to that exact entry.
+    """
+    records_by_key: dict[str, set[tuple[str, str]]] = {}
+    for source, official in sources.items():
+        if not _is_eligible_lockable(source, official):
+            continue
+        if not _has_latin_letter(source) or any(map(_is_cjk_character, source)):
+            continue
+        records_by_key.setdefault(source.casefold(), set()).add(
+            (official[0], official[1])
+        )
+
+    variants: list[tuple[str, tuple[str, str, str]]] = []
+    emitted: set[str] = set()
+    for source, official in sources.items():
+        if source != official[1] or official[2] not in CASE_VARIANT_CATEGORIES:
+            continue
+        if len(records_by_key.get(source.casefold(), ())) != 1:
+            continue
+        for variant in (source.lower(), source.upper()):
+            if (
+                variant != source
+                and len(variant) == len(source)
+                and variant not in sources
+                and variant not in emitted
+            ):
+                emitted.add(variant)
+                variants.append((variant, official))
+    return variants
+
+
+def _is_latin_word_char(char: str) -> bool:
+    return _is_ascii_word_char(char) or (
+        char.isalpha() and unicodedata.name(char, "").startswith("LATIN ")
+    )
+
+
+def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
+    """Reject a case-variant match glued to Latin letters or ASCII digits.
+
+    Variants may start or end with non-ASCII Latin letters (jué, élodie),
+    which the ASCII-only check does not cover, so xélodie or élodie ruès
+    would otherwise lock. Adjacent CJK text stays allowed.
+    """
+    if start > 0 and _is_latin_word_char(text[start - 1]):
+        return False
+    if end < len(text) and _is_latin_word_char(text[end]):
+        return False
+    return True
+
+
 def _new_placeholder_prefix(source_text: str) -> str:
     while True:
         prefix = f"__WUWA_TERM_{secrets.token_hex(8)}_"
@@ -322,6 +418,12 @@ class SentenceTranslator:
                 end = start + len(source)
                 if (
                     _ascii_word_boundaries_ok(text, start, end, source)
+                    and (
+                        source in official
+                        or _case_variant_boundaries_ok(
+                            context_text, context_offset + start, context_offset + end
+                        )
+                    )
                     and (
                         len(source) > 1
                         or _single_character_name_context_ok(
@@ -685,19 +787,7 @@ class SentenceTranslator:
         return tuple(
             (source, (official[0], official[1]))
             for source, official in self._lockable_sources()
-            if (
-                len(source) >= 2
-                or (
-                    len(source) == 1
-                    and source == official[0]
-                    and official[2] == "resonator"
-                    and _is_cjk_character(source)
-                )
-            )
-            and official[0]
-            and official[1]
-            and "\n" not in official[0]
-            and "\n" not in official[1]
+            if _is_eligible_lockable(source, official)
         )
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
@@ -724,6 +814,10 @@ class SentenceTranslator:
                 sources.setdefault(entry.zh, official)
             if entry.en:
                 sources.setdefault(entry.en, official)
+        # Case variants come after every exact source, so an exact surface
+        # always keeps its own record and wins equal-length overlaps.
+        for variant, official in _case_variant_sources(sources):
+            sources.setdefault(variant, official)
         return tuple(sources.items())
 
     def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:

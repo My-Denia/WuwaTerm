@@ -125,6 +125,8 @@ admin (see that section).
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <sentence>` translates with DB terms locked. Direction is auto-detected:
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
+  A resonator name typed all-lowercase or all-caps inside a sentence (`jinhsi`, `JINHSI`) is locked
+  like its official casing; mixed casing and other term categories still need the exact official form.
 - Explicit direction flags override that default for commands only:
   `/tr --to en ...`, `/tr -to en ...`, `/tr --to zh ...`, `/tr -to zh ...`,
   `/sentence --to en ...`, `/sentence --to zh ...`, `/sent --to en ...`, and

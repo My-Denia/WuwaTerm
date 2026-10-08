@@ -740,3 +740,32 @@ def test_build_translator_uses_supplied_budgets(sample_db):
 def test_error_codes_are_lowercase_snake_case(code: str):
     assert code == code.lower()
     assert code.replace("_", "").isalpha()
+
+
+def test_lowercase_resonator_name_is_locked_through_the_pipeline(
+    monkeypatch, sample_db
+):
+    # Synthetic record: the application stage must see the lock that the
+    # sentence layer adds for an all-lowercase resonator name.
+    with connect(sample_db) as conn:
+        insert_records(
+            conn, [TermRecord("resonator", "fixture", "1", "1", "维米拉", "Velmira")]
+        )
+        conn.commit()
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service, translator, TranslationJob(text="我把velmira练满了")
+        )
+    )
+
+    assert outcome.kind == KIND_LLM
+    locked_text, locks = calls[0]
+    assert "velmira" not in locked_text
+    assert [(zh, en) for _placeholder, zh, en in locks] == [("维米拉", "Velmira")]
+    assert outcome.text == "我把Velmira练满了"
+    # A locked official name suppresses the short-query dictionary-miss hint.
+    assert outcome.dictionary_miss is False
