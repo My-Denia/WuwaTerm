@@ -56,6 +56,7 @@ The review workbench saves a user-initiated `wuwaterm-manuscript-v1` JSON file.
 It contains source, target, direction, up to 32 occurrence-specific decisions,
 their dictionary/rule/candidate basis, explicit scalar correspondences and the
 last two reports. Import is local and bounded to 1 MiB; it never sends a request.
+Undoing an import restores the prior manuscript and its historical reports; it still requires an explicit fresh check.
 There are no accounts, cloud manuscripts, automatic uploads or browser-storage
 history. The user must download and later import the file to resume. The page
 can show whether current work still matches the latest manuscript download or
