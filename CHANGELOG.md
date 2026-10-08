@@ -5,6 +5,7 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Terms: sentence translation now locks a resonator-category English name typed all-lowercase or all-caps, so `jinhsi joins` and `JINHSI joins` keep the official name just like `Jinhsi joins`. Only exact Unicode lowercase or uppercase forms count; mixed casing such as `jinHsi`, plurals, other categories (speakers, items, skills, core terms), and any casing shared by a different dictionary record keep exact-case matching, and an exact dictionary entry always wins. The resonator category also holds some non-playable roleinfo names. Lookup, review and properly cased text are unchanged.
 - Site: undoing a manuscript import restores the prior draft, choices, alignments and both historical reports, including a check that finished while the file was being read. Restored reports still require an explicit fresh check.
 
 - Site: the pinned `next` dependency moves from 16.3.6 to 16.3.8, clearing the newly published draft-mode content-leak and SSG/ISR cache-poisoning advisories (`GHSA-3w37-wq28-93x7`, `GHSA-4jqv-mc3x-m676`) that turned the site feasibility security check red. `npm audit` now reports no known vulnerabilities; the vendored `braces` entry is only re-sorted alphabetically. No application code changes.
