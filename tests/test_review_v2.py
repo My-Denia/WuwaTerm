@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -9,11 +10,13 @@ from pathlib import Path
 import pytest
 
 from wuwaterm.application import project_review_report, review_pair
+from wuwaterm.cjk_span import JIEBA_COMMIT, LEXICON_FILTER, _WORDS
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.review import (
     RULE_VERSION_V2,
+    VERDICT_CONFLICT,
     VERDICT_NEEDS_REVIEW,
     VERDICT_NOT_EVALUATED,
     VERDICT_VERIFIED,
@@ -800,3 +803,209 @@ def test_kept_span_without_current_matcher_revision_is_stale(sample_db):
     assert {item.source_span.text for item in accepted.findings} == {"安可", "声骸"}
     kept_finding = next(item for item in accepted.findings if item.id == finding.id)
     assert kept_finding.verdict == VERDICT_NOT_EVALUATED
+
+
+def _finding_for(report, term):
+    return next(item for item in report.findings if item.source_span.text == term)
+
+
+def test_review_v2_target_cross_word_span_is_not_verified(sample_db):
+    service = TermService(sample_db)
+    report = review_pair(
+        service, "Echo.", "回声骸骨。", "zh", review_version=RULE_VERSION_V2
+    )
+    finding = _finding_for(report, "Echo")
+    assert finding.verdict == VERDICT_NEEDS_REVIEW
+    assert finding.target_span is None
+
+    report = review_pair(
+        service, "Encore.", "平安可贵。", "zh", review_version=RULE_VERSION_V2
+    )
+    finding = _finding_for(report, "Encore")
+    assert finding.verdict == VERDICT_NEEDS_REVIEW
+    assert finding.target_span is None
+
+
+def test_review_v2_repeated_term_does_not_reuse_cross_word_span(sample_db):
+    service = TermService(sample_db)
+    report = review_pair(
+        service, "Echo and Echo.", "声骸与回声骸骨。", "zh", review_version=RULE_VERSION_V2
+    )
+    echoes = [item for item in report.findings if item.source_span.text == "Echo"]
+    assert len(echoes) == 2
+    first, second = echoes
+    assert first.verdict == VERDICT_VERIFIED
+    assert first.target_span is not None
+    assert (first.target_span.start, first.target_span.end, first.target_span.text) == (
+        0,
+        2,
+        "声骸",
+    )
+    assert second.verdict == VERDICT_NEEDS_REVIEW
+    assert second.target_span is None
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "term", "zh"),
+    [
+        ("Echo.", "回声骸骨。", "Echo", "声骸"),
+        ("Encore.", "平安可贵。", "Encore", "安可"),
+    ],
+)
+def test_review_v2_official_pair_on_cross_word_span_is_conflict(
+    sample_db, source, target, term, zh
+):
+    service = TermService(sample_db)
+    baseline = review_pair(
+        service, source, target, "zh", review_version=RULE_VERSION_V2
+    )
+    finding = _finding_for(baseline, term)
+    candidate = next(item for item in finding.candidates if item.zh == zh)
+    context = {
+        "source_revision": baseline.source_revision,
+        "rule_version": baseline.rule_version,
+        "dictionary_revision": baseline.dictionary.revision,
+        "matcher_revision": baseline.matcher_revision,
+    }
+    resolved = review_pair(
+        service,
+        source,
+        target,
+        "zh",
+        resolutions=(
+            {
+                "mention_id": finding.id,
+                "choice": "official_pair",
+                "candidate_id": candidate.candidate_id,
+            },
+        ),
+        review_version=RULE_VERSION_V2,
+        resolution_context=context,
+    )
+    chosen = next(item for item in resolved.findings if item.id == finding.id)
+    assert chosen.verdict == VERDICT_CONFLICT
+    assert chosen.target_span is None
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "term", "zh", "span"),
+    [
+        ("Use Echo.", "使用声骸。", "Echo", "声骸", (2, 4)),
+        ("Encore joins.", "安可加入队伍。", "Encore", "安可", (0, 2)),
+        ("Echo.", "一声骸。", "Echo", "声骸", (1, 3)),
+        ("Echo.", "强大声骸。", "Echo", "声骸", (2, 4)),
+        ("Echo.", "声骸。", "Echo", "声骸", (0, 2)),
+    ],
+)
+def test_review_v2_keeps_continuous_target_hits(
+    sample_db, source, target, term, zh, span
+):
+    service = TermService(sample_db)
+    report = review_pair(service, source, target, "zh", review_version=RULE_VERSION_V2)
+    finding = _finding_for(report, term)
+    assert finding.verdict == VERDICT_VERIFIED
+    assert finding.target_span is not None
+    assert (finding.target_span.start, finding.target_span.end) == span
+    assert finding.target_span.text == zh
+
+
+def test_review_v2_keeps_both_terms_in_one_sentence(sample_db):
+    service = TermService(sample_db)
+    report = review_pair(
+        service, "Encore uses Echo.", "给安可装备声骸。", "zh", review_version=RULE_VERSION_V2
+    )
+    by_term = {item.source_span.text: item for item in report.findings}
+    assert set(by_term) == {"Encore", "Echo"}
+    for term, zh in (("Encore", "安可"), ("Echo", "声骸")):
+        finding = by_term[term]
+        assert finding.verdict == VERDICT_VERIFIED
+        assert finding.target_span is not None
+        assert finding.target_span.text == zh
+
+
+def test_review_v2_clipped_region_still_vetoes_on_full_target(sample_db):
+    service = TermService(sample_db)
+    report = review_pair(
+        service,
+        "Echo.",
+        "回声骸骨。",
+        "zh",
+        review_version=RULE_VERSION_V2,
+        alignments=(
+            {
+                "source": {"start": 0, "end": 4, "text": "Echo"},
+                "target": {"start": 1, "end": 5, "text": "声骸骨。"},
+            },
+        ),
+    )
+    finding = _finding_for(report, "Echo")
+    assert finding.verdict == VERDICT_NEEDS_REVIEW
+    assert finding.target_span is None
+
+
+def test_review_v2_vetoed_elsewhere_span_does_not_block_review(sample_db):
+    service = TermService(sample_db)
+    report = review_pair(
+        service,
+        "Echo.",
+        "平安。回声骸骨。",
+        "zh",
+        review_version=RULE_VERSION_V2,
+        alignments=(
+            {
+                "source": {"start": 0, "end": 4, "text": "Echo"},
+                "target": {"start": 0, "end": 3, "text": "平安。"},
+            },
+        ),
+    )
+    finding = _finding_for(report, "Echo")
+    assert finding.verdict == VERDICT_NEEDS_REVIEW
+    assert finding.target_span is None
+
+
+def test_matcher_revision_changed_and_v1_label_context_is_stale(sample_db):
+    legacy_payload = json.dumps(
+        ["wuwaterm-cjk-matcher-v1", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    old_hash = hashlib.sha256(legacy_payload).hexdigest()
+
+    service = TermService(sample_db)
+    baseline = review_pair(
+        service, "Echo.", "使用声骸。", "zh", review_version=RULE_VERSION_V2
+    )
+    assert HEX64.fullmatch(baseline.matcher_revision or "")
+    assert baseline.matcher_revision != old_hash
+
+    finding = _finding_for(baseline, "Echo")
+    resolutions = ({"mention_id": finding.id, "choice": "not_a_term"},)
+    three_key = {
+        "source_revision": baseline.source_revision,
+        "rule_version": baseline.rule_version,
+        "dictionary_revision": baseline.dictionary.revision,
+    }
+    with pytest.raises(ReviewRequestError, match="stale") as stale:
+        review_pair(
+            service,
+            "Echo.",
+            "使用声骸。",
+            "zh",
+            resolutions=resolutions,
+            review_version=RULE_VERSION_V2,
+            resolution_context={**three_key, "matcher_revision": old_hash},
+        )
+    assert stale.value.code == "invalid_request"
+
+    legacy = review_pair(
+        service,
+        "Echo.",
+        "使用声骸。",
+        "zh",
+        resolutions=resolutions,
+        review_version=RULE_VERSION_V2,
+        resolution_context=three_key,
+        require_matcher_revision=False,
+    )
+    kept = next(item for item in legacy.findings if item.id == finding.id)
+    assert kept.verdict == VERDICT_NOT_EVALUATED
