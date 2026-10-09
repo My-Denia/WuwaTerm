@@ -363,6 +363,75 @@ def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
     return True
 
 
+def select_term_spans(
+    text: str,
+    lockable: tuple[tuple[str, tuple[str, str]], ...],
+    context_text: str,
+    context_offset: int,
+) -> list[_TermSpan]:
+    """Return the term spans ``text`` locks, ordered by start position.
+
+    ``context_text`` is the surrounding visible text that ``text`` starts at
+    ``context_offset`` in; plain text passes itself with offset 0.
+    """
+    spans: list[_TermSpan] = []
+    for order, (source, official) in enumerate(lockable):
+        start = text.find(source)
+        while start != -1:
+            end = start + len(source)
+            if (
+                _ascii_word_boundaries_ok(text, start, end, source)
+                and (
+                    source in official
+                    or _case_variant_boundaries_ok(
+                        context_text, context_offset + start, context_offset + end
+                    )
+                )
+                and (
+                    len(source) > 1
+                    or _single_character_name_context_ok(
+                        context_text, context_offset + start, context_offset + end
+                    )
+                )
+                and not crosses_cjk_word_boundary(
+                    context_text, context_offset + start, context_offset + end
+                )
+            ):
+                spans.append(
+                    _TermSpan(
+                        start=start,
+                        end=end,
+                        source=source,
+                        official=official,
+                        order=order,
+                    )
+                )
+            start = text.find(source, start + 1)
+
+    # Select global longest non-overlapping official term spans. This
+    # intentionally prioritizes the longest single term, not maximum total
+    # coverage. Equal-length overlaps follow dictionary iteration order,
+    # then start position, then source text.
+    selected: list[_TermSpan] = []
+    occupied: list[tuple[int, int]] = []
+    for span in sorted(
+        spans,
+        key=lambda item: (
+            -(item.end - item.start),
+            item.order,
+            item.start,
+            item.source,
+        ),
+    ):
+        if any(span.start < end and start < span.end for start, end in occupied):
+            continue
+        selected.append(span)
+        occupied.append((span.start, span.end))
+
+    selected.sort(key=lambda item: item.start)
+    return selected
+
+
 def _new_placeholder_prefix(source_text: str) -> str:
     while True:
         prefix = f"__WUWA_TERM_{secrets.token_hex(8)}_"
@@ -411,61 +480,7 @@ class SentenceTranslator:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
             lockable = self._eligible_lockable_sources()
-        spans: list[_TermSpan] = []
-        for order, (source, official) in enumerate(lockable):
-            start = text.find(source)
-            while start != -1:
-                end = start + len(source)
-                if (
-                    _ascii_word_boundaries_ok(text, start, end, source)
-                    and (
-                        source in official
-                        or _case_variant_boundaries_ok(
-                            context_text, context_offset + start, context_offset + end
-                        )
-                    )
-                    and (
-                        len(source) > 1
-                        or _single_character_name_context_ok(
-                            context_text, context_offset + start, context_offset + end
-                        )
-                    )
-                    and not crosses_cjk_word_boundary(
-                        context_text, context_offset + start, context_offset + end
-                    )
-                ):
-                    spans.append(
-                        _TermSpan(
-                            start=start,
-                            end=end,
-                            source=source,
-                            official=official,
-                            order=order,
-                        )
-                    )
-                start = text.find(source, start + 1)
-
-        # Select global longest non-overlapping official term spans. This
-        # intentionally prioritizes the longest single term, not maximum total
-        # coverage. Equal-length overlaps follow dictionary iteration order,
-        # then start position, then source text.
-        selected: list[_TermSpan] = []
-        occupied: list[tuple[int, int]] = []
-        for span in sorted(
-            spans,
-            key=lambda item: (
-                -(item.end - item.start),
-                item.order,
-                item.start,
-                item.source,
-            ),
-        ):
-            if any(span.start < end and start < span.end for start, end in occupied):
-                continue
-            selected.append(span)
-            occupied.append((span.start, span.end))
-
-        selected.sort(key=lambda item: item.start)
+        selected = select_term_spans(text, lockable, context_text, context_offset)
         prefix = _new_placeholder_prefix(text)
         locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
