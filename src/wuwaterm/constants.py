@@ -105,3 +105,23 @@ FREE_TEXT_LOCK_EXCLUSIONS_KEY = "free_text_lock_exclusions"
 FREE_TEXT_LOCK_EXCLUSIONS_VERSION = 1
 FREE_TEXT_LOCK_MIN_OCCURRENCES = 10
 FREE_TEXT_LOCK_MAX_ALIGNED_RATIO = (1, 5)
+
+# Chinese-surface free-text lock exclusions, measured in the zh direction: the
+# builder counts how often each Chinese dictionary surface locks in official
+# Chinese lines that have a parallel English line, and counts a line aligned
+# when the parallel English (casefolded, quote-stripped) carries the surface's
+# official English or the English of any record carrying that surface. On the
+# 3.7 census (277,917 aligned line pairs) the per-surface aligned share is
+# strongly bimodal with a density valley around 0.2 — 74 surfaces sit in
+# [0.05,0.15), only 26 in [0.15,0.25), then the density rises again to 676
+# surfaces at >=0.95 — so 1/5 is the cut that misclassifies the fewest
+# boundary surfaces. N>=10 is where the distribution actually separates: the
+# N in [5,9] band shows no valley (one aligned line moves a ratio by 10-20
+# points there), and cutting at N>=5 would add 30 surfaces on that noise. The
+# values coincide with the English side by convergence from an independent
+# distribution, not by copying; they are defined separately so either side
+# can move without renegotiating the other.
+FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY = "free_text_lock_exclusions_zh"
+FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION = 1
+FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES = 10
+FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO = (1, 5)

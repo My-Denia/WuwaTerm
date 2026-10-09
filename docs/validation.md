@@ -88,7 +88,7 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 `uv`, which the `dev` extra does not install) and has its own CI job.
 
 ```bash
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions
 .venv/bin/python scripts/verify_seed_terms.py data/terms.candidate.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
 .venv/bin/python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu

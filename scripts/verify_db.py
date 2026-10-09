@@ -12,12 +12,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from wuwaterm.constants import (  # noqa: E402
     DEFAULT_SOURCE_PROFILE_NAME,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
     get_source_profile,
     source_profile_choices,
 )
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
 from wuwaterm.normalize import normalize_text  # noqa: E402
-from wuwaterm.sentence import parse_free_text_lock_exclusions  # noqa: E402
+from wuwaterm.sentence import (  # noqa: E402
+    parse_free_text_lock_exclusions,
+    parse_free_text_zh_lock_exclusions,
+)
 
 
 REQUIRED_CATEGORIES = (
@@ -204,6 +208,40 @@ def _free_text_exclusion_errors(
     return []
 
 
+def _free_text_zh_exclusion_errors(
+    conn: sqlite3.Connection, metadata: dict[str, str], *, required: bool
+) -> list[str]:
+    """Check the builder-written Chinese-surface exclusions, if present.
+
+    Same contract as the English key, mirrored: a missing key passes unless
+    ``required`` (databases built before the key existed, or without the
+    official corpus, keep every surface lockable). A present key must parse
+    under the current zh version and parameters, and every excluded surface
+    must be a Chinese surface of a term row.
+    """
+    value = metadata.get(FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY)
+    if value is None:
+        if required:
+            return [f"metadata {FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY} is missing"]
+        return []
+    try:
+        rows = parse_free_text_zh_lock_exclusions(value)
+    except (TypeError, ValueError) as exc:
+        return [f"metadata {FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY} is invalid: {exc}"]
+    missing = [
+        surface
+        for surface, _occurrences, _aligned in rows
+        if conn.execute("SELECT 1 FROM terms WHERE zh = ? LIMIT 1", (surface,)).fetchone()
+        is None
+    ]
+    if missing:
+        return [
+            f"metadata {FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY} names {len(missing)} "
+            f"surface(s) with no term row, first {missing[0]!r}"
+        ]
+    return []
+
+
 def verify_database(
     path: str | Path,
     *,
@@ -211,6 +249,7 @@ def verify_database(
     required_categories: tuple[str, ...] = REQUIRED_CATEGORIES,
     exact_hits: tuple[tuple[str, str], ...] | None = None,
     require_free_text_exclusions: bool = False,
+    require_free_text_zh_exclusions: bool = False,
 ) -> tuple[dict[str, int], dict[str, str]]:
     profile = get_source_profile(profile_name)
     checks = profile.representative_exact_hits if exact_hits is None else exact_hits
@@ -247,6 +286,11 @@ def verify_database(
                 conn, metadata, required=require_free_text_exclusions
             )
         )
+        errors.extend(
+            _free_text_zh_exclusion_errors(
+                conn, metadata, required=require_free_text_zh_exclusions
+            )
+        )
 
     if errors:
         raise VerificationError("; ".join(errors))
@@ -279,6 +323,14 @@ def main() -> int:
             "missing; a full build-db writes it"
         ),
     )
+    parser.add_argument(
+        "--require-free-text-zh-exclusions",
+        action="store_true",
+        help=(
+            f"fail when the {FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY} metadata key "
+            "is missing; a full build-db writes it"
+        ),
+    )
     args = parser.parse_args()
 
     profile = get_source_profile(args.profile)
@@ -291,6 +343,7 @@ def main() -> int:
             required_categories=categories,
             exact_hits=exact_hits,
             require_free_text_exclusions=args.require_free_text_exclusions,
+            require_free_text_zh_exclusions=args.require_free_text_zh_exclusions,
         )
     except (VerificationError, sqlite3.Error) as exc:
         print(f"database verification failed: {exc}", file=sys.stderr)
@@ -314,6 +367,12 @@ def main() -> int:
     else:
         count = len(parse_free_text_lock_exclusions(exclusions))
         print(f"{FREE_TEXT_LOCK_EXCLUSIONS_KEY}\t{count} surfaces")
+    zh_exclusions = metadata.get(FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY)
+    if zh_exclusions is None:
+        print(f"{FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY}\tabsent")
+    else:
+        zh_count = len(parse_free_text_zh_lock_exclusions(zh_exclusions))
+        print(f"{FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY}\t{zh_count} surfaces")
     return 0
 
 

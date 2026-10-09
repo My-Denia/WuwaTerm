@@ -212,7 +212,7 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
 .venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions
 ```
 
 On either path the refresh fetches roughly a gigabyte over the network and can
@@ -223,9 +223,11 @@ is usually much faster than the first attempt.
 
 `verify_db.py` checks integrity, the schema, the recorded source provenance
 against the profile, the required categories, representative exact hits, and
-the free-text lock exclusions the build records (`--require-free-text-exclusions`
-makes a candidate without them fail; the builder image's `verify-db` always
-passes it). It prints the category counts, the recorded provenance and the
+the free-text lock exclusion lists the build records — the English
+`free_text_lock_exclusions` and Chinese `free_text_lock_exclusions_zh` keys
+(`--require-free-text-exclusions` and `--require-free-text-zh-exclusions`
+make a candidate without them fail; the builder image's `verify-db` always
+passes both). It prints the category counts, the recorded provenance and the
 number of excluded surfaces and nothing else — there is **no explicit PASS
 line**, so the exit status is the verdict: zero means verified. On a first install, once it passes, put the candidate in place:
 

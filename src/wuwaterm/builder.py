@@ -19,6 +19,10 @@ from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
     FREE_TEXT_LOCK_MAX_ALIGNED_RATIO,
     FREE_TEXT_LOCK_MIN_OCCURRENCES,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
     SourceProfile,
     get_source_profile,
 )
@@ -388,6 +392,114 @@ def measure_free_text_exclusions(
     )
 
 
+# Quote characters stripped from candidate English values before the zh
+# alignment check: official English often wraps a name in quotes ("Jué",
+# «Rinascita», 「Jue」) while the parallel line renders it bare. The zh
+# direction needs this because the English side it checks carries quoting
+# the English rule's Chinese side never faced.
+_ZH_ALIGNMENT_QUOTE_CHARS = "\"'“”‘’«»『』「」"
+
+
+def measure_free_text_zh_exclusions(
+    db_path: str | Path, zh_map: dict[str, str], en_map: dict[str, str]
+) -> str:
+    """Return the Chinese-surface lock exclusion metadata value for a DB.
+
+    Every official Chinese string with an English counterpart goes through
+    the runtime span selection over the exact lockable surfaces (no case
+    variants, no exclusions). Each selected surface containing a CJK
+    character counts one occurrence, and is aligned when the parallel
+    English string, casefolded, contains the surface's official English or
+    the English of any record carrying that surface — each candidate also
+    tried with surrounding quote characters stripped, because case-sensitive
+    and un-stripped checks were measured to wrongly exclude 99 real-term
+    surfaces (黑海岸 -> The Black Shores, 「角」 -> "Jué"). A surface is
+    excluded when it occurs at least FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES times
+    and its aligned share is below FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO. The
+    value is compact, key-sorted JSON with surfaces sorted, so equal inputs
+    give equal bytes.
+    """
+    from .lookup import TermService
+    from .sentence import exact_lockable_sources, select_term_spans
+
+    entries = TermService(db_path).entries()
+    lockable = exact_lockable_sources(entries)
+    aligned_en: dict[str, set[str]] = defaultdict(set)
+    for entry in entries:
+        if entry.en and entry.zh:
+            aligned_en[entry.zh].add(entry.en)
+            aligned_en[entry.en].add(entry.en)
+
+    # A matching surface's first character must occur in the text, so every
+    # surface lives in its first character's bucket and a line only tries
+    # the buckets of the characters it contains. Buckets are merged in
+    # lockable order, so span selection is identical to the full set (the
+    # candidate-build verification re-counts without the prefilter and
+    # requires byte-identical output).
+    by_first: dict[str, list[int]] = defaultdict(list)
+    for index, (source, _official) in enumerate(lockable):
+        by_first[source[0]].append(index)
+
+    variant_cache: dict[str, tuple[str, ...]] = {}
+
+    def aligned_variants(surface: str, official_en: str) -> tuple[str, ...]:
+        # A given surface always locks to the same official record, so the
+        # variant set depends only on the surface.
+        cached = variant_cache.get(surface)
+        if cached is None:
+            values: set[str] = set()
+            for value in aligned_en.get(surface, ()) | {official_en}:
+                if not value:
+                    continue
+                values.add(value.casefold())
+                stripped = value.strip(_ZH_ALIGNMENT_QUOTE_CHARS)
+                if stripped:
+                    values.add(stripped.casefold())
+            cached = tuple(values)
+            variant_cache[surface] = cached
+        return cached
+
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for text_key, text in zh_map.items():
+        en_text = en_map.get(text_key)
+        if en_text is None:
+            continue
+        indexes: set[int] = set()
+        for char in set(text):
+            indexes.update(by_first.get(char, ()))
+        if not indexes:
+            continue
+        candidates = tuple(lockable[index] for index in sorted(indexes))
+        en_folded = en_text.casefold()
+        for span in select_term_spans(text, candidates, text, 0):
+            surface = span.source
+            if not _is_cjk_text(surface):
+                continue
+            count = counts[surface]
+            count[0] += 1
+            if any(value in en_folded for value in aligned_variants(surface, span.official[1])):
+                count[1] += 1
+
+    numerator, denominator = FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO
+    surfaces = [
+        [surface, occurrences, aligned]
+        for surface, (occurrences, aligned) in sorted(counts.items())
+        if occurrences >= FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES
+        and aligned * denominator < occurrences * numerator
+    ]
+    return json.dumps(
+        {
+            "version": FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+            "min_occurrences": FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+            "max_aligned_ratio": list(FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO),
+            "surfaces": surfaces,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def build_database(
     data_dir: str | Path,
     db_path: str | Path,
@@ -412,10 +524,15 @@ def build_database(
         return len(records)
     zh_map, en_map = text_maps[0]
     exclusions = measure_free_text_exclusions(db_path, en_map, zh_map)
+    zh_exclusions = measure_free_text_zh_exclusions(db_path, zh_map, en_map)
     with closing(connect(db_path)) as conn:
         conn.execute(
             "INSERT INTO metadata(key, value) VALUES (?, ?)",
             (FREE_TEXT_LOCK_EXCLUSIONS_KEY, exclusions),
+        )
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY, zh_exclusions),
         )
         conn.commit()
     return len(records)
