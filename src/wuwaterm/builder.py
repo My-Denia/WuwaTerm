@@ -397,7 +397,7 @@ def measure_free_text_exclusions(
 # «Rinascita», 「Jue」) while the parallel line renders it bare. The zh
 # direction needs this because the English side it checks carries quoting
 # the English rule's Chinese side never faced.
-_ZH_ALIGNMENT_QUOTE_CHARS = "\"'“”‘’«»『』「"
+_ZH_ALIGNMENT_QUOTE_CHARS = "\"'“”‘’«»『』「」"
 
 
 def measure_free_text_zh_exclusions(

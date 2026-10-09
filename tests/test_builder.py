@@ -258,6 +258,9 @@ def _zh_records_only_db(tmp_path: Path) -> Path:
             # surface, but this record's English still counts as aligned.
             TermRecord("speaker", "fixture", "6", "6", "布鲁克", "Brook the Guard"),
             TermRecord("speaker", "fixture", "7", "7", "小小", "Teensy"),
+            # Corner-bracket-wrapped official English: aligned only when
+            # both the opening and closing brackets strip.
+            TermRecord("speaker", "fixture", "8", "8", "岸鹭", "「Heron」"),
         ],
         source_profile=profile,
         source_provenance=SourceProvenance(
@@ -294,6 +297,11 @@ def _zh_exclusion_corpus() -> tuple[dict[str, str], dict[str, str]]:
         # lines; were the inner 布鲁克 counted, it would reach 24.
         zh[f"vale_{index}"] = f"布鲁克谷很安静，第{index}行。"
         en[f"vale_{index}"] = f"Quiet valley, line {index}."
+        # 岸鹭's official English is wrapped in corner brackets; without
+        # stripping the closing 」 the bare parallel line never aligns and
+        # the surface would be wrongly excluded.
+        zh[f"heron_{index}"] = f"岸鹭飞过，第{index}行。"
+        en[f"heron_{index}"] = f"heron flew by, line {index}."
     for index in range(4):
         # Below the occurrence floor even with zero alignment.
         zh[f"teensy_{index}"] = f"小小很生气，第{index}行。"
@@ -331,9 +339,10 @@ def test_measure_free_text_zh_exclusions_keeps_high_alignment_surfaces(tmp_path)
     }
 
     # Casefolding aligns VELMIRA; quote-strip + casefold aligns bare jue;
-    # any record's English aligns 布鲁克; 小小 stays under the floor.
+    # any record's English aligns 布鲁克; corner-bracket strip (both sides)
+    # aligns bare heron; 小小 stays under the floor.
     assert surfaces == {"雷恩", "布鲁克谷"}
-    assert surfaces.isdisjoint({"维米拉", "角先生", "布鲁克", "小小"})
+    assert surfaces.isdisjoint({"维米拉", "角先生", "布鲁克", "小小", "岸鹭"})
 
 
 def test_create_database_alone_writes_no_zh_exclusions(tmp_path):
