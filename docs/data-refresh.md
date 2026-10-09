@@ -69,7 +69,7 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
 .venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions
 ```
 
 The refresh and build fail closed unless the checkout's `origin`, full HEAD,
@@ -85,14 +85,21 @@ counterpart and records, in the `free_text_lock_exclusions` metadata key, the
 English dictionary surfaces that free-text sentence translation must not lock:
 a surface locked at least 10 times whose parallel Chinese string carries its
 official Chinese name in fewer than one in five of those lines (for example a
-speaker label that is also the ordinary word `It`). The value is sorted
-compact JSON, so the idempotent-build check still holds. The verifier rejects a
-malformed key, a key built with other parameters, or a surface that is not a
-term; `--require-free-text-exclusions` (always passed by the builder image's
-`verify-db`) also rejects a candidate without the key, so the image's default
+speaker label that is also the ordinary word `It`). It likewise reads every
+official Chinese string that has an English counterpart and records, in the
+`free_text_lock_exclusions_zh` metadata key, the Chinese surfaces measured the
+same way — a line counts as aligned when the parallel English, casefolded and
+with surrounding quote characters stripped, carries the surface's official
+English (for example the speaker label that is also the ordinary word `大人`).
+Both values are sorted compact JSON, so the idempotent-build check still
+holds. The verifier rejects a malformed key, a key built with other
+parameters, or a surface that is not a term, for each key separately;
+`--require-free-text-exclusions` (always passed by the builder image's
+`verify-db`) and `--require-free-text-zh-exclusions` also reject a candidate
+without the respective key, so the image's default
 `verify-db` against a live database built before this key existed fails until
 the next full build replaces it. A database built before
-this key existed, or written by `create_database` alone, keeps every surface
+these keys existed, or written by `create_database` alone, keeps every surface
 lockable. A promoted database is what changes runtime behaviour: the code
 alone does not. Generated candidates
 remain ignored and are not distributed.

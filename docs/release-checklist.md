@@ -110,7 +110,7 @@ separate CI jobs. Confirm on the pull request, not only locally.
 For a locally built release candidate database, also run:
 
 ```bash
-python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions
+python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions
 python scripts/verify_seed_terms.py data/terms.candidate.db
 python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
 python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
@@ -393,7 +393,7 @@ generated notes before publishing rather than assuming this page.
 
 - `python scripts/validate.py` (hygiene, non-goals, architecture, API contract,
   ruff, test suite) on the CI matrix
-- `python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions`
+- `python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions`
 - Packaging: build, `twine check --strict`,
   `scripts/check_package_artifacts.py`, and a clean-environment
   install/import/CLI smoke of the exact wheel and sdist attached here

@@ -130,6 +130,10 @@ admin (see that section).
   An English dictionary surface that official text almost always uses as an ordinary word (`It`, `Do`,
   `Fish`) is not locked inside a sentence once a dictionary rebuilt with its free-text exclusion list is
   promoted; `/tr It` alone still returns the dictionary hit.
+  Likewise, a Chinese dictionary surface that official text overwhelmingly uses as an ordinary word or as
+  part of other names (`大人`, `索拉`) is not locked inside a sentence once a dictionary rebuilt with its
+  Chinese free-text exclusion list (`free_text_lock_exclusions_zh`) is promoted; `/tr 大人` alone still
+  returns the dictionary hit `Adult`.
 - Explicit direction flags override that default for commands only:
   `/tr --to en ...`, `/tr -to en ...`, `/tr --to zh ...`, `/tr -to zh ...`,
   `/sentence --to en ...`, `/sentence --to zh ...`, `/sent --to en ...`, and
