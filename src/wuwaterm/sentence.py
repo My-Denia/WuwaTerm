@@ -10,6 +10,7 @@ import json
 import asyncio
 import inspect
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
@@ -18,7 +19,14 @@ from typing import Any
 import httpx
 
 from .cjk_span import crosses_cjk_word_boundary
+from .constants import (
+    FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_MIN_OCCURRENCES,
+)
 from .lookup import TermService
+from .models import TermEntry
 from .normalize import normalize_user_text
 from .telegram_html import (
     ProtectedTelegramHTML,
@@ -303,6 +311,7 @@ def _has_latin_letter(text: str) -> bool:
 
 def _case_variant_sources(
     sources: dict[str, tuple[str, str, str]],
+    excluded: frozenset[str] = frozenset(),
 ) -> list[tuple[str, tuple[str, str, str]]]:
     """Return lowercase/uppercase surfaces for case-variant category names.
 
@@ -313,6 +322,7 @@ def _case_variant_sources(
     and do not block it. Distinct surfaces in any category that share a
     casefold key but lock to different (zh, en) records get no variant, and a
     variant that is itself a dictionary source is left to that exact entry.
+    A surface in ``excluded`` gets no variant but still counts for both checks.
     """
     records_by_key: dict[str, set[tuple[str, str]]] = {}
     for source, official in sources.items():
@@ -329,6 +339,8 @@ def _case_variant_sources(
     for source, official in sources.items():
         if source != official[1] or official[2] not in CASE_VARIANT_CATEGORIES:
             continue
+        if source in excluded:
+            continue
         if len(records_by_key.get(source.casefold(), ())) != 1:
             continue
         for variant in (source.lower(), source.upper()):
@@ -341,6 +353,91 @@ def _case_variant_sources(
                 emitted.add(variant)
                 variants.append((variant, official))
     return variants
+
+
+def _is_exact_int(value: object) -> bool:
+    # bool is an int subclass; the metadata contract accepts exact ints only.
+    return type(value) is int
+
+
+def parse_free_text_lock_exclusions(value: str) -> tuple[tuple[str, int, int], ...]:
+    """Parse the builder's free-text lock exclusion metadata value.
+
+    Returns ``(surface, occurrences, aligned)`` rows. Raises ValueError unless
+    the value has the current version and parameters, surfaces are unique and
+    sorted, and every row meets the exclusion rule it was built with.
+    """
+    data = json.loads(value)
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "min_occurrences",
+        "max_aligned_ratio",
+        "surfaces",
+    }:
+        raise ValueError("unexpected exclusion object")
+    if not _is_exact_int(data["version"]) or (
+        data["version"] != FREE_TEXT_LOCK_EXCLUSIONS_VERSION
+    ):
+        raise ValueError("unsupported exclusion version")
+    if not _is_exact_int(data["min_occurrences"]) or (
+        data["min_occurrences"] != FREE_TEXT_LOCK_MIN_OCCURRENCES
+    ):
+        raise ValueError("exclusion min_occurrences mismatch")
+    ratio = data["max_aligned_ratio"]
+    if (
+        not isinstance(ratio, list)
+        or not all(map(_is_exact_int, ratio))
+        or tuple(ratio) != FREE_TEXT_LOCK_MAX_ALIGNED_RATIO
+    ):
+        raise ValueError("exclusion max_aligned_ratio mismatch")
+    numerator, denominator = FREE_TEXT_LOCK_MAX_ALIGNED_RATIO
+    surfaces = data["surfaces"]
+    if not isinstance(surfaces, list):
+        raise ValueError("exclusion surfaces must be a list")
+    rows: list[tuple[str, int, int]] = []
+    for row in surfaces:
+        if not isinstance(row, list) or len(row) != 3:
+            raise ValueError("exclusion row must be [surface, occurrences, aligned]")
+        surface, occurrences, aligned = row
+        if (
+            type(surface) is not str
+            or not _has_latin_letter(surface)
+            or any(map(_is_cjk_character, surface))
+            or "\n" in surface
+        ):
+            raise ValueError("exclusion surface must be single-line Latin text")
+        if not _is_exact_int(occurrences) or not _is_exact_int(aligned):
+            raise ValueError("exclusion counts must be integers")
+        if not (
+            occurrences >= FREE_TEXT_LOCK_MIN_OCCURRENCES
+            and 0 <= aligned <= occurrences
+            and aligned * denominator < occurrences * numerator
+        ):
+            raise ValueError("exclusion row does not meet the exclusion rule")
+        if rows and surface <= rows[-1][0]:
+            raise ValueError("exclusion surfaces must be unique and sorted")
+        rows.append((surface, occurrences, aligned))
+    return tuple(rows)
+
+
+def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
+    """Return surfaces excluded from free-text locking, failing open.
+
+    A missing key is the normal state of a database built without the
+    official corpus; an invalid value is logged and also excludes nothing.
+    """
+    value = metadata.get(FREE_TEXT_LOCK_EXCLUSIONS_KEY)
+    if value is None:
+        return frozenset()
+    try:
+        rows = parse_free_text_lock_exclusions(value)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "ignoring invalid %s metadata; every dictionary surface stays lockable",
+            FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+        )
+        return frozenset()
+    return frozenset(surface for surface, _occurrences, _aligned in rows)
 
 
 def _is_latin_word_char(char: str) -> bool:
@@ -430,6 +527,38 @@ def select_term_spans(
 
     selected.sort(key=lambda item: item.start)
     return selected
+
+
+def _exact_lockable_sources(
+    entries: Iterable[TermEntry],
+) -> dict[str, tuple[str, str, str]]:
+    # Entries arrive in lookup priority order, so the first record carrying a
+    # surface owns it.
+    sources: dict[str, tuple[str, str, str]] = {}
+    for entry in entries:
+        if "\n" in entry.zh or "\n" in entry.en:
+            continue
+        official = (entry.zh, entry.en, entry.category)
+        if entry.zh:
+            sources.setdefault(entry.zh, official)
+        if entry.en:
+            sources.setdefault(entry.en, official)
+    return sources
+
+
+def exact_lockable_sources(
+    entries: Iterable[TermEntry],
+) -> tuple[tuple[str, tuple[str, str]], ...]:
+    """Return the eligible exact dictionary surfaces free text can lock.
+
+    This is the runtime lockable set before case variants and free-text
+    exclusions, in runtime order, for the builder's corpus measurement.
+    """
+    return tuple(
+        (source, (official[0], official[1]))
+        for source, official in _exact_lockable_sources(entries).items()
+        if _is_eligible_lockable(source, official)
+    )
 
 
 def _new_placeholder_prefix(source_text: str) -> str:
@@ -820,18 +949,16 @@ class SentenceTranslator:
         )
 
     def _read_lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
-        sources: dict[str, tuple[str, str, str]] = {}
-        for entry in self.service.entries():
-            if "\n" in entry.zh or "\n" in entry.en:
-                continue
-            official = (entry.zh, entry.en, entry.category)
-            if entry.zh:
-                sources.setdefault(entry.zh, official)
-            if entry.en:
-                sources.setdefault(entry.en, official)
+        excluded = _free_text_exclusions(self.service.metadata())
+        sources = _exact_lockable_sources(self.service.entries())
         # Case variants come after every exact source, so an exact surface
-        # always keeps its own record and wins equal-length overlaps.
-        for variant, official in _case_variant_sources(sources):
+        # always keeps its own record and wins equal-length overlaps. They are
+        # computed before exclusions are removed, so an excluded surface still
+        # blocks a variant equal to it and still counts for casefold ambiguity.
+        variants = _case_variant_sources(sources, excluded)
+        for surface in excluded:
+            sources.pop(surface, None)
+        for variant, official in variants:
             sources.setdefault(variant, official)
         return tuple(sources.items())
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import logging
 from pathlib import Path
 
@@ -769,3 +770,53 @@ def test_lowercase_resonator_name_is_locked_through_the_pipeline(
     assert outcome.text == "我把Velmira练满了"
     # A locked official name suppresses the short-query dictionary-miss hint.
     assert outcome.dictionary_miss is False
+
+
+@pytest.mark.parametrize("excluded", [True, False])
+def test_excluded_surfaces_count_as_dictionary_miss(monkeypatch, sample_db, excluded):
+    with connect(sample_db) as conn:
+        insert_records(conn, [
+            TermRecord("speaker", "fixture", "1", "1", "雷恩", "Wren"),
+            TermRecord("speaker", "fixture", "2", "2", "布鲁克", "Brook"),
+        ])
+        if excluded:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                (
+                    "free_text_lock_exclusions",
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "min_occurrences": 10,
+                            "max_aligned_ratio": [1, 5],
+                            "surfaces": [["Brook", 12, 0], ["Wren", 12, 1]],
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service, translator, TranslationJob(text="Wren/Brook")
+        )
+    )
+
+    assert outcome.kind == KIND_LLM
+    locked_text, locks = calls[0]
+    # A whitespace-free input is a short query, which is where the miss hint
+    # applies; excluded surfaces reach the LLM as ordinary words.
+    if excluded:
+        assert locked_text == "Wren/Brook"
+        assert locks == ()
+        assert outcome.text == "Wren/Brook"
+    else:
+        assert [(zh, en) for _placeholder, zh, en in locks] == [
+            ("雷恩", "Wren"),
+            ("布鲁克", "Brook"),
+        ]
+        assert outcome.text == "雷恩/布鲁克"
+    assert outcome.dictionary_miss is excluded

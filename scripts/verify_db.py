@@ -11,11 +11,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from wuwaterm.constants import (  # noqa: E402
     DEFAULT_SOURCE_PROFILE_NAME,
+    FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     get_source_profile,
     source_profile_choices,
 )
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
 from wuwaterm.normalize import normalize_text  # noqa: E402
+from wuwaterm.sentence import parse_free_text_lock_exclusions  # noqa: E402
 
 
 REQUIRED_CATEGORIES = (
@@ -169,12 +171,46 @@ def _exact_hit_errors(
     return errors
 
 
+def _free_text_exclusion_errors(
+    conn: sqlite3.Connection, metadata: dict[str, str], *, required: bool
+) -> list[str]:
+    """Check the builder-written free-text lock exclusions, if present.
+
+    A missing key passes unless ``required``: databases built before the key
+    existed, or without the official corpus, keep every surface lockable.
+    A present key must parse under the current version and parameters, and
+    every excluded surface must be an English surface of a term row.
+    """
+    value = metadata.get(FREE_TEXT_LOCK_EXCLUSIONS_KEY)
+    if value is None:
+        if required:
+            return [f"metadata {FREE_TEXT_LOCK_EXCLUSIONS_KEY} is missing"]
+        return []
+    try:
+        rows = parse_free_text_lock_exclusions(value)
+    except (TypeError, ValueError) as exc:
+        return [f"metadata {FREE_TEXT_LOCK_EXCLUSIONS_KEY} is invalid: {exc}"]
+    missing = [
+        surface
+        for surface, _occurrences, _aligned in rows
+        if conn.execute("SELECT 1 FROM terms WHERE en = ? LIMIT 1", (surface,)).fetchone()
+        is None
+    ]
+    if missing:
+        return [
+            f"metadata {FREE_TEXT_LOCK_EXCLUSIONS_KEY} names {len(missing)} "
+            f"surface(s) with no term row, first {missing[0]!r}"
+        ]
+    return []
+
+
 def verify_database(
     path: str | Path,
     *,
     profile_name: str = DEFAULT_SOURCE_PROFILE_NAME,
     required_categories: tuple[str, ...] = REQUIRED_CATEGORIES,
     exact_hits: tuple[tuple[str, str], ...] | None = None,
+    require_free_text_exclusions: bool = False,
 ) -> tuple[dict[str, int], dict[str, str]]:
     profile = get_source_profile(profile_name)
     checks = profile.representative_exact_hits if exact_hits is None else exact_hits
@@ -206,6 +242,11 @@ def verify_database(
         if missing:
             errors.append(f"missing or empty categories: {', '.join(missing)}")
         errors.extend(_exact_hit_errors(conn, checks))
+        errors.extend(
+            _free_text_exclusion_errors(
+                conn, metadata, required=require_free_text_exclusions
+            )
+        )
 
     if errors:
         raise VerificationError("; ".join(errors))
@@ -230,6 +271,14 @@ def main() -> int:
     )
     parser.add_argument("--min-category", action="append", default=[])
     parser.add_argument("--exact-hit", action="append", type=_parse_exact_hit, default=[])
+    parser.add_argument(
+        "--require-free-text-exclusions",
+        action="store_true",
+        help=(
+            f"fail when the {FREE_TEXT_LOCK_EXCLUSIONS_KEY} metadata key is "
+            "missing; a full build-db writes it"
+        ),
+    )
     args = parser.parse_args()
 
     profile = get_source_profile(args.profile)
@@ -241,6 +290,7 @@ def main() -> int:
             profile_name=profile.name,
             required_categories=categories,
             exact_hits=exact_hits,
+            require_free_text_exclusions=args.require_free_text_exclusions,
         )
     except (VerificationError, sqlite3.Error) as exc:
         print(f"database verification failed: {exc}", file=sys.stderr)
@@ -258,6 +308,12 @@ def main() -> int:
         "source_changelist",
     ):
         print(f"{key}\t{metadata[key]}")
+    exclusions = metadata.get(FREE_TEXT_LOCK_EXCLUSIONS_KEY)
+    if exclusions is None:
+        print(f"{FREE_TEXT_LOCK_EXCLUSIONS_KEY}\tabsent")
+    else:
+        count = len(parse_free_text_lock_exclusions(exclusions))
+        print(f"{FREE_TEXT_LOCK_EXCLUSIONS_KEY}\t{count} surfaces")
     return 0
 
 

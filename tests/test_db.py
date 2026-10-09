@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -64,9 +66,9 @@ def verified_db(tmp_path):
     return path
 
 
-def _verify(path: Path) -> subprocess.CompletedProcess[str]:
+def _verify(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "verify_db.py"), str(path)],
+        [sys.executable, str(ROOT / "scripts" / "verify_db.py"), str(path), *args],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -168,3 +170,91 @@ def test_strong_verifier_rejects_corrupt_database(verified_db, tmp_path):
 
     assert result.returncode == 1
     assert "database verification failed" in result.stderr
+
+
+def _with_exclusions(source: Path, tmp_path: Path, name: str, value: str) -> Path:
+    candidate = _copy_db(source, tmp_path, name)
+    with sqlite3.connect(candidate) as conn:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES ('free_text_lock_exclusions', ?)",
+            (value,),
+        )
+    return candidate
+
+
+def _exclusions(surfaces: list[list[object]], **overrides: object) -> str:
+    value: dict[str, object] = {
+        "version": 1,
+        "min_occurrences": 10,
+        "max_aligned_ratio": [1, 5],
+        "surfaces": surfaces,
+    }
+    value.update(overrides)
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+@pytest.mark.parametrize("flags", [(), ("--require-free-text-exclusions",)])
+def test_verifier_accepts_valid_free_text_exclusions(verified_db, tmp_path, flags):
+    candidate = _with_exclusions(
+        verified_db, tmp_path, "valid.db", _exclusions([["Test 3", 12, 1]])
+    )
+
+    result = _verify(candidate, *flags)
+
+    assert result.returncode == 0, result.stderr
+    assert "free_text_lock_exclusions\t1 surfaces" in result.stdout
+
+
+def test_verifier_treats_missing_free_text_exclusions_by_flag(verified_db):
+    plain = _verify(verified_db)
+    assert plain.returncode == 0, plain.stderr
+    assert "free_text_lock_exclusions\tabsent" in plain.stdout
+
+    required = _verify(verified_db, "--require-free-text-exclusions")
+    assert required.returncode == 1
+    assert "free_text_lock_exclusions is missing" in required.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not json",
+        _exclusions([["Test 3", 12, 1]], version=2),
+        _exclusions([["Test 3", 12, 1]], max_aligned_ratio=[1, 4]),
+        _exclusions([["Test 3", 12, 3]]),
+        _exclusions([["Not A Term", 12, 0]]),
+    ],
+)
+@pytest.mark.parametrize("flags", [(), ("--require-free-text-exclusions",)])
+def test_verifier_rejects_invalid_free_text_exclusions(
+    verified_db, tmp_path, value, flags
+):
+    candidate = _with_exclusions(verified_db, tmp_path, "invalid.db", value)
+
+    result = _verify(candidate, *flags)
+
+    assert result.returncode == 1
+    assert "free_text_lock_exclusions" in result.stderr
+
+
+def test_builder_verify_db_requires_free_text_exclusions(verified_db, tmp_path):
+    env = os.environ.copy()
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    env["WUWATERM_DB_PATH"] = str(verified_db)
+    entrypoint = ["sh", str(ROOT / "deploy" / "builder-entrypoint.sh"), "verify-db"]
+
+    missing = subprocess.run(
+        entrypoint, cwd=ROOT, env=env, text=True, capture_output=True,
+        timeout=20, check=False,
+    )
+    assert missing.returncode == 1
+    assert "free_text_lock_exclusions is missing" in missing.stderr
+
+    env["WUWATERM_DB_PATH"] = str(
+        _with_exclusions(verified_db, tmp_path, "built.db", _exclusions([]))
+    )
+    present = subprocess.run(
+        entrypoint, cwd=ROOT, env=env, text=True, capture_output=True,
+        timeout=20, check=False,
+    )
+    assert present.returncode == 0, present.stderr

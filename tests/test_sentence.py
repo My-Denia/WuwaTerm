@@ -1726,3 +1726,183 @@ def test_case_variant_locks_inside_html_formatting(case_variant_db):
     protected = protect_telegram_html("我和<b>velmira</b>组队")
     locked = translator._lock_html_terms(protected)
     assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+
+
+# Free-text lock exclusions (builder-written metadata). Synthetic names only.
+def _exclusion_value(rows, **overrides):
+    value = {
+        "version": 1,
+        "min_occurrences": 10,
+        "max_aligned_ratio": [1, 5],
+        "surfaces": [list(row) for row in rows],
+    }
+    value.update(overrides)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _set_exclusions(db_path, value):
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("free_text_lock_exclusions", value),
+        )
+        conn.commit()
+
+
+@pytest.fixture()
+def exclusion_db(sample_db):
+    with connect(sample_db) as conn:
+        conn.execute("DELETE FROM terms")
+        insert_records(conn, [
+            TermRecord("speaker", "fixture", "1", "1", "雷恩", "Wren"),
+            TermRecord("speaker", "fixture", "2", "2", "布鲁克", "Brook"),
+            TermRecord("location", "fixture", "3", "3", "布鲁克谷", "Brook Vale"),
+            TermRecord("resonator", "fixture", "4", "4", "维米拉", "Velmira"),
+            TermRecord("core_term", "fixture", "5", "5", "声骸", "Echo"),
+        ])
+        conn.commit()
+    return sample_db
+
+
+def test_excluded_surface_does_not_lock_in_free_text(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+
+    locked = translator.lock_terms("Wren is raining.")
+    assert locked.locks == ()
+    assert locked.locked_text == "Wren is raining."
+
+    locked = translator.lock_terms("Velmira met Wren")
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert locked.restore(locked.locked_text) == "Velmira met Wren"
+    assert locked.restore(locked.locked_text, to_en=False) == "维米拉 met Wren"
+
+
+def test_missing_exclusion_key_keeps_every_surface_lockable(exclusion_db):
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "Velmira met Wren") == [
+        ("维米拉", "Velmira"),
+        ("雷恩", "Wren"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not json",
+        "[]",
+        _exclusion_value([("Wren", 12, 0)], version=2),
+        _exclusion_value([("Wren", 12, 0)], version=True),
+        _exclusion_value([("Wren", 12, 0)], min_occurrences=5),
+        _exclusion_value([("Wren", 12, 0)], max_aligned_ratio=[1, 4]),
+        _exclusion_value([("Wren", 12, 0)], surfaces="Wren"),
+        _exclusion_value([("Wren", 12, 0)], extra=1),
+        _exclusion_value([("Wren", 9, 0)]),
+        _exclusion_value([("Wren", 10, 2)]),
+        _exclusion_value([("Wren", 12, 0), ("Brook", 12, 0)]),
+        _exclusion_value([("Wren", 12, 0), ("Wren", 12, 0)]),
+        _exclusion_value([("雷恩", 12, 0)]),
+        _exclusion_value([("Wren", 12.0, 0)]),
+        _exclusion_value([["Wren", 12]]),
+    ],
+)
+def test_invalid_exclusion_metadata_fails_open_with_one_warning(
+    exclusion_db, caplog, value
+):
+    _set_exclusions(exclusion_db, value)
+    translator = SentenceTranslator(exclusion_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
+        assert _locked_pairs(translator, "Velmira met Wren") == [
+            ("维米拉", "Velmira"),
+            ("雷恩", "Wren"),
+        ]
+        translator.lock_terms("Wren again")
+
+    warnings = [
+        record for record in caplog.records
+        if "free_text_lock_exclusions" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def test_html_translation_honours_exclusions_and_keeps_attributes(exclusion_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    html = '<a href="https://example.invalid/Wren/Velmira">Wren met Velmira</a>'
+    protected = protect_telegram_html(html)
+    locked = translator._lock_html_terms(protected)
+
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert translator._restore_html(
+        protected, locked, locked.locked_text, to_en=False
+    ) == '<a href="https://example.invalid/Wren/Velmira">Wren met 维米拉</a>'
+
+
+def test_excluded_resonator_gets_no_case_variants(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Velmira", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    for text in ("Velmira joins.", "velmira joins.", "VELMIRA joins."):
+        assert _locked_pairs(translator, text) == []
+
+
+def test_excluded_surface_keeps_whole_input_lookup(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert translator.translate("Wren", to_chinese=True) == "雷恩"
+
+
+def test_excluded_speaker_label_resolves_but_does_not_lock(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert translator.prepare_text("wren: hi") == "Wren: hi"
+    locked = translator.lock_terms("wren: hi")
+    assert locked.locks == ()
+    assert locked.locked_text == "Wren: hi"
+
+
+def test_excluded_inner_surface_keeps_longer_term(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Brook", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "Brook Vale is quiet.") == [
+        ("布鲁克谷", "Brook Vale")
+    ]
+    assert _locked_pairs(translator, "Brook is quiet.") == []
+
+
+def test_exclusions_follow_atomic_db_replacement(exclusion_db):
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "Wren waves.") == [("雷恩", "Wren")]
+
+    candidate = exclusion_db.with_name("terms.candidate.db")
+    shutil.copy2(exclusion_db, candidate)
+    _set_exclusions(candidate, _exclusion_value([("Wren", 12, 0)]))
+    os.replace(candidate, exclusion_db)
+
+    assert _locked_pairs(translator, "Wren waves.") == []
+
+
+def test_exclusions_do_not_touch_chinese_surfaces(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "雷恩来了") == [("雷恩", "Wren")]
+
+
+def test_exclusions_keep_case_variant_ambiguity_and_exact_blocking(case_variant_db):
+    # Excluding one member of a casefold group does not make the other
+    # member's variant unambiguous, and an excluded exact surface still
+    # blocks a resonator variant equal to it.
+    _set_exclusions(
+        case_variant_db, _exclusion_value([("Arin vale", 12, 0), ("corin", 12, 0)])
+    )
+    translator = SentenceTranslator(case_variant_db)
+    assert _locked_pairs(translator, "arin vale waves.") == []
+    assert _locked_pairs(translator, "ARIN VALE waves.") == []
+    assert _locked_pairs(translator, "Arin Vale waves.") == [("艾林", "Arin Vale")]
+    assert _locked_pairs(translator, "Arin vale waves.") == []
+    assert _locked_pairs(translator, "corin grows here.") == []
+    assert _locked_pairs(translator, "Corin is here.") == [("柯林", "Corin")]
+    # Other resonators keep their variants.
+    assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]

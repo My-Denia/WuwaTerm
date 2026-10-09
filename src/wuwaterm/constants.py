@@ -94,3 +94,14 @@ CORE_TERM_KEYS = {
     "Term850082_Title": "core_term",  # 声骸 -> Echo
     "OccupationConfig_漂泊者_Name": "core_term",  # 漂泊者 -> Rover
 }
+
+# Free-text lock exclusions. The builder counts how often each English
+# dictionary surface is locked in official English text and how often the
+# parallel official Chinese text carries its official Chinese name. Surfaces
+# locked at least FREE_TEXT_LOCK_MIN_OCCURRENCES times with an aligned share
+# below FREE_TEXT_LOCK_MAX_ALIGNED_RATIO (numerator, denominator) are stored
+# under the metadata key and do not lock in free-text sentence translation.
+FREE_TEXT_LOCK_EXCLUSIONS_KEY = "free_text_lock_exclusions"
+FREE_TEXT_LOCK_EXCLUSIONS_VERSION = 1
+FREE_TEXT_LOCK_MIN_OCCURRENCES = 10
+FREE_TEXT_LOCK_MAX_ALIGNED_RATIO = (1, 5)
