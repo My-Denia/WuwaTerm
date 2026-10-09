@@ -258,3 +258,91 @@ def test_builder_verify_db_requires_free_text_exclusions(verified_db, tmp_path):
         timeout=20, check=False,
     )
     assert present.returncode == 0, present.stderr
+
+
+# Chinese-surface free-text lock exclusions (the zh metadata key).
+def _with_zh_exclusions(source: Path, tmp_path: Path, name: str, value: str) -> Path:
+    candidate = _copy_db(source, tmp_path, name)
+    with sqlite3.connect(candidate) as conn:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES "
+            "('free_text_lock_exclusions_zh', ?)",
+            (value,),
+        )
+    return candidate
+
+
+def _zh_exclusions(surfaces: list[list[object]], **overrides: object) -> str:
+    value: dict[str, object] = {
+        "version": 1,
+        "min_occurrences": 10,
+        "max_aligned_ratio": [1, 5],
+        "surfaces": surfaces,
+    }
+    value.update(overrides)
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("flags", [(), ("--require-free-text-zh-exclusions",)])
+def test_verifier_accepts_valid_free_text_zh_exclusions(verified_db, tmp_path, flags):
+    candidate = _with_zh_exclusions(
+        verified_db, tmp_path, "valid-zh.db", _zh_exclusions([["测试3", 12, 1]])
+    )
+
+    result = _verify(candidate, *flags)
+
+    assert result.returncode == 0, result.stderr
+    assert "free_text_lock_exclusions_zh\t1 surfaces" in result.stdout
+
+
+def test_verifier_treats_missing_free_text_zh_exclusions_by_flag(verified_db):
+    plain = _verify(verified_db)
+    assert plain.returncode == 0, plain.stderr
+    assert "free_text_lock_exclusions_zh\tabsent" in plain.stdout
+
+    required = _verify(verified_db, "--require-free-text-zh-exclusions")
+    assert required.returncode == 1
+    assert "free_text_lock_exclusions_zh is missing" in required.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not json",
+        _zh_exclusions([["测试3", 12, 1]], version=2),
+        _zh_exclusions([["测试3", 12, 1]], max_aligned_ratio=[1, 4]),
+        _zh_exclusions([["测试3", 12, 3]]),
+        _zh_exclusions([["无此词面", 12, 0]]),
+        _zh_exclusions([["Test 3", 12, 0]]),
+    ],
+)
+@pytest.mark.parametrize("flags", [(), ("--require-free-text-zh-exclusions",)])
+def test_verifier_rejects_invalid_free_text_zh_exclusions(
+    verified_db, tmp_path, value, flags
+):
+    candidate = _with_zh_exclusions(verified_db, tmp_path, "invalid-zh.db", value)
+
+    result = _verify(candidate, *flags)
+
+    assert result.returncode == 1
+    assert "free_text_lock_exclusions_zh" in result.stderr
+
+
+def test_verifier_checks_each_exclusion_key_independently(verified_db, tmp_path):
+    # A valid English key does not excuse an invalid zh key, and the zh
+    # flag does not require the English key.
+    both = _with_zh_exclusions(
+        _with_exclusions(verified_db, tmp_path, "en.db", _exclusions([["Test 3", 12, 1]])),
+        tmp_path,
+        "both.db",
+        "not json",
+    )
+    result = _verify(both, "--require-free-text-zh-exclusions")
+    assert result.returncode == 1
+    assert "free_text_lock_exclusions_zh is invalid" in result.stderr
+
+    zh_only = _with_zh_exclusions(
+        verified_db, tmp_path, "zh-only.db", _zh_exclusions([["测试3", 12, 1]])
+    )
+    result = _verify(zh_only, "--require-free-text-zh-exclusions")
+    assert result.returncode == 0, result.stderr
