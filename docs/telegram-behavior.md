@@ -127,6 +127,9 @@ admin (see that section).
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
   A resonator name typed all-lowercase or all-caps inside a sentence (`jinhsi`, `JINHSI`) is locked
   like its official casing; mixed casing and other term categories still need the exact official form.
+  An English dictionary surface that official text almost always uses as an ordinary word (`It`, `Do`,
+  `Fish`) is not locked inside a sentence once a dictionary rebuilt with its free-text exclusion list is
+  promoted; `/tr It` alone still returns the dictionary hit.
 - Explicit direction flags override that default for commands only:
   `/tr --to en ...`, `/tr -to en ...`, `/tr --to zh ...`, `/tr -to zh ...`,
   `/sentence --to en ...`, `/sentence --to zh ...`, `/sent --to en ...`, and

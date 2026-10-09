@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+import unicodedata
+from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .constants import CORE_TERM_KEYS, SourceProfile, get_source_profile
+from .constants import (
+    CORE_TERM_KEYS,
+    FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_MIN_OCCURRENCES,
+    SourceProfile,
+    get_source_profile,
+)
 from .data_source import inspect_data_source
-from .db import create_database
+from .db import connect, create_database
 from .models import TermRecord
 from .normalize import clean_source_text
 
@@ -123,20 +135,33 @@ def source_profile_for_data_dir(data_dir: str | Path, profile_name: str | None =
     return get_source_profile()
 
 
-def iter_records(data_dir: str | Path, profile_name: str | None = None) -> list[TermRecord]:
+TextMaps = tuple[dict[str, str], dict[str, str]]
+
+
+def iter_records(
+    data_dir: str | Path,
+    profile_name: str | None = None,
+    loaded_text_maps: list[TextMaps] | None = None,
+) -> list[TermRecord]:
+    """Extract term records; append the (zh, en) text maps read to
+    ``loaded_text_maps`` when given, so the caller can reuse them."""
     profile = source_profile_for_data_dir(data_dir, profile_name)
     if profile.layout == "arikatsu_textmaps":
-        return iter_arikatsu_records(data_dir)
-    return iter_dimbreath_records(data_dir)
+        return iter_arikatsu_records(data_dir, loaded_text_maps)
+    return iter_dimbreath_records(data_dir, loaded_text_maps)
 
 
-def iter_arikatsu_records(data_dir: str | Path) -> list[TermRecord]:
+def iter_arikatsu_records(
+    data_dir: str | Path, loaded_text_maps: list[TextMaps] | None = None
+) -> list[TermRecord]:
     root = Path(data_dir)
     bin_root = root / "BinData"
     if not bin_root.exists():
         raise BuildError(f"missing BinData directory: {bin_root}")
     zh_map = load_arikatsu_string_texts(root, "zh-Hans")
     en_map = load_arikatsu_string_texts(root, "en")
+    if loaded_text_maps is not None:
+        loaded_text_maps.append((zh_map, en_map))
     records: list[TermRecord] = []
 
     for text_key, category in CORE_TERM_KEYS.items():
@@ -205,7 +230,9 @@ def iter_arikatsu_records(data_dir: str | Path) -> list[TermRecord]:
     return records
 
 
-def iter_dimbreath_records(data_dir: str | Path) -> list[TermRecord]:
+def iter_dimbreath_records(
+    data_dir: str | Path, loaded_text_maps: list[TextMaps] | None = None
+) -> list[TermRecord]:
     root = Path(data_dir)
     config_root = root / "ConfigDB"
     if not config_root.exists():
@@ -213,6 +240,8 @@ def iter_dimbreath_records(data_dir: str | Path) -> list[TermRecord]:
 
     zh_map = load_multitext(root, "zh-Hans")
     en_map = load_multitext(root, "en")
+    if loaded_text_maps is not None:
+        loaded_text_maps.append((zh_map, en_map))
     records: list[TermRecord] = []
 
     for text_key, category in CORE_TERM_KEYS.items():
@@ -260,6 +289,105 @@ def iter_dimbreath_records(data_dir: str | Path) -> list[TermRecord]:
     return records
 
 
+_ASCII_LETTER_RUN_RE = re.compile(r"[A-Za-z]+")
+
+
+def _is_cjk_text(text: str) -> bool:
+    return any("\u3400" <= char <= "\u9fff" for char in text)
+
+
+def _is_latin_surface(text: str) -> bool:
+    return not _is_cjk_text(text) and any(
+        char.isalpha() and unicodedata.name(char, "").startswith("LATIN ")
+        for char in text
+    )
+
+
+def measure_free_text_exclusions(
+    db_path: str | Path, en_map: dict[str, str], zh_map: dict[str, str]
+) -> str:
+    """Return the free-text lock exclusion metadata value for a built DB.
+
+    Every official English string with a Chinese counterpart goes through
+    the runtime span selection over the exact lockable surfaces (no case
+    variants, no exclusions). Each selected Latin-script surface counts one
+    occurrence, and is aligned when the parallel Chinese string contains
+    the locked official Chinese or the Chinese of any record carrying that
+    surface. A surface is excluded when it occurs at least
+    FREE_TEXT_LOCK_MIN_OCCURRENCES times and its aligned share is below
+    FREE_TEXT_LOCK_MAX_ALIGNED_RATIO. The value is compact, key-sorted JSON
+    with surfaces sorted, so equal inputs give equal bytes.
+    """
+    from .lookup import TermService
+    from .sentence import exact_lockable_sources, select_term_spans
+
+    entries = TermService(db_path).entries()
+    lockable = exact_lockable_sources(entries)
+    aligned_zh: dict[str, set[str]] = defaultdict(set)
+    for entry in entries:
+        if entry.en and entry.zh:
+            aligned_zh[entry.en].add(entry.zh)
+            aligned_zh[entry.zh].add(entry.zh)
+
+    # A matching surface's longest ASCII letter run is a whole letter run of
+    # the text: inner runs are bounded by the surface itself and edge runs
+    # by the ASCII word-boundary check. Surfaces without such a run are
+    # always tried, and text containing CJK falls back to the full set so
+    # Chinese surfaces keep their place in span selection.
+    by_anchor: dict[str, list[int]] = defaultdict(list)
+    always: list[int] = []
+    for index, (source, _official) in enumerate(lockable):
+        runs = _ASCII_LETTER_RUN_RE.findall(source)
+        if runs:
+            by_anchor[max(runs, key=len)].append(index)
+        elif not _is_cjk_text(source):
+            always.append(index)
+
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for text_key, text in en_map.items():
+        zh_text = zh_map.get(text_key)
+        if zh_text is None:
+            continue
+        if _is_cjk_text(text):
+            candidates = lockable
+        else:
+            indexes = set(always)
+            for run in set(_ASCII_LETTER_RUN_RE.findall(text)):
+                indexes.update(by_anchor.get(run, ()))
+            if not indexes:
+                continue
+            candidates = tuple(lockable[index] for index in sorted(indexes))
+        for span in select_term_spans(text, candidates, text, 0):
+            surface = span.source
+            if not _is_latin_surface(surface):
+                continue
+            count = counts[surface]
+            count[0] += 1
+            if span.official[0] in zh_text or any(
+                zh in zh_text for zh in aligned_zh.get(surface, ())
+            ):
+                count[1] += 1
+
+    numerator, denominator = FREE_TEXT_LOCK_MAX_ALIGNED_RATIO
+    surfaces = [
+        [surface, occurrences, aligned]
+        for surface, (occurrences, aligned) in sorted(counts.items())
+        if occurrences >= FREE_TEXT_LOCK_MIN_OCCURRENCES
+        and aligned * denominator < occurrences * numerator
+    ]
+    return json.dumps(
+        {
+            "version": FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
+            "min_occurrences": FREE_TEXT_LOCK_MIN_OCCURRENCES,
+            "max_aligned_ratio": list(FREE_TEXT_LOCK_MAX_ALIGNED_RATIO),
+            "surfaces": surfaces,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def build_database(
     data_dir: str | Path,
     db_path: str | Path,
@@ -267,7 +395,8 @@ def build_database(
 ) -> int:
     profile = source_profile_for_data_dir(data_dir, profile_name)
     provenance = inspect_data_source(data_dir, profile.name)
-    records = iter_records(data_dir, profile.name)
+    text_maps: list[TextMaps] = []
+    records = iter_records(data_dir, profile.name, loaded_text_maps=text_maps)
     if inspect_data_source(data_dir, profile.name) != provenance:
         raise BuildError("source provenance changed during database extraction")
     create_database(
@@ -276,6 +405,19 @@ def build_database(
         source_profile=profile,
         source_provenance=provenance,
     )
+    # Exclusions need the official corpus the records were read from;
+    # create_database alone, or a records source that read no text maps,
+    # writes none, and runtime then keeps every surface lockable.
+    if not text_maps:
+        return len(records)
+    zh_map, en_map = text_maps[0]
+    exclusions = measure_free_text_exclusions(db_path, en_map, zh_map)
+    with closing(connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (FREE_TEXT_LOCK_EXCLUSIONS_KEY, exclusions),
+        )
+        conn.commit()
     return len(records)
 
 

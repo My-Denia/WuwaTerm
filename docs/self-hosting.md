@@ -212,7 +212,7 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
 .venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions
 ```
 
 On either path the refresh fetches roughly a gigabyte over the network and can
@@ -222,10 +222,12 @@ checkout is resumed rather than discarded, so a retry after a transient failure
 is usually much faster than the first attempt.
 
 `verify_db.py` checks integrity, the schema, the recorded source provenance
-against the profile, the required categories, and representative exact hits. It
-prints the category counts and the recorded provenance and nothing else — there
-is **no explicit PASS line**, so the exit status is the verdict: zero means
-verified. On a first install, once it passes, put the candidate in place:
+against the profile, the required categories, representative exact hits, and
+the free-text lock exclusions the build records (`--require-free-text-exclusions`
+makes a candidate without them fail; the builder image's `verify-db` always
+passes it). It prints the category counts, the recorded provenance and the
+number of excluded surfaces and nothing else — there is **no explicit PASS
+line**, so the exit status is the verdict: zero means verified. On a first install, once it passes, put the candidate in place:
 
 ```bash
 mv data/terms.candidate.db data/terms.db
