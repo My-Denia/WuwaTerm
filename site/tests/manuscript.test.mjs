@@ -192,3 +192,113 @@ test('changing a submitted choice is incomparable even without any truncation', 
   file.history[0].resolutions[0].injected = true;
   assert.throws(() => parseWorkfile(JSON.stringify(file)));
 });
+
+// F10: dictionary exclusion lists downgrade automatic findings to not_evaluated
+// with a null target span. The site runtime already treats either-side
+// not_evaluated as incomparable and ignores verdicts when reusing saved
+// choices; the tests below pin that contract against the new report shapes.
+test('F10 downgrade needs_review to not_evaluated on same basis is incomparable, never resolved or pending', () => {
+  const before = fixture(undefined, 'Wrong.\nEcho.'); // 今汐 needs_review (null target), 声骸 verified
+  const after = structuredClone(before);
+  after.report.findings[0] = { ...after.report.findings[0], verdict: 'not_evaluated', target_span: null };
+  assert.equal(validReport(after.report, after.source, after.target), true);
+  assert.equal(after.report.findings[0].id, before.report.findings[0].id);
+  assert.equal(after.report.findings[0].rule_id, before.report.findings[0].rule_id);
+  assert.deepEqual(after.report.findings[0].candidates, before.report.findings[0].candidates); // F10 keeps candidates
+  const result = compareReports(before, after);
+  assert.equal(result.resolved.length, 0);
+  assert.equal(result.pending.length, 0);
+  assert.equal(result.new.length, 0);
+  assert.equal(result.incomparable.length, 1);
+  assert.equal(result.incomparable[0].mention.text, '今汐');
+  assert.equal(result.incomparable[0].mention.historical, false);
+  assert.equal(result.incomparable[0].code, 'scope_position_incomparable');
+  assert.match(result.incomparable[0].reason, /不可比/u);
+});
+test('F10 downgrade verified_constraint to not_evaluated is incomparable, never resolved or pending', () => {
+  const before = fixture(); // both findings verified_constraint
+  const after = structuredClone(before);
+  after.report.findings[0] = { ...after.report.findings[0], verdict: 'not_evaluated', target_span: null };
+  assert.equal(validReport(after.report, after.source, after.target), true);
+  const result = compareReports(before, after);
+  assert.equal(result.resolved.length, 0);
+  assert.equal(result.pending.length, 0);
+  assert.equal(result.new.length, 0);
+  assert.equal(result.incomparable.length, 1);
+  assert.equal(result.incomparable[0].mention.text, '今汐');
+  assert.equal(result.incomparable[0].code, 'scope_position_incomparable');
+});
+test('unchanged saved official_pair stays applicable against a fresh not_evaluated finding with same candidate and basis', () => {
+  const s = fixture();
+  const gated = structuredClone(s);
+  gated.report.findings[0] = { ...gated.report.findings[0], verdict: 'not_evaluated', target_span: null };
+  const c = choiceFor(s);
+  const candidate = s.report.findings[0].candidates[0];
+  assert.equal(c.choice, 'official_pair');
+  assert.equal(c.candidate.candidate_id, candidate.candidate_id);
+  assert.deepEqual(c.basis, basisOf(gated.report));
+  assert.ok(gated.report.findings[0].candidates.some(x => x.candidate_id === candidate.candidate_id));
+  const result = reconcileChoice(c, s, gated);
+  assert.equal(result.status, 'applicable');
+  assert.equal(result.code, 'position_basis_match');
+  assert.deepEqual(result.resolution, { mention_id: gated.report.findings[0].id, choice: 'official_pair', candidate_id: candidate.candidate_id });
+});
+test('not_a_term against a fresh not_evaluated finding: same-session stays applicable, imported still needs re-confirmation', () => {
+  const s = fixture();
+  const gated = structuredClone(s);
+  gated.report.findings[0] = { ...gated.report.findings[0], verdict: 'not_evaluated', target_span: null };
+  const c = choiceFor(s, 0, null);
+  assert.equal(c.choice, 'not_a_term'); assert.equal(c.candidate, null);
+  const sameSession = reconcileChoice(c, s, gated, false);
+  assert.equal(sameSession.status, 'applicable');
+  assert.equal(sameSession.code, 'user_not_a_term');
+  assert.deepEqual(sameSession.resolution, { mention_id: gated.report.findings[0].id, choice: 'not_a_term' });
+  const imported = reconcileChoice(c, s, gated, true);
+  assert.equal(imported.status, 'pending');
+  assert.equal(imported.code, 'imported_not_a_term');
+  assert.equal(imported.resolution, null);
+});
+test('workfile round-trip keeps original verdicts: historical needs_review and fresh not_evaluated are not rewritten', async () => {
+  const { freshApiReport, FRESH_MATCHER_REVISION } = await import('./fixtures/manuscript.mjs');
+  const historical = fixture(undefined, 'Wrong.\nEcho.'); // 今汐 needs_review (null target), 声骸 verified
+  const fresh = structuredClone(historical);
+  fresh.report = freshApiReport({
+    ...historical.report,
+    findings: historical.report.findings.map(f => f.verdict === 'needs_review'
+      ? { ...f, verdict: 'not_evaluated', target_span: null } : f),
+  });
+  const payload = { source: historical.source, target: historical.target, direction: historical.direction,
+    alignments: historical.alignments, choices: [], history: [clean(historical), clean(fresh)] };
+  const restored = parseWorkfile(serializeWorkfile(payload));
+  assert.equal(restored.history.length, 2);
+  const [oldSnap, freshSnap] = restored.history;
+  assert.equal(oldSnap.report.findings[0].verdict, 'needs_review');
+  assert.equal(oldSnap.report.findings[0].target_span, null);
+  assert.equal(oldSnap.report.findings[1].verdict, 'verified_constraint');
+  assert.deepEqual(oldSnap.report.findings[1].target_span, historical.report.findings[1].target_span);
+  assert.equal(Object.hasOwn(oldSnap.report, 'matcher_revision'), false);
+  assert.equal(freshSnap.report.findings[0].verdict, 'not_evaluated');
+  assert.equal(freshSnap.report.findings[0].target_span, null);
+  assert.deepEqual(freshSnap.report.findings[0].candidates, historical.report.findings[0].candidates);
+  assert.equal(freshSnap.report.findings[1].verdict, 'verified_constraint');
+  assert.equal(freshSnap.report.matcher_revision, FRESH_MATCHER_REVISION);
+});
+test('gated not_evaluated reports keep existing protections: missing finding and changed basis still require confirmation', () => {
+  const s = fixture();
+  const gated = structuredClone(s);
+  gated.report.findings[0] = { ...gated.report.findings[0], verdict: 'not_evaluated', target_span: null };
+  const c = choiceFor(s);
+  const rebased = structuredClone(gated);
+  rebased.report.dictionary = { ...rebased.report.dictionary, revision: hash('rotated dictionary') };
+  const basisPending = reconcileChoice(c, s, rebased);
+  assert.equal(basisPending.status, 'pending');
+  assert.equal(basisPending.code, 'basis_changed');
+  assert.equal(basisPending.resolution, null);
+  const missing = structuredClone(gated);
+  missing.report.findings = missing.report.findings.slice(1);
+  const missingPending = reconcileChoice(c, s, missing);
+  assert.equal(missingPending.status, 'pending');
+  assert.equal(missingPending.code, 'finding_missing_or_truncated');
+  assert.equal(missingPending.resolution, null);
+  assert.equal(reconcileChoice(c, s, gated).status, 'applicable'); // verdict alone never blocks reuse
+});

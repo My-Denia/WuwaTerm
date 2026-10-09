@@ -8,7 +8,8 @@ Intended layers (must stay aligned with docs/architecture.md):
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
                    or builder modules)
-  shared policy:   translation_policy, runtime_keys, constants
+  shared policy:   translation_policy, runtime_keys, constants,
+                   exclusion_metadata (strict builder-metadata parsers)
   presentation:    bot, channel, telegram_html, telegram_text
   local state:     settings, channel_reply_index, channel_reply_schema,
                    channel_runtime, logging_utils
@@ -101,7 +102,9 @@ DOMAIN_LLM = frozenset({"sentence"})
 # module sits above domain/LLM and below presentation: callers import it; it
 # imports none of them.
 APPLICATION = frozenset({"application"})
-SHARED = frozenset({"translation_policy", "runtime_keys", "constants"})
+SHARED = frozenset(
+    {"translation_policy", "runtime_keys", "constants", "exclusion_metadata"}
+)
 PRESENTATION = frozenset({"bot", "channel", "telegram_html", "telegram_text"})
 LOCAL_STATE = frozenset(
     {

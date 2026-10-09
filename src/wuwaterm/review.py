@@ -10,14 +10,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .cjk_span import MATCHER_REVISION, crosses_cjk_word_boundary
-from .constants import CATEGORY_ORDER
+from .constants import (
+    CATEGORY_ORDER,
+    FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+)
+from .exclusion_metadata import (
+    parse_free_text_lock_exclusions,
+    parse_free_text_zh_lock_exclusions,
+)
 from .lookup import TermService
 from .models import TermEntry
+
+LOGGER = logging.getLogger(__name__)
 
 RULE_VERSION = "review-v1"
 RULE_VERSION_V2 = "review-v2"
@@ -364,6 +375,41 @@ def _surface_index(
         if entry.en and entry.en != entry.zh:
             surfaces.setdefault(entry.en, []).append(entry)
     return surfaces
+
+
+def _automatic_term_exclusions(metadata: dict[str, str]) -> frozenset[str]:
+    """Return surfaces the official corpus uses as ordinary words.
+
+    Both free-text exclusion metadata keys supply the same corpus evidence —
+    a surface locked at least ten times whose official parallel line carried
+    the official form in under one fifth of those lines — so automatic term
+    discovery treats such a surface as an ordinary word unless the user says
+    otherwise. Each key is read independently: a missing key is the normal
+    state of a database built without it and contributes nothing; an invalid
+    value is warned about and contributes nothing from that key while the
+    other key still applies. This reader never changes which mentions or
+    candidates a report contains; it only decides whether an unresolved
+    mention asserts a terminology constraint.
+    """
+    surfaces: set[str] = set()
+    for key, parser in (
+        (FREE_TEXT_LOCK_EXCLUSIONS_KEY, parse_free_text_lock_exclusions),
+        (FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY, parse_free_text_zh_lock_exclusions),
+    ):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        try:
+            rows = parser(value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "ignoring invalid %s metadata; no automatic term exclusions "
+                "were applied from that key",
+                key,
+            )
+            continue
+        surfaces.update(surface for surface, _occurrences, _aligned in rows)
+    return frozenset(surfaces)
 
 
 def _is_cjk_character(char: str) -> bool:
@@ -892,6 +938,7 @@ def _judge_mention_v2(
     corresponding: tuple[int, int] | None,
     used_target: set[tuple[int, int]],
     resolution: ReviewResolution | None,
+    automatic_term_excluded: bool = False,
 ) -> ReviewFinding:
     finding_id = mention_id(mention.start, mention.end, mention.source)
     source_span = _span_at(source, mention.start, mention.end)
@@ -917,6 +964,21 @@ def _judge_mention_v2(
                 "invalid_request",
                 "official_pair candidate_id is not current for this mention",
             )
+
+    if resolution is None and automatic_term_excluded:
+        # The official corpus uses this exact surface as an ordinary word, so
+        # its automatic discovery asserts no terminology constraint: the
+        # finding stays, with every candidate, but nothing is evaluated and
+        # no target span is claimed. An explicit official_pair resolution
+        # runs the authoritative check above; not_a_term is user intent.
+        return ReviewFinding(
+            id=finding_id,
+            verdict=VERDICT_NOT_EVALUATED,
+            rule_id=RULE_TERM_PAIR,
+            source_span=source_span,
+            target_span=None,
+            candidates=candidates,
+        )
 
     forms = (
         (_official_form(selected, direction),)
@@ -1201,6 +1263,7 @@ def _review_pair_v2(
         _coerce_resolution_context(resolution_context)
 
     surfaces = _surface_index(entries)
+    automatic_exclusions = _automatic_term_exclusions(snapshot.metadata)
     mentions = _collect_mentions(
         source,
         surfaces,
@@ -1254,6 +1317,7 @@ def _review_pair_v2(
                 corresponding=_mapped_target_range(mention, mappings),
                 used_target=used_target,
                 resolution=resolution,
+                automatic_term_excluded=mention.source in automatic_exclusions,
             )
         )
 
