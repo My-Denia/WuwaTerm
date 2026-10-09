@@ -24,6 +24,10 @@ from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
     FREE_TEXT_LOCK_MAX_ALIGNED_RATIO,
     FREE_TEXT_LOCK_MIN_OCCURRENCES,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
 )
 from .lookup import TermService
 from .models import TermEntry
@@ -420,24 +424,96 @@ def parse_free_text_lock_exclusions(value: str) -> tuple[tuple[str, int, int], .
     return tuple(rows)
 
 
-def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
-    """Return surfaces excluded from free-text locking, failing open.
+def parse_free_text_zh_lock_exclusions(value: str) -> tuple[tuple[str, int, int], ...]:
+    """Parse the builder's Chinese-surface lock exclusion metadata value.
 
-    A missing key is the normal state of a database built without the
-    official corpus; an invalid value is logged and also excludes nothing.
+    Returns ``(surface, occurrences, aligned)`` rows under the same strict
+    contract as the English key: current zh version and parameters, surfaces
+    unique and sorted, and every row meeting the exclusion rule it was built
+    with. The script check is the mirror image: each surface must be
+    single-line and contain at least one CJK character (U+3400-U+9FFF);
+    non-CJK characters around the han characters (brackets, digits) stay
+    allowed, and unlike the English parser there is no Latin requirement.
     """
-    value = metadata.get(FREE_TEXT_LOCK_EXCLUSIONS_KEY)
-    if value is None:
-        return frozenset()
-    try:
-        rows = parse_free_text_lock_exclusions(value)
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "ignoring invalid %s metadata; every dictionary surface stays lockable",
-            FREE_TEXT_LOCK_EXCLUSIONS_KEY,
-        )
-        return frozenset()
-    return frozenset(surface for surface, _occurrences, _aligned in rows)
+    data = json.loads(value)
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "min_occurrences",
+        "max_aligned_ratio",
+        "surfaces",
+    }:
+        raise ValueError("unexpected zh exclusion object")
+    if not _is_exact_int(data["version"]) or (
+        data["version"] != FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION
+    ):
+        raise ValueError("unsupported zh exclusion version")
+    if not _is_exact_int(data["min_occurrences"]) or (
+        data["min_occurrences"] != FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES
+    ):
+        raise ValueError("zh exclusion min_occurrences mismatch")
+    ratio = data["max_aligned_ratio"]
+    if (
+        not isinstance(ratio, list)
+        or not all(map(_is_exact_int, ratio))
+        or tuple(ratio) != FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO
+    ):
+        raise ValueError("zh exclusion max_aligned_ratio mismatch")
+    numerator, denominator = FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO
+    surfaces = data["surfaces"]
+    if not isinstance(surfaces, list):
+        raise ValueError("zh exclusion surfaces must be a list")
+    rows: list[tuple[str, int, int]] = []
+    for row in surfaces:
+        if not isinstance(row, list) or len(row) != 3:
+            raise ValueError("zh exclusion row must be [surface, occurrences, aligned]")
+        surface, occurrences, aligned = row
+        if (
+            type(surface) is not str
+            or not any(map(_is_cjk_character, surface))
+            or "\n" in surface
+        ):
+            raise ValueError("zh exclusion surface must be single-line CJK text")
+        if not _is_exact_int(occurrences) or not _is_exact_int(aligned):
+            raise ValueError("zh exclusion counts must be integers")
+        if not (
+            occurrences >= FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES
+            and 0 <= aligned <= occurrences
+            and aligned * denominator < occurrences * numerator
+        ):
+            raise ValueError("zh exclusion row does not meet the exclusion rule")
+        if rows and surface <= rows[-1][0]:
+            raise ValueError("zh exclusion surfaces must be unique and sorted")
+        rows.append((surface, occurrences, aligned))
+    return tuple(rows)
+
+
+def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
+    """Return the union of both exclusion keys, failing open per key.
+
+    The English and Chinese metadata keys are read independently: a missing
+    key is the normal state of a database built without the official corpus
+    or before that key existed, and an invalid value is logged with one
+    warning naming that key and excludes nothing from it, while the other
+    key still applies.
+    """
+    surfaces: set[str] = set()
+    for key, parser in (
+        (FREE_TEXT_LOCK_EXCLUSIONS_KEY, parse_free_text_lock_exclusions),
+        (FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY, parse_free_text_zh_lock_exclusions),
+    ):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        try:
+            rows = parser(value)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "ignoring invalid %s metadata; every dictionary surface stays lockable",
+                key,
+            )
+            continue
+        surfaces.update(surface for surface, _occurrences, _aligned in rows)
+    return frozenset(surfaces)
 
 
 def _is_latin_word_char(char: str) -> bool:

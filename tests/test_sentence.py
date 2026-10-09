@@ -1906,3 +1906,178 @@ def test_exclusions_keep_case_variant_ambiguity_and_exact_blocking(case_variant_
     assert _locked_pairs(translator, "Corin is here.") == [("柯林", "Corin")]
     # Other resonators keep their variants.
     assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+
+
+# Chinese-surface free-text lock exclusions (the zh metadata key). The
+# runtime reads both keys and applies their union; each key fails open
+# independently. Synthetic names only.
+def _zh_exclusion_value(rows, **overrides):
+    value = {
+        "version": 1,
+        "min_occurrences": 10,
+        "max_aligned_ratio": [1, 5],
+        "surfaces": [list(row) for row in rows],
+    }
+    value.update(overrides)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _set_zh_exclusions(db_path, value):
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("free_text_lock_exclusions_zh", value),
+        )
+        conn.commit()
+
+
+def test_zh_excluded_surface_does_not_lock_in_free_text(exclusion_db):
+    _set_zh_exclusions(exclusion_db, _zh_exclusion_value([("雷恩", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+
+    locked = translator.lock_terms("雷恩说话了。")
+    assert locked.locks == ()
+    assert locked.locked_text == "雷恩说话了。"
+
+    locked = translator.lock_terms("维米拉见了雷恩")
+    assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
+    assert locked.restore(locked.locked_text) == "Velmira见了雷恩"
+    assert locked.restore(locked.locked_text, to_en=False) == "维米拉见了雷恩"
+
+
+def test_missing_zh_exclusion_key_keeps_every_surface_lockable(exclusion_db):
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "维米拉见了雷恩") == [
+        ("维米拉", "Velmira"),
+        ("雷恩", "Wren"),
+    ]
+
+
+def test_english_and_zh_exclusions_apply_as_a_union(exclusion_db):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    _set_zh_exclusions(exclusion_db, _zh_exclusion_value([("雷恩", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "Wren met 雷恩") == []
+    assert _locked_pairs(translator, "Velmira met Wren") == [("维米拉", "Velmira")]
+    assert _locked_pairs(translator, "维米拉见了雷恩") == [("维米拉", "Velmira")]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not json",
+        "[]",
+        _zh_exclusion_value([("雷恩", 12, 0)], version=2),
+        _zh_exclusion_value([("雷恩", 12, 0)], version=True),
+        _zh_exclusion_value([("雷恩", 12, 0)], min_occurrences=5),
+        _zh_exclusion_value([("雷恩", 12, 0)], max_aligned_ratio=[1, 4]),
+        _zh_exclusion_value([("雷恩", 12, 0)], surfaces="雷恩"),
+        _zh_exclusion_value([("雷恩", 12, 0)], extra=1),
+        _zh_exclusion_value([("雷恩", 9, 0)]),
+        _zh_exclusion_value([("雷恩", 10, 2)]),
+        _zh_exclusion_value([("雷恩", 12, 0), ("布鲁克", 12, 0)]),
+        _zh_exclusion_value([("雷恩", 12, 0), ("雷恩", 12, 0)]),
+        _zh_exclusion_value([("Wren", 12, 0)]),
+        _zh_exclusion_value([("雷\n恩", 12, 0)]),
+        _zh_exclusion_value([("雷恩", 12.0, 0)]),
+        _zh_exclusion_value([["雷恩", 12]]),
+    ],
+)
+def test_invalid_zh_exclusion_metadata_fails_open_with_one_warning(
+    exclusion_db, caplog, value
+):
+    _set_zh_exclusions(exclusion_db, value)
+    translator = SentenceTranslator(exclusion_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
+        assert _locked_pairs(translator, "维米拉见了雷恩") == [
+            ("维米拉", "Velmira"),
+            ("雷恩", "Wren"),
+        ]
+        translator.lock_terms("雷恩 again")
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "free_text_lock_exclusions_zh" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def test_invalid_zh_exclusion_leaves_valid_english_key_active(exclusion_db, caplog):
+    _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
+    _set_zh_exclusions(exclusion_db, "not json")
+    translator = SentenceTranslator(exclusion_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
+        assert _locked_pairs(translator, "Wren met 雷恩") == [("雷恩", "Wren")]
+        translator.lock_terms("Wren again")
+
+    zh_warnings = [
+        record
+        for record in caplog.records
+        if "free_text_lock_exclusions_zh" in record.getMessage()
+    ]
+    assert len(zh_warnings) == 1
+    english_warnings = [
+        record
+        for record in caplog.records
+        if "free_text_lock_exclusions" in record.getMessage()
+        and "free_text_lock_exclusions_zh" not in record.getMessage()
+    ]
+    assert english_warnings == []
+
+
+def test_zh_exclusion_keeps_whole_input_lookup(exclusion_db):
+    _set_zh_exclusions(exclusion_db, _zh_exclusion_value([("雷恩", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert translator.translate("雷恩") == "Wren"
+
+
+def test_zh_excluded_speaker_label_resolves_but_does_not_lock(exclusion_db):
+    _set_zh_exclusions(exclusion_db, _zh_exclusion_value([("雷恩", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert translator.prepare_text("雷恩：你好") == "Wren: 你好"
+    locked = translator.lock_terms("雷恩：你好")
+    # The speaker prefix resolved to the official English surface, which is
+    # not excluded, so only the zh surface exclusion is proven here: the
+    # resolution itself is the unchanged behavior under test.
+    assert [(zh, en) for _, zh, en in locked.locks] == [("雷恩", "Wren")]
+
+
+def test_zh_exclusion_does_not_touch_latin_surfaces_or_case_variants(exclusion_db):
+    _set_zh_exclusions(exclusion_db, _zh_exclusion_value([("维米拉", 12, 0)]))
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "维米拉来了") == []
+    assert _locked_pairs(translator, "Velmira joins.") == [("维米拉", "Velmira")]
+    assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+    assert _locked_pairs(translator, "VELMIRA joins.") == [("维米拉", "Velmira")]
+
+
+def test_zh_exclusions_follow_atomic_db_replacement(exclusion_db):
+    translator = SentenceTranslator(exclusion_db)
+    assert _locked_pairs(translator, "雷恩来了。") == [("雷恩", "Wren")]
+
+    candidate = exclusion_db.with_name("terms.candidate.db")
+    shutil.copy2(exclusion_db, candidate)
+    _set_zh_exclusions(candidate, _zh_exclusion_value([("雷恩", 12, 0)]))
+    os.replace(candidate, exclusion_db)
+
+    assert _locked_pairs(translator, "雷恩来了。") == []
+
+
+def test_parse_free_text_zh_lock_exclusions_accepts_cjk_with_non_han_chars():
+    from wuwaterm.sentence import parse_free_text_zh_lock_exclusions
+
+    value = _zh_exclusion_value([("「拉海洛」", 12, 1), ("第2索拉", 12, 0)])
+    rows = parse_free_text_zh_lock_exclusions(value)
+    assert rows == (("「拉海洛」", 12, 1), ("第2索拉", 12, 0))
+
+
+def test_parse_free_text_zh_lock_exclusions_rejects_non_cjk_surface():
+    from wuwaterm.sentence import parse_free_text_zh_lock_exclusions
+
+    with pytest.raises(ValueError, match="single-line CJK"):
+        parse_free_text_zh_lock_exclusions(_zh_exclusion_value([("Wren", 12, 0)]))
+    with pytest.raises(ValueError, match="single-line CJK"):
+        parse_free_text_zh_lock_exclusions(_zh_exclusion_value([("「」", 12, 0)]))
