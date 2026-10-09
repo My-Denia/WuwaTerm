@@ -298,13 +298,19 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 | Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
-| Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
 | Presentation (HTTP) | `wuwaterm_api.*` | everything in `wuwaterm` except the four allowlisted modules below; the Telegram SDK |
 | Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Storage | `db` | presentation / Telegram SDK; `build_pinyin` only inside write helpers (lazy) |
 | Builder | `builder`, `data_source`, `build_pinyin` | `bot`, `channel` |
 | Bootstrap | `cli` | may wire both runtime and builder entrypoints |
+
+Strict parsers for the builder's versioned free-text lock exclusion
+metadata live in `exclusion_metadata` — standard-library modules plus
+`constants` only. Sentence locking and the review engine's
+automatic-assessment policy both consume that same corpus evidence while
+keeping their own policies separate.
 
 **The API import allowlist.** `src/wuwaterm_api` may import exactly four
 modules from `wuwaterm`: `application`, `models`, `translation_policy`,

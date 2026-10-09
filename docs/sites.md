@@ -146,6 +146,37 @@ that Site first, while the new API still accepts legacy three-key resolutions,
 then revert the API. A historical manuscript still imports, but a kept span
 whose saved basis lacks the new matcher is `basis_changed` on the new Site.
 
+The dictionary also carries two free-text lock exclusion metadata keys,
+`free_text_lock_exclusions` and `free_text_lock_exclusions_zh`, recording
+corpus evidence that a surface is usually an ordinary word: it is locked
+at least ten times in official text while the parallel official line
+carried the official form in under one fifth of those lines. `review-v2`
+consumes the same evidence for a different purpose than sentence locking,
+which keeps its own behavior. An unresolved mention of such a surface
+keeps its finding and every candidate but is returned `not_evaluated`
+with no target span, so it consumes no target occurrence. 未评估 with
+candidates means selectable, not asserted: the presence of an official
+form in the target alone does not verify it. An explicit `official_pair`
+resolution still runs the authoritative check — verified with the exact
+target span, `confirmed_conflict`, or `not_evaluated` per the existing
+rules — while `not_a_term` records user intent, not official verification.
+
+A report whose findings are all such mentions reaches
+`coverage.evaluated = 0`, and the exports then show the zero-coverage
+line. That is honest: nothing was evaluated, and zero findings or zero
+evaluation never means the translation passed. In report comparison, a
+finding downgraded from `needs_review` or `verified_constraint` to
+`not_evaluated` is classified incomparable, never resolved. A database
+without these keys behaves as if no surface were excluded from automatic
+assessment; an invalid key is ignored with one warning naming that key
+only, while the other key still applies.
+
+This is an automatic-assessment policy change and nothing else:
+`rule_version` stays `review-v2`, and the exclusion metadata is not part
+of the content-derived term-row dictionary revision. The request
+protocol, candidate identity, matcher-basis behavior and the deployment
+ordering above are unchanged by it.
+
 ## Interface language and report exports
 
 The interface is bilingual (Chinese and English). The choice is a single
