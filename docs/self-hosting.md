@@ -227,7 +227,7 @@ the free-text lock exclusion lists the build records — the English
 `free_text_lock_exclusions` and Chinese `free_text_lock_exclusions_zh` keys
 (`--require-free-text-exclusions` and `--require-free-text-zh-exclusions`
 make a candidate without them fail; the builder image's `verify-db` always
-passes the English one). It prints the category counts, the recorded provenance and the
+passes both). It prints the category counts, the recorded provenance and the
 number of excluded surfaces and nothing else — there is **no explicit PASS
 line**, so the exit status is the verdict: zero means verified. On a first install, once it passes, put the candidate in place:
 

@@ -27,6 +27,7 @@ case "$COMMAND" in
       --min-category sonata_effect \
       --min-category location \
       --require-free-text-exclusions \
+      --require-free-text-zh-exclusions \
       "$@"
     ;;
   *)

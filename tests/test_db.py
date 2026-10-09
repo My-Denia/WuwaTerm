@@ -253,6 +253,21 @@ def test_builder_verify_db_requires_free_text_exclusions(verified_db, tmp_path):
     env["WUWATERM_DB_PATH"] = str(
         _with_exclusions(verified_db, tmp_path, "built.db", _exclusions([]))
     )
+    zh_missing = subprocess.run(
+        entrypoint, cwd=ROOT, env=env, text=True, capture_output=True,
+        timeout=20, check=False,
+    )
+    assert zh_missing.returncode == 1
+    assert "free_text_lock_exclusions_zh is missing" in zh_missing.stderr
+
+    env["WUWATERM_DB_PATH"] = str(
+        _with_zh_exclusions(
+            _with_exclusions(verified_db, tmp_path, "both.db", _exclusions([])),
+            tmp_path,
+            "both-zh.db",
+            _zh_exclusions([]),
+        )
+    )
     present = subprocess.run(
         entrypoint, cwd=ROOT, env=env, text=True, capture_output=True,
         timeout=20, check=False,

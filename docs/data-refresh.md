@@ -94,10 +94,10 @@ English (for example the speaker label that is also the ordinary word `大人`).
 Both values are sorted compact JSON, so the idempotent-build check still
 holds. The verifier rejects a malformed key, a key built with other
 parameters, or a surface that is not a term, for each key separately;
-`--require-free-text-exclusions` (always passed by the builder image's
-`verify-db`) and `--require-free-text-zh-exclusions` also reject a candidate
-without the respective key, so the image's default
-`verify-db` against a live database built before this key existed fails until
+`--require-free-text-exclusions` and `--require-free-text-zh-exclusions`
+(both always passed by the builder image's `verify-db`) each reject a
+candidate without the respective key, so the image's default
+`verify-db` against a live database built before a key existed fails until
 the next full build replaces it. A database built before
 these keys existed, or written by `create_database` alone, keeps every surface
 lockable. A promoted database is what changes runtime behaviour: the code
