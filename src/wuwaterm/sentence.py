@@ -636,8 +636,18 @@ class SentenceTranslator:
             return ""
         return "\n".join(self._resolve_speaker_prefix(line) for line in text.splitlines())
 
-    def lock_terms(self, text: str) -> LockedSentence:
-        return self._lock_terms(self.prepare_text(text))
+    def lock_terms(
+        self, text: str, *, allow_plural_inflection: bool = False
+    ) -> LockedSentence:
+        """Lock terms in ``text`` with exact-surface matching by default.
+
+        ``allow_plural_inflection`` mirrors the translation paths' C1 opt-in
+        (en→zh plural locking); direction-less callers keep the default and
+        the exact current behavior.
+        """
+        return self._lock_terms(
+            self.prepare_text(text), allow_plural_inflection=allow_plural_inflection
+        )
 
     def _lock_terms(
         self,
