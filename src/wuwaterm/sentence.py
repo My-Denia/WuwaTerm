@@ -505,14 +505,19 @@ def select_term_spans(
         # Only exact English surfaces inflect, so ``source in official`` holds
         # and the case-variant boundary branch is not needed here; the suffix
         # is consumed into the span, so ASCII word-glue right after the
-        # inflection ("Resonatorses") still vetoes the match.
+        # inflection ("Resonatorses") still vetoes the match. An exact span
+        # always wins a bounds tie: when the synthesized plural of one
+        # surface is itself another exact dictionary surface (``Star`` vs
+        # ``Stars`` -> 星星/群星, ``Luca`` vs ``Lucas``), the exact entry must
+        # keep the span regardless of dictionary iteration order.
+        exact_bounds = {(span.start, span.end) for span in spans}
         for order, (source, official) in enumerate(lockable):
             for suffix in _plural_suffix_candidates(source, official):
                 inflected = source + suffix
                 start = text.find(inflected)
                 while start != -1:
                     end = start + len(inflected)
-                    if (
+                    if (start, end) not in exact_bounds and (
                         _ascii_word_boundaries_ok(text, start, end, inflected)
                         and (
                             source in official

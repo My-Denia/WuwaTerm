@@ -2426,3 +2426,34 @@ def test_plural_signature_changes_are_keyword_only_with_safe_defaults():
         assert "allow_plural_inflection" in parameters
         assert parameters["allow_plural_inflection"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["allow_plural_inflection"].default is False
+
+
+def test_exact_surface_beats_synthesized_plural_at_same_bounds(plural_db):
+    """Codex P2 round 2 regression: when the plural of one surface is itself
+    another exact dictionary surface, the exact entry keeps the span no
+    matter the row order — 'Lucas' must lock the exact record, never the
+    plural of 'Luca' (real 3.7 pairs: Luca/Lucas, Soldier/Soldiers,
+    Devout Acolyte/Devout Acolytes)."""
+    with connect(plural_db) as conn:
+        # Insert the base BEFORE its plural so dictionary iteration order
+        # would otherwise let the synthesized inflection win the tie.
+        insert_records(conn, [
+            TermRecord("speaker", "fixture", "1", "1", "卢卡", "Luca"),
+            TermRecord("speaker", "fixture", "2", "2", "卢卡斯", "Lucas"),
+        ])
+        conn.commit()
+    translator = SentenceTranslator(plural_db)
+    locked = translator._lock_terms(
+        "Lucas joins the team", allow_plural_inflection=True
+    )
+    assert [(zh, en) for _placeholder, zh, en in locked.locks] == [
+        ("卢卡斯", "Lucas")
+    ]
+    # Same text with inflection OFF also locks the exact entry: both paths
+    # agree that an exact surface owns its own span.
+    locked_off = translator._lock_terms(
+        "Lucas joins the team", allow_plural_inflection=False
+    )
+    assert [(zh, en) for _placeholder, zh, en in locked_off.locks] == [
+        ("卢卡斯", "Lucas")
+    ]
