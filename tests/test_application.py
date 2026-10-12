@@ -820,3 +820,59 @@ def test_excluded_surfaces_count_as_dictionary_miss(monkeypatch, sample_db, excl
         ]
         assert outcome.text == "雷恩/布鲁克"
     assert outcome.dictionary_miss is excluded
+
+
+def test_plural_lock_suppresses_dictionary_miss_en_zh(monkeypatch, sample_db):
+    """Codex P2 regression: the miss hint must ask the same direction-aware
+    locking question the translation path asked. A short plural en->zh query
+    that locks the official term is authoritative, not a dictionary miss."""
+    with connect(sample_db) as conn:
+        insert_records(conn, [
+            TermRecord("resonator", "fixture", "3", "3", "共鸣者", "Resonator"),
+        ])
+        conn.commit()
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="Resonators", forced_to_chinese=True),
+        )
+    )
+
+    assert outcome.kind == KIND_LLM
+    locked_text, locks = calls[0]
+    assert [(zh, en) for _placeholder, zh, en in locks] == [("共鸣者", "Resonator")]
+    assert outcome.text == "共鸣者"
+    # Locked via plural inflection: no "not authoritative" hint.
+    assert outcome.dictionary_miss is False
+
+
+def test_plural_unlocked_direction_keeps_dictionary_miss(monkeypatch, sample_db):
+    """Control: forcing English output keeps exact-surface locking, so the
+    same plural query genuinely has no locked official term and the miss
+    hint stays truthful."""
+    with connect(sample_db) as conn:
+        insert_records(conn, [
+            TermRecord("resonator", "fixture", "3", "3", "共鸣者", "Resonator"),
+        ])
+        conn.commit()
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="Resonators", forced_to_chinese=False),
+        )
+    )
+
+    assert outcome.kind == KIND_LLM
+    locked_text, locks = calls[0]
+    assert locks == ()
+    assert outcome.dictionary_miss is True

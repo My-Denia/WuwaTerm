@@ -2081,3 +2081,379 @@ def test_parse_free_text_zh_lock_exclusions_rejects_non_cjk_surface():
         parse_free_text_zh_lock_exclusions(_zh_exclusion_value([("Wren", 12, 0)]))
     with pytest.raises(ValueError, match="single-line CJK"):
         parse_free_text_zh_lock_exclusions(_zh_exclusion_value([("「」", 12, 0)]))
+
+
+# ---------------------------------------------------------------------------
+# C1: bounded plural-inflection lock matching, opt-in from en->zh translate
+# paths only (plan rev-3 C1). Default-off surfaces (public lock_terms,
+# select_term_spans, builder.py exclusion mining, _has_locked_terms) stay
+# byte-identical; only translate/translate_async/translate_html* enable it,
+# and only when to_chinese=True.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def plural_db(sample_db):
+    # Synthetic records only. Mirrors the D2 top pluralized surfaces plus the
+    # s/es trigger-ending shapes the bounded inflection rule must handle.
+    with connect(sample_db) as conn:
+        conn.execute("DELETE FROM terms")
+        insert_records(conn, [
+            TermRecord("core_term", "fixture", "1", "1", "共鸣者", "Resonator"),
+            TermRecord("item", "fixture", "2", "2", "星声", "Astrite"),
+            TermRecord("item", "fixture", "3", "3", "终端", "Terminal"),
+            TermRecord("item", "fixture", "4", "4", "S型还原素", "Type-S Restorative"),
+            TermRecord("core_term", "fixture", "5", "5", "声骸", "Echo"),
+            TermRecord("item", "fixture", "6", "6", "盒子", "Box"),
+            TermRecord("item", "fixture", "7", "7", "头目", "Boss"),
+            TermRecord("item", "fixture", "8", "8", "巴士", "Bus"),
+            TermRecord("resonator", "fixture", "9", "9", "吟霖", "Yinlin"),
+        ])
+        conn.commit()
+    return sample_db
+
+
+def _identity_llm(monkeypatch):
+    """LLM stand-in that keeps placeholders and echoes the locked text back.
+
+    Restore then swaps placeholders for the official term in the target
+    language, so the caller sees exactly what locking decided.
+    """
+    enable_llm_env(monkeypatch)
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    return fake_call
+
+
+def _identity_llm_async(monkeypatch):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    return fake_call
+
+
+@pytest.mark.parametrize(
+    "source_plural,zh_official",
+    [
+        ("Resonators", "共鸣者"),
+        ("Astrites", "星声"),
+        ("Terminals", "终端"),
+        ("Type-S Restoratives", "S型还原素"),
+    ],
+)
+def test_plural_lock_and_restore_en_zh_d2_top_surfaces(
+    monkeypatch, plural_db, source_plural, zh_official
+):
+    _identity_llm(monkeypatch)
+    translator = SentenceTranslator(plural_db)
+
+    result = translator.translate(f"Collect {source_plural}.", to_chinese=True)
+
+    assert result == f"Collect {zh_official}."
+    # Singular twin keeps locking exactly as before.
+    singular = source_plural[:-1] if not source_plural.endswith("es") else None
+    if singular:
+        assert translator.translate(f"Collect {singular}.", to_chinese=True) == (
+            f"Collect {zh_official}."
+        )
+
+
+def test_plural_suffix_consumed_into_span_en_zh(monkeypatch, plural_db):
+    seen = {}
+    enable_llm_env(monkeypatch)
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert to_chinese is True
+        seen["locked_text"] = locked_text
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(plural_db)
+
+    result = translator.translate(
+        "Collect and deliver Type-S Restoratives to progress the restoration.",
+        to_chinese=True,
+    )
+
+    # The inflected form never reaches the model; restore replaces it whole.
+    assert "Restoratives" not in seen["locked_text"]
+    assert result == "Collect and deliver S型还原素 to progress the restoration."
+
+
+def test_singular_unchanged_en_zh(monkeypatch, plural_db):
+    _identity_llm(monkeypatch)
+    translator = SentenceTranslator(plural_db)
+
+    assert translator.translate("Found a Terminal here.", to_chinese=True) == (
+        "Found a 终端 here."
+    )
+    locked = translator.lock_terms("Found a Terminal here.")
+    assert [(zh, en) for _, zh, en in locked.locks] == [("终端", "Terminal")]
+
+
+def test_new_echoes_en_zh_locks_echo_and_restores(monkeypatch, plural_db):
+    seen = {}
+    enable_llm_env(monkeypatch)
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert to_chinese is True
+        seen["locked_text"] = locked_text
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(plural_db)
+
+    result = translator.translate("New Echoes drop here.", to_chinese=True)
+
+    # "Echoes" is consumed by the span (orthodox consonant+o -> es), so the
+    # model only sees the placeholder and restore yields the official zh.
+    assert "Echo" not in seen["locked_text"]
+    assert result == "New 声骸 drop here."
+
+
+def test_new_echoes_zh_en_and_en_en_paths_unchanged(monkeypatch, plural_db):
+    for var in (
+        "WUWATERM_OPENAI_BASE_URL",
+        "OPENAI_BASE_URL",
+        "WUWATERM_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "WUWATERM_OPENAI_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    translator = SentenceTranslator(plural_db)
+
+    # en->en passthrough: plural matching stays off, text is untouched.
+    assert translator.translate("New Echoes", to_chinese=False) == "New Echoes"
+    # zh->en: Chinese text locks the zh surface exactly as before.
+    assert translator.translate("新的声骸", to_chinese=False) == "新的Echo"
+
+
+def test_plural_inflection_default_off_everywhere(plural_db):
+    translator = SentenceTranslator(plural_db)
+    text = "Resonators and Terminals await."
+
+    # Public lock_terms: direction-less, exact current behavior (no locks).
+    locked = translator.lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+    # builder.py exclusion-mining call shape: positional, default off.
+    from wuwaterm.sentence import exact_lockable_sources, select_term_spans
+
+    lockable = exact_lockable_sources(translator.service.entries())
+    assert select_term_spans(text, lockable, text, 0) == []
+
+    # Opting in produces the plural spans, proving the flag is the only delta.
+    inflected = select_term_spans(
+        text, lockable, text, 0, allow_plural_inflection=True
+    )
+    assert [span.source for span in inflected] == ["Resonators", "Terminals"]
+    assert [span.official[0] for span in inflected] == ["共鸣者", "终端"]
+
+    # application.py _has_locked_terms stays direction-less and default-off.
+    from wuwaterm.application import _has_locked_terms
+
+    assert _has_locked_terms(translator, text) is False
+    assert _has_locked_terms(translator, "Resonators") is False
+    assert _has_locked_terms(translator, "Resonator") is True
+
+
+def test_plural_trigger_table_via_select_term_spans():
+    from wuwaterm.sentence import select_term_spans
+
+    lockable = (
+        ("Boss", ("头目", "Boss")),
+        ("Box", ("盒子", "Box")),
+        ("Bus", ("巴士", "Bus")),
+        ("Echo", ("声骸", "Echo")),
+        ("Wish", ("愿望", "Wish")),
+        ("Buzz", ("嗡鸣", "Buzz")),
+        ("Mio", ("米欧", "Mio")),
+        ("Hero", ("英雄", "Hero")),
+        ("Resonator", ("共鸣者", "Resonator")),
+    )
+
+    def locked_sources(text):
+        spans = select_term_spans(text, lockable, text, 0, allow_plural_inflection=True)
+        return [span.source for span in spans]
+
+    def default_off(text):
+        spans = select_term_spans(text, lockable, text, 0)
+        return [span.source for span in spans]
+
+    # ss: only es, never a double-s +s ("Bosss" is not a plural).
+    assert locked_sources("Bosses") == ["Bosses"]
+    assert locked_sources("Bosss") == []
+    assert locked_sources("Boss") == ["Boss"]
+    # x: orthodox es only ("Boxs" is a misspelling, not locked).
+    assert locked_sources("Boxes") == ["Boxes"]
+    assert locked_sources("Boxs") == []
+    # Bare-s surfaces get no inflection at all: "Buses" stays unlocked and
+    # "Buss" is not the surface.
+    assert locked_sources("Buses") == []
+    assert locked_sources("Buss") == []
+    # Consonant+o takes es; vowel+o takes plain s.
+    assert locked_sources("Echoes") == ["Echoes"]
+    assert locked_sources("Echos") == []
+    assert locked_sources("Heroes") == ["Heroes"]
+    assert locked_sources("Mios") == ["Mios"]
+    assert locked_sources("Mioes") == []
+    # sh / z triggers.
+    assert locked_sources("Wishes") == ["Wishes"]
+    assert locked_sources("Buzzes") == ["Buzzes"]
+    # Ordinary endings take plain s; exactly ONE trailing inflection only.
+    assert locked_sources("Resonators") == ["Resonators"]
+    assert locked_sources("Resonatorses") == []
+    assert locked_sources("Resonatorss") == []
+    # Word-glue still vetoes inflected spans on both edges.
+    assert locked_sources("xResonators") == []
+    assert locked_sources("ResonatorsXYZ") == []
+    assert locked_sources("Echoesx") == []
+    # Every plural above is inert with the flag off (default-off regression).
+    for text in ("Bosses", "Boxes", "Buses", "Echoes", "Wishes", "Resonators"):
+        assert default_off(text) == []
+
+
+def test_plural_case_variant_surfaces_stay_exact(plural_db):
+    translator = SentenceTranslator(plural_db)
+    # yinlin/YINLIN variants still lock exactly and gain no plural forms.
+    for variant in ("yinlin", "YINLIN"):
+        locked = translator.lock_terms(f"{variant} joins.")
+        assert [(zh, en) for _, zh, en in locked.locks] == [("吟霖", "Yinlin")]
+    locked = translator.lock_terms("YINLINs join.")
+    assert locked.locks == ()
+    assert locked.locked_text == "YINLINs join."
+    # The exact surface "Yinlin" itself is an ordinary English surface: its
+    # plural locks en->zh like any other exact surface.
+    locked = translator._lock_terms("Two Yinlins join.", allow_plural_inflection=True)
+    assert [(zh, en) for _, zh, en in locked.locks] == [("吟霖", "Yinlin")]
+    assert locked.restore(locked.locked_text, to_en=False) == "Two 吟霖 join."
+
+
+def test_plural_placeholder_uniqueness_preserved(monkeypatch, plural_db):
+    _identity_llm(monkeypatch)
+    translator = SentenceTranslator(plural_db)
+
+    locked = translator._lock_terms(
+        "Resonators and Terminals", allow_plural_inflection=True
+    )
+    placeholders = [placeholder for placeholder, _zh, _en in locked.locks]
+    assert len(placeholders) == len(set(placeholders)) == 2
+    for placeholder in placeholders:
+        assert placeholder not in "Resonators and Terminals"
+
+
+def test_plural_excluded_surface_gains_no_inflection(monkeypatch, plural_db):
+    _set_exclusions(plural_db, _exclusion_value([("Echo", 12, 0)]))
+    _identity_llm(monkeypatch)
+    translator = SentenceTranslator(plural_db)
+
+    # Exact and plural forms of the excluded surface stay unlocked.
+    assert translator.translate("New Echoes", to_chinese=True) == "New Echoes"
+    assert translator.translate("Echo reset", to_chinese=True) == "Echo reset"
+    # Neighbors still lock.
+    assert translator.translate("Resonators echo", to_chinese=True) == "共鸣者 echo"
+
+
+def test_plural_locking_via_translate_async(monkeypatch, plural_db):
+    _identity_llm_async(monkeypatch)
+    translator = SentenceTranslator(plural_db)
+
+    async def run():
+        return await translator.translate_async(
+            "Buy 3 Type-S Restoratives now.", to_chinese=True
+        )
+
+    assert asyncio.run(run()) == "Buy 3 S型还原素 now."
+
+
+def test_plural_html_translation_en_zh_keeps_tags_untouched(monkeypatch, plural_db):
+    seen = {}
+    enable_llm_env(monkeypatch)
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert to_chinese is True and html_mode is True
+        seen["locked_text"] = locked_text
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(plural_db)
+
+    result = translator.translate_html(
+        "<b>Resonators</b> await <i>Terminals</i>", to_chinese=True
+    )
+
+    assert "Resonators" not in seen["locked_text"]
+    assert "Terminals" not in seen["locked_text"]
+    assert result == "<b>共鸣者</b> await <i>终端</i>"
+
+
+def test_plural_html_translation_default_off_unchanged(monkeypatch, plural_db):
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert to_chinese is False
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(plural_db)
+
+    # zh->en HTML path: plural inflection never activates.
+    assert translator.translate_html("<b>声骸</b>来了", to_chinese=False) == (
+        "<b>Echo</b>来了"
+    )
+
+
+def test_plural_signature_changes_are_keyword_only_with_safe_defaults():
+    from wuwaterm import sentence as sentence_module
+
+    parameters = inspect.signature(sentence_module.select_term_spans).parameters
+    assert parameters["allow_plural_inflection"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["allow_plural_inflection"].default is False
+    for name in ("_lock_terms", "_lock_html_terms"):
+        parameters = inspect.signature(getattr(SentenceTranslator, name)).parameters
+        assert "allow_plural_inflection" in parameters
+        assert parameters["allow_plural_inflection"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["allow_plural_inflection"].default is False
+
+
+def test_exact_surface_beats_synthesized_plural_at_same_bounds(plural_db):
+    """Codex P2 round 2 regression: when the plural of one surface is itself
+    another exact dictionary surface, the exact entry keeps the span no
+    matter the row order — 'Lucas' must lock the exact record, never the
+    plural of 'Luca' (real 3.7 pairs: Luca/Lucas, Soldier/Soldiers,
+    Devout Acolyte/Devout Acolytes)."""
+    with connect(plural_db) as conn:
+        # Insert the base BEFORE its plural so dictionary iteration order
+        # would otherwise let the synthesized inflection win the tie.
+        insert_records(conn, [
+            TermRecord("speaker", "fixture", "1", "1", "卢卡", "Luca"),
+            TermRecord("speaker", "fixture", "2", "2", "卢卡斯", "Lucas"),
+        ])
+        conn.commit()
+    translator = SentenceTranslator(plural_db)
+    locked = translator._lock_terms(
+        "Lucas joins the team", allow_plural_inflection=True
+    )
+    assert [(zh, en) for _placeholder, zh, en in locked.locks] == [
+        ("卢卡斯", "Lucas")
+    ]
+    # Same text with inflection OFF also locks the exact entry: both paths
+    # agree that an exact surface owns its own span.
+    locked_off = translator._lock_terms(
+        "Lucas joins the team", allow_plural_inflection=False
+    )
+    assert [(zh, en) for _placeholder, zh, en in locked_off.locks] == [
+        ("卢卡斯", "Lucas")
+    ]

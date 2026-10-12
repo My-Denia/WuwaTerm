@@ -278,6 +278,44 @@ def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> b
     return True
 
 
+# Orthodox English plural endings that take "es". A bare trailing "s" that
+# is not part of "ss" (Bus, Titus, Mephis) is deliberately NOT a trigger:
+# those singulars stay exact, so "Buses" never locks "Bus". Nouns ending in
+# consonant+o (Echo, Hero) also take "es"; vowel+o (Milo, Romeo) takes "s".
+_ES_PLURAL_LOWER_TRIGGERS = ("ss", "x", "z", "ch", "sh")
+_VOWELS_LOWER = frozenset("aeiou")
+
+
+def _plural_suffix_candidates(
+    source: str, official: tuple[str, str]
+) -> tuple[str, ...]:
+    """Bounded trailing inflections admitted for an exact English surface.
+
+    Only exact English official surfaces qualify (``source == official[1]``):
+    Chinese surfaces and lowercase/all-caps case variants stay exact. The
+    surface must end in an ASCII letter and carry no CJK character. At most
+    ONE suffix is ever returned: plain "s" for ordinary endings, "es" for
+    orthodox triggers (ss/x/z/ch/sh and consonant+o). Surfaces already
+    ending in "s" get no plain "+s" — "Boss"+s is a double-s, not a plural —
+    and no "es" unless the ending is "ss". This is a bounded heuristic, not
+    a morphological engine.
+    """
+    if source != official[1]:
+        return ()
+    if not source or not (source[-1].isascii() and source[-1].isalpha()):
+        return ()
+    if any(_is_cjk_character(char) for char in source):
+        return ()
+    lowered = source.lower()
+    if lowered.endswith("s"):
+        return ("es",) if lowered.endswith("ss") else ()
+    if lowered.endswith(_ES_PLURAL_LOWER_TRIGGERS):
+        return ("es",)
+    if lowered.endswith("o") and lowered[-2] not in _VOWELS_LOWER:
+        return ("es",)
+    return ("s",)
+
+
 def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
     return (
         (
@@ -411,11 +449,22 @@ def select_term_spans(
     lockable: tuple[tuple[str, tuple[str, str]], ...],
     context_text: str,
     context_offset: int,
+    *,
+    allow_plural_inflection: bool = False,
 ) -> list[_TermSpan]:
     """Return the term spans ``text`` locks, ordered by start position.
 
     ``context_text`` is the surrounding visible text that ``text`` starts at
     ``context_offset`` in; plain text passes itself with offset 0.
+
+    ``allow_plural_inflection`` is the C1 opt-in, default off: when true, a
+    bounded trailing English plural (``s``/``es`` per
+    ``_plural_suffix_candidates``) is admitted past the exact-surface match
+    for exact English surfaces ending in an ASCII letter, with the suffix
+    consumed into the span so restore replaces the inflected form whole.
+    It is enabled only by the translation paths that already know the target
+    is Chinese; every other caller (public ``lock_terms``, the builder's
+    exclusion mining) keeps exact current behavior.
     """
     spans: list[_TermSpan] = []
     for order, (source, official) in enumerate(lockable):
@@ -450,6 +499,56 @@ def select_term_spans(
                     )
                 )
             start = text.find(source, start + 1)
+
+    if allow_plural_inflection:
+        # Plural spans join the same global longest selection as exact spans.
+        # Only exact English surfaces inflect, so ``source in official`` holds
+        # and the case-variant boundary branch is not needed here; the suffix
+        # is consumed into the span, so ASCII word-glue right after the
+        # inflection ("Resonatorses") still vetoes the match. An exact span
+        # always wins a bounds tie: when the synthesized plural of one
+        # surface is itself another exact dictionary surface (``Star`` vs
+        # ``Stars`` -> 星星/群星, ``Luca`` vs ``Lucas``), the exact entry must
+        # keep the span regardless of dictionary iteration order.
+        exact_bounds = {(span.start, span.end) for span in spans}
+        for order, (source, official) in enumerate(lockable):
+            for suffix in _plural_suffix_candidates(source, official):
+                inflected = source + suffix
+                start = text.find(inflected)
+                while start != -1:
+                    end = start + len(inflected)
+                    if (start, end) not in exact_bounds and (
+                        _ascii_word_boundaries_ok(text, start, end, inflected)
+                        and (
+                            source in official
+                            or _case_variant_boundaries_ok(
+                                context_text,
+                                context_offset + start,
+                                context_offset + end,
+                            )
+                        )
+                        and (
+                            len(source) > 1
+                            or _single_character_name_context_ok(
+                                context_text,
+                                context_offset + start,
+                                context_offset + end,
+                            )
+                        )
+                        and not crosses_cjk_word_boundary(
+                            context_text, context_offset + start, context_offset + end
+                        )
+                    ):
+                        spans.append(
+                            _TermSpan(
+                                start=start,
+                                end=end,
+                                source=inflected,
+                                official=official,
+                                order=order,
+                            )
+                        )
+                    start = text.find(inflected, start + 1)
 
     # Select global longest non-overlapping official term spans. This
     # intentionally prioritizes the longest single term, not maximum total
@@ -542,8 +641,18 @@ class SentenceTranslator:
             return ""
         return "\n".join(self._resolve_speaker_prefix(line) for line in text.splitlines())
 
-    def lock_terms(self, text: str) -> LockedSentence:
-        return self._lock_terms(self.prepare_text(text))
+    def lock_terms(
+        self, text: str, *, allow_plural_inflection: bool = False
+    ) -> LockedSentence:
+        """Lock terms in ``text`` with exact-surface matching by default.
+
+        ``allow_plural_inflection`` mirrors the translation paths' C1 opt-in
+        (en→zh plural locking); direction-less callers keep the default and
+        the exact current behavior.
+        """
+        return self._lock_terms(
+            self.prepare_text(text), allow_plural_inflection=allow_plural_inflection
+        )
 
     def _lock_terms(
         self,
@@ -551,11 +660,18 @@ class SentenceTranslator:
         *,
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
         single_character_context: tuple[str, int] | None = None,
+        allow_plural_inflection: bool = False,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
             lockable = self._eligible_lockable_sources()
-        selected = select_term_spans(text, lockable, context_text, context_offset)
+        selected = select_term_spans(
+            text,
+            lockable,
+            context_text,
+            context_offset,
+            allow_plural_inflection=allow_plural_inflection,
+        )
         prefix = _new_placeholder_prefix(text)
         locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
@@ -570,7 +686,12 @@ class SentenceTranslator:
         locked_parts.append(text[index:])
         return LockedSentence(locked_text="".join(locked_parts), locks=tuple(locks))
 
-    def _lock_html_terms(self, protected: ProtectedTelegramHTML) -> LockedSentence:
+    def _lock_html_terms(
+        self,
+        protected: ProtectedTelegramHTML,
+        *,
+        allow_plural_inflection: bool = False,
+    ) -> LockedSentence:
         """Lock terms only in visible segments, never in tags or attributes."""
 
         lockable = self._eligible_lockable_sources()
@@ -597,6 +718,7 @@ class SentenceTranslator:
                 segment,
                 lockable=lockable,
                 single_character_context=(context_text, offset),
+                allow_plural_inflection=allow_plural_inflection,
             )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)
@@ -636,7 +758,12 @@ class SentenceTranslator:
             official = exact.best.entry.zh if to_chinese else exact.best.entry.en
             if official:
                 return official
-        locked = self._lock_terms(prepared)
+        # C1: plural inflection is admitted only when the target is Chinese
+        # (Chinese has no plural marking, so restoring the official zh term
+        # is well-formed); zh->en and en->en keep exact-surface matching.
+        locked = self._lock_terms(
+            prepared, allow_plural_inflection=to_chinese
+        )
         if not _llm_configured():
             return locked.restore(locked.locked_text, to_en=not to_chinese)
         try:
@@ -672,7 +799,7 @@ class SentenceTranslator:
             official = exact.best.entry.zh if to_chinese else exact.best.entry.en
             if official:
                 return official
-        locked = self._lock_terms(prepared)
+        locked = self._lock_terms(prepared, allow_plural_inflection=to_chinese)
         if not _llm_configured():
             return locked.restore(locked.locked_text, to_en=not to_chinese)
         try:
@@ -713,7 +840,9 @@ class SentenceTranslator:
         run an LLM request inside an existing event loop.
         """
         protected = protect_telegram_html(html_text)
-        locked = self._lock_html_terms(protected)
+        locked = self._lock_html_terms(
+            protected, allow_plural_inflection=to_chinese
+        )
         if to_chinese:
             translated = self._call_llm_sync(
                 locked.locked_text, locked.locks, html_mode=True, to_chinese=True
@@ -739,7 +868,9 @@ class SentenceTranslator:
     ) -> str:
         """Async version of translate_html; LLMTranslationError propagates."""
         protected = protect_telegram_html(html_text)
-        locked = self._lock_html_terms(protected)
+        locked = self._lock_html_terms(
+            protected, allow_plural_inflection=to_chinese
+        )
         if to_chinese:
             translated = await self._call_llm_async_limited(
                 locked.locked_text,

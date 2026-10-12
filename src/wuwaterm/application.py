@@ -277,17 +277,29 @@ def _fuzzy_dictionary_answer(
     return best.entry.zh if to_chinese else best.entry.en
 
 
-def _has_locked_terms(translator: SentenceTranslator, text: str) -> bool:
-    return bool(translator.lock_terms(text).locks)
+def _has_locked_terms(
+    translator: SentenceTranslator, text: str, *, to_chinese: bool = False
+) -> bool:
+    # Direction-aware by necessity: the en->zh path also locks plural
+    # inflections of exact English surfaces, so the dictionary-miss signal
+    # must ask the same question the translation path asked. Every other
+    # direction keeps exact-surface matching.
+    return bool(
+        translator.lock_terms(text, allow_plural_inflection=to_chinese).locks
+    )
 
 
 def _should_append_dict_miss(
-    prepared: str, translator: SentenceTranslator, translated: str
+    prepared: str,
+    translator: SentenceTranslator,
+    translated: str,
+    *,
+    to_chinese: bool = False,
 ) -> bool:
     return (
         translated not in LLM_FAILURE_NOTICES
         and _is_short_query(prepared)
-        and not _has_locked_terms(translator, prepared)
+        and not _has_locked_terms(translator, prepared, to_chinese=to_chinese)
     )
 
 
@@ -457,7 +469,9 @@ async def _translate_plain_async(
         kind=KIND_LLM,
         text=translated,
         to_chinese=to_chinese,
-        dictionary_miss=_should_append_dict_miss(prepared, translator, translated),
+        dictionary_miss=_should_append_dict_miss(
+            prepared, translator, translated, to_chinese=to_chinese
+        ),
     )
 
 
@@ -502,7 +516,7 @@ async def translate_request_async(
                 text=markup.text,
                 to_chinese=to_chinese,
                 dictionary_miss=_should_append_dict_miss(
-                    prepared, translator, markup.text
+                    prepared, translator, markup.text, to_chinese=to_chinese
                 ),
                 markup_used=True,
             )
@@ -571,7 +585,9 @@ def translate_request(
         kind=KIND_LLM,
         text=translated,
         to_chinese=to_chinese,
-        dictionary_miss=_should_append_dict_miss(prepared, translator, translated),
+        dictionary_miss=_should_append_dict_miss(
+            prepared, translator, translated, to_chinese=to_chinese
+        ),
     )
 
 
