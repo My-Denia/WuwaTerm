@@ -71,7 +71,7 @@ on that same branch is already authorized when all of these hold:
 
 That continuation does not authorize force-push, history rewrite, a
 wider scope, unrelated cleanup, merge, deploy,
-release or tag, registry promotion, production mutation, a backend
+registry promotion, production mutation, a backend
 restart, a production database refresh, or env, proxy, or secrets
 changes.
 
