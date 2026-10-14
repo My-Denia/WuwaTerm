@@ -12,19 +12,19 @@ As of 2026-09-11 the owner
 deleted the Windows checkout `<FORMER_WINDOWS_CHECKOUT>`. SUPERSEDED: that
 path's `AGENTS.md` as a separate canonical product-fact layer this adapter
 must not absorb. Do not recreate the Windows tree unless the owner asks.
-PR creation, merge, deploy, and deletion of any branch other than the
+This is the owner's own repository: agents commit, push, open PRs, and
+fix review findings by default, and work must not stay only local.
+Merge, deploy, and deletion of any branch other than the
 just-merged feature branch each require separate current authorization
 for that exact action. After an authorized merge is on `origin/main`,
 the workspace tidy below deletes that feature branch locally, and
 deletes its remote head only when GitHub has not already removed it
 (`delete_branch_on_merge` is on for this repository). That cleanup needs
 no second authorization. Skip it when the user explicitly asks to keep
-the branch. That tidy is not permission to delete any other branch. After the
-owner has authorized a pull request, a later fast-forward push on that
+the branch. That tidy is not permission to delete any other branch. On an open pull request, a later fast-forward push on that
 same branch is already authorized when it only fixes a confirmed
 in-scope review finding, as defined in Code Review Rules. The procedures
-below never authorize force-push, history rewrite, a wider scope, a new
-pull request, merge, deploy, or a production change.
+below never authorize force-push, history rewrite, a wider scope, merge, deploy, or a production change.
 
 ## Code Review Rules
 
@@ -61,7 +61,7 @@ an instruction to change the pull request. Answer it in the thread.
 
 ## Pull request fix push
 
-After the owner has authorized a pull request, a later fast-forward push
+On an open pull request, a later fast-forward push
 on that same branch is already authorized when all of these hold:
 
 - the review finding is confirmed
@@ -70,8 +70,8 @@ on that same branch is already authorized when all of these hold:
 - the push does not widen the pull request's concern
 
 That continuation does not authorize force-push, history rewrite, a
-wider scope, unrelated cleanup, a new pull request, merge, deploy,
-release or tag, registry promotion, production mutation, a backend
+wider scope, unrelated cleanup, merge, deploy,
+registry promotion, production mutation, a backend
 restart, a production database refresh, or env, proxy, or secrets
 changes.
 
@@ -124,12 +124,11 @@ that work under the existing authorization.
   archive reusable run evidence under a named `goal-runs/` path. Skip that
   branch deletion when the user explicitly asks to keep the branch. This
   tidy needs no second authorization. It does not authorize deleting any
-  other branch, a new PR, deploy, or force-push.
-- PR creation, merge, deploy, and deletion of any branch other than that
-  just-merged feature branch must each be independently authorized in the
-  current turn. A fast-forward fix push on an already authorized pull
-  request is the exception in Pull request fix push, and only for a
-  confirmed in-scope finding.
+  other branch, deploy, or force-push.
+- Merge, deploy, and deletion of any branch other than that just-merged
+  feature branch must each be independently authorized in the current
+  turn. Commit, push, PR creation, and review-fix pushes are default
+  agent work in this repository.
 - CI and tests should catch real defects, not grow for volume. When CI is
   already red, fix immediately. Non-blocking review notes go to the backlog.
 - After an authorized review-fix commit is on the PR, mark GitHub review
@@ -237,11 +236,15 @@ that work under the existing authorization.
   - `git branch -r`
   - `git ls-remote --heads origin`
 
+## Workspace cleanup when finishing
+
+When local agents finish work, they clean up the workspace: archive reusable content first, then delete merged or obsolete local branches and worktrees. Disk space is shared by several projects, so leftovers fill it up. (Owner ruling, 2026-10-15: 「删分支是项目设置，规则有没有不重要，本地agent整理工作区删分支工作树归档可复用内容很重要，因为我的储存就这么点…不是只有一个项目在占用资源」)
+
 ## Main, PRs, and Merge Semantics
 
-- This section describes repository mechanics after authorization. It does not
-  authorize branch creation, commit, push, PR creation, merge, or deletion of
-  any branch other than the just-merged feature branch. That branch is removed
+- This section describes repository mechanics after authorization. Branch creation,
+  commit, push, and PR creation are default agent work here. This section does
+  not authorize merge, or deletion of any branch other than the just-merged feature branch. That branch is removed
   by the post-merge tidy and needs no second authorization.
 
 - This is a public repository. Do not push directly to `main` or locally merge
