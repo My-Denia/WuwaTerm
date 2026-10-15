@@ -21,26 +21,27 @@ def test_code_review_rules_are_tracked_at_the_root():
     assert "not an instruction to change the pull request" in text
 
 
-def test_in_scope_fix_push_does_not_authorize_merge_or_deploy():
+def test_in_scope_fix_push_does_not_authorize_deploy():
     text = _flat(AGENTS)
     assert "## Pull request fix push" in text
     assert "fast-forward push" in text
     assert "same branch" in text
     assert "force-push" in text
-    assert "merge, deploy" in text
+    assert "wider scope, unrelated cleanup, deploy" in text
     assert "production database refresh" in text
     assert "outside the original scope is not a reason" in text
 
 
-def test_post_merge_tidy_deletes_only_the_merged_feature_branch():
+def test_post_merge_tidy_follows_merge_and_cleanup_rulings():
     text = _flat(AGENTS)
     assert "tidy the workspace in that same turn" in text
     assert "update local `main` to `origin/main`" in text
     assert "delete the local merged feature branch" in text
     assert "delete_branch_on_merge" in text
     assert "if that pull request's remote head is still present" in text
-    assert "does not authorize deleting any other branch" in text
-    assert "needs no second authorization" in text
+    assert "Agents merge their own pull requests when the change does not contradict the owner's intent" in text
+    assert "Other merged or obsolete local branches and worktrees are cleaned up the same way" in text
+    assert "This tidy does not authorize deploy or force-push." in text
     assert "## Git Branches" in text
     assert "only when the corresponding local and" not in text
     assert "clean up the source branch locally and on GitHub" not in text
