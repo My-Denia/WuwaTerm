@@ -50,20 +50,60 @@ export function TranslationWorkbench() {
     return () => window.removeEventListener(POOL_REFRESH_EVENT, onRefresh);
   }, []);
   useEffect(() => () => { termsController.current?.abort(); translationController.current?.abort(); }, []);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const initial = new URLSearchParams(window.location.search).get('q');
+    if (initial && initial.trim() && Array.from(initial.trim()).length <= 200) {
+      const trimmed = initial.trim();
+      const timer = setTimeout(() => {
+        setQuery(trimmed);
+        void runLookup(trimmed);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
-  async function lookup(event: FormEvent) {
-    event.preventDefault(); if (!query.trim()) return;
+  async function runLookup(targetText: string) {
+    const trimmed = targetText.trim();
+    if (!trimmed || Array.from(trimmed).length > 200) return;
     termsController.current?.abort();
     const controller = new AbortController(); termsController.current = controller;
     setTerms({ kind: 'loading' });
     try {
-      const r = await fetch('/api/terms?q=' + encodeURIComponent(query.trim()), { cache: 'no-store', signal: controller.signal });
+      const r = await fetch('/api/terms?q=' + encodeURIComponent(trimmed), { cache: 'no-store', signal: controller.signal });
       const v = await payload(r);
       if (controller.signal.aborted || termsController.current !== controller) return;
       setTerms(r.ok && isTerms(v) ? { kind: 'success', data: v } : { kind: 'error', error: failure(v) ? v : FALLBACK });
       setPoolAttempt(n => n + 1);
+      if (typeof window !== 'undefined' && window.history?.replaceState) {
+        const u = new URL(window.location.href);
+        u.searchParams.set('q', trimmed);
+        window.history.replaceState(null, '', u.toString());
+      }
     } catch { if (!controller.signal.aborted) setTerms({ kind: 'error', error: FALLBACK }); }
     finally { if (termsController.current === controller) termsController.current = null; }
+  }
+  async function lookup(event: FormEvent) {
+    event.preventDefault();
+    await runLookup(query);
+  }
+  function clearQuery() {
+    setQuery('');
+    setTerms({ kind: 'idle' });
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      const u = new URL(window.location.href);
+      u.searchParams.delete('q');
+      window.history.replaceState(null, '', u.toString());
+    }
+  }
+  function insertTerm(text: string) {
+    setSource(prev => prev ? prev + ' ' + text : text);
+    setTranslation({ kind: 'idle' });
+    setCopied(false);
+    translationInput.current?.focus();
+  }
+  function sendTermToReview(zh: string, en: string) {
+    window.dispatchEvent(new CustomEvent('wuwaterm-send-review', { detail: { source: zh, target: en, direction: 'en' } }));
   }
   async function translate(event: FormEvent) {
     event.preventDefault(); if (!source.trim()) return;
@@ -124,10 +164,16 @@ export function TranslationWorkbench() {
         <p className="card-intro">{m.terms.intro}</p>
         <form onSubmit={lookup}>
           <label htmlFor="term-query">{m.terms.label}</label>
-          <div className="input-row"><input id="term-query" value={query} onChange={e => { setQuery(e.target.value); setTerms({ kind: 'idle' }); }} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} /><button type="submit" disabled={!query.trim() || Array.from(query.trim()).length > 200 || terms.kind === 'loading'}>{terms.kind === 'loading' ? m.terms.buttonLoading : m.terms.buttonIdle}</button></div>
+          <div className="input-row">
+            <div className="input-wrap">
+              <input id="term-query" value={query} onChange={e => setQuery(e.target.value)} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} />
+              {query && <button type="button" className="clear-input" aria-label={m.terms.clearQuery} onClick={clearQuery}>✕</button>}
+            </div>
+            <button type="submit" disabled={!query.trim() || Array.from(query.trim()).length > 200 || terms.kind === 'loading'}>{terms.kind === 'loading' ? m.terms.buttonLoading : m.terms.buttonIdle}</button>
+          </div>
           <p className="field-hint">{m.terms.hint}</p>
         </form>
-        <TermsView state={terms} onTranslate={moveQueryToTranslation} />
+        <TermsView state={terms} onTranslate={moveQueryToTranslation} onInsert={insertTerm} onSendReview={sendTermToReview} />
       </section>
       <section className="workspace-card translation-card" aria-labelledby="translation-title">
         <div className="card-heading"><div><p className="section-kicker">{m.translation.kicker}</p><h2 id="translation-title">{m.translation.title}</h2></div><span className="tag">{m.translation.tag}</span></div>
@@ -145,15 +191,25 @@ export function TranslationWorkbench() {
     <div className="product-notes">{m.productNotes.map((note, i) => <p key={i}><strong>{note.title}</strong><span>{note.body}</span></p>)}</div>
   </div>;
 }
-function TermsView({ state, onTranslate }: { state: State<TermsResult>; onTranslate: () => void }) {
+function TermsView({ state, onTranslate, onInsert, onSendReview }: { state: State<TermsResult>; onTranslate: () => void; onInsert: (text: string) => void; onSendReview: (zh: string, en: string) => void }) {
   const { lang } = useUiLanguage();
   const m = msg(lang);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  async function copyText(key: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(current => current === key ? null : current), 2000);
+    } catch { /* clipboard fallback */ }
+  }
+
   if (state.kind === 'idle') return <div className="empty-state"><span aria-hidden="true">文 ⇄ A</span><p>{m.terms.emptyTitle}</p><small>{m.terms.emptyBody}</small></div>;
   if (state.kind === 'loading') return <p className="empty-state" role="status">{m.terms.loading}</p>;
   if (state.kind === 'error') return <FailureView value={state.error} />;
   if (state.kind !== 'success') return null;
   if (!state.data.matches.length) return <div className="empty-state"><p>{m.terms.noneFound}</p><button className="text-button" type="button" onClick={onTranslate}>{m.terms.noneAction}</button></div>;
-  return <div className="terms-results" aria-live="polite"><p className="result-summary">{fill(m.terms.matchesFound, { n: state.data.matches.length })}</p>{state.data.matches.map((match,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{match.zh}</strong><span>{match.en}</span></div><dl><div><dt>{m.terms.category}</dt><dd>{categoryLabel(lang, match.category)}</dd></div><div><dt>{m.terms.matchReason}</dt><dd>{reasonLabel(lang, match.reason)}</dd></div><div><dt>{m.terms.matchScore}</dt><dd>{match.score}</dd></div></dl></article>)}<RequestId value={state.data.request_id} /></div>;
+  return <div className="terms-results" aria-live="polite"><p className="result-summary">{fill(m.terms.matchesFound, { n: state.data.matches.length })}</p>{state.data.matches.map((match,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{match.zh}</strong><span>{match.en}</span></div><dl><div><dt>{m.terms.category}</dt><dd>{categoryLabel(lang, match.category)}</dd></div><div><dt>{m.terms.matchReason}</dt><dd>{reasonLabel(lang, match.reason)}</dd></div><div><dt>{m.terms.matchScore}</dt><dd>{match.score}</dd></div></dl><div className="term-actions"><button type="button" className={`chip-button ${copiedKey === `${i}-zh` ? 'chip-copied' : ''}`} onClick={() => void copyText(`${i}-zh`, match.zh)}>{copiedKey === `${i}-zh` ? m.terms.copied : m.terms.copyZh}</button><button type="button" className={`chip-button ${copiedKey === `${i}-en` ? 'chip-copied' : ''}`} onClick={() => void copyText(`${i}-en`, match.en)}>{copiedKey === `${i}-en` ? m.terms.copied : m.terms.copyEn}</button><button type="button" className={`chip-button ${copiedKey === `${i}-pair` ? 'chip-copied' : ''}`} onClick={() => void copyText(`${i}-pair`, `${match.zh} (${match.en})`)}>{copiedKey === `${i}-pair` ? m.terms.copied : m.terms.copyPair}</button><button type="button" className="chip-button" onClick={() => onInsert(match.zh)}>{m.terms.useInTranslation}</button><button type="button" className="chip-button" onClick={() => onSendReview(match.zh, match.en)}>{m.terms.sendToReview}</button></div></article>)}<RequestId value={state.data.request_id} /></div>;
 }
 function TranslationView({ state, copied, copyFailed, onCopy, source }: { state: State<TranslationResult>; copied: boolean; copyFailed: boolean; onCopy: () => void; source: string }) {
   const { lang } = useUiLanguage();

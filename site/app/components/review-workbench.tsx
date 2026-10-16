@@ -227,6 +227,7 @@ export function ReviewWorkbench() {
     setHistory(nextHistory); discardInFlight(); setChoices([]); setImported([]); setReports([]); setDraft(next);
     setNotice('receivedDraft');
     sourceBox.current?.focus();
+    if (typeof document !== 'undefined') { document.getElementById('review-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   }, [discardInFlight]);
   function remember() { setHistory(stack => [...stack.slice(-19), { draft, choices, imported }]); }
   function edit(next: Draft, message = '') {
@@ -247,7 +248,10 @@ export function ReviewWorkbench() {
       const empty = before.draft.source === '' && before.draft.target === '' && before.draft.alignments === null
         && !before.choices.length && !before.imported.length && !before.reports.length && !before.history.length;
       if (empty) receiveDraft(next);
-      else setPendingDraft(next);
+      else {
+        setPendingDraft(next);
+        if (typeof document !== 'undefined') { document.getElementById('review-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
     }
     window.addEventListener('wuwaterm-send-review', onDraft);
     return () => window.removeEventListener('wuwaterm-send-review', onDraft);
@@ -450,6 +454,19 @@ export function ReviewWorkbench() {
     }
     finally { if (fileBox.current) fileBox.current.value = ''; }
   }
+  function clearDraft() {
+    if (!source.trim() && !target.trim() && !choices.length && !imported.length && !(alignments && alignments.length) && !reports.length) return;
+    const before = work.current;
+    const saved: Undo = { draft: before.draft, choices: before.choices, imported: before.imported, reports: before.reports };
+    setHistory(stack => [...stack.slice(-19), saved]);
+    discardInFlight();
+    setDraft(EMPTY);
+    setChoices([]);
+    setImported([]);
+    setReports([]);
+    setNotice('clearedDraft');
+    sourceBox.current?.focus();
+  }
   function save() {
     try {
       const content = serializeWorkfile(manuscriptBody(draft, choices, reports));
@@ -557,6 +574,7 @@ export function ReviewWorkbench() {
     )}
     <p className="manuscript-save-state" role="status">{saveStateText}{guard ? ` ${m.review.saveStateLeaveNote}` : ''}</p>
     <div className="actions draft-actions">
+      <button type="button" className="secondary-button" onClick={clearDraft} disabled={!source.trim() && !target.trim() && !choices.length && !imported.length && !(alignments && alignments.length) && !reports.length}>{m.review.clearDraft}</button>
       <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
       <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
       <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
@@ -625,17 +643,25 @@ export function ReviewWorkbench() {
           const active = finding.id === activeFindingId;
           const sourceLocated = latest.source === source && highlightSegments(source, finding.source_span) !== null;
           const targetLocated = finding.target_span !== null && latest.target === target && highlightSegments(target, finding.target_span) !== null;
-          return <article className="term-result" key={finding.id} data-mention-id={finding.id} data-active={active ? 'true' : 'false'} aria-current={active ? 'true' : undefined}><p className="result-summary">{active ? m.review.currentMark : ''}{(m.review.verdicts as Record<string, string>)[finding.verdict]} · {fill(m.review.spanRange, { start: finding.source_span.start + 1, end: finding.source_span.end })}{finding.candidates_truncated ? m.review.truncatedMark : ''}</p>
-            <Excerpt text={source} span={sourceLocated ? finding.source_span : null} missing={fill(m.review.excerptMissingSource, { text: finding.source_span.text })} />
-            <Excerpt text={target} span={targetLocated ? finding.target_span : null} missing={m.review.excerptMissingTarget} />
+          return <article className="term-result" key={finding.id} data-mention-id={finding.id} data-active={active ? 'true' : 'false'} aria-current={active ? 'true' : undefined}><p className="result-summary">{active ? m.review.currentMark : ''}<span className={`verdict-badge verdict-${finding.verdict}`}>{(m.review.verdicts as Record<string, string>)[finding.verdict]}</span> · {fill(m.review.spanRange, { start: finding.source_span.start + 1, end: finding.source_span.end })}{finding.candidates_truncated ? m.review.truncatedMark : ''}</p>
+            <div className="excerpt-labeled">
+              <span className="excerpt-tag">{m.review.excerptSourceLabel}</span>
+              <Excerpt text={source} span={sourceLocated ? finding.source_span : null} missing={fill(m.review.excerptMissingSource, { text: finding.source_span.text })} />
+            </div>
+            <div className="excerpt-labeled">
+              <span className="excerpt-tag">{m.review.excerptTargetLabel}</span>
+              <Excerpt text={target} span={targetLocated ? finding.target_span : null} missing={m.review.excerptMissingTarget} />
+            </div>
             <div className="finding-jumps">
               <button className="text-button" type="button" disabled={!sourceLocated} onClick={() => jumpTo(sourceBox.current, source, finding.source_span)}>{m.review.jumpSource}</button>
               <button className="text-button" type="button" disabled={!targetLocated} onClick={() => { if (finding.target_span) jumpTo(targetBox.current, target, finding.target_span); }}>{m.review.jumpTarget}</button>
             </div>
             {finding.candidates.map((candidate: Candidate) => <div className="term-pair" key={candidate.candidate_id}><strong>{candidate.zh}</strong><span>{candidate.en}</span><small>{m.terms.category}{labelJoiner(lang)}{categoryLabel(lang, candidate.category)}</small>
-              <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading' || latest.report.truncated} onClick={() => choose(finding, candidate)}>{m.review.adopt}</button>
-              {targetLocated && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>{m.review.replace}</button>}
-              {finding.target_span === null && <button className="text-button" type="button" disabled={phase === 'loading' || !eligibleRevision(latest, finding, candidate, draft)} onClick={event => openRevision(finding, candidate, event.currentTarget)}>{m.review.revisionOpen}</button>}
+              <div className="finding-actions">
+                <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading' || latest.report.truncated} onClick={() => choose(finding, candidate)}>{m.review.adopt}</button>
+                {targetLocated && <button className="text-button" type="button" disabled={!sourceCompatible || phase === 'loading'} onClick={() => replace(finding, candidate)}>{m.review.replace}</button>}
+                {finding.target_span === null && <button className="text-button" type="button" disabled={phase === 'loading' || !eligibleRevision(latest, finding, candidate, draft)} onClick={event => openRevision(finding, candidate, event.currentTarget)}>{m.review.revisionOpen}</button>}
+              </div>
               <details className="candidate-sources"><summary>{m.review.viewSources}</summary>
                 <ul>{candidate.sources.map(item => <li key={`${item.source_file}\u0000${item.source_id}`}><span>{item.source_file}</span><span>{item.source_id}</span></li>)}</ul>
               </details>

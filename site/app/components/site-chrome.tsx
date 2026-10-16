@@ -18,6 +18,12 @@ export function SiteChrome({ children }: { children: React.ReactNode }) {
           <span className="brand-mark" aria-hidden="true">W</span>
           <span><strong>WuwaTerm</strong><small>{m.nav.brandSmall}</small></span>
         </a>
+        <div className="section-pills" role="navigation" aria-label={m.terms.quickJumpTitle}>
+          <a href="#terms-title" className="section-pill">{m.terms.jumpTerms}</a>
+          <a href="#translation-title" className="section-pill">{m.terms.jumpTranslation}</a>
+          <a href="#review-title" className="section-pill">{m.terms.jumpReview}</a>
+          <a href="#provenance-section" className="section-pill">{m.terms.jumpProvenance}</a>
+        </div>
         <div className="nav-links"><a href="/limits">{m.nav.limits}</a><a href="/privacy">{m.nav.privacy}</a><span className="beta-badge">{m.nav.betaBadge}</span><LanguageToggle /></div>
       </nav>
       {children}
