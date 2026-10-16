@@ -48,11 +48,13 @@ test('term match actions: copy, insert to translation, and send to review', asyn
   await expect(first).toContainText('今汐');
   await expect(first).toContainText('Jinhsi');
 
-  // Term actions exist
+  // Term actions exist and meet >= 40px touch height
   const insertBtn = first.getByRole('button', { name: '填入翻译', exact: true });
   const reviewBtn = first.getByRole('button', { name: '送去审校', exact: true });
   await expect(insertBtn).toBeVisible();
   await expect(reviewBtn).toBeVisible();
+  const chipBox = await insertBtn.boundingBox();
+  expect(chipBox?.height).toBeGreaterThanOrEqual(40);
 
   // Test insert to translation
   await insertBtn.click();
@@ -111,6 +113,12 @@ test('clear draft in review workbench empties manuscript and undo restores it', 
   await expect(clearBtn).toBeEnabled();
   await clearBtn.click();
   await expect(page.locator('.notice-state')).toContainText('已清空审校稿件与选择');
+
+  // Whitespace-only manuscript is also treated as clearable work
+  await page.locator('#review-source').fill('   \n  ');
+  await expect(clearBtn).toBeEnabled();
+  await clearBtn.click();
+  await expect(page.locator('#review-source')).toHaveValue('');
 });
 
 test('section pills have at least 40px touch targets and allow direct navigation', async ({ page }) => {
@@ -141,6 +149,16 @@ test('document return link preserves query parameter across navigation', async (
   await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
   await expect(page.locator('#term-query')).toHaveValue('今汐');
   await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
+
+  // Guarded leave with active draft also preserves ?q=
+  await page.locator('#review-source').fill('草稿');
+  await page.locator('.nav-links a[href*="/privacy"]').click();
+  const leaveDialog = page.getByRole('dialog', { name: '离开审校页？' });
+  await expect(leaveDialog).toBeVisible();
+  await leaveDialog.getByRole('button', { name: '仍要离开', exact: true }).click();
+  await expect(page).toHaveURL(/\/privacy\?q=%E4%BB%8A%E6%B1%90/);
+  await page.locator('.document-top .back-link').click();
+  await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
 });
 
 test('findings display excerpt labels and verdict badges', async ({ page }) => {
