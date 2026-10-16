@@ -1,9 +1,17 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { msg } from '../../lib/messages';
 import { useUiLanguage } from './ui-language-context';
 import { LanguageToggle } from './language-toggle';
+
+function navigateWithQuery(event: React.MouseEvent<HTMLAnchorElement>, base: string) {
+  if (typeof window === 'undefined') return;
+  const q = new URLSearchParams(window.location.search).get('q');
+  if (q && q.trim()) {
+    event.currentTarget.href = base + '?q=' + encodeURIComponent(q.trim());
+  }
+}
 
 export function SiteChrome({ children }: { children: React.ReactNode }) {
   const { lang } = useUiLanguage();
@@ -24,10 +32,10 @@ export function SiteChrome({ children }: { children: React.ReactNode }) {
           <a href="#review-title" className="section-pill">{m.terms.jumpReview}</a>
           <a href="#provenance-section" className="section-pill">{m.terms.jumpProvenance}</a>
         </div>
-        <div className="nav-links"><a href="/limits">{m.nav.limits}</a><a href="/privacy">{m.nav.privacy}</a><span className="beta-badge">{m.nav.betaBadge}</span><LanguageToggle /></div>
+        <div className="nav-links"><a href="/limits" onClick={e => navigateWithQuery(e, '/limits')}>{m.nav.limits}</a><a href="/privacy" onClick={e => navigateWithQuery(e, '/privacy')}>{m.nav.privacy}</a><span className="beta-badge">{m.nav.betaBadge}</span><LanguageToggle /></div>
       </nav>
       {children}
-      <footer><p>{m.nav.footerTagline}</p><div><a href="/limits">{m.nav.footerLimits}</a><a href="/privacy">{m.nav.footerPrivacy}</a></div></footer>
+      <footer><p>{m.nav.footerTagline}</p><div><a href="/limits" onClick={e => navigateWithQuery(e, '/limits')}>{m.nav.footerLimits}</a><a href="/privacy" onClick={e => navigateWithQuery(e, '/privacy')}>{m.nav.footerPrivacy}</a></div></footer>
     </>
   );
 }

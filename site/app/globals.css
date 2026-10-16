@@ -20,7 +20,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .nav-links a { text-decoration:none; }
 .nav-links a:hover { color:var(--accent); }
 .section-pills { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-.section-pill { display:inline-flex; align-items:center; padding:5px 12px; border-radius:16px; font-size:11px; font-weight:600; color:var(--muted); background:#13222b; border:1px solid var(--line); text-decoration:none; transition:color .15s, border-color .15s, background-color .15s; }
+.section-pill { display:inline-flex; align-items:center; min-height:40px; padding:8px 14px; border-radius:20px; font-size:11px; font-weight:600; color:var(--muted); background:#13222b; border:1px solid var(--line); text-decoration:none; transition:color .15s, border-color .15s, background-color .15s; }
 .section-pill:hover { color:var(--accent); border-color:var(--accent); background:#182e38; }
 .section-pill:active { transform:scale(0.97); }
 .beta-badge,.tag { border:1px solid var(--line); border-radius:24px; padding:6px 11px; color:var(--accent); font-size:11px; white-space:nowrap; }

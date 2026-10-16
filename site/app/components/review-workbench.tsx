@@ -455,7 +455,7 @@ export function ReviewWorkbench() {
     finally { if (fileBox.current) fileBox.current.value = ''; }
   }
   function clearDraft() {
-    if (!source.trim() && !target.trim() && !choices.length && !imported.length && !(alignments && alignments.length) && !reports.length) return;
+    if (!source.trim() && !target.trim() && !choices.length && !imported.length && alignments === null && !reports.length) return;
     const before = work.current;
     const saved: Undo = { draft: before.draft, choices: before.choices, imported: before.imported, reports: before.reports };
     setHistory(stack => [...stack.slice(-19), saved]);
@@ -574,7 +574,7 @@ export function ReviewWorkbench() {
     )}
     <p className="manuscript-save-state" role="status">{saveStateText}{guard ? ` ${m.review.saveStateLeaveNote}` : ''}</p>
     <div className="actions draft-actions">
-      <button type="button" className="secondary-button" onClick={clearDraft} disabled={!source.trim() && !target.trim() && !choices.length && !imported.length && !(alignments && alignments.length) && !reports.length}>{m.review.clearDraft}</button>
+      <button type="button" className="secondary-button" onClick={clearDraft} disabled={!source.trim() && !target.trim() && !choices.length && !imported.length && alignments === null && !reports.length}>{m.review.clearDraft}</button>
       <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
       <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
       <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />

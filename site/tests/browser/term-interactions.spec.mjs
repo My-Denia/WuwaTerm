@@ -102,16 +102,45 @@ test('clear draft in review workbench empties manuscript and undo restores it', 
   await undoBtn.click();
   await expect(page.locator('#review-source')).toHaveValue('测试原文');
   await expect(page.locator('#review-target')).toHaveValue('Test target');
+
+  // Empty alignments array is also treated as clearable work
+  await page.locator('.alignment-panel > summary').click();
+  await page.getByRole('button', { name: '清空对应', exact: true }).click();
+  await page.locator('#review-source').fill('');
+  await page.locator('#review-target').fill('');
+  await expect(clearBtn).toBeEnabled();
+  await clearBtn.click();
+  await expect(page.locator('.notice-state')).toContainText('已清空审校稿件与选择');
 });
 
-test('section pills allow direct navigation between workbenches', async ({ page }) => {
+test('section pills have at least 40px touch targets and allow direct navigation', async ({ page }) => {
   await open(page);
   const pills = page.locator('.section-pills .section-pill');
   await expect(pills).toHaveCount(4);
+  for (let i = 0; i < 4; i += 1) {
+    const box = await pills.nth(i).boundingBox();
+    expect(box?.height).toBeGreaterThanOrEqual(40);
+  }
   await expect(pills.nth(0)).toHaveAttribute('href', '#terms-title');
   await expect(pills.nth(1)).toHaveAttribute('href', '#translation-title');
   await expect(pills.nth(2)).toHaveAttribute('href', '#review-title');
   await expect(pills.nth(3)).toHaveAttribute('href', '#provenance-section');
+});
+
+test('document return link preserves query parameter across navigation', async ({ page }) => {
+  await open(page);
+  await page.locator('#term-query').fill('今汐');
+  await page.locator('.terms-card').getByRole('button', { name: '查术语', exact: true }).click();
+  await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
+
+  // Navigate to limits via topbar link
+  await page.locator('.nav-links a[href*="/limits"]').click();
+  await expect(page).toHaveURL(/\/limits\?q=%E4%BB%8A%E6%B1%90/);
+  // Return via back link
+  await page.locator('.document-top .back-link').click();
+  await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
+  await expect(page.locator('#term-query')).toHaveValue('今汐');
+  await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
 });
 
 test('findings display excerpt labels and verdict badges', async ({ page }) => {
