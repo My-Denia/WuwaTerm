@@ -88,6 +88,8 @@ export function TranslationWorkbench() {
     await runLookup(query);
   }
   function clearQuery() {
+    termsController.current?.abort();
+    termsController.current = null;
     setQuery('');
     setTerms({ kind: 'idle' });
     if (typeof window !== 'undefined' && window.history?.replaceState) {
@@ -166,7 +168,7 @@ export function TranslationWorkbench() {
           <label htmlFor="term-query">{m.terms.label}</label>
           <div className="input-row">
             <div className="input-wrap">
-              <input id="term-query" value={query} onChange={e => setQuery(e.target.value)} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} />
+              <input id="term-query" value={query} onChange={e => { setQuery(e.target.value); setTerms({ kind: 'idle' }); }} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} />
               {query && <button type="button" className="clear-input" aria-label={m.terms.clearQuery} onClick={clearQuery}>✕</button>}
             </div>
             <button type="submit" disabled={!query.trim() || Array.from(query.trim()).length > 200 || terms.kind === 'loading'}>{terms.kind === 'loading' ? m.terms.buttonLoading : m.terms.buttonIdle}</button>
