@@ -181,7 +181,8 @@ def _safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
         return base
 
 
-_CJK_PUNCTUATION = "，。！？、；：（）《》【】“”‘’"
+_CJK_PUNCTUATION = "，。！？、；：（）《》【】“”‘’·…—"
+_CJK_NEIGHBOR_CLASS = rf"[\u3400-\u9fff{_CJK_PUNCTUATION}]"
 
 
 @dataclass(frozen=True)
@@ -210,13 +211,13 @@ class LockedSentence:
                 # Collapse stray ASCII spaces adjacent to restored Chinese terms and CJK text.
                 if _is_cjk_character(zh[0]) or zh[0] in _CJK_PUNCTUATION:
                     result = re.sub(
-                        r"([\u3400-\u9fff\u3000-\u303f\uff01-\uff5e“”‘’]) " + re.escape(placeholder),
+                        rf"({_CJK_NEIGHBOR_CLASS}) " + re.escape(placeholder),
                         r"\1" + placeholder,
                         result,
                     )
                 if _is_cjk_character(zh[-1]) or zh[-1] in _CJK_PUNCTUATION:
                     result = re.sub(
-                        re.escape(placeholder) + r" ([\u3400-\u9fff\u3000-\u303f\uff01-\uff5e“”‘’])",
+                        re.escape(placeholder) + rf" ({_CJK_NEIGHBOR_CLASS})",
                         placeholder + r"\1",
                         result,
                     )

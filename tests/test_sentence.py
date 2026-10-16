@@ -1373,6 +1373,10 @@ def test_restore_to_chinese_collapses_stray_ascii_spaces_around_cjk_terms(sample
     res3 = locked_echo.restore(f"Use {echo_ph} build", to_en=False)
     assert res3 == "Use 声骸 build"
 
+    # Fullwidth Latin letters are not punctuation and keep their spaces:
+    res_fw = locked_echo.restore(f"Ａ {echo_ph} Ｂ", to_en=False)
+    assert res_fw == "Ａ 声骸 Ｂ"
+
     # One side CJK, other side Latin:
     res4 = locked_echo.restore(f"在 {echo_ph} build", to_en=False)
     assert res4 == "在声骸 build"
