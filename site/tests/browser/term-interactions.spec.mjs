@@ -95,6 +95,39 @@ test('URL parameter ?q=... initializes and triggers term lookup on mount', async
   await expect(page.locator('.terms-results')).toBeVisible();
   await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
   expect(requests.terms).toBe(1);
+
+  // Refresh re-runs the URL-carried term lookup, matching the product note
+  // ("a refresh re-runs the term lookup carried in the URL").
+  await page.reload();
+  await expect(page.locator('#term-query')).toHaveValue('今汐');
+  await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
+  expect(requests.terms).toBe(2);
+});
+
+test('editing a submitted nonempty query drops q so return cannot rerun the stale lookup', async ({ page }) => {
+  const requests = await open(page);
+  await page.locator('#term-query').fill('今汐');
+  await page.locator('.terms-card').getByRole('button', { name: '查术语', exact: true }).click();
+  await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
+  await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
+
+  // Editing to a different nonempty query invalidates the submitted lookup:
+  // q leaves the URL and the cleared results cannot be resurrected by navigation.
+  await page.locator('#term-query').fill('声骸');
+  await expect(page).toHaveURL(/^http:\/\/[^/?]+(?:\/?)$/);
+  await expect(page.locator('.terms-results')).toHaveCount(0);
+
+  // Internal links stop carrying the stale query
+  await expect(page.locator('.pool-notice a')).toHaveAttribute('href', '/limits');
+
+  // Round trip through /limits restores neither the stale query nor its results
+  await page.locator('.nav-links a[href*="/limits"]').click();
+  await expect(page).toHaveURL(/\/limits$/);
+  await page.locator('.document-top .back-link').click();
+  await expect(page).toHaveURL(/^http:\/\/[^/?]+(?:\/?)$/);
+  await expect(page.locator('#term-query')).toHaveValue('');
+  await expect(page.locator('.terms-results')).toHaveCount(0);
+  expect(requests.terms).toBe(1);
 });
 
 test('clear draft in review workbench empties manuscript and undo restores it', async ({ page }) => {
