@@ -1009,3 +1009,86 @@ def test_matcher_revision_changed_and_v1_label_context_is_stale(sample_db):
     )
     kept = next(item for item in legacy.findings if item.id == finding.id)
     assert kept.verdict == VERDICT_NOT_EVALUATED
+
+
+@pytest.mark.parametrize(
+    ("target", "valid"),
+    [
+        ("香椿加入队伍。", False),
+        ("椿树很好看。", False),
+        ("椿加入队伍。", True),
+        ("与椿组队。", True),
+        ("椿", True),
+    ],
+)
+def test_review_v2_single_character_target_uses_compound_context(tmp_path, target, valid):
+    service = _one_character_service(tmp_path)
+    source = "Camellya joins the team."
+    automatic = review_pair(service, source, target, "zh", review_version=RULE_VERSION_V2)
+    finding = _finding_for(automatic, "Camellya")
+    assert finding.verdict == (VERDICT_VERIFIED if valid else VERDICT_NEEDS_REVIEW)
+    assert (finding.target_span.text if finding.target_span else None) == ("椿" if valid else None)
+    selected = review_pair(
+        service, source, target, "zh", review_version=RULE_VERSION_V2,
+        resolutions=({"mention_id": finding.id, "choice": "official_pair",
+                      "candidate_id": finding.candidates[0].candidate_id},),
+        resolution_context={"source_revision": automatic.source_revision,
+                            "rule_version": automatic.rule_version,
+                            "dictionary_revision": automatic.dictionary.revision,
+                            "matcher_revision": automatic.matcher_revision},
+    )
+    chosen = _finding_for(selected, "Camellya")
+    assert chosen.verdict == (VERDICT_VERIFIED if valid else VERDICT_CONFLICT)
+    assert (chosen.target_span.text if chosen.target_span else None) == ("椿" if valid else None)
+    # Legacy v1 remains frozen, rather than silently acquiring v2 semantics.
+    legacy = review_pair(service, source, target, "zh")
+    assert _finding_for(legacy, "Camellya").verdict == VERDICT_VERIFIED
+
+
+def test_review_v2_single_character_compound_elsewhere_is_not_an_occurrence(tmp_path):
+    service = _one_character_service(tmp_path)
+    source = "Camellya joins the team."
+    for target, expected in [
+        ("无关。香椿加入队伍。", VERDICT_NEEDS_REVIEW),
+        ("无关。椿加入队伍。", VERDICT_NOT_EVALUATED),
+    ]:
+        report = review_pair(
+            service, source, target, "zh", review_version=RULE_VERSION_V2,
+            alignments=({"source": {"start": 0, "end": len(source), "text": source},
+                         "target": {"start": 0, "end": 3, "text": "无关。"}},),
+        )
+        assert _finding_for(report, "Camellya").verdict == expected
+        assert _finding_for(report, "Camellya").target_span is None
+
+
+@pytest.mark.parametrize(
+    ("target", "start", "end", "valid"),
+    [("xEcho", 1, 5, False), ("Echox", 0, 4, False),
+     ("xEchoz", 1, 5, False), ("Echoes", 0, 4, False),
+     ("Echo", 0, 4, True), ("x Echo", 2, 6, True),
+     ("Echo and more", 0, 4, True)],
+)
+def test_review_v2_alignment_filters_full_word_matches_without_banning_ranges(
+    sample_db, target, start, end, valid
+):
+    service = TermService(sample_db)
+    alignment = ({"source": {"start": 0, "end": 2, "text": "声骸"},
+                  "target": {"start": start, "end": end, "text": target[start:end]}},)
+    report = review_pair(service, "声骸", target, "en", review_version=RULE_VERSION_V2,
+                         alignments=alignment)
+    finding = _finding_for(report, "声骸")
+    # A substring range is VALID input; it just cannot make Echo a bounded
+    # occurrence inside xEcho/Echoes. No invalid_request workaround.
+    assert finding.verdict == (VERDICT_VERIFIED if valid else VERDICT_NEEDS_REVIEW)
+    assert (finding.target_span.text if finding.target_span else None) == ("Echo" if valid else None)
+    selected = review_pair(
+        service, "声骸", target, "en", review_version=RULE_VERSION_V2,
+        alignments=alignment,
+        resolutions=({"mention_id": finding.id, "choice": "official_pair",
+                      "candidate_id": finding.candidates[0].candidate_id},),
+        resolution_context={"source_revision": report.source_revision,
+                            "rule_version": report.rule_version,
+                            "dictionary_revision": report.dictionary.revision,
+                            "matcher_revision": report.matcher_revision},
+    )
+    assert _finding_for(selected, "声骸").verdict == (VERDICT_VERIFIED if valid else VERDICT_CONFLICT)

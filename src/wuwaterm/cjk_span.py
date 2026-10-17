@@ -40,6 +40,11 @@ is not a veto.
 
 wuwaterm-cjk-matcher-v2 keeps the v1 slice and also gates review-v2 target
 occurrences; review-v2 source mentions already did.
+
+wuwaterm-cjk-matcher-v3 adds target-side compound qualification for actual
+single-character resonator candidates. The pinned jieba slice and existing
+crosses_cjk_word_boundary policy stay unchanged; source mention and sentence
+locking admission retain their prior conservative policy.
 """
 
 from __future__ import annotations
@@ -52,6 +57,32 @@ LEXICON_COUNT = 66315
 JIEBA_COMMIT = "67fa2e36e72f69d9134b8a1037b83fbb070b9775"
 JIEBA_DICT_PATH = "jieba/dict.txt"
 LEXICON_FILTER = "U+3400-U+9FFF; length 2-8; frequency >= 24"
+
+
+# The frequency-filtered slice omits 香椿, the ordinary Chinese word for
+# toon. This explicit supplement is hashed with the target matcher contract;
+# it does not change the pinned lexicon or source/sentence locking.
+_SINGLE_NAME_COMPOUNDS = frozenset({"香椿"})
+
+
+def single_character_compound_at(text: str, start: int, end: int) -> bool:
+    """Whether an ordinary word covers this single-character target form.
+
+    Called only for one-character resonator candidates, never as a global
+    ban on one-character official forms. A 2..8-char ordinary word covering
+    this span extends at least one edge (香椿 at its end, 椿树 at its start).
+    It is not a general Chinese word segmenter or a sentence-meaning check.
+    """
+    if not (0 <= start < end <= len(text) and end - start == 1):
+        return False
+    if not "\u3400" <= text[start] <= "\u9fff":
+        return False
+    for lo in range(max(0, end - MAX_WORD_LEN), start + 1):
+        for hi in range(max(end, lo + 2), min(len(text), lo + MAX_WORD_LEN) + 1):
+            word = text[lo:hi]
+            if word in _WORDS or word in _SINGLE_NAME_COMPOUNDS:
+                return True
+    return False
 
 
 def crosses_cjk_word_boundary(text: str, start: int, end: int) -> bool:
@@ -66404,7 +66435,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v2", JIEBA_COMMIT, LEXICON_FILTER, sorted(words)],
+        ["wuwaterm-cjk-matcher-v3", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

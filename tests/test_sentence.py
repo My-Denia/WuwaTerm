@@ -515,30 +515,48 @@ def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_d
 
 
 @pytest.mark.parametrize(
-    ("to_chinese", "html_text", "expected"),
+    ("to_chinese", "html_text", "expected", "expected_en_forms"),
     [
+        # Segments separated by real visible separators still lock normally.
         (
             False,
             '<blockquote expandable><a href="https://example.com/声骸?q=1&amp;x=2">'
-            '<b>今汐</b></a><code class="language-python">声骸</code> &amp; '
+            '<b>今汐</b></a> <code class="language-python">声骸</code> &amp; '
             '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
             '<blockquote expandable><a href="https://example.com/声骸?q=1&amp;x=2">'
-            '<b>Jinhsi</b></a><code class="language-python">Echo</code> &amp; '
+            '<b>Jinhsi</b></a> <code class="language-python">Echo</code> &amp; '
             '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            {"Jinhsi", "Echo"},
         ),
+        (
+            True,
+            '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
+            '<b>Jinhsi</b></a> <code class="language-python">Echo</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
+            '<b>今汐</b></a> <code class="language-python">声骸</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            {"Jinhsi", "Echo"},
+        ),
+        # Ruling (term-trust round): an invisible tag between two ASCII word
+        # characters is INSIDE one visual word. "Jinhsi</a><code>Echo" renders
+        # as the glued token "JinhsiEcho", so neither surface is a bounded
+        # mention and both stay unlocked — exactly as they would in plain
+        # text "JinhsiEcho". Tags no longer change term-lock eligibility.
         (
             True,
             '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
             '<b>Jinhsi</b></a><code class="language-python">Echo</code> &amp; '
             '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
             '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
-            '<b>今汐</b></a><code class="language-python">声骸</code> &amp; '
+            '<b>Jinhsi</b></a><code class="language-python">Echo</code> &amp; '
             '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            set(),
         ),
     ],
 )
 def test_html_translation_protects_structure_and_only_locks_visible_text(
-    monkeypatch, sample_db, to_chinese, html_text, expected
+    monkeypatch, sample_db, to_chinese, html_text, expected, expected_en_forms
 ):
     enable_llm_env(monkeypatch)
     seen = {}
@@ -571,7 +589,7 @@ def test_html_translation_protects_structure_and_only_locks_visible_text(
     assert "emoji-id=" not in locked_text
     assert "&amp;" not in locked_text
     assert "https://example.com" not in locked_text
-    assert {lock[2] for lock in seen["locks"]} >= {"Jinhsi", "Echo"}
+    assert {lock[2] for lock in seen["locks"]} == expected_en_forms
 
 
 @pytest.mark.parametrize(
@@ -2496,3 +2514,45 @@ def test_exact_surface_beats_synthesized_plural_at_same_bounds(plural_db):
     assert [(zh, en) for _placeholder, zh, en in locked_off.locks] == [
         ("卢卡斯", "Lucas")
     ]
+
+
+@pytest.mark.parametrize(
+    ("html_text", "allow_plural", "expected_locks", "expected_restore"),
+    [
+        # Invisible tag inside a word: visible "Echos" is not a bounded Echo,
+        # and must not become one because the tag splits the segment.
+        ("Use the <b>Echo</b>s now.", False, 0, "Use the <b>Echo</b>s now."),
+        # Visible plural split by a tag: "<b>Resonator</b>s" renders as one
+        # word "Resonators"; neither an exact nor an inflected span exists
+        # inside a single segment, so the surface stays unlocked instead of
+        # restoring 共鸣者 with a stranded "s".
+        ("Bring <b>Resonator</b>s.", True, 0, "Bring <b>Resonator</b>s."),
+        # Glued lowercase continuation before a tag: visible "xxEcho" is one
+        # token and Echo is not a bounded mention.
+        ("xx<b>Echo</b> joins.", False, 0, "xx<b>Echo</b> joins."),
+        # Correct matches survive: real separators around the surface.
+        ("<b>Echo</b> used.", False, 1, "<b>声骸</b> used."),
+        ("Echo <b>rests</b>.", False, 1, "声骸 <b>rests</b>."),
+        # Whole inflected surface inside one segment with a tag AFTER the
+        # suffix still plural-locks and restores whole.
+        ("<b>Resonators</b> arrive.", True, 1, "<b>共鸣者</b> arrive."),
+        # Entity adjacency: decoded &amp; is a real separator, Echo stays
+        # bounded (visible "Echo & rest").
+        ("Echo &amp; rest.", False, 1, "声骸 &amp; rest."),
+    ],
+)
+def test_html_tag_cannot_change_ascii_lock_eligibility_or_plural(
+    plural_db, html_text, allow_plural, expected_locks, expected_restore
+):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(plural_db)
+    protected = protect_telegram_html(html_text)
+    locked = translator._lock_html_terms(
+        protected, allow_plural_inflection=allow_plural
+    )
+    assert len(locked.locks) == expected_locks
+    restored = translator._restore_html(
+        protected, locked, locked.locked_text, to_en=False
+    )
+    assert restored == expected_restore

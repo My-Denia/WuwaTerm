@@ -490,7 +490,16 @@ def select_term_spans(
         while start != -1:
             end = start + len(source)
             if (
-                _ascii_word_boundaries_ok(text, start, end, source)
+                # ASCII word boundaries are decided against the CONTEXT the
+                # match lives in (the full visible text for HTML segments,
+                # the text itself for plain input): an invisible tag between
+                # "Echo" and "s" (visible "Echos") must not make the glued
+                # surface look word-bounded, and text before an opening tag
+                # must not either. Plain callers pass (text, 0), so their
+                # behavior is bit-identical.
+                _ascii_word_boundaries_ok(
+                    context_text, context_offset + start, context_offset + end, source
+                )
                 and (
                     source in official
                     or _case_variant_boundaries_ok(
@@ -536,7 +545,18 @@ def select_term_spans(
                 while start != -1:
                     end = start + len(inflected)
                     if (start, end) not in exact_bounds and (
-                        _ascii_word_boundaries_ok(text, start, end, inflected)
+                        # Same context rule as exact spans: a plural suffix
+                        # glued across an invisible tag ("Resonator</b>s",
+                        # visible "Resonators") is neither an exact nor an
+                        # inflected match of the segment alone — the surface
+                        # stays unlocked instead of restoring a stranded
+                        # suffix (共鸣者s).
+                        _ascii_word_boundaries_ok(
+                            context_text,
+                            context_offset + start,
+                            context_offset + end,
+                            inflected,
+                        )
                         and (
                             source in official
                             or _case_variant_boundaries_ok(

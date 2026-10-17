@@ -15,7 +15,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .cjk_span import MATCHER_REVISION, crosses_cjk_word_boundary
+from .cjk_span import (MATCHER_REVISION, crosses_cjk_word_boundary, single_character_compound_at)
 from .constants import (
     CATEGORY_ORDER,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
@@ -714,12 +714,24 @@ def _find_occurrences(text: str, needle: str) -> list[tuple[int, int]]:
     return found
 
 
-def _find_occurrences_v2(text: str, needle: str) -> list[tuple[int, int]]:
-    """Review-v2 target search: a cross-word CJK substring is not an occurrence."""
+def _find_occurrences_v2(
+    text: str, needle: str, *, single_character_name: bool = False
+) -> list[tuple[int, int]]:
+    """Qualify an occurrence in its full target context, before range filtering.
+
+    Single-character Chinese resonator names cannot be satisfied by their
+    character occurring in an ordinary compound. Source mention collection
+    remains intentionally conservative; applying its entire whitelist to
+    targets would discard supported true-name contexts such as 与椿组队.
+    Other single-character forms (祂) and multicharacter policy are unchanged.
+    """
     found: list[tuple[int, int]] = []
     for start, end in _find_occurrences(text, needle):
-        if not crosses_cjk_word_boundary(text, start, end):
-            found.append((start, end))
+        if crosses_cjk_word_boundary(text, start, end):
+            continue
+        if single_character_name and single_character_compound_at(text, start, end):
+            continue
+        found.append((start, end))
     return found
 
 
@@ -990,6 +1002,20 @@ def _judge_mention_v2(
         )
     )
 
+    # Restrict compound qualification to actual one-character resonator
+    # candidate forms, both automatic and selected and in elsewhere search.
+    # Selection does not make a substring an occurrence of the chosen name.
+    single_character_names = {
+        candidate.zh for candidate in candidates
+        if direction == "zh" and candidate.category == "resonator"
+        and len(candidate.zh) == 1 and _is_cjk_character(candidate.zh)
+    }
+
+    def occurrences(text: str, form: str) -> list[tuple[int, int]]:
+        return _find_occurrences_v2(
+            text, form, single_character_name=form in single_character_names
+        )
+
     if corresponding is None:
         return ReviewFinding(
             id=finding_id,
@@ -1001,15 +1027,17 @@ def _judge_mention_v2(
         )
 
     lo, hi = corresponding
-    region = target[lo:hi]
     in_region: dict[str, list[tuple[int, int]]] = {}
     appearing: list[str] = []
     for form in forms:
         local = []
-        for start, end in _find_occurrences(region, form):
-            absolute = (lo + start, lo + end)
-            if crosses_cjk_word_boundary(target, absolute[0], absolute[1]):
+        # Qualify against the full text, then retain whole occurrences in
+        # the mapped range. Arbitrary character alignments remain valid;
+        # their edges simply cannot manufacture new English word boundaries.
+        for start, end in occurrences(target, form):
+            if start < lo or end > hi:
                 continue
+            absolute = (start, end)
             if _span_available(absolute, used_target):
                 local.append(absolute)
         in_region[form] = local
@@ -1030,7 +1058,7 @@ def _judge_mention_v2(
                 candidates=candidates,
             )
         if _elsewhere_has_form(
-            target, corresponding, forms, occurrences=_find_occurrences_v2
+            target, corresponding, forms, occurrences=occurrences
         ):
             return ReviewFinding(
                 id=finding_id,
@@ -1087,7 +1115,7 @@ def _judge_mention_v2(
             )
 
     if _elsewhere_has_form(
-        target, corresponding, forms, occurrences=_find_occurrences_v2
+        target, corresponding, forms, occurrences=occurrences
     ):
         return ReviewFinding(
             id=finding_id,
