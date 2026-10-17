@@ -1046,6 +1046,7 @@ def test_runtime_only_sigkill_child_keeps_lock_until_explicit_release(runtime_ha
     env["RUNTIME_FAKE_BLOCK_FILE"] = str(root / "sigkill-ready")
     env["RUNTIME_FAKE_RELEASE_FILE"] = str(root / "sigkill-release")
     env["RUNTIME_FAKE_DONE_FILE"] = str(root / "sigkill-done")
+    env["RUNTIME_FAKE_CHILD_PID_FILE"] = str(root / "sigkill-child-pid")
     process = subprocess.Popen(
         ["sh", str(root / "deploy" / "vps-update.sh"), "--runtime-only"],
         cwd=root,
@@ -1074,11 +1075,28 @@ def test_runtime_only_sigkill_child_keeps_lock_until_explicit_release(runtime_ha
             if time.monotonic() >= deadline:
                 pytest.fail("orphaned Docker child did not release")
             time.sleep(0.05)
-        recovered = _run_runtime(root, env, recover=True)
+        while True:
+            recovered = _run_runtime(root, env, recover=True)
+            if recovered.returncode != 75:
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail("orphaned Docker child did not release the lock")
+            time.sleep(0.05)
     finally:
+        (root / "sigkill-release").write_text("release\n", encoding="ascii")
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait(timeout=10)
+        child_pid_path = root / "sigkill-child-pid"
+        if child_pid_path.exists():
+            try:
+                child_pid = int(child_pid_path.read_text(encoding="ascii"))
+                os.kill(child_pid, signal.SIGKILL)
+            except (ProcessLookupError, ValueError, OSError):
+                pass
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
 

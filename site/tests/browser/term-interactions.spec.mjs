@@ -68,11 +68,13 @@ test('term match actions: copy, insert to translation, and send to review', asyn
   await expect(page.locator('#review-source')).toBeFocused();
 });
 
-test('query clear button resets input and results on demand', async ({ page }) => {
+test('query clear button resets input and results on demand without form button override', async ({ page }) => {
   await open(page);
   await page.locator('#term-query').fill('今汐');
   const clearBtn = page.locator('.clear-input');
   await expect(clearBtn).toBeVisible();
+  const box = await clearBtn.boundingBox();
+  expect(box?.height).toBeLessThanOrEqual(36);
   await clearBtn.click();
   await expect(page.locator('#term-query')).toHaveValue('');
   await expect(clearBtn).toBeHidden();
@@ -141,9 +143,18 @@ test('document return link preserves query parameter across navigation', async (
   await page.locator('.terms-card').getByRole('button', { name: '查术语', exact: true }).click();
   await expect(page.locator('.terms-results .term-result').first()).toContainText('Jinhsi');
 
+  // Verify pool-notice limits link carries ?q=
+  const noticeLink = page.locator('.pool-notice a');
+  await expect(noticeLink).toHaveAttribute('href', '/limits?q=%E4%BB%8A%E6%B1%90');
+
   // Navigate to limits via topbar link
   await page.locator('.nav-links a[href*="/limits"]').click();
   await expect(page).toHaveURL(/\/limits\?q=%E4%BB%8A%E6%B1%90/);
+
+  // Limits footer link to privacy also carries ?q=
+  const privacyFooterLink = page.locator('footer a[href*="/privacy"]');
+  await expect(privacyFooterLink).toHaveAttribute('href', '/privacy?q=%E4%BB%8A%E6%B1%90');
+
   // Return via back link
   await page.locator('.document-top .back-link').click();
   await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
@@ -157,6 +168,15 @@ test('document return link preserves query parameter across navigation', async (
   await expect(leaveDialog).toBeVisible();
   await leaveDialog.getByRole('button', { name: '仍要离开', exact: true }).click();
   await expect(page).toHaveURL(/\/privacy\?q=%E4%BB%8A%E6%B1%90/);
+
+  // Privacy document links to limits also carry ?q=
+  const limitsLinks = page.locator('main a[href*="/limits"]');
+  const count = await limitsLinks.count();
+  expect(count).toBeGreaterThan(0);
+  for (let i = 0; i < count; i += 1) {
+    await expect(limitsLinks.nth(i)).toHaveAttribute('href', '/limits?q=%E4%BB%8A%E6%B1%90');
+  }
+
   await page.locator('.document-top .back-link').click();
   await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
 });

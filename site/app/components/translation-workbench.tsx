@@ -1,10 +1,12 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { categoryLabel, reasonLabel } from '../../lib/dictionary-labels';
 import { fill, msg } from '../../lib/messages';
 import { isPool, POOL_REFRESH_EVENT, requestPoolRefresh, type Pool } from '../../lib/pool-snapshot';
 import { numberLocale } from '../../lib/ui-language';
+import { setBrowserQuery, useTermQuery, withQuery } from '../query-state';
 import { useUiLanguage } from './ui-language-context';
 
 type Failure = { status: 'unavailable'; reason: string; request_id?: string; retry_after_seconds?: number };
@@ -66,6 +68,7 @@ export function TranslationWorkbench() {
   async function runLookup(targetText: string) {
     const trimmed = targetText.trim();
     if (!trimmed || Array.from(trimmed).length > 200) return;
+    setBrowserQuery(trimmed);
     termsController.current?.abort();
     const controller = new AbortController(); termsController.current = controller;
     setTerms({ kind: 'loading' });
@@ -75,11 +78,6 @@ export function TranslationWorkbench() {
       if (controller.signal.aborted || termsController.current !== controller) return;
       setTerms(r.ok && isTerms(v) ? { kind: 'success', data: v } : { kind: 'error', error: failure(v) ? v : FALLBACK });
       setPoolAttempt(n => n + 1);
-      if (typeof window !== 'undefined' && window.history?.replaceState) {
-        const u = new URL(window.location.href);
-        u.searchParams.set('q', trimmed);
-        window.history.replaceState(null, '', u.toString());
-      }
     } catch { if (!controller.signal.aborted) setTerms({ kind: 'error', error: FALLBACK }); }
     finally { if (termsController.current === controller) termsController.current = null; }
   }
@@ -92,11 +90,7 @@ export function TranslationWorkbench() {
     termsController.current = null;
     setQuery('');
     setTerms({ kind: 'idle' });
-    if (typeof window !== 'undefined' && window.history?.replaceState) {
-      const u = new URL(window.location.href);
-      u.searchParams.delete('q');
-      window.history.replaceState(null, '', u.toString());
-    }
+    setBrowserQuery(null);
   }
   function insertTerm(text: string) {
     setSource(prev => prev ? prev + ' ' + text : text);
@@ -137,6 +131,7 @@ export function TranslationWorkbench() {
   }
   const m = msg(lang);
   const locale = numberLocale(lang);
+  const termQuery = useTermQuery();
   const translationClosed = pool.kind === 'success' && (!pool.data.translation_enabled || pool.data.translations.remaining === 0 || pool.data.characters.remaining === 0);
   const sourceLength = Array.from(source).length;
   return <div className="workbench">
@@ -148,7 +143,7 @@ export function TranslationWorkbench() {
     <aside className="pool-notice" aria-label={m.pool.noticeAria}>
       <span className="notice-symbol" aria-hidden="true">↗</span>
       <div><strong>{m.pool.noticeTitle}</strong><p>{m.pool.noticeBody}</p></div>
-      <a href="/limits">{m.pool.noticeLink} <span aria-hidden="true">↗</span></a>
+      <Link href={withQuery('/limits', termQuery)}>{m.pool.noticeLink} <span aria-hidden="true">↗</span></Link>
     </aside>
     <section className="pool-strip" aria-live="polite" aria-label={m.pool.stripAria}>
       {pool.kind === 'success' ? <>

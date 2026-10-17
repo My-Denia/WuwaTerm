@@ -1,38 +1,22 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { POOL_LIMITS as limits } from '../../lib/shared-pool.js';
 import { fill, msg } from '../../lib/messages';
 import { numberLocale } from '../../lib/ui-language';
+import { useTermQuery, withQuery } from '../query-state';
 import { useUiLanguage } from './ui-language-context';
 import { LanguageToggle } from './language-toggle';
-
-function returnWithQuery(event: React.MouseEvent<HTMLAnchorElement>) {
-  if (typeof window === 'undefined') return;
-  const q = new URLSearchParams(window.location.search).get('q');
-  if (q && q.trim()) {
-    event.currentTarget.href = '/?q=' + encodeURIComponent(q.trim());
-  }
-}
 
 export function LimitsBody() {
   const { lang } = useUiLanguage();
   const m = msg(lang);
   const locale = numberLocale(lang);
-  const [backHref, setBackHref] = useState('/');
+  const termQuery = useTermQuery();
   // Keep the tab title in step with an in-place language switch.
   useEffect(() => { document.title = m.limits.title; }, [lang, m.limits.title]);
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const q = new URLSearchParams(window.location.search).get('q');
-    if (q && q.trim()) {
-      const target = '/?q=' + encodeURIComponent(q.trim());
-      const timer = setTimeout(() => setBackHref(target), 0);
-      return () => clearTimeout(timer);
-    }
-  }, []);
-  return <main className="document"><div className="document-top"><Link className="back-link" href={backHref} onClick={returnWithQuery}>{m.nav.back}</Link><LanguageToggle /></div><p className="eyebrow">{m.limits.eyebrow}</p><h1>{m.limits.h1}</h1><p className="document-lead">{m.limits.lead}</p>
+  return <main className="document"><div className="document-top"><Link className="back-link" href={withQuery('/', termQuery)}>{m.nav.back}</Link><LanguageToggle /></div><p className="eyebrow">{m.limits.eyebrow}</p><h1>{m.limits.h1}</h1><p className="document-lead">{m.limits.lead}</p>
     <section><h2>{m.limits.s1h}</h2><table><thead><tr><th>{m.limits.tableFeature}</th><th>{m.limits.tableCeiling}</th></tr></thead><tbody>
       <tr><td>{m.limits.rowTerms}</td><td>{fill(m.limits.rowTermsCeiling, { n: limits.termsPerDay })}</td></tr>
       <tr><td>{m.limits.rowTranslation}</td><td>{fill(m.limits.rowTranslationCeiling, { n: limits.translationsPerDay, chars: limits.charactersPerDay.toLocaleString(locale) })}</td></tr>
@@ -44,6 +28,6 @@ export function LimitsBody() {
     <section><h2>{m.limits.s3h}</h2><p>{m.limits.s3p1}</p><p>{m.limits.s3p2}</p></section>
     <section><h2>{m.limits.s4h}</h2><p>{m.limits.s4p1}</p><p>{m.limits.s4p2}</p></section>
     <section><h2>{m.limits.s5h}</h2><p>{m.limits.s5p1}</p><p>{m.limits.s5p2}</p></section>
-    <footer><a href="/privacy">{m.limits.footerPrivacy}</a> · {m.limits.footerUpdated}</footer>
+    <footer><Link href={withQuery('/privacy', termQuery)}>{m.limits.footerPrivacy}</Link> · {m.limits.footerUpdated}</footer>
   </main>;
 }

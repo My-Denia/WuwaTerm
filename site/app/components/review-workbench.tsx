@@ -73,10 +73,6 @@ function unloadUrl(anchor: HTMLAnchorElement): string | null {
   let url: URL;
   try { url = new URL(anchor.href, window.location.href); } catch { return null; }
   if (url.origin === window.location.origin && url.pathname === window.location.pathname && url.search === window.location.search) return null;
-  if (url.origin === window.location.origin && ['/limits', '/privacy'].includes(url.pathname)) {
-    const q = new URLSearchParams(window.location.search).get('q');
-    if (q && q.trim()) url.searchParams.set('q', q.trim());
-  }
   return url.href;
 }
 
