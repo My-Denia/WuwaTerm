@@ -74,11 +74,19 @@ test('query clear button resets input and results on demand without form button 
   const clearBtn = page.locator('.clear-input');
   await expect(clearBtn).toBeVisible();
   const box = await clearBtn.boundingBox();
-  expect(box?.height).toBeLessThanOrEqual(36);
+  expect(box?.height).toBeGreaterThanOrEqual(40);
+  expect(box?.width).toBeGreaterThanOrEqual(40);
   await clearBtn.click();
   await expect(page.locator('#term-query')).toHaveValue('');
   await expect(clearBtn).toBeHidden();
   await expect(page.locator('.terms-results')).toHaveCount(0);
+
+  // Erasing query with backspace removes q from URL
+  await page.locator('#term-query').fill('今汐');
+  await page.locator('.terms-card').getByRole('button', { name: '查术语', exact: true }).click();
+  await expect(page).toHaveURL(/\/\?q=%E4%BB%8A%E6%B1%90/);
+  await page.locator('#term-query').fill('');
+  await expect(page).toHaveURL(/^http:\/\/[^/?]+(?:\/)?$/);
 });
 
 test('URL parameter ?q=... initializes and triggers term lookup on mount', async ({ page }) => {

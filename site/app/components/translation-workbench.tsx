@@ -92,7 +92,18 @@ export function TranslationWorkbench() {
     setTerms({ kind: 'idle' });
     setBrowserQuery(null);
   }
+  function handleQueryChange(value: string) {
+    setQuery(value);
+    setTerms({ kind: 'idle' });
+    if (!value.trim()) {
+      termsController.current?.abort();
+      termsController.current = null;
+      setBrowserQuery(null);
+    }
+  }
   function insertTerm(text: string) {
+    translationController.current?.abort();
+    translationController.current = null;
     setSource(prev => prev ? prev + ' ' + text : text);
     setTranslation({ kind: 'idle' });
     setCopied(false);
@@ -163,7 +174,7 @@ export function TranslationWorkbench() {
           <label htmlFor="term-query">{m.terms.label}</label>
           <div className="input-row">
             <div className="input-wrap">
-              <input id="term-query" value={query} onChange={e => { setQuery(e.target.value); setTerms({ kind: 'idle' }); }} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} />
+              <input id="term-query" value={query} onChange={e => handleQueryChange(e.target.value)} placeholder={m.terms.placeholder} autoComplete="off" disabled={terms.kind === 'loading'} />
               {query && <button type="button" className="clear-input" aria-label={m.terms.clearQuery} onClick={clearQuery}>✕</button>}
             </div>
             <button type="submit" disabled={!query.trim() || Array.from(query.trim()).length > 200 || terms.kind === 'loading'}>{terms.kind === 'loading' ? m.terms.buttonLoading : m.terms.buttonIdle}</button>
