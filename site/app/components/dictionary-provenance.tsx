@@ -88,7 +88,7 @@ export function DictionaryProvenance() {
   }
 
   return (
-    <section className="provenance" aria-label={m.provenance.aria}>
+    <section className="provenance" id="provenance-section" aria-label={m.provenance.aria}>
       <p>{m.provenance.intro}</p>
       <div className="provenance-actions">
         <button className="secondary-button" type="button" onClick={() => void load(false)}>{m.provenance.open}</button>
