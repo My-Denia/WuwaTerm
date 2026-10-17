@@ -17,6 +17,8 @@ from wuwaterm.cjk_span import (
     MATCHER_REVISION,
     MAX_WORD_LEN,
     _WORDS,
+    _SINGLE_NAME_COMPOUNDS,
+    single_character_compound_at,
     crosses_cjk_word_boundary,
 )
 from wuwaterm.lookup import TermService
@@ -72,7 +74,7 @@ def test_lexicon_is_the_pinned_jieba_slice():
     for word in REQUIRED_WORDS:
         assert word in _WORDS
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v2", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS)],
+        ["wuwaterm-cjk-matcher-v3", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -151,3 +153,16 @@ def test_derived_lexicon_retains_full_upstream_mit_notice():
     assert "Permission is hereby granted, free of charge" in notice
     assert "copies or substantial portions of the Software" in notice
     assert 'THE SOFTWARE IS PROVIDED "AS IS"' in notice
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "compound"),
+    [("香椿炒蛋。", "椿", True), ("椿树很好看。", "椿", True),
+     ("与椿组队。", "椿", False), ("椿加入队伍。", "椿", False),
+     ("心情不错。", "心", True), ("与心组队。", "心", False)],
+)
+def test_target_single_character_compound_qualification(text, name, compound):
+    start = text.index(name)
+    assert single_character_compound_at(text, start, start + 1) is compound
+    # The new helper is NOT a change to source/sentence CJK admission.
+    assert crosses_cjk_word_boundary(text, start, start + 1) is False

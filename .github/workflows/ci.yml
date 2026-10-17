@@ -39,7 +39,7 @@ jobs:
       - run: python scripts/validate.py
 
   lock:
-    name: uv lock drift check
+    name: uv locked runtime behavior (py3.11)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -49,6 +49,13 @@ jobs:
       # Pin uv to the same version the deploy images use (deploy/Dockerfile).
       - run: python -m pip install -U pip uv==0.11.3
       - run: uv lock --check
+      # The floating pytest matrix above checks compatibility. This job uses
+      # the SAME locked dependency resolution and API extra as the runtime
+      # image. Bind uv explicitly to 3.11 rather than its managed default.
+      - run: uv sync --locked --python 3.11 --extra api --extra dev
+      - name: Record locked runtime interpreter and dependencies
+        run: uv run --locked --python 3.11 --extra api --extra dev python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
+      - run: uv run --locked --python 3.11 --extra api --extra dev python scripts/validate.py
 
   site:
     name: site feasibility security
