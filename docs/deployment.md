@@ -758,8 +758,9 @@ must be one of this transaction's known identities — the recorded old
 binding, the per-surface rollback binding, or the target binding, in any
 running state, with absence only when the daemon positively proves it; and
 every recorded rollback reference must resolve to the exact per-surface old
-image id recorded for it, re-resolved immediately before it runs, so a
-retargeted tag can never execute. An inspection that cannot positively
+image id recorded for it, re-resolved immediately before use; drift observed
+at either check blocks execution. The check and the Docker operation are not
+atomic with manual changes outside the deployment lock. An inspection that cannot positively
 prove absence (daemon, transport, permission, or malformed output) makes
 the host unobservable: recovery refuses, the database does not move, and
 the record is kept. The shell's EXIT rollback restores the database through
@@ -770,9 +771,16 @@ database untouched.
 
 The EXIT-trap rollback drops the record only through the same observed
 old-binding verification, so a rollback that cannot prove its outcome keeps
-the record instead of certifying it. Recovery never rewrites an unknown
-database, never starts a surface that was not recorded running, and never
-deletes an unconfined journal-referenced file. Keep the recorded backup,
+the record instead of certifying it. Stopped and absent are distinct object
+states: explicit recovery recreates a recorded stopped service on its verified
+old image without starting it, or removes only a known stopped replacement when
+no old object existed (without force or volume removal). Final verification
+checks presence, image, reference and running state; an unresolved object keeps
+the journal even after an ordinary EXIT rollback. The old manifest is verified
+with its own recorded image ID, not an arbitrary first service when images differ.
+Recovery never rewrites an unknown database, never starts a surface that was not
+recorded running, and never deletes an unconfined journal-referenced file.
+Keep the recorded backup,
 the old manifests and the rollback image tags until recovery has completed.
 
 Like the runtime-only record, this machinery is exercised against isolated

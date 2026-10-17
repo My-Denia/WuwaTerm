@@ -711,8 +711,9 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
     Used by recovery after restoring it and by the shell's EXIT rollback
     before it may clear the journal: the pointer, the database hash (or
     the recorded absence), the old manifest and every recorded surface's
-    observed image id/running state must agree. Only surfaces that were
-    recorded running are expected back, each on its own recorded image.
+    observed presence/image/reference/running state must agree. Recorded
+    stopped objects must exist on their old image without running; recorded
+    absence must be actual absence, not a stopped replacement object.
     """
 
     present, value = _pointer_state()
@@ -729,19 +730,12 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
         manifest_path = _confined(journal["old_manifest_path"])
         if not manifest_path.is_file():
             raise FullUpdateError("full_recovery_unresolved")
-        verify_id: str | None = None
-        for image_key, running_key in (
-            ("old_bot_image_id", "old_bot_running"),
-            ("old_api_image_id", "old_api_running"),
-        ):
-            if journal[running_key] and journal[image_key]:
-                verify_id = journal[image_key]
-                break
+        # A host may legitimately have distinct old service images. The
+        # immutable manifest identifies its own image; neither service order
+        # nor running state may substitute a different verification key.
+        verify_id = _preflight_old_manifest(journal, manifest_path)
         try:
             if journal["old_db_sha256"] is not None:
-                if verify_id is None:
-                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    verify_id = payload["image"]["id"]
                 verify_manifest(
                     manifest_path,
                     source_commit=journal["old_pointer"],
@@ -750,17 +744,6 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
                     db_path=ROOT / "data" / "terms.db",
                     immutable=True,
                 )
-            else:
-                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if verify_id is None:
-                    verify_id = payload["image"]["id"]
-                if (
-                    payload.get("schema_version") != 1
-                    or payload.get("source_commit") != journal["old_pointer"]
-                    or payload.get("image", {}).get("id") != verify_id
-                    or payload.get("image", {}).get("revision") != journal["old_pointer"]
-                ):
-                    raise FullUpdateError("full_recovery_unresolved")
         except (ManifestError, OSError, ValueError, KeyError, TypeError):
             raise FullUpdateError("full_recovery_unresolved") from None
         try:
@@ -768,18 +751,18 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
         except ManifestError:
             raise FullUpdateError("full_recovery_unresolved") from None
     for service in SERVICES:
-        image_key, _ref_key, running_key, rollback_key = SURFACE_KEYS[service]
-        expected_running = bool(journal[running_key] and journal[image_key])
+        image_key, ref_key, running_key, rollback_key = SURFACE_KEYS[service]
         state = _container_state(CONTAINERS[service])
-        if expected_running:
-            if (
-                state is None
-                or not state[0]
-                or state[1] != journal[image_key]
-                or state[2] != journal[rollback_key]
-            ):
+        if journal[image_key] is None:
+            if state is not None:
                 raise FullUpdateError("full_recovery_unresolved")
-        elif state is not None and state[0]:
+            continue
+        if (
+            state is None
+            or state[0] != journal[running_key]
+            or state[1] != journal[image_key]
+            or state[2] not in (journal[ref_key], journal[rollback_key])
+        ):
             raise FullUpdateError("full_recovery_unresolved")
 
 
@@ -805,7 +788,7 @@ def _preflight_journal_paths(journal: dict[str, Any]) -> None:
         _preflight_old_manifest(journal, manifest)
 
 
-def _preflight_old_manifest(journal: dict[str, Any], path: Path) -> None:
+def _preflight_old_manifest(journal: dict[str, Any], path: Path) -> str:
     """Static binding of the recorded old manifest to the old preimage.
 
     The live database may still hold the new candidate here, so the deep
@@ -841,6 +824,7 @@ def _preflight_old_manifest(journal: dict[str, Any], path: Path) -> None:
         )
     ):
         raise FullUpdateError("full_recovery_unresolved")
+    return _image_id(image["id"])
 
 
 def _assert_admissible_surface(
@@ -885,8 +869,10 @@ def _preflight_old_side(journal: dict[str, Any]) -> None:
     Order matters: every actionable journal path is confined and consistent,
     every observed surface is a known transaction identity (absence only
     when positively proven), and every recorded rollback reference resolves
-    to the exact per-surface old image id recorded for it — so a drifted
-    tag can never execute. Refusal here leaves the host exactly as it was.
+    to the exact per-surface old image id recorded for it. Drift observed
+    here or just before use refuses execution; those checks are not atomic
+    with manual Docker changes outside this lock. Refusal here leaves the
+    host exactly as it was.
     """
 
     _preflight_journal_paths(journal)
@@ -953,6 +939,46 @@ def _restore_database(journal: dict[str, Any]) -> None:
             raise FullUpdateError("full_recovery_unresolved")
 
 
+def _restore_nonrunning_surface(journal: dict[str, Any], service: str) -> None:
+    """Restore object presence and image identity without starting a service.
+
+    Quiescence and transaction preflight have already completed. Recheck
+    identity before removing a known replacement or recreating a stopped old
+    object; missing objects remain repairable on reentry.
+    """
+    image_key, ref_key, _running_key, rollback_key = SURFACE_KEYS[service]
+    state = _container_state(CONTAINERS[service])
+    _assert_admissible_surface(journal, service, state)
+    if state is not None and state[0]:
+        raise FullUpdateError("full_recovery_stop_failed")
+    if journal[image_key] is None:
+        if state is not None:
+            # Only a known stopped target object is admissible when no old
+            # object existed. Never force removal or remove its volumes.
+            _run(["docker", "rm", CONTAINERS[service]])
+            if _container_state(CONTAINERS[service]) is not None:
+                raise FullUpdateError("full_recovery_restore_failed")
+        return
+    if (
+        state is not None
+        and state[1] == journal[image_key]
+        and state[2] in (journal[ref_key], journal[rollback_key])
+    ):
+        return
+    if _image_ref_id(journal[rollback_key]) != journal[image_key]:
+        raise FullUpdateError("full_recovery_unresolved")
+    _compose(
+        "create", "--no-build", "--force-recreate", "--pull", "never", service,
+        env=_runtime_env(journal[rollback_key], source_commit=journal["old_pointer"]),
+    )
+    state = _container_state(CONTAINERS[service])
+    if (
+        state is None or state[0] or state[1] != journal[image_key]
+        or state[2] != journal[rollback_key]
+    ):
+        raise FullUpdateError("full_recovery_restore_failed")
+
+
 def _restore_old_binding(journal: dict[str, Any]) -> None:
     """Bring the host back to the recorded previous binding, then verify it.
 
@@ -1012,9 +1038,9 @@ def _restore_old_binding(journal: dict[str, Any]) -> None:
     for service in SERVICES:
         image_key, _ref_key, running_key, rollback_key = SURFACE_KEYS[service]
         if journal[running_key] and journal[image_key]:
-            # The tag was resolved in the preflight; re-resolve it
-            # immediately before running so a tag retargeted in between
-            # can never execute.
+            # Re-resolve the tag immediately before use to detect drift
+            # since preflight. This check and Docker's operation are not
+            # atomic with external manual tag changes.
             if _image_ref_id(journal[rollback_key]) != journal[image_key]:
                 raise FullUpdateError("full_recovery_unresolved")
             _compose(
@@ -1026,9 +1052,7 @@ def _restore_old_binding(journal: dict[str, Any]) -> None:
                 env=_runtime_env(journal[rollback_key], source_commit=journal["old_pointer"]),
             )
         else:
-            state = _container_state(CONTAINERS[service])
-            if state is not None and state[0]:
-                raise FullUpdateError("full_recovery_unresolved")
+            _restore_nonrunning_surface(journal, service)
     _check_termination()
     _verify_old_binding(journal)
 
