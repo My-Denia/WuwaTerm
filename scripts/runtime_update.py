@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from scripts.deployment_manifest import (  # noqa: E402
     verify_manifest,
     write_manifest,
 )
+from scripts.full_update import full_journal_exists  # noqa: E402
 
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1011,7 +1013,16 @@ def _idempotent_target(
     return True
 
 
-def _check_full_journal() -> int:
+def _check_runtime_journal() -> int:
+    """Admission gate for the FULL updater: no unresolved runtime record.
+
+    A full data deployment must never run across an unresolved runtime-only
+    transaction. Untrusted shapes (symlink, malformed, schema drift) refuse
+    as well: nobody has proven them closed. Journals already closed with a
+    verified binding (committed, rolled_back) do not block a later full
+    deployment.
+    """
+
     path = _journal_path()
     if path.is_symlink():
         raise RuntimeUpdateError("invalid_journal")
@@ -1263,26 +1274,41 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--runtime-only", action="store_true")
     group.add_argument("--recover-runtime", action="store_true")
-    group.add_argument("--check-full-journal", action="store_true")
+    group.add_argument("--check-runtime-journal", action="store_true")
     args = parser.parse_args(argv)
     try:
         _require_held_lock()
     except RuntimeUpdateError as exc:
         print(f"runtime-only deployment failed: {exc.code}", file=sys.stderr)
         return 1
+    if args.check_runtime_journal:
+        try:
+            return _check_runtime_journal()
+        except RuntimeUpdateError as exc:
+            print(f"runtime-only deployment failed: {exc.code}", file=sys.stderr)
+            return 1
     signal.signal(signal.SIGINT, _on_termination)
     signal.signal(signal.SIGTERM, _on_termination)
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, _on_termination)
     try:
-        if args.check_full_journal:
-            return _check_full_journal()
+        # An interrupted full-data update leaves the live database and the
+        # pointer on opposite sides of a transaction this mode must not
+        # touch. ANY outstanding full journal - including one whose phase
+        # marker says committed - refuses admission until the explicit full
+        # recovery has verified the observed binding and cleared it.
+        if full_journal_exists():
+            raise RuntimeUpdateError("full_recovery_required")
         return _new_deployment() if args.runtime_only else _recovery()
     except RuntimeUpdateError as exc:
         print(f"runtime-only deployment failed: {exc.code}", file=sys.stderr)
+        if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
+            traceback.print_exc()
         return 1
     except Exception:
         print("runtime-only deployment failed: internal_error", file=sys.stderr)
+        if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
+            traceback.print_exc()
         return 1
 
 

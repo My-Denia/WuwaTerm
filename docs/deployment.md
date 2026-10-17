@@ -698,6 +698,88 @@ DB, recreates the runtime from the tagged old image, and restores or removes
 the commit pointer. Timestamped DB and pointer backups and rollback image tags
 are retained; no historical snapshot or state file is deleted.
 
+### Interrupted full updates
+
+A full update mutates the database, both serving containers and the pointer,
+so the updater durably records the transaction BEFORE the first
+serving-binding mutation. The record at `.deployments/.full-transaction.json`
+(schema-versioned, mode 0600, written atomically with fsync) binds:
+
+- the old and new database SHA-256 preimages, the backup path, and the
+  backup hash recorded in its filename;
+- the old commit pointer and its immutable manifest;
+- each serving surface's observed image id, reference and running state,
+  plus the per-surface rollback tags created for this transaction;
+- the target image ref/id/digest/revision after the image was verified;
+- a fingerprint over the deployment shell, compose file, manifest helper and
+  recovery module, so a journal written by different tool code is not
+  actionable by this code.
+
+An ordinary failure still rolls back in-process through the EXIT trap. An
+uncatchable termination (SIGKILL, host power loss) inside the window leaves
+that durable record behind; the phase marker alone is never proof of the
+outcome. While ANY full-transaction record exists — in any shape, including
+one whose marker says `committed` — every deployment mode refuses admission:
+
+```bash
+sh deploy/vps-update.sh            # refused: a transaction journal requires recovery
+sh deploy/vps-update.sh --runtime-only   # refused likewise
+```
+
+The explicit recovery entry classifies the host by what is actually observed
+— pointer, live database hash, manifest, and both containers' image
+ids/references/running states — never by the journal's phase marker alone:
+
+```bash
+sh deploy/vps-update.sh --recover-full
+```
+
+- Observed NEW binding complete (pointer, database, manifest, both surfaces
+  on the target image id and reference): the transaction is confirmed and
+  the record is cleared. No container is stopped and nothing is restored.
+- Observed OLD binding: the recorded previous binding is restored — known
+  surfaces are quiesced and verified stopped first, the recorded backup is
+  re-hashed before any copy and re-verified after promotion, only surfaces
+  that were recorded running come back, each on its own recorded image,
+  and the old binding is verified from observation before the record is
+  cleared.
+- Anything else — unknown pointer, unknown live database, new pointer with
+  old or missing services, missing or modified backup, unconfined recorded
+  paths, schema/type drift, tool fingerprint mismatch — is reported
+  unresolved, changes nothing further, and KEEPS the record, so recovery is
+  reentrant. A missing live database is restored from the recorded verified
+  backup; a first deploy (no recorded old binding) restores the recorded
+  absence and starts nothing.
+
+Before any of that, recovery establishes an admissibility preflight that
+mutates nothing: every journal-referenced path (backup, old manifest) is
+confined and consistent with the recorded preimage; every observed surface
+must be one of this transaction's known identities — the recorded old
+binding, the per-surface rollback binding, or the target binding, in any
+running state, with absence only when the daemon positively proves it; and
+every recorded rollback reference must resolve to the exact per-surface old
+image id recorded for it, re-resolved immediately before it runs, so a
+retargeted tag can never execute. An inspection that cannot positively
+prove absence (daemon, transport, permission, or malformed output) makes
+the host unobservable: recovery refuses, the database does not move, and
+the record is kept. The shell's EXIT rollback restores the database through
+the same verified restoration as explicit recovery (`restore-db`): the
+backup and the copied bytes are hashed BEFORE the live file can be
+replaced, so a backup modified after preparation leaves the known live
+database untouched.
+
+The EXIT-trap rollback drops the record only through the same observed
+old-binding verification, so a rollback that cannot prove its outcome keeps
+the record instead of certifying it. Recovery never rewrites an unknown
+database, never starts a surface that was not recorded running, and never
+deletes an unconfined journal-referenced file. Keep the recorded backup,
+the old manifests and the rollback image tags until recovery has completed.
+
+Like the runtime-only record, this machinery is exercised against isolated
+fake-docker harnesses with real durable file operations and a real
+process-group SIGKILL at the promotion window; it is not a claim about real
+host power-loss behaviour.
+
 For a state-only migration using an existing `terms.db`, let the new runtime
 perform the same validated, atomic one-time migration during startup:
 

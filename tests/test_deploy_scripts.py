@@ -99,13 +99,13 @@ def test_vps_update_durably_promotes_and_restores_database_and_pointer():
         'pointer_published=1\npython3 scripts/deployment_manifest.py publish-pointer'
     )
     assert backup < backup_hash < promotion < pointer
-    assert (
-        'python3 scripts/deployment_manifest.py durable-remove \\\n'
-        '        --path "$db_path"'
-        in text
-    )
+    # The EXIT trap restores the database through the SAME verified
+    # restoration explicit recovery uses: backup and copied bytes are hashed
+    # before the live file can be replaced (no unverified promote). The trap
+    # is defined before the main flow but only runs after a failure, so the
+    # anchor is presence, not file position.
+    assert 'python3 scripts/full_update.py restore-db' in text
     assert '--path "$pointer_path"' in text
-    assert '--source "$restore_tmp" --destination "$db_path"' in text
 
 
 def test_durable_replace_and_remove_fsync_changed_directories(monkeypatch, tmp_path):
@@ -542,8 +542,11 @@ def test_ghcr_overlay_declares_image_references_only():
 
 NEW_COMMIT = "2" * 40
 OLD_COMMIT = "1" * 40
-OLD_IMAGE = "sha256:oldimage"
-NEW_IMAGE = "sha256:newimage"
+# Real-shaped ids: the deployment tooling validates image identity strictly
+# (sha256:<64 lowercase hex>), and the harness must observe the same shapes
+# the real daemon reports.
+OLD_IMAGE = "sha256:" + "1" * 64
+NEW_IMAGE = "sha256:" + "2" * 64
 
 
 def _deployment_db(path: Path, suffix: str) -> None:
@@ -672,6 +675,7 @@ def _make_deploy_harness(tmp_path):
         "deploy/vps-update.sh",
         "deploy/docker-compose.yml",
         "scripts/deployment_manifest.py",
+        "scripts/full_update.py",
         "scripts/validate_state_file.py",
         "scripts/verify_db.py",
     ):
@@ -757,6 +761,10 @@ def _make_deploy_harness(tmp_path):
         "      cat \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
         "    *State.Running*)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/bot-running\" ;;\n"
+        "    *Config.Image*wuwaterm-api*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/api-ref\" ;;\n"
+        "    *Config.Image*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/bot-ref\" ;;\n"
         "    *)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
         "  esac\n"
@@ -767,6 +775,7 @@ def _make_deploy_harness(tmp_path):
         "  case \"$*\" in\n"
         f"    *Config.Labels*) echo '{NEW_COMMIT}' ;;\n"
         f"    *RepoDigests*) echo '{NEW_IMAGE}' ;;\n"
+        f"    *rollback-*) echo '{OLD_IMAGE}' ;;\n"
         f"    *) echo '{NEW_IMAGE}' ;;\n"
         "  esac\n"
         "  exit 0\n"
@@ -795,10 +804,15 @@ def _make_deploy_harness(tmp_path):
         "    python3 \"$FAKE_DEPLOY_ROOT/scripts/verify_db.py\" \"$candidate\"\n"
         "    ;;\n"
         "  *' up -d '*wuwaterm*)\n"
-        "    case \"${WUWATERM_RUNTIME_IMAGE:-}\" in\n"
+        "    image=\"${WUWATERM_RUNTIME_IMAGE:-unset}\"\n"
+        "    case \"$image\" in\n"
         f"      *rollback-*) echo '{OLD_IMAGE}' > \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
         f"      *) echo '{NEW_IMAGE}' > \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
         "    esac\n"
+        # Both surfaces are created from one image ref per deployment; the
+        # recovery record verifies the observed Config.Image per surface.
+        "    echo \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "    echo \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
         "    ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -839,7 +853,19 @@ def _make_deploy_harness(tmp_path):
         "    fi\n"
         "    exit 0\n"
         "    ;;\n"
-        "  *'deployment_manifest.py durable-replace --source data/terms.db.rollback.'*)\n"
+        f"  *'deployment_manifest.py durable-replace --source data/terms.db.rollback.'*)\n"
+        "    if [ \"${FAKE_DB_ROLLBACK_CONTENT_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected rollback content failure' >&2\n"
+        "      exit 91\n"
+        "    fi\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_DB_ROLLBACK_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected rollback durability failure' >&2\n"
+        "      exit 93\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  *'full_update.py restore-db'*)\n"
         "    if [ \"${FAKE_DB_ROLLBACK_CONTENT_FAILURE:-0}\" = 1 ]; then\n"
         "      echo 'injected rollback content failure' >&2\n"
         "      exit 91\n"
@@ -864,6 +890,8 @@ def _make_deploy_harness(tmp_path):
     )
     python_script.chmod(0o755)
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    (root / "bot-ref").write_text("wuwaterm-runtime:old\n", encoding="ascii")
+    (root / "api-ref").write_text("wuwaterm-runtime:old\n", encoding="ascii")
     # Default host state: both surfaces were up when the deployment started.
     # A test that wants a present-but-stopped surface rewrites these.
     (root / "api-running").write_text("true\n", encoding="ascii")
@@ -999,16 +1027,21 @@ def test_vps_update_surfaces_rollback_durability_failure(deploy_harness):
 
     assert result.returncode == 97
     assert "injected rollback durability failure" in result.stderr
-    assert "restored database durability could not be confirmed" in result.stderr
+    assert "verified database restoration failed" in result.stderr
     assert "rollback completed with errors; manual recovery is required" in result.stderr
     assert (
         hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
         == old_hash
     )
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    # The bytes came back, but the restoration command explicitly failed its
+    # durability check. Matching bytes are not permission to restart: keep
+    # the stopped replacement object and the recovery record, with no old
+    # image activation until recovery can verify the complete binding.
+    assert (root / "running-image").read_text(encoding="ascii").strip() == NEW_IMAGE
+    assert (root / ".deployments" / ".full-transaction.json").exists()
     docker_log = (root / "docker.log").read_text(encoding="utf-8")
-    assert any(
+    assert not any(
         "rollback-" in line
         and "up -d --no-build --force-recreate wuwaterm" in line
         for line in docker_log.splitlines()
@@ -1258,7 +1291,7 @@ def test_vps_update_manages_both_surfaces_together():
     assert "replacement containers could not be stopped before rollback" in text
     rollback_body = text.split("rollback_on_failure() {", 1)[1]
     stop_at = rollback_body.index("compose stop wuwaterm wuwaterm-api")
-    restore_at = rollback_body.index("durable-replace")
+    restore_at = rollback_body.index("python3 scripts/full_update.py restore-db")
     assert stop_at < restore_at
 
 
@@ -1324,7 +1357,7 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     restore_at = next(
         index
         for index, line in enumerate(actions)
-        if "durable-replace --source data/terms.db.rollback." in line
+        if "full_update.py restore-db" in line
     )
     stops_before_restore = [
         index
