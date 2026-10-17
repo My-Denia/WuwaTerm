@@ -1355,6 +1355,45 @@ def test_restore_to_chinese_swaps_in_zh_official(sample_db):
     assert set(restored.removeprefix("Use ").split(" plus ")) == {"今汐", "共鸣者"}
 
 
+def test_restore_to_chinese_collapses_stray_ascii_spaces_around_cjk_terms(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked_echo = translator.lock_terms("Echo")
+    echo_ph = locked_echo.locks[0][0]
+
+    # Model places spaces between Chinese characters and the placeholder:
+    # "那个 __placeholder__ 现在" -> "那个声骸现在"
+    res1 = locked_echo.restore(f"那个 {echo_ph} 现在", to_en=False)
+    assert res1 == "那个声骸现在"
+
+    # Spaces between CJK punctuation and term are also collapsed:
+    res2 = locked_echo.restore(f"且， {echo_ph} 。", to_en=False)
+    assert res2 == "且，声骸。"
+
+    # English words adjacent to the restored term keep their spaces:
+    res3 = locked_echo.restore(f"Use {echo_ph} build", to_en=False)
+    assert res3 == "Use 声骸 build"
+
+    # Fullwidth Latin letters are not punctuation and keep their spaces:
+    res_fw = locked_echo.restore(f"Ａ {echo_ph} Ｂ", to_en=False)
+    assert res_fw == "Ａ 声骸 Ｂ"
+
+    # One side CJK, other side Latin:
+    res4 = locked_echo.restore(f"在 {echo_ph} build", to_en=False)
+    assert res4 == "在声骸 build"
+
+    # Multiple adjacent placeholders with spaces between them:
+    locked_two = translator.lock_terms("Jinhsi and Echo")
+    by_en = {en: placeholder for placeholder, _zh, en in locked_two.locks}
+    jinhsi_ph = by_en["Jinhsi"]
+    echo_ph2 = by_en["Echo"]
+    res5 = locked_two.restore(f"{jinhsi_ph} {echo_ph2}", to_en=False)
+    assert res5 == "今汐声骸"
+
+    # to_en=True preserves original spacing as expected for English output:
+    res_en = locked_two.restore(f"Use {jinhsi_ph} and {echo_ph2}", to_en=True)
+    assert res_en == "Use Jinhsi and Echo"
+
+
 def test_translate_english_sentence_locks_and_restores_chinese(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")

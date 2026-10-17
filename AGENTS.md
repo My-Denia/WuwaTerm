@@ -12,19 +12,18 @@ As of 2026-09-11 the owner
 deleted the Windows checkout `<FORMER_WINDOWS_CHECKOUT>`. SUPERSEDED: that
 path's `AGENTS.md` as a separate canonical product-fact layer this adapter
 must not absorb. Do not recreate the Windows tree unless the owner asks.
-PR creation, merge, deploy, and deletion of any branch other than the
-just-merged feature branch each require separate current authorization
-for that exact action. After an authorized merge is on `origin/main`,
-the workspace tidy below deletes that feature branch locally, and
-deletes its remote head only when GitHub has not already removed it
-(`delete_branch_on_merge` is on for this repository). That cleanup needs
-no second authorization. Skip it when the user explicitly asks to keep
-the branch. That tidy is not permission to delete any other branch. After the
-owner has authorized a pull request, a later fast-forward push on that
+This is the owner's own repository: agents commit, push, open PRs, and
+fix review findings by default, and work must not stay only local.
+Agents merge their own pull requests when the change does not contradict the
+owner's intent and adds no embellishment or slop; otherwise they fix it first.
+Deploy requires separate current authorization. After a merge is on
+`origin/main`, the workspace tidy below deletes merged or obsolete local
+branches and worktrees; GitHub removes merged remote heads
+(`delete_branch_on_merge` is on). Skip it when the user explicitly asks to keep
+the branch. On an open pull request, a later fast-forward push on that
 same branch is already authorized when it only fixes a confirmed
 in-scope review finding, as defined in Code Review Rules. The procedures
-below never authorize force-push, history rewrite, a wider scope, a new
-pull request, merge, deploy, or a production change.
+below never authorize force-push, history rewrite, a wider scope, deploy, or a production change.
 
 ## Code Review Rules
 
@@ -61,7 +60,7 @@ an instruction to change the pull request. Answer it in the thread.
 
 ## Pull request fix push
 
-After the owner has authorized a pull request, a later fast-forward push
+On an open pull request, a later fast-forward push
 on that same branch is already authorized when all of these hold:
 
 - the review finding is confirmed
@@ -70,8 +69,8 @@ on that same branch is already authorized when all of these hold:
 - the push does not widen the pull request's concern
 
 That continuation does not authorize force-push, history rewrite, a
-wider scope, unrelated cleanup, a new pull request, merge, deploy,
-release or tag, registry promotion, production mutation, a backend
+wider scope, unrelated cleanup, deploy,
+registry promotion, production mutation, a backend
 restart, a production database refresh, or env, proxy, or secrets
 changes.
 
@@ -111,10 +110,10 @@ that work under the existing authorization.
   `GAH_DEPLOY_OFF` or other bypasses. Do not send test messages to Telegram
   chats, groups, or channels; API/Web probes, `getMe`, and natural telemetry
   are allowed.
-- Merge only when explicitly authorized; this repo squash-merges with
+- Agents merge their own pull requests when the change does not contradict the owner's intent and adds no embellishment or slop; otherwise they fix it first. This repo squash-merges with
   `(#NN)`. Do not force-push main or use admin bypass. Codex PR review is
   auto-triggered; do not comment `@codex review`.
-- After an authorized merge is on `origin/main`, tidy the workspace in that
+- After a merge is on `origin/main`, tidy the workspace in that
   same turn: update local `main` to `origin/main`; delete the local merged
   feature branch after it is an ancestor of `origin/main` or
   `git cherry origin/main <branch>` prints only `-` lines; if that pull
@@ -122,14 +121,13 @@ that work under the existing authorization.
   usually removes it first (`delete_branch_on_merge` is on). Do not delete
   a remote head that is already gone. Classify leftover dirty files;
   archive reusable run evidence under a named `goal-runs/` path. Skip that
-  branch deletion when the user explicitly asks to keep the branch. This
-  tidy needs no second authorization. It does not authorize deleting any
-  other branch, a new PR, deploy, or force-push.
-- PR creation, merge, deploy, and deletion of any branch other than that
-  just-merged feature branch must each be independently authorized in the
-  current turn. A fast-forward fix push on an already authorized pull
-  request is the exception in Pull request fix push, and only for a
-  confirmed in-scope finding.
+  branch deletion when the user explicitly asks to keep the branch. Other
+  merged or obsolete local branches and worktrees are cleaned up the same way
+  (see Workspace cleanup when finishing). This tidy does not authorize deploy
+  or force-push.
+- Deploy must be independently authorized in the current turn. Commit, push,
+  PR creation, review-fix pushes, and merge are default agent work in this
+  repository.
 - CI and tests should catch real defects, not grow for volume. When CI is
   already red, fix immediately. Non-blocking review notes go to the backlog.
 - After an authorized review-fix commit is on the PR, mark GitHub review
@@ -218,12 +216,10 @@ that work under the existing authorization.
   after the executor.
 - Before changing branches or deleting a branch, record the current branch,
   `git status --short --branch`, and the branch tip SHA.
-- After an authorized merge is on `origin/main`, clean up that feature
-  branch in the same turn by the workspace tidy above. Merge authorization
-  already includes it: delete the local branch, and delete the remote head
-  only when it is still present. That cleanup needs no second authorization.
-  Skip it when the user explicitly asks to keep the branch. Deletion of any
-  other branch still needs its own current authorization.
+- After a merge is on `origin/main`, clean up that feature branch in the
+  same turn by the workspace tidy above: delete the local branch, and delete
+  the remote head only when it is still present. Skip it when the user
+  explicitly asks to keep the branch.
 - Before deleting a branch, verify one of these is true:
   - The branch is an ancestor of `origin/main`:
     `git merge-base --is-ancestor <branch> origin/main`.
@@ -237,12 +233,15 @@ that work under the existing authorization.
   - `git branch -r`
   - `git ls-remote --heads origin`
 
+## Workspace cleanup when finishing
+
+When local agents finish work, they clean up the workspace: archive reusable content first, then delete merged or obsolete local branches and worktrees. A branch is obsolete when it is an ancestor of `origin/main`, `git cherry origin/main <branch>` prints only `-` lines, or its pull request is closed. Disk space is shared by several projects, so leftovers fill it up. (Owner ruling, 2026-10-15: 「删分支是项目设置，规则有没有不重要，本地agent整理工作区删分支工作树归档可复用内容很重要，因为我的储存就这么点…不是只有一个项目在占用资源」)
+
 ## Main, PRs, and Merge Semantics
 
-- This section describes repository mechanics after authorization. It does not
-  authorize branch creation, commit, push, PR creation, merge, or deletion of
-  any branch other than the just-merged feature branch. That branch is removed
-  by the post-merge tidy and needs no second authorization.
+- This section describes repository mechanics after authorization. Branch creation,
+  commit, push, PR creation, and merge are default agent work here. Local
+  branch cleanup follows Workspace cleanup when finishing.
 
 - This is a public repository. Do not push directly to `main` or locally merge
   into `main` for normal work. Put changes on a conventionally named branch,
@@ -322,8 +321,8 @@ that work under the existing authorization.
   - a merged pull request's remote head may already be gone because
     GitHub deletes it on merge. The workspace tidy removes the local
     merged feature branch, and removes that remote head only when it
-    remains. Any other branch is deleted only after that deletion is
-    separately authorized, or it is intentionally retained with a reason.
+    remains. Other merged or obsolete local branches are cleaned up per
+    Workspace cleanup when finishing, or retained with a reason.
 - Continue preserving remote `.env` and `data/` during deploys. Never print
   secret values.
 - Keep the remote backup path and deployed commit SHA in the closeout.
@@ -370,7 +369,7 @@ that work under the existing authorization.
 
 - Closeout reports remaining branches. The post-merge tidy deletes the
   just-merged feature branch locally, and its remote head only when that
-  head is still present. It deletes no other branch.
+  head is still present.
 
 - Include branch state in final delivery after any Git/PR/deploy task:
   - current branch and tracking status;
@@ -379,8 +378,7 @@ that work under the existing authorization.
   - remaining remote heads.
 - If the merged pull request's remote head is already gone, that is
   GitHub's delete-on-merge setting. Delete the local merged feature
-  branch in that same tidy. Report any other remaining branch as a
-  cleanup candidate. The agent deletes any other branch only after that
-  deletion is separately authorized.
+  branch in that same tidy, along with other merged or obsolete local
+  branches and worktrees.
 - If a branch was renamed, verify old remote refs are gone and new refs use
   conventional names.
