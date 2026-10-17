@@ -118,7 +118,7 @@ const zh = {
   },
   productNotes: [
     { title: '字典优先', body: '优先使用官方中英对照，未命中时才尝试模型翻译。' },
-    { title: '不保存历史', body: '结果仅在当前页面显示，刷新页面即清空。' },
+    { title: '不保存历史', body: '结果仅在当前页面显示，不写入云端；刷新会按网址中的查询词自动重查术语，翻译与审校结果则清空。' },
     { title: '独立作品', body: '基于官方游戏术语，不是游戏官方运营的网站。' },
   ],
   tMsg: {
@@ -623,7 +623,7 @@ const en: typeof zh = {
   },
   productNotes: [
     { title: 'Dictionary first', body: 'Official Chinese–English pairs are used first; the model is tried only on a miss.' },
-    { title: 'No history kept', body: 'Results live only on this page; refreshing clears them.' },
+    { title: 'No history kept', body: 'Results live only on this page, with no cloud copy; a refresh re-runs the term lookup carried in the URL and clears translation and review results.' },
     { title: 'Independent project', body: 'Built on official game terms; not a website run by the game’s official operator.' },
   ],
   tMsg: {

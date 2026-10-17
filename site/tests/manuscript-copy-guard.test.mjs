@@ -44,9 +44,14 @@ test('repo sentences that would otherwise overclaim now state the same limits', 
   assert.match(readmeZh, /崩溃或强制结束/);
 });
 
-test('home product note still describes a completed refresh and is not rewritten', () => {
+test('home product note matches the URL-carried refresh restore behavior', () => {
   const zh = msg('zh').productNotes.find(item => item.title === '不保存历史');
   const en = msg('en').productNotes.find(item => item.title === 'No history kept');
-  assert.equal(zh?.body, '结果仅在当前页面显示，刷新页面即清空。');
-  assert.equal(en?.body, 'Results live only on this page; refreshing clears them.');
+  assert.match(zh?.body ?? '', /刷新会按网址中的查询词自动重查术语/);
+  assert.match(zh?.body ?? '', /翻译与审校结果则清空/);
+  assert.match(en?.body ?? '', /re-runs the term lookup carried in the URL/);
+  assert.match(en?.body ?? '', /clears translation and review results/);
+  // The old overclaim is gone from both languages.
+  assert.doesNotMatch(zh?.body ?? '', /刷新页面即清空/);
+  assert.doesNotMatch(en?.body ?? '', /refreshing clears them/);
 });

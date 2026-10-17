@@ -22,6 +22,7 @@ function isTranslation(v: unknown): v is TranslationResult { const x = v as Tran
 
 export function TranslationWorkbench() {
   const { lang } = useUiLanguage();
+  const termQuery = useTermQuery();
   const [pool, setPool] = useState<State<Pool>>({ kind: 'loading' });
   const [poolAttempt, setPoolAttempt] = useState(0);
   const [query, setQuery] = useState('');
@@ -98,8 +99,12 @@ export function TranslationWorkbench() {
     if (!value.trim()) {
       termsController.current?.abort();
       termsController.current = null;
-      setBrowserQuery(null);
     }
+    // The URL q stands for the submitted lookup whose results were just
+    // cleared by this edit. Drop it so every withQuery link stops carrying
+    // the stale query and a later return or refresh cannot resurrect it;
+    // runLookup sets a fresh q on the next submit.
+    if (termQuery) setBrowserQuery(null);
   }
   function insertTerm(text: string) {
     translationController.current?.abort();
@@ -142,7 +147,6 @@ export function TranslationWorkbench() {
   }
   const m = msg(lang);
   const locale = numberLocale(lang);
-  const termQuery = useTermQuery();
   const translationClosed = pool.kind === 'success' && (!pool.data.translation_enabled || pool.data.translations.remaining === 0 || pool.data.characters.remaining === 0);
   const sourceLength = Array.from(source).length;
   return <div className="workbench">
