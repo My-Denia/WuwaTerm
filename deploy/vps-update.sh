@@ -471,33 +471,9 @@ rollback_on_failure() {
     fi
   fi
 
-  # The binding is verified against a surface that was actually RESTORED. A
-  # stopped bot container can sit on a different image than the running API,
-  # and verifying against the one that stayed down would compare the manifest
-  # to something this rollback never brought back. With nothing restored there
-  # is nothing to verify, and an empty id would compare against nothing at all.
-  verify_image_id=""
-  if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
-    verify_image_id="$old_image_id"
-  elif [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
-    verify_image_id="$old_api_image_id"
-  fi
-  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ] \
-    && [ -n "$verify_image_id" ]; then
-    if ! python3 scripts/deployment_manifest.py verify \
-      --path "$manifest_dir/$old_pointer.json" \
-      --source-commit "$old_pointer" \
-      --image-id "$verify_image_id" \
-      --db "$db_path"; then
-      echo "warning: restored deployment binding verification failed" >&2
-      rollback_failed=1
-    fi
-    if ! python3 scripts/deployment_manifest.py verify-pointer \
-      --path "$pointer_path" --source-commit "$old_pointer"; then
-      echo "warning: restored deployment pointer verification failed" >&2
-      rollback_failed=1
-    fi
-  fi
+  # Operational errors above still prevent clearance. Otherwise the shared
+  # observed-binding verifier below is the sole certification authority; it
+  # uses the manifest's own image and every recorded surface, not bot-first.
   if [ "$rollback_failed" -ne 0 ]; then
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     echo "warning: the full-transaction journal is KEPT for recovery:" >&2

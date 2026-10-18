@@ -1462,12 +1462,13 @@ def test_vps_update_keeps_a_rollback_image_per_surface():
         'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"'
         in text[bot_restart:api_restart]
     )
-    # The restored binding is verified against a surface that was actually
-    # restored, never against one that stayed down on a different image.
-    assert 'verify_image_id=""' in text
+    # Per-surface restoration and complete-binding certification are distinct:
+    # the shared observed verifier uses the manifest's own image, never an
+    # arbitrary first restarted surface as a competing verification key.
     assert '[ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]' in text
     assert '[ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]' in text
-    assert '--image-id "$verify_image_id"' in text
+    assert 'python3 scripts/full_update.py rollback-clear' in text
+    assert 'verify_image_id=' not in text
 
 
 def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
