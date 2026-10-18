@@ -13,6 +13,10 @@ case "${1:-}" in
     mode="recover-runtime"
     shift
     ;;
+  --recover-full)
+    mode="recover-full"
+    shift
+    ;;
   *)
     echo "unknown deployment option" >&2
     exit 64
@@ -109,13 +113,23 @@ case "$mode" in
   recover-runtime)
     exec python3 scripts/runtime_update.py --recover-runtime
     ;;
+  recover-full)
+    exec python3 scripts/full_update.py recover
+    ;;
 esac
 
 # A full data deployment must never run across an unresolved runtime-only
-# transaction. The helper validates the durable journal before any full-mode
-# Git, builder, candidate DB, or runtime mutation is reached.
-if ! python3 scripts/runtime_update.py --check-full-journal >/dev/null 2>&1; then
-  echo "refusing full deployment: runtime transaction requires recovery" >&2
+# transaction, nor across an unresolved FULL transaction journal left by an
+# interrupted full-data update (kill/power-loss: the EXIT trap never ran and
+# the database/pointer pair may be inconsistent). Recovery for the latter is
+# `sh deploy/vps-update.sh --recover-full`; an unresolved journal refuses
+# every new deployment until it is recovered.
+if ! python3 scripts/runtime_update.py --check-runtime-journal >/dev/null 2>&1; then
+  echo "refusing full deployment: a transaction journal requires recovery" >&2
+  exit 1
+fi
+if ! python3 scripts/full_update.py check >/dev/null 2>&1; then
+  echo "refusing full deployment: a transaction journal requires recovery" >&2
   exit 1
 fi
 
@@ -237,8 +251,10 @@ fi
 # it needs to know is whether each surface was RUNNING.
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
+old_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
+old_api_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null || true)"
 # Tagged per surface: a host running only one of them still has an image to
 # roll back to, and a host whose two containers are on different images keeps
 # both of them.
@@ -319,6 +335,21 @@ runtime_stopped=0
 db_promoted=0
 pointer_published=0
 
+# --- full-transaction journal (scripts/full_update.py) -------------------
+# Durable phase record so an interrupted full update (SIGKILL, power loss:
+# the EXIT rollback trap never ran) can be recovered deterministically from
+# the recorded preimages. The module writes it atomically BEFORE the first
+# serving-binding mutation; it is dropped only through the module's
+# observed-binding verifiers (`confirm` on success, `rollback-clear` in the
+# EXIT trap). Any uncertain binding keeps the record for `--recover-full`.
+
+# A rollback reference is mutable. Resolve it immediately before each restart,
+# just as explicit recovery does; an unknown or unavailable image stays down.
+rollback_image_matches() {
+  rollback_resolved="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null)" || return 1
+  [ "$rollback_resolved" = "$2" ]
+}
+
 rollback_on_failure() {
   status=$?
   trap - EXIT
@@ -353,20 +384,24 @@ rollback_on_failure() {
     echo "commit pointer are left exactly as they are and nothing is" >&2
     echo "restarted. Stop both containers by hand, then roll back." >&2
     echo "warning: rollback completed with errors; manual recovery is required" >&2
+    echo "warning: the full-transaction journal is KEPT for recovery:" >&2
+    echo "  sh deploy/vps-update.sh --recover-full" >&2
     exit "$status"
   fi
 
+  # The database returns through the SAME verified restoration explicit
+  # recovery uses (`full_update.py restore-db`): the recorded backup and
+  # the copied bytes are hashed BEFORE the live file can be replaced, so a
+  # backup modified after preparation leaves the known live database
+  # untouched. The journal keeps the record for `--recover-full` whenever
+  # this fails.
   if [ "$db_promoted" -eq 1 ]; then
+    if ! python3 scripts/full_update.py restore-db; then
+      echo "warning: verified database restoration failed or its durability could not be confirmed" >&2
+      rollback_failed=1
+      db_binding_restored=0
+    fi
     if [ "$old_db_present" -eq 1 ]; then
-      restore_tmp="$db_path.rollback.$deployment_id"
-      if ! cp -p "$db_backup" "$restore_tmp"; then
-        echo "warning: could not prepare database rollback copy" >&2
-        rollback_failed=1
-      elif ! python3 scripts/deployment_manifest.py durable-replace \
-        --source "$restore_tmp" --destination "$db_path"; then
-        echo "warning: restored database durability could not be confirmed" >&2
-        rollback_failed=1
-      fi
       if [ ! -f "$db_path" ] || \
         [ "$(sha256sum "$db_path" | awk '{print $1}')" != "$old_db_hash" ]; then
         echo "warning: old database content was not restored" >&2
@@ -374,11 +409,6 @@ rollback_on_failure() {
         db_binding_restored=0
       fi
     else
-      if ! python3 scripts/deployment_manifest.py durable-remove \
-        --path "$db_path"; then
-        echo "warning: database removal durability could not be confirmed" >&2
-        rollback_failed=1
-      fi
       if [ -e "$db_path" ]; then
         echo "warning: promoted database still exists after rollback" >&2
         rollback_failed=1
@@ -412,7 +442,10 @@ rollback_on_failure() {
       # host running only the API has no bot image, and that must not decide
       # whether the API comes back.
       if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
-        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+        if ! rollback_image_matches "$rollback_image_ref" "$old_image_id"; then
+          echo "warning: old runtime rollback image binding changed; refusing restart" >&2
+          rollback_failed=1
+        elif ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
           compose up -d --no-build --force-recreate wuwaterm; then
           echo "warning: old runtime image could not be restarted" >&2
           rollback_failed=1
@@ -423,7 +456,10 @@ rollback_on_failure() {
       # restore, and a container that existed but was stopped (an earlier
       # failed upgrade, or an operator decision) must not be started here.
       if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
-        if ! WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref" \
+        if ! rollback_image_matches "$rollback_api_image_ref" "$old_api_image_id"; then
+          echo "warning: old api rollback image binding changed; refusing restart" >&2
+          rollback_failed=1
+        elif ! WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref" \
           compose up -d --no-build --force-recreate wuwaterm-api; then
           echo "warning: old api image could not be restarted" >&2
           rollback_failed=1
@@ -435,44 +471,57 @@ rollback_on_failure() {
     fi
   fi
 
-  # The binding is verified against a surface that was actually RESTORED. A
-  # stopped bot container can sit on a different image than the running API,
-  # and verifying against the one that stayed down would compare the manifest
-  # to something this rollback never brought back. With nothing restored there
-  # is nothing to verify, and an empty id would compare against nothing at all.
-  verify_image_id=""
-  if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
-    verify_image_id="$old_image_id"
-  elif [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
-    verify_image_id="$old_api_image_id"
-  fi
-  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ] \
-    && [ -n "$verify_image_id" ]; then
-    if ! python3 scripts/deployment_manifest.py verify \
-      --path "$manifest_dir/$old_pointer.json" \
-      --source-commit "$old_pointer" \
-      --image-id "$verify_image_id" \
-      --db "$db_path"; then
-      echo "warning: restored deployment binding verification failed" >&2
-      rollback_failed=1
-    fi
-    if ! python3 scripts/deployment_manifest.py verify-pointer \
-      --path "$pointer_path" --source-commit "$old_pointer"; then
-      echo "warning: restored deployment pointer verification failed" >&2
-      rollback_failed=1
-    fi
-  fi
+  # Operational errors above still prevent clearance. Otherwise the shared
+  # observed-binding verifier below is the sole certification authority; it
+  # uses the manifest's own image and every recorded surface, not bot-first.
   if [ "$rollback_failed" -ne 0 ]; then
     echo "warning: rollback completed with errors; manual recovery is required" >&2
+    echo "warning: the full-transaction journal is KEPT for recovery:" >&2
+    echo "  sh deploy/vps-update.sh --recover-full" >&2
+  else
+    # The rollback restored the previous binding completely, so the armed
+    # journal no longer describes an open transaction. It may be dropped
+    # ONLY through the module's observed old-binding verifier - the same
+    # check explicit recovery runs - so a rollback that silently restored
+    # the wrong thing keeps the record instead of certifying it. Isolated
+    # fault injection tests take this same path: nothing here says
+    # production was damaged — the transaction rolled back to the previous
+    # binding.
+    if ! python3 scripts/full_update.py rollback-clear; then
+      echo "warning: the restored binding failed observed verification; manual recovery is required" >&2
+      echo "warning: the full-transaction journal is KEPT for recovery:" >&2
+      echo "  sh deploy/vps-update.sh --recover-full" >&2
+    fi
   fi
   exit "$status"
 }
 trap rollback_on_failure EXIT
 
-# Candidate DB and immutable image are both verified before this stop. Both
-# surfaces mount the same terminology database read-only, so both must be down
-# while it is replaced.
-#
+# Candidate DB and immutable image are both verified before this stop.
+# Both surfaces mount the same terminology database read-only, so both must
+# be down while it is replaced. The old DB snapshot is durable and every
+# preimage is recorded BEFORE the first serving-binding mutation, exactly as
+# the journal's design requires.
+python3 scripts/full_update.py prepare \
+  --transaction-id "$deployment_id" \
+  --source-commit "$source_commit" \
+  --old-pointer-present "$old_pointer_present" \
+  --old-pointer "$old_pointer" \
+  --db-backup "$db_backup" \
+  --old-db-sha "${old_db_hash:-none}" \
+  --candidate-path "$candidate_path" \
+  --old-image-id "${old_image_id:-none}" \
+  --old-api-image-id "${old_api_image_id:-none}" \
+  --old-ref "${old_ref:-none}" \
+  --old-api-ref "${old_api_ref:-none}" \
+  --old-bot-running "${old_bot_running:-false}" \
+  --old-api-running "${old_api_running:-false}" \
+  --rollback-image-ref "$rollback_image_ref" \
+  --rollback-api-image-ref "$rollback_api_image_ref" \
+  --target-image-ref "$new_image_ref" \
+  --target-image-id "$image_id" \
+  --target-image-digest "$image_digest" \
+  --target-image-revision "$image_revision"
 # The transition is recorded BEFORE the command, for the same reason
 # db_promoted is: a combined stop that fails partway may already have stopped
 # one surface, and a rollback that believes nothing was touched would leave the
@@ -482,6 +531,7 @@ compose stop wuwaterm wuwaterm-api
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
   --source "$candidate_path" --destination "$db_path"
+python3 scripts/full_update.py phase promoted
 
 # Freeze and validate the legacy state only while the old runtime is stopped.
 for state_file in chat_settings.json channel_replies.json; do
@@ -514,6 +564,7 @@ fail_if state
 
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose up -d --no-build \
   --force-recreate wuwaterm wuwaterm-api
+python3 scripts/full_update.py phase started
 fail_if start
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
   -e TELEGRAM_TEST_CHAT_ID= wuwaterm python scripts/deploy_smoke.py
@@ -566,17 +617,24 @@ python3 scripts/deployment_manifest.py verify \
   --image-id "$running_image_id" \
   --image-digest "$image_digest" \
   --db "$db_path"
+python3 scripts/full_update.py phase published
 
 pointer_published=1
 python3 scripts/deployment_manifest.py publish-pointer \
   --path "$pointer_path" --source-commit "$source_commit"
 python3 scripts/deployment_manifest.py verify-pointer \
   --path "$pointer_path" --source-commit "$source_commit"
+python3 scripts/full_update.py phase committed
 fail_if pointer
 
 db_hash="$(sha256sum "$db_path" | awk '{print $1}')"
 runtime_stopped=0
 trap - EXIT
+# Success drops the durable record only through the module's observed
+# new-binding verifier: pointer, database hash, manifest and BOTH surfaces'
+# image ids/refs/running states must match the new binding before the
+# journal (and the now-consumed confined candidate) is removed.
+python3 scripts/full_update.py confirm
 
 echo "deployment source commit: $source_commit"
 echo "deployment image id: $image_id"

@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Deploy: full-data updates now persist a transaction record before database promotion and provide `--recover-full` for interrupted updates. Recovery checks confined backups, database hashes, the deployment pointer and per-service image bindings; uncertain state retains the record instead of being certified as recovered. Outstanding full-data transactions block new updates, and ordinary failure rollback verifies database restoration and rollback image references before restarting services. These recovery guarantees are covered by isolated fault-injection tests, not a claim that production was damaged.
+
 - Review: `review-v2` no longer certifies a one-character resonator name inside an ordinary compound (for example, Camellya → the `椿` in `香椿` or `椿树`). Target-side checks use the full text before applying manual alignment ranges, so selecting `Echo` inside `xEcho` cannot manufacture a word boundary. Arbitrary ranges and `review-v1` remain unchanged; the opt-in matcher basis advances to v3.
 - Terms: HTML formatting no longer makes an English word fragment lockable or leaves a split plural suffix after restoration. Exact and plural boundaries use the full visible text; matches still stay inside their original formatting segment. CI now also runs the existing behavior suite on explicit Python 3.11 with the deployment lockfile and API dependencies, while retaining the floating compatibility matrix.
 

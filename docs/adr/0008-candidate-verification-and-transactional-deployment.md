@@ -50,6 +50,24 @@ The default updater retains the full candidate pipeline for an intentional
 data update. Runtime-only deployment adds an explicit operation with a stricter
 database-preservation contract; it does not weaken full deployment verification.
 
+### Full-data transaction record
+
+A full update has the same interruption exposure across a wider window — the
+database itself is promoted before the new services start — so it keeps its
+own durable record at `.deployments/.full-transaction.json`, written before
+the first serving-binding mutation and removed only through observed-binding
+verification (`scripts/full_update.py`, driven by `deploy/vps-update.sh`; the
+recovery entry is `--recover-full`). The record binds the old/new database
+hashes, the hash-named backup, the old pointer and manifest, both surfaces'
+observed image ids/refs/running states, the target image identity and a
+fingerprint over the tool code. Recovery classifies the host from observed
+pointer/database/manifest/containers — never the phase marker alone —
+confirms a complete new binding or restores the recorded previous one, and on
+any uncertainty keeps the record and changes nothing further. Any outstanding
+record refuses every deployment mode until recovery resolves it. The shell's
+EXIT rollback may clear the record only through the same observed old-binding
+verification. See `docs/deployment.md` for the operator contract.
+
 ## Consequences
 
 - Positive: provenance is auditable; rollback path is scripted.
@@ -63,5 +81,8 @@ database-preservation contract; it does not weaken full deployment verification.
 
 - `deploy/vps-update.sh` candidate paths, `rollback_on_failure`, manifests
 - `scripts/deployment_manifest.py`, `scripts/deploy_smoke.py`
+- `scripts/full_update.py` (full-data transaction record and recovery)
 - `docs/deployment.md`, `docs/validation.md`, `docs/release-checklist.md`
 - `tests/test_deploy_scripts.py` (script contracts where covered)
+- `tests/test_full_deploy_recovery.py` (interruption window, recovery
+  reentry and the fail-closed binding matrix in isolated harnesses)
