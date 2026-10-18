@@ -743,7 +743,12 @@ sh deploy/vps-update.sh --recover-full
   that were recorded running come back, each on its own recorded image,
   and the old binding is verified from observation before the record is
   cleared.
-- Anything else — unknown pointer, unknown live database, new pointer with
+- Same-source identical-binding redeploys can have equal old/new pointers.
+  A complete observed new binding is confirmed without restarting services;
+  a known incomplete binding can return to the recorded old state only through
+  the same full admissibility preflight. Pointer equality alone never decides
+  that recovery succeeded. Unobservable/unsafe states still refuse.
+- Anything else — unknown pointer, unknown live database, a distinct new pointer with
   old or missing services, missing or modified backup, unconfined recorded
   paths, schema/type drift, tool fingerprint mismatch — is reported
   unresolved, changes nothing further, and KEEPS the record, so recovery is

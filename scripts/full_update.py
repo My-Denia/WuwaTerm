@@ -639,10 +639,10 @@ def _live_db_state(journal: dict[str, Any]) -> str:
 def _classify(journal: dict[str, Any]) -> str:
     """Which side of the transaction the OBSERVED host is on.
 
-    The live pointer decides the side; a pointer that is neither the
-    recorded old nor the recorded new commit describes a state this
-    journal does not know about, and so does a pointer that vanished when
-    one was recorded, or one that cannot be parsed.
+    Distinct pointers select the side. A shared old/new source value does
+    not prove publication: recovery must first verify the complete new
+    binding, or use the existing old-side preflight for an incomplete known
+    transaction. Foreign, vanished or unparseable pointers remain unknown.
     """
 
     present, value = _pointer_state()
@@ -650,6 +650,8 @@ def _classify(journal: dict[str, Any]) -> str:
         if value is None:
             return "unknown"
         if value == journal["source_commit"]:
+            if journal["old_pointer_present"] and value == journal["old_pointer"]:
+                return "shared"
             return "new"
         if journal["old_pointer_present"] and value == journal["old_pointer"]:
             return "old"
@@ -1295,12 +1297,20 @@ def cmd_recover(_args: argparse.Namespace) -> int:
     journal = _load_journal()
     _require_tool_match(journal)
     side = _classify(journal)
-    if side == "new":
-        _verify_new_binding(journal)
-        _clear_journal(journal)
-        print("full transaction confirmed on the new binding; journal cleared")
-        return 0
-    if side == "old":
+    if side in ("new", "shared"):
+        try:
+            _verify_new_binding(journal)
+        except FullUpdateError as exc:
+            if side != "shared" or exc.code != "full_recovery_unresolved":
+                raise
+            # Equal source values cannot select a side. The old-side full
+            # preflight must still prove admissibility before any mutation;
+            # unknown data/services and unobservable state never bypass it.
+        else:
+            _clear_journal(journal)
+            print("full transaction confirmed on the new binding; journal cleared")
+            return 0
+    if side in ("old", "shared"):
         _restore_old_binding(journal)
         _clear_journal(journal)
         print("full transaction rolled back to the previous binding")
