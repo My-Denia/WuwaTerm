@@ -72,6 +72,63 @@ async function prepare(page) {
   await expect(page.locator('.choice-records')).toContainText('今汐 / Jinhsi');
 }
 
+for (const language of ['zh', 'en']) {
+  test(`first edits without a report do not announce a stale report (${language})`, async ({ page }) => {
+    const { reviews } = await open(page);
+    if (language === 'en') {
+      await page.getByRole('button', { name: 'English', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    }
+    await expect(page.locator('.notice-state')).toHaveCount(0);
+    await page.locator('#review-source').fill(A.source);
+    await expect(page.locator('.notice-state')).toHaveCount(0);
+    await page.locator('#review-target').fill(A.target);
+    await expect(page.locator('.notice-state')).toHaveCount(0);
+    await page.locator('#review-source').fill(A.source + '声骸。');
+    await expect(page.locator('.notice-state')).toHaveCount(0);
+    expect(reviews).toHaveLength(0);
+    await test.info().attach(`first-edit-${language}`, {
+      body: await page.locator('.review-card').screenshot({ path: test.info().outputPath(`first-edit-${language}.png`) }), contentType: 'image/png',
+    });
+  });
+
+  test(`edits after a report keep the stale notice (${language})`, async ({ page }) => {
+    const { reviews } = await open(page);
+    if (language === 'en') {
+      await page.getByRole('button', { name: 'English', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    }
+    await page.locator('#review-source').fill(A.source);
+    await page.locator('#review-target').fill(A.target);
+    await page.getByRole('button', { name: language === 'en' ? 'Check terms' : '核对术语', exact: true }).click();
+    await expect(page.locator('.review-current')).toBeVisible();
+    const stale = language === 'en' ? 'the old report is stale' : '旧报告已失效';
+    await page.locator('#review-source').fill(A.source + '声骸。');
+    await expect(page.locator('.notice-state')).toContainText(stale);
+    await expect(page.locator('.review-current')).toHaveCount(0);
+    // A second edit must still warn even though the report is already stale.
+    await page.locator('#review-target').fill(A.target + ' Echo.');
+    await expect(page.locator('.notice-state')).toContainText(stale);
+    expect(reviews).toHaveLength(1);
+    await test.info().attach(`stale-report-${language}`, {
+      body: await page.locator('.review-card').screenshot({ path: test.info().outputPath(`stale-report-${language}.png`) }), contentType: 'image/png',
+    });
+  });
+}
+
+test('editing confirmed alignments keeps their separate reset notice', async ({ page }) => {
+  const { reviews } = await open(page);
+  await page.locator('#review-source').fill(A.source);
+  await page.locator('#review-target').fill(A.target);
+  await page.locator('.alignment-panel > summary').click();
+  await page.getByRole('button', { name: '确认全文为一个对应段', exact: true }).click();
+  await expect(page.locator('.alignment-row')).toHaveCount(1);
+  await page.locator('#review-target').fill(A.target + ' Echo.');
+  await expect(page.locator('.notice-state')).toContainText('原分段对应已取消确认');
+  await expect(page.locator('.alignment-row')).toHaveCount(0);
+  expect(reviews).toHaveLength(0);
+});
+
 test('empty reception focuses review without a review request', async ({ page }) => {
   const { reviews } = await open(page);
   await translate(page);

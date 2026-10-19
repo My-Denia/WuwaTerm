@@ -235,7 +235,7 @@ export function ReviewWorkbench() {
   }
   function editText(side: 'source' | 'target', value: string) {
     edit({ ...draft, [side]: value, alignments: alignments === null ? null : [] },
-      alignments !== null ? 'editedAlignments' : 'editedText');
+      alignments !== null ? 'editedAlignments' : latest ? 'editedText' : '');
   }
   useEffect(() => {
     function onDraft(event: Event) {
