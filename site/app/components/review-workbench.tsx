@@ -573,15 +573,6 @@ export function ReviewWorkbench() {
       </ol>
     )}
     <p className="manuscript-save-state" role="status">{saveStateText}{guard ? ` ${m.review.saveStateLeaveNote}` : ''}</p>
-    <div className="actions draft-actions">
-      <button type="button" className="secondary-button" onClick={clearDraft} disabled={!holdsWork}>{m.review.clearDraft}</button>
-      <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
-      <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
-      <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
-      <button type="button" className="secondary-button" onClick={exportTxt}>{m.review.exportTxt}</button>
-      <button type="button" className="secondary-button" onClick={exportResult}>{m.review.exportResult}</button>
-      <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
-    </div>
     <form onSubmit={submit}>
       <div className="label-row"><label htmlFor="review-source">{m.review.sourceLabel}</label><select aria-label={m.review.directionAria} value={direction} onChange={e => edit({ ...draft, direction: e.target.value as 'en' | 'zh', alignments: alignments === null ? null : [] }, 'directionChanged')}><option value="en">{m.review.directionEn}</option><option value="zh">{m.review.directionZh}</option></select></div>
       <textarea ref={sourceBox} id="review-source" value={source} onChange={e => editText('source', e.target.value)} rows={5} placeholder={m.review.sourcePlaceholder} />
@@ -612,6 +603,15 @@ export function ReviewWorkbench() {
         <button className="secondary-button" type="button" onClick={undo} disabled={!history.length}>{m.review.undo}</button>
       </div>
     </form>
+    <div className="actions draft-actions">
+      <button type="button" className="secondary-button" onClick={clearDraft} disabled={!holdsWork}>{m.review.clearDraft}</button>
+      <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
+      <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
+      <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
+      <button type="button" className="secondary-button" onClick={exportTxt}>{m.review.exportTxt}</button>
+      <button type="button" className="secondary-button" onClick={exportResult}>{m.review.exportResult}</button>
+      <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
+    </div>
     {notice && <p className="notice-state" role="status">{noticeText}</p>}
     {error && <p className="error-panel" role="alert">{errorTextValue}</p>}
     {phase === 'loading' && <p role="status">{m.review.loadingStatus}</p>}
