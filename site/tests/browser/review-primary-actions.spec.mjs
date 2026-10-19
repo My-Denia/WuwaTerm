@@ -153,6 +153,12 @@ for (const [name, viewport] of [['desktop', { width: 1280, height: 720 }], ['390
         expect(box.form.bottom).toBeLessThanOrEqual(box.draft.y + 0.5);
         expect(box.check.bottom).toBeLessThanOrEqual(box.draft.y + 0.5);
         expect(box.check.y).toBeLessThan(box.draftButtons[0].y);
+        // Review delta: the relocated block keeps the existing 17px action-row
+        // top spacing. Strictly positive here; the legacy `.draft-actions`
+        // margin override must not collapse it to 0.
+        const actionGap = box.draft.y - box.form.bottom;
+        expect(actionGap).toBeGreaterThan(0);
+        expect(actionGap).toBeGreaterThanOrEqual(16);
         // Same control count and order in both UI languages, unreduced by wrapping.
         expect(box.draftButtons).toHaveLength(6);
         expect(box.draftButtons.map(button => button.label)).toEqual(
