@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Docs: the security policy now identifies 0.6.x as the current supported release line, removing the obsolete condition that v0.6.0 has not yet been published.
+
 - Deploy: full-data updates now persist a transaction record before database promotion and provide `--recover-full` for interrupted updates. Recovery checks confined backups, database hashes, the deployment pointer and per-service image bindings; uncertain state retains the record instead of being certified as recovered. Outstanding full-data transactions block new updates, and ordinary failure rollback verifies database restoration and rollback image references before restarting services. These recovery guarantees are covered by isolated fault-injection tests, not a claim that production was damaged.
 
 - Review: `review-v2` no longer certifies a one-character resonator name inside an ordinary compound (for example, Camellya → the `椿` in `香椿` or `椿树`). Target-side checks use the full text before applying manual alignment ranges, so selecting `Echo` inside `xEcho` cannot manufacture a word boundary. Arbitrary ranges and `review-v1` remain unchanged; the opt-in matcher basis advances to v3.
