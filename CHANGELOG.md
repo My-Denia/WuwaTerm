@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Site: repair asynchronous manuscript import ownership and edit preservation. The latest chosen file now supersedes prior in-flight reads immediately, an in-flight read cannot overwrite newer edits, choices or checks, and an obsolete read failure or completion cannot pollute the latest draft or its errors. Selecting the same file again is enabled by synchronous input reset upon selection.
+
 - Docs: the security policy now identifies 0.6.x as the current supported release line, removing the obsolete condition that v0.6.0 has not yet been published.
 
 - Deploy: full-data updates now persist a transaction record before database promotion and provide `--recover-full` for interrupted updates. Recovery checks confined backups, database hashes, the deployment pointer and per-service image bindings; uncertain state retains the record instead of being certified as recovered. Outstanding full-data transactions block new updates, and ordinary failure rollback verifies database restoration and rollback image references before restarting services. These recovery guarantees are covered by isolated fault-injection tests, not a claim that production was damaged.
