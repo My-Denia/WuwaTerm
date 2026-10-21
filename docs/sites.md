@@ -64,6 +64,17 @@ the file imported in this visit, but it cannot confirm that download reached
 disk. Ordinary leave and refresh ask first when the work cannot be restored
 from that imported file. A crash or forced quit can still discard the page.
 
+Import selection ownership follows a strict latest-selection policy: the latest chosen
+file immediately supersedes any prior pending file read regardless of completion order.
+If the latest file fails (oversize, unreadable, or invalid format), current manuscript work
+is retained and that latest error is shown; obsolete earlier files never become a hidden
+fallback. Starting an import read does not freeze editing or stop a running review. Newer
+edits, choice/alignment changes, clears, undos, accepted handoffs, or newly initiated checks
+invalidate the pending read to preserve newer intent. If an existing check finishes while a
+file is reading, an accepted import captures that newly arrived report into its acceptance-time
+undo snapshot. The file picker input resets synchronously upon selection so selecting the
+same file again triggers immediate processing without interference from prior completions.
+
 Sending a translation to review accepts an empty workbench directly. Sending
 the same source, translation and direction again preserves choices, ranges,
 reports, undo history and any running check. A different manuscript asks for

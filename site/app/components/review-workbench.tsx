@@ -104,6 +104,7 @@ export function ReviewWorkbench() {
   const fileBox = useRef<HTMLInputElement>(null);
   const controller = useRef<AbortController | null>(null);
   const generation = useRef(0);
+  const importAttempt = useRef(0);
   const handoffDialog = useRef<HTMLDialogElement>(null);
   const keepDraftButton = useRef<HTMLButtonElement>(null);
   const leaveDialog = useRef<HTMLDialogElement>(null);
@@ -256,7 +257,7 @@ export function ReviewWorkbench() {
     window.addEventListener('wuwaterm-send-review', onDraft);
     return () => window.removeEventListener('wuwaterm-send-review', onDraft);
   }, [receiveDraft, cancelRevision]);
-  useEffect(() => () => { controller.current?.abort(); }, []);
+  useEffect(() => () => { controller.current?.abort(); importAttempt.current += 1; }, []);
   useEffect(() => {
     const controller = new AbortController();
     void (async () => {
@@ -431,11 +432,18 @@ export function ReviewWorkbench() {
   }
   async function importFile(file?: File) {
     if (!file) return;
-    if (file.size > MAX_WORKFILE_BYTES) { setError({ code: 'workfile_too_large' }); return; }
+    const attempt = ++importAttempt.current;
+    setError(curr => (curr && (curr.code === 'importInvalid' || curr.code?.startsWith('workfile_')) ? null : curr));
+    if (file.size > MAX_WORKFILE_BYTES) {
+      if (importAttempt.current === attempt) setError({ code: 'workfile_too_large' });
+      return;
+    }
     const mine = generation.current;
     try {
-      const value = parseWorkfile(await file.text());
+      const text = await file.text();
+      if (importAttempt.current !== attempt) return;
       if (generation.current !== mine) { setNotice('importChangedDuringRead'); return; }
+      const value = parseWorkfile(text);
       const nextDraft: Draft = { source: value.source, target: value.target, direction: value.direction, alignments: value.alignments };
       const nextChoices = value.choices as Choice[];
       const nextReports: Snapshot[] = value.history.map((s: Draft & { report: Report; resolutions?: Resolution[] }) => ({ ...s, resolutions: s.resolutions ?? null, trusted: false, signature: '' }));
@@ -450,9 +458,10 @@ export function ReviewWorkbench() {
       if (importedBody) setImportedCanonical(importedBody);
       setNotice('imported');
     } catch (cause) {
-      setError(errorFrom(cause, 'importInvalid'));
+      if (importAttempt.current === attempt && generation.current === mine) {
+        setError(errorFrom(cause, 'importInvalid'));
+      }
     }
-    finally { if (fileBox.current) fileBox.current.value = ''; }
   }
   function clearDraft() {
     if (!holdsWork) return;
@@ -607,7 +616,11 @@ export function ReviewWorkbench() {
       <button type="button" className="secondary-button" onClick={clearDraft} disabled={!holdsWork}>{m.review.clearDraft}</button>
       <button type="button" className="secondary-button" onClick={save}>{m.review.save}</button>
       <button type="button" className="secondary-button" onClick={() => fileBox.current?.click()}>{m.review.import}</button>
-      <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => void importFile(e.target.files?.[0])} />
+      <input ref={fileBox} className="visually-hidden" type="file" accept=".json,application/json" aria-label={m.review.importFileAria} onChange={e => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        void importFile(file);
+      }} />
       <button type="button" className="secondary-button" onClick={exportTxt}>{m.review.exportTxt}</button>
       <button type="button" className="secondary-button" onClick={exportResult}>{m.review.exportResult}</button>
       <button type="button" className="secondary-button" onClick={exportMarkdown}>{m.review.exportMarkdown}</button>
