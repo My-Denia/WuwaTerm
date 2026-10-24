@@ -1455,3 +1455,94 @@ def test_rollback_with_corrupt_backup_leaves_live_database(full_harness):
     assert not any(
         " up -d " in line and "rollback" in line for line in _docker_log(root)
     )
+
+
+def _fail_running_inspects(root: Path, service: str, times: int) -> None:
+    """Make the first N State.Running inspects of one surface a daemon error.
+
+    Later inspects keep the fake daemon's real running flag. This is the
+    transient first-query failure, not proven absence.
+    """
+
+    fake = root.parent / "bin" / "docker"
+    script = fake.read_text(encoding="utf-8")
+    needle = 'if [ "${1:-}" = inspect ]; then\n'
+    assert script.count(needle) == 1
+    marker = f"fail-running-{service}"
+    inject = (
+        f'  if [ "$service" = "{service}" ]; then\n'
+        '    case "$*" in\n'
+        '      *State.Running*)\n'
+        '        count=0\n'
+        f'        if [ -f "$FAKE_DEPLOY_ROOT/{marker}" ]; then '
+        f'count=$(cat "$FAKE_DEPLOY_ROOT/{marker}"); fi\n'
+        f'        if [ "$count" -lt {times} ]; then\n'
+        f'          printf "%s\\n" "$((count + 1))" > '
+        f'"$FAKE_DEPLOY_ROOT/{marker}"\n'
+        '          echo "Cannot connect to the Docker daemon" >&2\n'
+        '          exit 1\n'
+        '        fi\n'
+        '        ;;\n'
+        '    esac\n'
+        '  fi\n'
+    )
+    fake.write_text(script.replace(needle, needle + inject, 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("service", ["bot", "api"])
+def test_transient_running_inspect_failure_restores_the_real_old_state(
+    full_harness, service
+):
+    """A first running-state inspect that fails, then succeeds, must not be
+    stored as stopped. After a later injected failure, recovery restarts the
+    surface that was actually running."""
+
+    root, env, old_hash, _new_hash, _ob, _new_bytes, _backup_rel = full_harness
+    _fail_running_inspects(root, service, 1)
+    env["WUWATERM_FAIL_STEP"] = "start"
+
+    result = _run_mode(root, env, [])
+
+    assert result.returncode == 97, result.stderr
+    assert "not recording it as stopped" not in result.stderr
+    assert int((root / f"fail-running-{service}").read_text(encoding="ascii")) == 1
+    assert not (root / JOURNAL_RELPATH).exists()
+    assert hashlib.sha256(
+        (root / "data" / "terms.db").read_bytes()
+    ).hexdigest() == old_hash
+    assert (root / f"{service}-running").read_text(encoding="ascii").strip() == "true"
+    rollback_ups = [
+        line for line in _docker_log(root)
+        if "up -d" in line and "rollback" in line
+    ]
+    if service == "api":
+        assert any(
+            line.endswith("wuwaterm-api") and "rollback-api-" in line
+            for line in rollback_ups
+        ), rollback_ups
+    else:
+        assert any(
+            line.endswith(" wuwaterm") and "rollback-api-" not in line
+            for line in rollback_ups
+        ), rollback_ups
+
+
+@pytest.mark.parametrize("service", ["bot", "api"])
+def test_unconfirmed_running_state_refuses_before_mutation(full_harness, service):
+    """If running state cannot be confirmed, do not record stopped, stop a
+    service, write a journal, or clear a recovery basis."""
+
+    root, env, old_hash, _new_hash, _ob, _new_bytes, _backup_rel = full_harness
+    _fail_running_inspects(root, service, 9)
+
+    result = _run_mode(root, env, [])
+
+    assert result.returncode == 1, result.stderr
+    assert "not recording it as stopped" in result.stderr
+    assert not (root / JOURNAL_RELPATH).exists()
+    assert hashlib.sha256(
+        (root / "data" / "terms.db").read_bytes()
+    ).hexdigest() == old_hash
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+    assert not any(" stop " in line for line in _docker_log(root))

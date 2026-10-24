@@ -752,7 +752,9 @@ def _make_deploy_harness(tmp_path):
         # A host may run one surface and not the other: an absent container
         # answers nothing at all and exits nonzero.
         "  if [ \"${FAKE_NO_BOT_CONTAINER:-0}\" = 1 ]; then\n"
-        "    case \"$*\" in *wuwaterm-bot*) exit 1 ;; esac\n"
+        "    case \"$*\" in *wuwaterm-bot*)\n"
+        "      echo 'Error response from daemon: No such object: wuwaterm-bot' >&2\n"
+        "      exit 1 ;; esac\n"
         "  fi\n"
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.

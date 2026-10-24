@@ -59,10 +59,11 @@ JIEBA_DICT_PATH = "jieba/dict.txt"
 LEXICON_FILTER = "U+3400-U+9FFF; length 2-8; frequency >= 24"
 
 
-# The frequency-filtered slice omits 香椿, the ordinary Chinese word for
-# toon. This explicit supplement is hashed with the target matcher contract;
-# it does not change the pinned lexicon or source/sentence locking.
-_SINGLE_NAME_COMPOUNDS = frozenset({"香椿"})
+# The frequency-filtered slice omits two ordinary plant names that end in
+# the resonator character 椿: 香椿 (toon) and 臭椿 (tree of heaven). This
+# explicit supplement is hashed with the target matcher contract; it does
+# not change the pinned lexicon or source/sentence locking.
+_SINGLE_NAME_COMPOUNDS = frozenset({"香椿", "臭椿"})
 
 
 def single_character_compound_at(text: str, start: int, end: int) -> bool:
@@ -70,8 +71,9 @@ def single_character_compound_at(text: str, start: int, end: int) -> bool:
 
     Called only for one-character resonator candidates, never as a global
     ban on one-character official forms. A 2..8-char ordinary word covering
-    this span extends at least one edge (香椿 at its end, 椿树 at its start).
-    It is not a general Chinese word segmenter or a sentence-meaning check.
+    this span extends at least one edge (香椿 or 臭椿 at its end, 椿树 at its
+    start). It is not a general Chinese word segmenter or a sentence-meaning
+    check.
     """
     if not (0 <= start < end <= len(text) and end - start == 1):
         return False
