@@ -158,6 +158,7 @@ def test_derived_lexicon_retains_full_upstream_mit_notice():
 @pytest.mark.parametrize(
     ("text", "name", "compound"),
     [("香椿炒蛋。", "椿", True), ("椿树很好看。", "椿", True),
+     ("这是一棵臭椿。", "椿", True),
      ("与椿组队。", "椿", False), ("椿加入队伍。", "椿", False),
      ("心情不错。", "心", True), ("与心组队。", "心", False)],
 )

@@ -1016,6 +1016,7 @@ def test_matcher_revision_changed_and_v1_label_context_is_stale(sample_db):
     [
         ("香椿加入队伍。", False),
         ("椿树很好看。", False),
+        ("这是一棵臭椿。", False),
         ("椿加入队伍。", True),
         ("与椿组队。", True),
         ("椿", True),

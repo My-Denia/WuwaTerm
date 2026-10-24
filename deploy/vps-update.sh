@@ -249,11 +249,49 @@ fi
 # upgrade, or stopped deliberately by the operator, still answers
 # `docker inspect`. Rollback restores the state this deployment found, so what
 # it needs to know is whether each surface was RUNNING.
+#
+# A failed running-state inspect is not "known stopped". Proven absence is the
+# daemon's own "No such object" answer. Anything else is retried, and if it
+# stays unconfirmed the update refuses here, before prepare or stop, and does
+# not substitute false.
+capture_running_state() {
+  cap_name="$1"
+  cap_attempt=0
+  while [ "$cap_attempt" -lt 3 ]; do
+    cap_attempt=$((cap_attempt + 1))
+    cap_err="/tmp/wuwaterm-running-inspect.$$"
+    set +e
+    cap_observed="$(docker inspect --format '{{.State.Running}}' "$cap_name" 2>"$cap_err")"
+    cap_status="$?"
+    set -e
+    if [ "$cap_status" -eq 0 ]; then
+      rm -f "$cap_err"
+      case "$cap_observed" in
+        true|false)
+          printf '%s' "$cap_observed"
+          return 0
+          ;;
+      esac
+      echo "refusing deployment: $cap_name running state is not exactly true or false" >&2
+      exit 1
+    fi
+    cap_err_text="$(cat "$cap_err" 2>/dev/null || true)"
+    rm -f "$cap_err"
+    case "$cap_err_text" in
+      *"No such object"*)
+        printf '%s' false
+        return 0
+        ;;
+    esac
+  done
+  echo "refusing deployment: $cap_name running state could not be confirmed; not recording it as stopped" >&2
+  exit 1
+}
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
-old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
+old_bot_running="$(capture_running_state wuwaterm-bot)"
 old_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
-old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
+old_api_running="$(capture_running_state wuwaterm-api)"
 old_api_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null || true)"
 # Tagged per surface: a host running only one of them still has an image to
 # roll back to, and a host whose two containers are on different images keeps
@@ -514,8 +552,8 @@ python3 scripts/full_update.py prepare \
   --old-api-image-id "${old_api_image_id:-none}" \
   --old-ref "${old_ref:-none}" \
   --old-api-ref "${old_api_ref:-none}" \
-  --old-bot-running "${old_bot_running:-false}" \
-  --old-api-running "${old_api_running:-false}" \
+  --old-bot-running "$old_bot_running" \
+  --old-api-running "$old_api_running" \
   --rollback-image-ref "$rollback_image_ref" \
   --rollback-api-image-ref "$rollback_api_image_ref" \
   --target-image-ref "$new_image_ref" \

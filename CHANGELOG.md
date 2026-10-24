@@ -5,6 +5,9 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Review: `review-v2` no longer certifies the resonator character `椿` inside the ordinary plant name `臭椿`. The same target-side compound supplement already excluded `香椿`; `椿加入队伍` and `与椿组队` stay recognized, and `椿树` stays excluded. This is not a general Chinese segmenter. The opt-in matcher hash changes with that supplement, so a stored context carrying the previous hash is stale by the existing freshness rule. `review-v1` and source/sentence locking are unchanged. Report comparison counts a constraint resolved only when the new check is `verified_constraint`, so this false certification is no longer a resolved comparison either.
+- Deploy: a full-data update no longer treats a failed `docker inspect` of a service's running state as stopped. A transient failure is retried; proven absence (`No such object`) is still not-running. If the state stays unconfirmed, the update refuses before any service or database change and does not clear a recovery record. An explicitly stopped service still stays down on rollback.
+
 - Site: repair asynchronous manuscript import ownership and edit preservation. The latest chosen file now supersedes prior in-flight reads immediately, an in-flight read cannot overwrite newer edits, choices or checks, and an obsolete read failure or completion cannot pollute the latest draft or its errors. Selecting the same file again is enabled by synchronous input reset upon selection.
 
 - Site: the pinned `vite` dependency moves from 8.2.2 to 8.2.4, clearing the launch-editor advisories `GHSA-587h-7wmj-h5pm` (high), `GHSA-698v-4r3x-3vcv` (moderate) and `GHSA-r825-w8mm-5pxw` (moderate) that turned the site feasibility security check red. `npm audit` now reports no known vulnerabilities. No application code changes.
