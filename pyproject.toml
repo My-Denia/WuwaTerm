@@ -42,7 +42,7 @@ dev = [
   # a development dependency rather than something a contributor installs by
   # hand. Bounded to one minor: the enabled rule set below is written against
   # what this range enforces, and a wider range would silently change the gate.
-  "ruff>=0.16,<0.17",
+  "ruff>=0.16,<0.18",
 ]
 
 [project.scripts]
