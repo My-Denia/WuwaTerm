@@ -82,7 +82,7 @@ The [self-hosting guide](docs/self-hosting.md) goes from a checkout at a release
 
 ### Windows client
 
-Download `WuwaTerm-<client version>-windows-x64.zip` from the [latest release](https://github.com/My-Denia/wuwa-translate-bot/releases/latest), not the “Source code” archive. It is a portable, unsigned build, so Windows SmartScreen asks you to choose “More info” and then “Run anyway”. The client talks to a WuwaTerm server through its API and needs a device token from whoever runs that server; it does not connect to the public beta. See the [client guide](client/README.md) (in Chinese).
+Download `WuwaTerm-<client version>-windows-x64.zip` from a [client release](https://github.com/My-Denia/wuwa-translate-bot/releases) (`client-vX.Y.Z`, or the existing bundled v0.6.0 release), not the “Source code” archive. It is a portable, unsigned build, so Windows SmartScreen asks you to choose “More info” and then “Run anyway”. The client talks to a WuwaTerm server through its API and needs a device token from whoever runs that server; it does not connect to the public beta. See the [client guide](client/README.md) (in Chinese).
 
 ### Telegram bot
 

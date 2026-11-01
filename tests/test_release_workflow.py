@@ -341,7 +341,7 @@ print(os.environ['STUB_TAG_SOURCE'] + '\\trefs/tags/v0.6.0')
 
 
 def test_build_jobs_skip_the_release_event():
-    for job in ("preflight", "python-package", "client", "images", "assemble"):
+    for job in ("preflight", "python-package", "images", "assemble"):
         block = _job_block(job)
         condition = [line for line in block.splitlines() if line.strip().startswith("if:")]
         assert condition, f"{job} has no if: and would rebuild on release published"
@@ -374,14 +374,14 @@ def test_promote_images_retags_published_manifest_digests():
 
 
 def test_the_note_template_states_the_unsigned_client():
-    template = _template_block().lower()
+    template = (ROOT / ".github/workflows/client-release.yml").read_text().lower()
     assert "unsigned" in template
     assert "smartscreen" in template
 
 
 def test_the_client_zip_has_one_name_across_every_file_that_names_it():
     holders = {
-        ".github/workflows/release.yml": WORKFLOW,
+        ".github/workflows/client-release.yml": ROOT / ".github/workflows/client-release.yml",
         "client/build.ps1": ROOT / "client" / "build.ps1",
         "client/README.md": ROOT / "client" / "README.md",
         "docs/support-matrix.md": ROOT / "docs" / "support-matrix.md",
@@ -660,3 +660,72 @@ def test_three_published_releases_keep_every_immutable_image_tag(tmp_path):
             )
     for kind, name in names.items():
         assert state["tags"][name + ":0.5"] == expected[tags[-1]][kind]
+
+
+def test_backend_release_has_no_client_build_or_asset_dependency(tmp_path):
+    text = _workflow_text()
+    assert "client/" not in text
+    assert "client-zip" not in text
+    assert "client_version" not in text
+    for job in ("push-images", "assemble", "draft-release"):
+        assert "client" not in _job_block(job)
+    for name in ("wuwaterm-1.0.0-py3-none-any.whl", "wuwaterm-1.0.0.tar.gz"):
+        (tmp_path / name).write_bytes(b"synthetic artifact")
+    result = subprocess.run(
+        ["bash", "-c", _step_run(_job_block("assemble"),
+         "Checksums over the two downloadable build outputs")],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert len((tmp_path / "SHA256SUMS").read_text().splitlines()) == 2
+    assert "startsWith(github.event.release.tag_name, 'v')" in _job_block("promote-images")
+
+
+def test_client_release_is_an_independent_draft_with_immutable_source():
+    text = (ROOT / ".github/workflows/client-release.yml").read_text()
+    assert "needs: [preflight, client]" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run == false" in text
+    assert 'git merge-base --is-ancestor "$TARGET" origin/main' in text
+    assert "^[0-9a-f]{40}$" in text
+    assert 'tag="client-v$VERSION"' in text
+    assert '--draft --latest=false --target "$SOURCE"' in text
+    assert "packages: write" not in text
+    assert "release-manifest.json" not in text
+    assert "client-manifest.json" in text
+    assert "--self-check" in text
+
+
+@pytest.mark.parametrize("lookup", ["absent", "existing", "error"])
+def test_client_draft_requires_confirmed_absent_tag(tmp_path, lookup):
+    workflow = (ROOT / ".github/workflows/client-release.yml").read_text()
+    script = _step_run(workflow[workflow.index("  draft:"):], "Create independent client draft")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "WuwaTerm-0.2.0-windows-x64.zip").write_bytes(b"synthetic zip")
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == 'api':
+    if os.environ['LOOKUP'] == 'existing': sys.exit(0)
+    print('HTTP 404' if os.environ['LOOKUP'] == 'absent' else 'HTTP 403', file=sys.stderr)
+    sys.exit(1)
+if args[:2] == ['release', 'create']:
+    assert args[2] == 'client-v0.2.0'
+    assert '--draft' in args and '--latest=false' in args
+    assert args[args.index('--target') + 1] == os.environ['SOURCE']
+    Path('created').touch()
+elif args[:2] == ['release', 'view']:
+    field = args[args.index('--json') + 1]
+    print({'isDraft': 'true', 'targetCommitish': os.environ['SOURCE'], 'assets': '3'}[field])
+else:
+    sys.exit(2)
+""")
+    gh.chmod(0o755)
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path,
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+             "GH_REPO": "example/project", "VERSION": "0.2.0", "SOURCE": "a" * 40,
+             "LOOKUP": lookup}, capture_output=True, text=True)
+    assert (result.returncode == 0) == (lookup == "absent"), result.stderr
+    assert (staging / "created").exists() == (lookup == "absent")

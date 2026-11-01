@@ -27,7 +27,6 @@ on:
     paths:
       - .github/workflows/release.yml
       - deploy/**
-      - client/**
       - pyproject.toml
   # After a human publishes the draft (which is what creates the git tag),
   # promote-images retags the digests already recorded in that release's
@@ -69,7 +68,6 @@ jobs:
     outputs:
       version: ${{ steps.versions.outputs.version }}
       tag: ${{ steps.versions.outputs.tag }}
-      client_version: ${{ steps.versions.outputs.client_version }}
       dry_run: ${{ steps.mode.outputs.dry_run }}
       source_commit: ${{ steps.commit.outputs.source_commit }}
       built_utc: ${{ steps.mode.outputs.built_utc }}
@@ -122,8 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          client_version="$(python3 -c 'import tomllib; print(tomllib.load(open("client/pyproject.toml", "rb"))["project"]["version"])')"
-          for v in "$version" "$client_version"; do
+          for v in "$version"; do
             if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
               echo "declared version '$v' is not X.Y.Z" >&2
               exit 1
@@ -132,9 +129,8 @@ jobs:
           {
             echo "version=$version"
             echo "tag=v$version"
-            echo "client_version=$client_version"
           } >> "$GITHUB_OUTPUT"
-          echo "server $version / client $client_version"
+          echo "server $version"
 
       - name: Read the data pin from the source profile
         id: datapin
@@ -207,7 +203,6 @@ jobs:
           DRY_RUN: ${{ steps.mode.outputs.dry_run }}
           TAG: ${{ steps.versions.outputs.tag }}
           VERSION: ${{ steps.versions.outputs.version }}
-          CLIENT_VERSION: ${{ steps.versions.outputs.client_version }}
           SOURCE_COMMIT: ${{ steps.commit.outputs.source_commit }}
           BUILT_UTC: ${{ steps.mode.outputs.built_utc }}
           DATA_PROFILE: ${{ steps.datapin.outputs.data_profile }}
@@ -227,7 +222,6 @@ jobs:
           | dry run | $DRY_RUN |
           | tag (created only when a human publishes the draft) | $TAG |
           | server version | $VERSION |
-          | client version | $CLIENT_VERSION |
           | source commit | $SOURCE_COMMIT |
           | built (UTC) | $BUILT_UTC |
           | data profile | $DATA_PROFILE |
@@ -277,75 +271,6 @@ jobs:
           path: |
             dist/*.whl
             dist/*.tar.gz
-          if-no-files-found: error
-
-  client:
-    name: desktop client zip (windows)
-    if: github.event_name != 'release'
-    needs: preflight
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      # build.ps1 refuses to fall back to a system interpreter, so the same
-      # client-local virtual environment an operator would create is created
-      # here and the build runs through the same script.
-      - run: python -m venv client/.venv
-      - run: client/.venv/Scripts/python.exe -m pip install -U pip
-      - run: client/.venv/Scripts/python.exe -m pip install -e "client[dev,build]"
-      - name: Client test suite
-        working-directory: client
-        run: .venv/Scripts/python.exe -m pytest
-      - name: One-folder PyInstaller build
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File client/build.ps1
-      - name: The built artifact passes its own start-up self-check
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Start-Process -Wait -PassThru, not the call operator: WuwaTerm.exe
-          # is built for the WINDOWS subsystem (console=False in the spec), so
-          # PowerShell does not wait for it and leaves $LASTEXITCODE unset. The
-          # first version of this step used `&` and failed with an empty exit
-          # code on an artifact that had just passed the identical check inside
-          # build.ps1 - which is how build.ps1 already does it, and why.
-          $check = Start-Process -FilePath "client/dist/WuwaTerm/WuwaTerm.exe" `
-            -ArgumentList "--self-check" -Wait -PassThru
-          if ($check.ExitCode -ne 0) {
-            throw "the built artifact failed its start-up self-check (exit $($check.ExitCode))"
-          }
-          Write-Host "self-check exit code: $($check.ExitCode)"
-      - name: Package the one-folder build as the release zip
-        shell: pwsh
-        env:
-          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $folder = "client/dist/WuwaTerm"
-          $zip = "client/dist/WuwaTerm-${env:CLIENT_VERSION}-windows-x64.zip"
-          # build.ps1 may already produce this zip itself. Use the script's own
-          # output when it is there, and produce it here when it is not, so
-          # neither arrangement breaks this job.
-          if (Test-Path -LiteralPath $zip) {
-            Write-Host "using the zip build.ps1 produced: $zip"
-          } else {
-            Write-Host "build.ps1 produced no zip; packaging $folder"
-            Compress-Archive -Path $folder -DestinationPath $zip
-          }
-          $item = Get-Item -LiteralPath $zip
-          if ($item.Length -le 0) {
-            throw "the release zip is empty: $zip"
-          }
-          Write-Host "release zip: $($item.FullName) ($($item.Length) bytes)"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: client-zip
-          path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
           if-no-files-found: error
 
   # Builds both targets and pushes NOTHING, so it needs no registry permission
@@ -432,9 +357,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The push, and the only job that may write packages. Unreachable from a
-  # pull_request by its own condition, and placed AFTER the package, client and
+  # pull_request by its own condition, and placed AFTER the package and
   # image jobs so a release tag is never pushed for a commit whose wheel, sdist
-  # or client build had already failed.
+  # build had already failed.
   #
   # Draft-time registry tags are sha-<7> only. vX.Y.Z and X.Y are applied by
   # promote-images after a human publishes the draft, from the exact digests
@@ -442,7 +367,7 @@ jobs:
   # leave release-looking tags on the registry.
   push-images:
     name: push the container images
-    needs: [preflight, python-package, client, images]
+    needs: [preflight, python-package, images]
     if: github.event_name == 'workflow_dispatch' && needs.preflight.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -461,7 +386,7 @@ jobs:
           TAG: ${{ needs.preflight.outputs.tag }}
         run: |
           set -uo pipefail
-          # Preflight's check ran before the package and Windows-client builds,
+          # Preflight's check ran before the package and image builds,
           # which take minutes. If the git tag appeared in that gap, this
           # version is already published somewhere and pushing these
           # release-semantic image tags would overwrite a published release's
@@ -547,7 +472,7 @@ jobs:
 
   assemble:
     name: checksums and release manifest
-    needs: [preflight, python-package, client, images, push-images]
+    needs: [preflight, python-package, images, push-images]
     # push-images is SKIPPED in every dry run, and a skipped need would
     # otherwise skip this job too. Success of everything that did run is still
     # required: failure() covers any failed ancestor.
@@ -563,25 +488,20 @@ jobs:
         with:
           name: python-package
           path: staging
-      - uses: actions/download-artifact@v8
-        with:
-          name: client-zip
-          path: staging
-      - name: Checksums over the three downloadable build outputs
+      - name: Checksums over the two downloadable build outputs
         working-directory: staging
         run: |
           set -euo pipefail
           ls -l
           # Bare filenames only, so `sha256sum -c SHA256SUMS` works from the
           # directory the assets are downloaded into.
-          sha256sum *.whl *.tar.gz *.zip > SHA256SUMS
+          sha256sum *.whl *.tar.gz > SHA256SUMS
           cat SHA256SUMS
           sha256sum -c SHA256SUMS
       - name: Write release-manifest.json
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
           SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
           BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
@@ -619,7 +539,6 @@ jobs:
           manifest = {
               "tag": os.environ["TAG"],
               "version": os.environ["VERSION"],
-              "client_version": os.environ["CLIENT_VERSION"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "built_utc": os.environ["BUILT_UTC"],
               "dry_run": os.environ["DRY_RUN"] == "true",
@@ -648,14 +567,14 @@ jobs:
           Path("staging/release-manifest.json").write_text(text, encoding="utf-8")
           print(text)
           PY
-      - name: The staged set is exactly the five release assets and verifies
+      - name: The staged set is exactly the four release assets and verifies
         working-directory: staging
         run: |
           set -euo pipefail
           count="$(ls -1 | wc -l)"
           ls -1
-          if [ "$count" -ne 5 ]; then
-            echo "expected exactly 5 staged assets, found $count" >&2
+          if [ "$count" -ne 4 ]; then
+            echo "expected exactly 4 staged assets, found $count" >&2
             exit 1
           fi
           sha256sum -c SHA256SUMS
@@ -749,8 +668,8 @@ jobs:
               raise SystemExit(f"the '## {version}' section of CHANGELOG.md is empty; stop")
 
           assets = sorted(p.name for p in staging.iterdir() if p.is_file())
-          if len(assets) != 5:
-              raise SystemExit(f"expected 5 release assets, found {len(assets)}: {assets}")
+          if len(assets) != 4:
+              raise SystemExit(f"expected 4 release assets, found {len(assets)}: {assets}")
 
           def image_line(key):
               image = images[key]
@@ -780,8 +699,6 @@ jobs:
               "- `python -m build`, `python -m twine check --strict dist/*`",
               "- `python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz`",
               "- clean-venv install, import and CLI smoke for both the wheel and the sdist",
-              "- desktop client test suite on Windows, then the packaged executable's",
-              "  own `--self-check` start-up rehearsal",
               "- `sha256sum -c SHA256SUMS` over the downloadable build outputs",
               "",
               "### Privacy And LLM",
@@ -794,20 +711,15 @@ jobs:
               "",
               "### Assets",
               "",
-              "This release attaches five files:",
+              "This release attaches four files:",
               "",
           ]
           lines += [f"- `{name}`" for name in assets]
           lines += [
               "",
               "Verify the downloads with `sha256sum -c SHA256SUMS`.",
-              "`release-manifest.json` records the source commit, the client version,",
+              "`release-manifest.json` records the source commit, the server version,",
               "the data pin and the container image digests this release was built from.",
-              "",
-              "The Windows desktop client in the zip is **UNSIGNED**: no code signing is",
-              "performed on it at any point. Windows SmartScreen will warn about an",
-              "unrecognised publisher; continue through *More info* then *Run anyway* only",
-              "if you trust this download, after checking its checksum.",
               "",
               "Container images built from the same commit. The tags listed here are",
               "the immutable sha tags pushed while this release was still a draft.",
@@ -823,8 +735,8 @@ jobs:
               "",
               "### Distribution Boundary",
               "",
-              "This release distributes source code, the Python package artifacts, the",
-              "desktop client binary and container images. It does not distribute",
+              "This release distributes source code, Python package artifacts and",
+              "container images. It does not distribute",
               "generated SQLite databases, generated TextMap files, or Wuthering Waves",
               "game data. The MIT license covers this project's source code only, not",
               "Wuthering Waves game data or in-game terminology.",
@@ -841,8 +753,6 @@ jobs:
               "  chat configuration.",
               "- Free-text sentence translation requires an external OpenAI-compatible",
               "  endpoint.",
-              "- The desktop client is built and tested on Windows x64 only, and it is",
-              "  not code-signed.",
               "",
           ]
           notes = Path(os.environ["RUNNER_TEMP"]) / "RELEASE_NOTES.md"
@@ -867,7 +777,6 @@ jobs:
             --notes-file "$RUNNER_TEMP/RELEASE_NOTES.md" \
             staging/*.whl \
             staging/*.tar.gz \
-            staging/*.zip \
             staging/SHA256SUMS \
             staging/release-manifest.json
       - name: Read the draft back
@@ -878,8 +787,8 @@ jobs:
           set -euo pipefail
           count="$(gh release view "$TAG" --json assets --jq '.assets | length')"
           gh release view "$TAG" --json isDraft,tagName,targetCommitish,assets
-          if [ "$count" -ne 5 ]; then
-            echo "the draft carries $count assets, expected 5" >&2
+          if [ "$count" -ne 4 ]; then
+            echo "the draft carries $count assets, expected 4" >&2
             exit 1
           fi
           {
@@ -896,7 +805,7 @@ jobs:
   # failed run may need a new workflow revision; never dispatch a new draft.
   promote-images:
     name: promote GHCR release tags
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: github.event_name == 'release' && github.event.action == 'published' && startsWith(github.event.release.tag_name, 'v')
     concurrency:
       group: ${{ github.repository }}-release-promotion
       queue: max

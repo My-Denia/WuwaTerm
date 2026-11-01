@@ -27,7 +27,7 @@
 
 ## 获取与运行
 
-从 v0.4.0 起,[GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
+v0.4.0–v0.6.0 随后端发布客户端；后续使用独立的 `client-vX.Y.Z`。在[GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
 会附带一个便携版压缩包 `WuwaTerm-0.2.0-windows-x64.zip`(命名规律是
 `WuwaTerm-<客户端版本>-windows-x64.zip`),以及一份 `SHA256SUMS`。
 在此之前(v0.3.0 及更早)发布页只提供服务端的 wheel 与 sdist,没有客户端产物,
@@ -310,3 +310,7 @@ client\.venv\Scripts\python.exe -m pytest
 
 测试使用被模拟的 HTTP 传输和一个内存中的凭据存储替身:不需要网络、不需要运行中的服务端,
 也不会真的写入 Windows 凭据管理器。
+
+## 独立发布
+
+客户端功能开发仍暂停，源码和 Windows CI 兼容构建继续保留。后端正式发布不再等待客户端新构建。需要发布客户端时，使用 `client-release.yml`，以主干完整 SHA 手动运行；默认仅构建，非 dry-run 创建 `client-vX.Y.Z` 草稿。发布前核对 ZIP、SHA256SUMS 和 client-manifest.json，保持 `--latest=false`，不要覆盖后端最新版本入口。客户端仍未签名，API 兼容范围见 [支持矩阵](../docs/support-matrix.md)。
