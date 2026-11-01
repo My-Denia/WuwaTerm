@@ -8,7 +8,7 @@ HTTP API; linked-channel posts retain their specialized orchestration. It runs
 for that, and the cost it carries, are recorded in
 [ADR 0014](adr/0014-private-web-presentation-layer.md).
 
-**This is not `site/`.** The anonymous public beta Site is a separately
+**This is not the public [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) repository.** The anonymous public beta Site is a separately
 deployed Hosted / Cloudflare same-origin proxy with no visitor account or gate
 in application code. Do not
 copy these `WUWATERM_API_WEB_*` settings or the Caddy `basic_auth` / edge

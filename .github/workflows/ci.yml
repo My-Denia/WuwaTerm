@@ -62,6 +62,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Read immutable Web revision
+        id: web
+        run: |
+          set -euo pipefail
+          revision=$(cat contracts/web-ref.txt)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "Backend source: $(git rev-parse HEAD)"
+      - uses: actions/checkout@v7
+        with:
+          repository: My-Denia/WuwaTerm-Web
+          ref: ${{ steps.web.outputs.revision }}
+          path: web
+      - name: Record Web source
+        run: git -C web rev-parse HEAD
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -71,36 +86,11 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -m cross_component tests/test_meta_site_contract.py
         env:
-          WUWATERM_WEB_ROOT: ${{ github.workspace }}/site
-
-  site:
-    name: site feasibility security
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: site
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: site/package-lock.json
-      - run: npm install --global npm@11.6.2
-      - run: npm ci
-      - run: npm audit --json
-      - run: npm audit --omit=dev --json
-      - run: npm test
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm run build
-      - run: npm run verify:no-client-secret
-      - run: npm run test:built
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
+          WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
+      - run: npm run test:contract
+        working-directory: web
         env:
-          WUWATERM_BROWSER_BUILT: "1"
+          WUWATERM_BACKEND_ROOT: ${{ github.workspace }}
 
   package:
     name: wheel/sdist build, audit, install

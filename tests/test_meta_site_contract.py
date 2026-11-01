@@ -27,14 +27,19 @@ from tests.test_api import (
     run,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-WEB_ROOT = Path(os.environ.get("WUWATERM_WEB_ROOT", str(ROOT / "site"))).resolve()
-HELPER = WEB_ROOT / "tests" / "helpers" / "project-live-meta.mjs"
+WEB_ROOT = os.environ.get("WUWATERM_WEB_ROOT")
+HELPER = (
+    Path(WEB_ROOT).resolve() / "tests" / "helpers" / "project-live-meta.mjs"
+    if WEB_ROOT
+    else None
+)
 pytestmark = pytest.mark.cross_component
 
 
 @pytest.fixture(scope="module", autouse=True)
 def require_web_contract_environment():
+    if HELPER is None:
+        pytest.fail("Set WUWATERM_WEB_ROOT to the pinned Web checkout")
     if shutil.which("node") is None:
         pytest.fail("Cross-component contracts require Node.js 24 on PATH")
     if not HELPER.is_file():

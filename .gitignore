@@ -42,3 +42,6 @@ $RECYCLE.BIN/
 .idea/
 .vscode/
 .zcodeignore
+
+# Immutable Web checkout used by cross-repository contract CI.
+/web/

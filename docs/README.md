@@ -7,9 +7,8 @@ desktop client guide and a few design and audit records are in Chinese.
 
 ## Using WuwaTerm
 
-- [Public Beta Site](sites.md): the anonymous web beta, its shared daily pool,
-  privacy limits, the review workbench and resumable manuscript files, and the
-  trust boundary between the hosted proxy and the API.
+- [Public Beta Site](sites.md): links to the independent Web repository, product
+  guide, privacy boundary, cross-repository contracts and deployment receipts.
 - [Windows client](../client/README.md): the desktop app for the HTTP API,
   how to get and run the release zip, server address, device credential and
   build. In Chinese.

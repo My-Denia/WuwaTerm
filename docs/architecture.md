@@ -56,7 +56,7 @@ Three presentation adapters, one application layer, two consumers:
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
 | Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
 | Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
-| Public beta Site | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that anonymously exposes same-origin `/api/*` and proxies `/v1` with a server-side device token | `site/` |
+| Public beta Site | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that anonymously exposes same-origin `/api/*` and proxies `/v1` with a server-side device token | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) |
 
 The desktop client is deliberately outside the service: it renders answers the
 API produced, and every rule the API applies is applied whether the caller is
@@ -108,7 +108,7 @@ operator checklist are in [sites.md](sites.md). Do not add Sites setup to
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
 | API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
 | Owner at a browser | The private web layer's two views (lookup, sentence translation), only when it is switched on and only through the proxy | `src/wuwaterm_api/web/app.py`, [ADR 0014](adr/0014-private-web-presentation-layer.md) |
-| Anonymous public beta visitor | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | `site/`, [sites.md](sites.md) |
+| Anonymous public beta visitor | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), [sites.md](sites.md) |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
 ### External systems
@@ -161,7 +161,7 @@ operator checklist are in [sites.md](sites.md). Do not add Sites setup to
    application's path to the service.
 8. **The Sites Worker is a half-trusted hop.** It holds a Bearer token that
    can spend the API's per-device rate limit and model budget. The browser
-   is locked down by `site/scripts/verify-no-client-secret.mjs`; callers of
+   is locked down by [the Web client-secret check](https://github.com/My-Denia/WuwaTerm-Web/blob/main/scripts/verify-no-client-secret.mjs); callers of
    the Worker are not. URL secrecy or a platform ACL is an operational
    choice this repository does not encode ([sites.md](sites.md)).
 
