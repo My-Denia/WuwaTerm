@@ -66,6 +66,16 @@ jobs:
         with:
           # Empty on a pull_request, where checkout uses the event's own ref.
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      # A run on main holds the default-branch cache scope, so it may execute
+      # only code already on main. Candidate branches dispatch from their own ref.
+      - name: Runs on main accept only main source
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
 
       - name: Start the clock
         run: |
