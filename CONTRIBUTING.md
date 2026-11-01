@@ -38,6 +38,24 @@ database or upstream text may be committed.
 [Architecture](docs/architecture.md) is the map, and
 [docs/adr/README.md](docs/adr/README.md) records why the shape is what it is.
 
+### API / public Web contract
+
+The default Python suite excludes `cross_component` tests and needs no Node.js
+for the meta projection contract. CI runs these tests in a dedicated job with
+Python 3.11 and Node.js 24. Run them explicitly with:
+
+```sh
+python -m pytest -m cross_component tests/test_meta_site_contract.py
+```
+
+`WUWATERM_WEB_ROOT` selects the Web source root (defaults to `site/`). It must
+contain `tests/helpers/project-live-meta.mjs` and the BFF implementation it
+imports. An explicit contract run fails if Node or the helper is missing.
+For a separate Web checkout, set this variable to its absolute path and record
+both repository commit SHAs with the result. The test passes real API response
+bytes through the consumer; strict field rejection remains part of the contract.
+The migration must pin that checkout in CI before removing `site/`.
+
 ## Getting The Code
 
 ```bash

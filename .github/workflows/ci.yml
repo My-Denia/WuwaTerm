@@ -57,6 +57,22 @@ jobs:
         run: uv run --locked --python 3.11 --extra api --extra dev python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
       - run: uv run --locked --python 3.11 --extra api --extra dev python scripts/validate.py
 
+  web-contract:
+    name: API to Web contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -m cross_component tests/test_meta_site_contract.py
+        env:
+          WUWATERM_WEB_ROOT: ${{ github.workspace }}/site
+
   site:
     name: site feasibility security
     runs-on: ubuntu-latest
