@@ -23,7 +23,7 @@ def test_code_review_rules_are_tracked_at_the_root():
 
 def test_in_scope_fix_push_does_not_authorize_deploy():
     text = _flat(AGENTS)
-    assert "fast-forward push on the same branch" in text
+    assert "fast-forward push on the same PR branch" in text
     assert "confirmed in-scope review finding" in text
     assert "never covers force-push, history rewrite, a wider scope, deploy, or a production change" in text
 
@@ -33,7 +33,6 @@ def test_cleanup_follows_owner_ruling():
     assert "## Workspace cleanup when finishing" in text
     assert "archive reusable content first, then delete merged or obsolete local branches and worktrees" in text
     assert "Owner ruling, 2026-10-15" in text
-    assert "merge their own PRs" in text
     assert "## Git Branches" in text
     assert "only when the corresponding local and" not in text
     assert "clean up the source branch locally and on GitHub" not in text

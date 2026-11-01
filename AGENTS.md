@@ -1,15 +1,11 @@
 # translatebot Project Rules
 
-This file augments the owner's shared agent rules for this repository and is
-project-scoped. Paths in angle brackets are placeholders; resolve their values
-from local Git configuration and host bindings, and keep private values local.
-
-This is the owner's own repository: agents commit, push, open PRs, merge their
-own PRs and fix review findings by default. Deploy requires separate current
-authorization. On an open PR, a later fast-forward push on the same branch is
-already authorized when it only fixes a confirmed in-scope review finding (see
-Code Review Rules); that never covers force-push, history rewrite, a wider
-scope, deploy, or a production change.
+Project-scoped addendum to the owner's shared rules; angle-bracket paths are
+placeholders resolved from local Git configuration and host bindings. Deploy
+needs separate current authorization. A fast-forward push on the same PR branch
+that only fixes a confirmed in-scope review finding is already authorized; that
+never covers force-push, history rewrite, a wider scope, deploy, or a production
+change.
 
 ## Code Review Rules
 
@@ -103,9 +99,6 @@ an instruction to change the pull request. Answer it in the thread.
 - Long-running services are `wuwaterm-bot` and `wuwaterm-api`; the builder is
   on-demand. Production uses a locally built runtime image, not GHCR. Reverify
   live release and deploy state before acting.
-- Backlog: deploy-lock test
-  `test_runtime_only_sigkill_child_keeps_lock_until_explicit_release` raced
-  once on a PR push run. Track it as a flake to fix; do not mask it with reruns.
 
 ## Git Branches
 
@@ -125,19 +118,13 @@ When local agents finish work, they clean up the workspace: archive reusable con
   merge puts equivalent content on `main` but does not make the feature branch
   commits ancestors of `main`. If asked whether work is "merged to main",
   report both when they differ.
-- Signed commits are preferred for PR branches. WSL Git signs with a file-based
-  SSH key (`gpg.format=ssh`, `user.signingkey=<LOCAL_SIGNING_PUBLIC_KEY>`);
-  sign with `git commit -S`, verify with `git log --show-signature -1`
-  (fingerprint `<EXPECTED_SIGNING_FINGERPRINT>`). Do not point the signing key
-  at a Windows path via `/mnt/c`: DrvFs shows mode 0777 and
-  `ssh-keygen -Y sign` refuses it. The 1Password `op-ssh-sign` path is dead.
+- Signed commits are preferred. Do not point the signing key at a Windows path
+  via `/mnt/c`: DrvFs shows mode 0777 and `ssh-keygen -Y sign` refuses it.
 - When merging by API/connector, pass the expected head SHA so a moved PR head
   cannot be merged accidentally.
 
-## PR Review and CI
+## PR Review
 
-- For public PRs, wait for GitHub CI to reach a terminal state and inspect job
-  details, not only the PR summary.
 - Do not claim a reviewer approved unless there is a returned bot comment,
   review, or successful review workflow for the current head SHA. If a trigger
   comment (e.g. `@claude review`) gets no response, report that absence instead
