@@ -412,9 +412,36 @@ peeled commit ref `refs/tags/$NEXT_VERSION^{}` while a lightweight tag is
 compared against the tag ref itself; this repository's tags have been
 lightweight, and the block does not depend on that staying true.
 
-Then re-download the published assets and check them against `SHA256SUMS`
-again, exactly as in step 2 of the draft readback, before reporting the release
-as published. Verifying the draft is not verifying the release.
+Re-download into a fresh directory so the draft assets and audited snapshot
+remain intact. Verify the published checksums and compare all four downloaded
+files to the digests accepted in the draft audit. Verifying the draft is not
+verifying the release.
+
+```bash
+# Published artifact readback: fresh bytes, preserved draft evidence.
+set -euo pipefail
+: "${verify_dir:?Use the reviewed draft directory}"
+: "${NEXT_VERSION:?Set the published tag}"
+: "${reviewed_main_commit:?Set the reviewed full SHA}"
+published_dir="$(mktemp -d "$verify_dir/published.XXXXXX")"
+gh release download "$NEXT_VERSION" --repo My-Denia/WuwaTerm --dir "$published_dir"
+(cd "$published_dir" && sha256sum -c SHA256SUMS)
+python3 - "$verify_dir/audited-release.json" "$published_dir" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+snapshot = json.loads(Path(sys.argv[1]).read_text())
+root = Path(sys.argv[2])
+assets = snapshot['assets']
+assert len(assets) == 4
+assert {p.name for p in root.iterdir()} == {a['name'] for a in assets}
+for asset in assets:
+    actual = 'sha256:' + hashlib.sha256((root / asset['name']).read_bytes()).hexdigest()
+    assert actual == asset['digest'], 'published bytes differ from audited draft'
+manifest = json.loads((root / 'release-manifest.json').read_text())
+assert manifest['tag'] == sys.argv[3] and manifest['source_commit'] == sys.argv[4]
+assert manifest['dry_run'] is False
+PY
+```
 
 ## When Something Is Wrong
 

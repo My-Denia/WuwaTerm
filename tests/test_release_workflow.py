@@ -828,3 +828,53 @@ def test_draft_registry_guard_preserves_existing_minor_tag(tmp_path, case):
     if case in {"existing_minor", "first_minor"}:
         assert len(probes) == 6, "both image repositories must be inspected"
     assert (result.returncode == 0) == (case in {"existing_minor", "first_minor"}), result.stderr
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_published_readback_downloads_fresh_bytes_and_preserves_draft(tmp_path, changed):
+    import hashlib
+
+    source = "a" * 40
+    data = {
+        "wuwaterm-0.6.1-py3-none-any.whl": "wheel bytes",
+        "wuwaterm-0.6.1.tar.gz": "sdist bytes",
+        "release-manifest.json": json.dumps({"tag": "v0.6.1", "source_commit": source, "dry_run": False}),
+    }
+    data["SHA256SUMS"] = "".join(
+        f"{hashlib.sha256(data[name].encode()).hexdigest()}  {name}\n"
+        for name in ["wuwaterm-0.6.1-py3-none-any.whl", "wuwaterm-0.6.1.tar.gz"])
+    for name, body in data.items():
+        (tmp_path / name).write_text(body)
+    snapshot = {"assets": [{"name": name, "digest": "sha256:" + hashlib.sha256(body.encode()).hexdigest()}
+                           for name, body in data.items()]}
+    (tmp_path / "audited-release.json").write_text(json.dumps(snapshot))
+    remote = dict(data)
+    if changed:
+        remote["release-manifest.json"] += " "
+    (tmp_path / "remote-assets.json").write_text(json.dumps(remote))
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:3] == ['release', 'download', 'v0.6.1']
+assert args[args.index('--repo') + 1] == 'My-Denia/WuwaTerm'
+root = Path(args[args.index('--dir') + 1])
+Path('download-dir').write_text(str(root))
+for name, body in json.loads(Path('remote-assets.json').read_text()).items():
+    target = root / name
+    assert not target.exists(), 'download refuses existing files without clobber'
+    target.write_text(body)
+""")
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "verify_dir": str(tmp_path), "NEXT_VERSION": "v0.6.1", "reviewed_main_commit": source}
+    result = subprocess.run(["bash", "-c", _checklist_bash("# Published artifact readback:")],
+                            cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert (result.returncode == 0) == (not changed), result.stderr
+    downloaded = Path((tmp_path / "download-dir").read_text())
+    assert downloaded != tmp_path and downloaded.parent == tmp_path
+    for name, body in data.items():
+        assert (tmp_path / name).read_text() == body
+    if changed:
+        assert "published bytes differ" in result.stderr
