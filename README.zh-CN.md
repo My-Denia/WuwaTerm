@@ -80,7 +80,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ### Windows 客户端
 
-从[最新发布](https://github.com/My-Denia/wuwa-translate-bot/releases/latest)下载 `WuwaTerm-<客户端版本>-windows-x64.zip`，不要下载“Source code”压缩包。客户端是免安装版，没有代码签名，Windows SmartScreen 会拦截，需要依次点“更多信息”和“仍要运行”。客户端通过 API 连接 WuwaTerm 服务端，需要服务运营者发放的设备令牌，不能直接连接公测站。详见[客户端说明](client/README.md)。
+从[客户端发布](https://github.com/My-Denia/wuwa-translate-bot/releases)（`client-vX.Y.Z`，或已有的 v0.6.0 合集版本）下载 `WuwaTerm-<客户端版本>-windows-x64.zip`，不要下载“Source code”压缩包。客户端是免安装版，没有代码签名，Windows SmartScreen 会拦截，需要依次点“更多信息”和“仍要运行”。客户端通过 API 连接 WuwaTerm 服务端，需要服务运营者发放的设备令牌，不能直接连接公测站。详见[客户端说明](client/README.md)。
 
 ### Telegram bot
 

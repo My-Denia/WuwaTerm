@@ -52,8 +52,8 @@ request without a Windows runner.
 | Build | one-folder PyInstaller build from the committed spec, via `client/build.ps1` |
 | Signing | **None.** The build is unsigned and there is no installer, so Windows SmartScreen shows a warning the user has to click through. |
 | Byte-for-byte equality between two builds | Not claimed and not checked. There is no lock file for the client and no comparison of build outputs. |
-| Distribution between releases | a CI workflow artifact from the `desktop client build (windows)` job, retained for 90 days and requiring a GitHub login. The release workflow builds the same zip on every run, including its dry runs, so the artifact exists before any release does. |
-| Distribution from v0.4.0 onward | a release asset, `WuwaTerm-0.2.0-windows-x64.zip`, listed in `SHA256SUMS` |
+| Distribution between releases | a CI workflow artifact from the `desktop client build (windows)` job, retained for 90 days and requiring a GitHub login. The independent `client-release.yml` workflow builds the same zip and can create a `client-vX.Y.Z` draft. Backend releases do not require a new client build. |
+| Distribution | a release asset, `WuwaTerm-0.2.0-windows-x64.zip`, listed in `SHA256SUMS`; v0.4.0–v0.6.0 bundled it with the backend, future client releases use `client-vX.Y.Z` |
 | Tested in CI | the client's own suite on `windows-latest` with Python 3.12, followed by the build; the release workflow repeats the suite, the build and the `--self-check` start-up rehearsal before it packages the zip |
 
 ## Compatibility contract

@@ -2,7 +2,7 @@
 
 Use this checklist to publish a GitHub release. From v0.4.0 onward the assets
 are **built by a workflow, not by hand**: `.github/workflows/release.yml` builds
-everything from one reviewed commit, and the human steps are deciding which
+the backend artifacts from one reviewed commit, and the human steps are deciding which
 commit, reading the draft back, and publishing it.
 
 Do not attach generated SQLite databases, TextMap files, or bulk game data to a
@@ -17,7 +17,7 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
-  independently of the server and carried in the release as
+  independently of the server and carried in a separate client release as
   `WuwaTerm-0.2.0-windows-x64.zip`
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -39,20 +39,19 @@ the page a reader checks first.
 ## What A Release Carries
 
 Releases up to and including v0.3.0 carried only the wheel, the sdist and
-`SHA256SUMS`: no client binary and no container image. From v0.4.0 onward:
+`SHA256SUMS`: no client binary and no container image. Versions v0.4.0 through v0.6.0 also bundled the client. Future backend releases
+use the independent workflows described here.
 
-**Five assets, and no others:**
+**Four backend assets, and no others:**
 
 | asset | built by | audited by |
 | --- | --- | --- |
 | `wuwaterm-<version>-py3-none-any.whl` | `python -m build` on `ubuntu-latest` | `twine check --strict`, `scripts/check_package_artifacts.py`, clean-venv install + import + CLI smoke |
 | `wuwaterm-<version>.tar.gz` | the same build | the same three |
-| `WuwaTerm-<client version>-windows-x64.zip` | `client/build.ps1` on `windows-latest` | the client test suite, then the built executable's own `--self-check` start-up rehearsal, before the folder is packaged |
-| `SHA256SUMS` | the workflow, over the three files above | verified by re-download while the release is still a draft |
+| `SHA256SUMS` | the workflow, over the two files above | verified by re-download while the release is still a draft |
 | `release-manifest.json` | the workflow | read back against the reviewed commit while the release is still a draft |
 
-`release-manifest.json` records the tag, the server version, the client
-version, the source commit, the build time, whether the run was a dry run, the
+`release-manifest.json` records the tag, the server version, the source commit, the build time, whether the run was a dry run, the
 image names, tags and digests, and the game-data pin. It is what makes a
 downloaded asset traceable to a commit without trusting the release page.
 
@@ -84,14 +83,22 @@ needs a source checkout at the release tag for the Compose files, the
 entrypoints, the data build and the verification scripts. Say that in the
 notes; do not let "images are published" be read as "no checkout needed".
 
-**The Windows client executable is UNSIGNED.** There is no code-signing
-certificate, no installer, and no plan for either this round. Windows
-SmartScreen will warn on first run and the user has to choose More info and
-then Run anyway. The release notes must say this in the Assets section — a user
-who meets the warning without having been told has been handed a reason to
-distrust the download. Two builds of the client are not expected to be
-byte-identical either, and nothing checks that they are; there is no lock file
-for the client and the runner image floats.
+## Independent Windows client release
+
+Client development remains paused. CI still builds and tests the client for
+compatibility; failure does not prevent a backend release workflow from finishing.
+Use `.github/workflows/client-release.yml` for an independent Windows package.
+It builds `WuwaTerm-<client version>-windows-x64.zip` from a full main SHA,
+runs client tests and the executable self-check, and defaults to a dry run.
+A non-dry dispatch creates a `client-vX.Y.Z` draft with the zip, `SHA256SUMS`
+and `client-manifest.json`. It does not publish or promote backend images.
+Review the exact source SHA, download and verify all three assets, then publish
+manually with `--latest=false` so it does not replace the latest backend release.
+The API compatibility boundary remains the one in [Support Matrix](support-matrix.md).
+
+The Windows client is **UNSIGNED**. Its release notes must disclose the
+SmartScreen warning. There is no installer, and builds are not claimed to be
+byte-identical. Existing bundled release assets remain available unchanged.
 
 ## Validation
 
@@ -152,7 +159,7 @@ the exact commit you are about to release.
    reviewed `origin/main` commit that passed CI and review. That SHA is the
    release target and is what goes into `target_commit`.
 2. **Dry run first.** Every pull request touching the workflow, `deploy/**`,
-   `client/**` or `pyproject.toml` already runs the workflow in dry-run mode,
+   or `pyproject.toml` already runs the workflow in dry-run mode,
    and a dry run can also be dispatched deliberately. A dry run builds every
    asset, builds both images, and publishes nothing — no registry login, no
    image push, no release. Read its `release-assets` artifact before doing the
@@ -160,9 +167,9 @@ the exact commit you are about to release.
 3. **The real run** creates a **draft**. It is the only mode that logs in to
    the registry, pushes images, or touches releases, and the two jobs that can
    do so are unreachable from any other trigger. The push runs only after the
-   wheel, the sdist, the client build and both image builds have already
+   wheel, the sdist and both image builds have already
    succeeded, so a release tag is never pushed for a commit whose package or
-   client had failed:
+   images had failed:
 
    ```bash
    NEXT_VERSION=vX.Y.Z
@@ -198,8 +205,8 @@ NEXT_VERSION=vX.Y.Z
 reviewed_main_commit=<reviewed-main-commit-sha>
 set -euo pipefail
 
-# 1. Exactly the five authorized assets, and no more.
-test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" -eq 5
+# 1. Exactly the four authorized assets, and no more.
+test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" -eq 4
 gh release view "$NEXT_VERSION" --json assets --jq '.assets[].name' | sort
 
 # 2. The bytes on the release page are the bytes the checksums describe.
@@ -397,8 +404,6 @@ generated notes before publishing rather than assuming this page.
 - Packaging: build, `twine check --strict`,
   `scripts/check_package_artifacts.py`, and a clean-environment
   install/import/CLI smoke of the exact wheel and sdist attached here
-- Desktop client: its own suite, the one-folder build, and the built
-  executable's `--self-check` start-up rehearsal
 
 ### Privacy And LLM
 
@@ -410,17 +415,11 @@ in release materials.
 
 ### Assets
 
-This release attaches five files, all built from the exact release commit: one
-wheel, one sdist, the Windows desktop client as
-`WuwaTerm-<client version>-windows-x64.zip`, a `SHA256SUMS` covering those
-three, and `release-manifest.json` recording the source commit, the versions,
-the image digests and the game-data pin. Verify downloads with
-`sha256sum -c SHA256SUMS`.
-
-The Windows desktop client in the zip is **UNSIGNED**: no code signing is
-performed on it at any point. SmartScreen will warn about an unrecognised
-publisher; continue through More info and then Run anyway only after checking
-the download against `SHA256SUMS`.
+This backend release attaches four files from the exact release commit:
+a wheel, an sdist, `SHA256SUMS` covering those two files, and
+`release-manifest.json` recording the source commit, version, image digests
+and game-data pin. Verify downloads with `sha256sum -c SHA256SUMS`.
+Windows packages are released separately.
 
 Container images built from the same commit, with their digests:
 `ghcr.io/my-denia/wuwaterm` (runtime, which serves the Telegram bot and the
@@ -433,8 +432,7 @@ before relying on it; if it is denied, build from source.
 
 ### Distribution Boundary
 
-This release distributes source code, a Python package, an unsigned Windows
-client build, and container images. It does not distribute generated SQLite
+This release distributes source code, a Python package and container images. It does not distribute generated SQLite
 databases, generated TextMap files, or Wuthering Waves game data.
 
 ### Known Limitations
@@ -450,5 +448,4 @@ databases, generated TextMap files, or Wuthering Waves game data.
   endpoint.
 - The HTTP API serves operator-registered devices; there is no public
   registration.
-- The Windows client is unsigned and there is no installer.
 ```

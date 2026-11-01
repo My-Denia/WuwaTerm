@@ -1,0 +1,158 @@
+name: Windows client release
+on:
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: Full main commit SHA to build
+        required: true
+        type: string
+      dry_run:
+        description: Build artifacts without creating a draft
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - .github/workflows/client-release.yml
+      - client/**
+permissions:
+  contents: read
+concurrency:
+  group: client-release-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || github.ref }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.source.outputs.source_commit }}
+      client_version: ${{ steps.source.outputs.client_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Validate source and client version
+        id: source
+        env:
+          TARGET: ${{ inputs.target_commit }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
+            git merge-base --is-ancestor "$TARGET" origin/main
+          fi
+          version=$(python -c 'import tomllib; print(tomllib.load(open("client/pyproject.toml", "rb"))["project"]["version"])')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "client_version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  client:
+    name: desktop client zip (windows)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # build.ps1 refuses to fall back to a system interpreter, so the same
+      # client-local virtual environment an operator would create is created
+      # here and the build runs through the same script.
+      - run: python -m venv client/.venv
+      - run: client/.venv/Scripts/python.exe -m pip install -U pip
+      - run: client/.venv/Scripts/python.exe -m pip install -e "client[dev,build]"
+      - name: Client test suite
+        working-directory: client
+        run: .venv/Scripts/python.exe -m pytest
+      - name: One-folder PyInstaller build
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File client/build.ps1
+      - name: The built artifact passes its own start-up self-check
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Start-Process -Wait -PassThru, not the call operator: WuwaTerm.exe
+          # is built for the WINDOWS subsystem (console=False in the spec), so
+          # PowerShell does not wait for it and leaves $LASTEXITCODE unset. The
+          # first version of this step used `&` and failed with an empty exit
+          # code on an artifact that had just passed the identical check inside
+          # build.ps1 - which is how build.ps1 already does it, and why.
+          $check = Start-Process -FilePath "client/dist/WuwaTerm/WuwaTerm.exe" `
+            -ArgumentList "--self-check" -Wait -PassThru
+          if ($check.ExitCode -ne 0) {
+            throw "the built artifact failed its start-up self-check (exit $($check.ExitCode))"
+          }
+          Write-Host "self-check exit code: $($check.ExitCode)"
+      - name: Package the one-folder build as the release zip
+        shell: pwsh
+        env:
+          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $folder = "client/dist/WuwaTerm"
+          $zip = "client/dist/WuwaTerm-${env:CLIENT_VERSION}-windows-x64.zip"
+          # build.ps1 may already produce this zip itself. Use the script's own
+          # output when it is there, and produce it here when it is not, so
+          # neither arrangement breaks this job.
+          if (Test-Path -LiteralPath $zip) {
+            Write-Host "using the zip build.ps1 produced: $zip"
+          } else {
+            Write-Host "build.ps1 produced no zip; packaging $folder"
+            Compress-Archive -Path $folder -DestinationPath $zip
+          }
+          $item = Get-Item -LiteralPath $zip
+          if ($item.Length -le 0) {
+            throw "the release zip is empty: $zip"
+          }
+          Write-Host "release zip: $($item.FullName) ($($item.Length) bytes)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: client-zip
+          path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
+          if-no-files-found: error
+
+  draft:
+    needs: [preflight, client]
+    if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: client-zip
+          path: staging
+      - name: Create independent client draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.preflight.outputs.client_version }}
+          SOURCE: ${{ needs.preflight.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          tag="client-v$VERSION"
+          status=0
+          gh api "repos/$GH_REPO/git/ref/tags/$tag" > /dev/null 2> tag-error || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "Client tag already exists" >&2
+            exit 1
+          fi
+          # Only a confirmed missing tag permits a new draft.
+          grep -q 'HTTP 404' tag-error
+          cd staging
+          sha256sum *.zip > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          printf '{"client_version":"%s","source_commit":"%s"}\n' "$VERSION" "$SOURCE" > client-manifest.json
+          printf 'Windows client %s. Source: %s.\n\nUNSIGNED: Windows SmartScreen may warn. Verify SHA256SUMS before use.\nRequires WuwaTerm API >=0.3.0 with schema v1. Client development remains paused.\n' "$VERSION" "$SOURCE" > ../notes.md
+          gh release create "$tag" --draft --latest=false --target "$SOURCE" \
+            --title "Windows client $VERSION" --notes-file ../notes.md \
+            *.zip SHA256SUMS client-manifest.json
+          test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true
+          test "$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)" = "$SOURCE"
+          test "$(gh release view "$tag" --json assets --jq '.assets | length')" -eq 3
