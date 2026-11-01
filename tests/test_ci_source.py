@@ -202,3 +202,53 @@ def test_missing_diff_base_forces_windows(tmp_path):
     )
     assert unknown_base.returncode == 0
     assert unknown_base.stdout.strip() == "true"
+
+
+def _source_repo(path):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=path, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    path.mkdir()
+    git("init", "-q", "-b", "main")
+    (path / "client").mkdir()
+    (path / "client/pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
+    git("add", ".")
+    git("commit", "-qm", "main")
+    main = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", main)
+    git("remote", "add", "origin", str(path))
+    git("checkout", "-qb", "candidate")
+    git("commit", "-q", "--allow-empty", "-m", "candidate")
+    return main, git("rev-parse", "HEAD")
+
+
+def _guard_script(workflow, step_name):
+    text = (ROOT / ".github/workflows" / workflow).read_text()
+    steps = yaml.load(text, Loader=yaml.BaseLoader)["jobs"]["preflight"]["steps"]
+    index = next(i for i, step in enumerate(steps) if step.get("name") == step_name)
+    assert all("run" not in step for step in steps[:index]), "source code may run before the guard"
+    return steps[index]["run"]
+
+
+@pytest.mark.parametrize(("workflow", "step_name"), [
+    ("release.yml", "Runs on main accept only main source"),
+    ("client-release.yml", "Validate source and client version"),
+])
+@pytest.mark.parametrize(("ref", "target", "allowed"), [
+    ("refs/heads/main", "main", True),
+    ("refs/heads/main", "candidate", False),
+    ("refs/heads/candidate", "candidate", True),
+])
+def test_main_runs_execute_only_main_source(tmp_path, workflow, step_name, ref, target, allowed):
+    repo = tmp_path / "repo"
+    main, candidate = _source_repo(repo)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", "-c", _guard_script(workflow, step_name)], cwd=repo, capture_output=True, text=True,
+        env={**os.environ, "TARGET": main if target == "main" else candidate, "DRY_RUN": "true",
+             "CONTROL_REF": ref, "GITHUB_OUTPUT": str(output)},
+    )
+    assert (result.returncode == 0) == allowed, result.stderr

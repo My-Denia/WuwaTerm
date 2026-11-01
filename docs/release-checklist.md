@@ -162,8 +162,10 @@ CI job to pass.
    release target and is what goes into `target_commit`.
 2. **Dry run first.** Dispatch the release workflow with `dry_run=true`. A dry
    run builds every asset and both images, without a registry login, image push,
-   or release. Read its `release-assets` artifact before the real run. A
-   candidate branch can be used for a dry run without a main CI receipt.
+   or release. Read its `release-assets` artifact before the real run. A run
+   dispatched on `main` accepts only a target already on `main`, dry runs
+   included. To dry-run a candidate commit, dispatch from its branch with
+   `--ref`; that needs no main CI receipt.
 3. **Record the registry baseline** using the block below before dispatch.
 4. **The real run** creates a **draft**. It is the only mode that logs in to
    the registry, pushes images, or touches releases, and the two jobs that can

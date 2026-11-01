@@ -45,6 +45,10 @@ jobs:
           [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
           if [ "$DRY_RUN" = false ]; then
             test "$CONTROL_REF" = refs/heads/main
+          fi
+          # A run on main holds the default-branch cache scope, so it may execute
+          # only code already on main. Candidate branches dry-run from their own ref.
+          if [ "$CONTROL_REF" = refs/heads/main ]; then
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$TARGET" origin/main
           fi

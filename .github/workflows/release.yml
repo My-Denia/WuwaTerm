@@ -69,6 +69,19 @@ jobs:
         with:
           ref: ${{ inputs.target_commit }}
           fetch-depth: 0
+      # A run on main holds the default-branch cache scope, so it may execute
+      # only code already on main. Candidate branches dry-run from their own ref.
+      - name: Runs on main accept only main source
+        env:
+          TARGET: ${{ inputs.target_commit }}
+          CONTROL_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$CONTROL_REF" = refs/heads/main ]; then
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            git merge-base --is-ancestor "$TARGET" origin/main
+          fi
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
