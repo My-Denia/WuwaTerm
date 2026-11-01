@@ -17,6 +17,9 @@ commits and public logs.
 
 ## Anonymous Public Beta Site
 
+The browser and proxy are maintained in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
+Its [privacy guide](https://github.com/My-Denia/WuwaTerm-Web/blob/main/docs/privacy-and-llm.md) records Web-specific behavior and limitations.
+
 The no-account public beta is
 <https://wuwaterm.denia-official.chatgpt.site>. Its browser sends terms and
 sentences only to same-origin `/api/*`; the Hosted server-side proxy forwards

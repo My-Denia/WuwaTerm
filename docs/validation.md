@@ -24,18 +24,20 @@ and a gate added to one of them was invisible in the others.
 It is **not** the whole pull request. CI also runs the uv lock-drift check, the
 wheel and sdist build with its packaging audit and clean-venv install smoke, the
 Windows desktop-client build, the Docker runtime/builder boundary job, and the
-`site` job under `site/` — five jobs this command does not contain, needing
+cross-repository `web-contract` job — five jobs this command does not contain, needing
 `uv`, a build, a Windows runner, Docker, and Node respectively. If a change
-touches the lock file, the packaging metadata, `client/`, `site/` or
+touches the lock file, the packaging metadata, `client/`, the API/Web contract or
 `deploy/`, a green run here is necessary and not sufficient; the job list is
 in [the gate table below](#gates-for-the-http-api-and-the-desktop-client)
 and in `.github/workflows/ci.yml`.
 
-Two further workflows run on a pull request, but only when it touches what they
+Three further workflows run on a pull request, but only when it touches what they
 cover. `.github/workflows/release.yml` runs in dry-run mode when the pull
-request changes that workflow, `deploy/**`, `client/**` or `pyproject.toml`: it
-builds the wheel, the sdist, the Windows client zip, both container images, the
-checksums and the release manifest, and publishes nothing.
+request changes that workflow, `deploy/**` or `pyproject.toml`: it builds the
+wheel, sdist, both container images, checksums and release manifest, and publishes
+nothing. `.github/workflows/client-release.yml` independently builds and checks
+the Windows zip when its workflow or `client/**` changes; its draft job is skipped
+on pull requests.
 `.github/workflows/selfhost-smoke.yml` runs when the pull request changes
 `deploy/**` or [Self-Hosting](self-hosting.md): it follows that guide's
 container path end to end on a clean runner — image build, data refresh,
@@ -163,7 +165,7 @@ four-module import allowlist into `wuwaterm` (see
 | `client/build.ps1` | The one-folder PyInstaller artifact builds from the committed spec and passes its own `--self-check`, and the build leaves nothing untracked in the working tree. Not that two builds agree: there is no lock file for the client and no byte comparison, and the script says so | Same CI job; the artifact is uploaded there |
 | `tests/test_client_documentation_claims.py` | Documentation does not promise properties the client does not have. The ban on claiming that two builds produce the same bytes is repository-wide, and literally so: the scan covers every file `git ls-files` reports outside `tests/` — extensionless and unfamiliar-extension files included, so `deploy/Dockerfile`, `uv.lock`, `docs/api/openapi.json` and the env examples are in scope, and nothing merely present-but-untracked is — with the two denial sentences exempted by their text rather than by their file, while the build script's own guarantee and the README's account of cancellation are pinned where they live. A text gate, for defects that are sentences rather than code | The repository `pytest` run, beside the other text gates |
 | `tests/test_api_request_logging.py` | Every HTTP request leaves exactly one server-side **completion** record — on the authenticated path, on `401`, on a failure that never reaches a handler — carrying the same `request_id` the caller was given; and that no record the deployed process would write holds any of what the service itself knows: a credential, the device id behind an authenticated principal, or submitted text. A caller-supplied target is recorded escaped, bounded, and replaced entirely when it could be a credential. The adapter's other diagnostic lines are outside the one-per-request count and inside the privacy scan. Asserted against captured records rather than by reading the source, because a field added later is invisible to inspection | The repository `pytest` run |
-| `cd site && npm test && npm run build && npm run verify:no-client-secret` | The Sites proxy pins host, path, redirects, schema and secret non-reflection; the client bundle has no device token or `WUWATERM_*` names. Mocked upstream only; not a live VPS | CI `site` job (`site feasibility security`) |
+| `WUWATERM_WEB_ROOT=... python -m pytest -m cross_component tests/test_meta_site_contract.py`; Web `npm run test:contract` | Real API metadata through the pinned BFF plus category/reason/client-label compatibility; strict response projection retained | Backend CI `web-contract`; Web CI also tests a pinned backend |
 
 The client gates are split on purpose. Everything that can be checked by
 reading text runs in the main suite on Linux; only what genuinely needs Qt,

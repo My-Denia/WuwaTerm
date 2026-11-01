@@ -54,7 +54,7 @@ takes no details, and it carries a required acknowledgement that you have put
 none there. Everything about the finding waits for the private channel.
 
 A useful report says what an attacker gains, what access they need to start,
-which surface it goes through (public beta Site under `site/`, Telegram bot,
+which surface it goes through (public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), Telegram bot,
 HTTP API, private web layer, desktop client, or the data build), and the
 smallest sequence that shows it.
 
@@ -82,7 +82,7 @@ for you — the redaction is yours to do.
 In scope:
 
 - The code in this repository: the Telegram bot, the HTTP API under `/v1`, the
-  owner-private web presentation layer, the public beta Site under `site/`, the
+  owner-private web presentation layer, the public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), the
   desktop client under `client/`, the data-build scripts, and the packaging
   and deployment material under `deploy/`.
 - The deployment guidance this project publishes, when following it as written
@@ -143,7 +143,7 @@ it:
   it from the store afterwards.
 - The web presentation layer is off by default and is owner-private when on. It
   is not a public front end and turning it on does not make it one.
-- The public beta Site under `site/` is a separate Hosted proxy. It is not the
+- The public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) is a separate Hosted proxy. It is not the
   in-process web layer. Application code does not authenticate the visitor;
   the Worker holds a device token that can spend `/v1` quota. See
   [Public Beta Site](docs/sites.md).

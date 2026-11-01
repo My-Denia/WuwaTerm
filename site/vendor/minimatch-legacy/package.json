@@ -1,9 +1,0 @@
-{
-  "name": "@wuwaterm/minimatch-legacy",
-  "version": "1.0.0",
-  "private": true,
-  "type": "commonjs",
-  "main": "index.cjs",
-  "license": "MIT",
-  "dependencies": { "minimatch-modern": "npm:minimatch@11.0.3" }
-}

@@ -113,6 +113,8 @@ Every guide is listed in the [documentation index](docs/README.md).
 
 ## Under the hood
 
+Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, Bot, dictionary builder, deployment tools and Windows client.
+
 - **Python 3.11+** with python-telegram-bot (long polling) and FastAPI, over a SQLite dictionary that the serving containers mount read-only.
 - **Architecture rules that CI enforces**: the application layer imports no presentation code, and the API contract is drift-checked against a committed OpenAPI snapshot ([ADR 0009](docs/adr/0009-http-api-adapter.md)).
 - **Revocable device credentials** for the API, stored only as salted scrypt verifiers ([ADR 0010](docs/adr/0010-device-principal-authentication.md)).

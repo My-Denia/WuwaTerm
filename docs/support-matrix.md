@@ -10,7 +10,7 @@ an intention.
 | --- | --- |
 | Declared range | `requires-python >=3.11`, no upper bound (`pyproject.toml`) |
 | Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
-| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build, the Docker boundary job and the `site` job run separately ([Validation](validation.md)) |
+| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build, the Docker boundary job and the `web-contract` job run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
 | Published images from v0.4.0 onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |
 | Supported development platform | **Linux.** The suite is green there. |
@@ -72,15 +72,15 @@ it is off by default and has no entry in the published API document
 ([Web Presentation Layer](web-presentation-layer.md)).
 
 The anonymous public beta Site is also outside this contract: it is a separately
-hosted proxy with its own error envelope, checked by the CI `site` job, not by
+hosted proxy with its own error envelope, checked by the Web repository CI, not by
 the desktop client ([Public Beta Site](sites.md)).
 
 ## Public beta Site
 
 | | |
 | --- | --- |
-| Tree | `site/` — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.1.0 |
-| Tested in CI | job `site` (`site feasibility security`) on `ubuntu-latest` with Node 24: `npm ci`, the full and production-only npm audits, `npm test`, typecheck, lint, production build, `verify:no-client-secret`, the built-artifact suite (`test:built`), a Playwright Chromium install, and the browser suite against the emitted bundle (`WUWATERM_BROWSER_BUILT=1 npm run test:browser`) |
+| Tree | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.1.0 |
+| Tested in CI | Web repository job `web` on `ubuntu-latest` with Node 24: `npm ci`, the full and production-only npm audits, `npm test`, typecheck, lint, production build, `verify:no-client-secret`, the built-artifact suite (`test:built`), a Playwright Chromium install, and the browser suite against the emitted bundle (`WUWATERM_BROWSER_BUILT=1 npm run test:browser`) |
 | Public service status | Best-effort anonymous beta at <https://wuwaterm.denia-official.chatgpt.site>; no account and no SLA, fixed-availability promise or per-visitor fairness guarantee |
 | Not in `scripts/validate.py` | by design; the server matrix does not install Node |
 | Visitor authentication | **none in application code.** Crawler `noindex` is not an ACL |

@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Repository: move the public Web to [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), retaining immutable cross-repository metadata and label contracts. Python core, API, Bot, builder, VPS tools, private Web and Windows remain here. This source move does not deploy either service.
+
 - Site: pin `next` to 16.4.3 and override `undici` 7.30.1, `zod` 4.6.6, and `fast-uri` 3.1.9 so the site feasibility audit no longer fails on the newly published advisories. No toolchain downgrade.
 
 - Review: `review-v2` no longer certifies the resonator character `椿` inside the ordinary plant name `臭椿`. The same target-side compound supplement already excluded `香椿`; `椿加入队伍` and `与椿组队` stay recognized, and `椿树` stays excluded. This is not a general Chinese segmenter. The opt-in matcher hash changes with that supplement, so a stored context carrying the previous hash is stale by the existing freshness rule. `review-v1` and source/sentence locking are unchanged. Report comparison counts a constraint resolved only when the new check is `verified_constraint`, so this false certification is no longer a resolved comparison either.

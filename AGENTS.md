@@ -145,6 +145,16 @@ that work under the existing authorization.
 
 ## Learned Workspace Facts
 
+- 2026-11-01 source organization: public Web now lives in
+  `My-Denia/WuwaTerm-Web`; this repository no longer tracks `site/`.
+  References to the old `site/` tree in dated receipts below describe history.
+  `contracts/web-ref.txt` pins the external consumer for metadata and label
+  contract CI. Python core/API/Bot/builder/deploy, the private in-process Web,
+  and the paused Windows client remain here. Windows packaging now uses
+  `client-release.yml` independently of backend `release.yml`. Both repositories
+  use the existing Linear WuwaTerm Project. This is source organization, not
+  evidence of a new formal release or production deployment.
+
 - 2026-10-04/05 **PR #131 MERGED** (squash `e9fe6d527ca5ef540f348756c114e7868213a9b8`
   on `origin/main`, parent `592a03d`; branch `feat/site-review-deliverables`
   deleted local+remote, restore SHA `11de612`): site zh/en bilingual
