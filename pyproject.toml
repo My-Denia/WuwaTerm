@@ -54,7 +54,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-q --strict-config --strict-markers"
+addopts = "-q --strict-config --strict-markers -m 'not cross_component'"
+markers = ["cross_component: requires the Web checkout and Node.js"]
 
 [tool.ruff]
 # Ruff takes the target version from project.requires-python. Generated data,

@@ -7,9 +7,13 @@ bytes to ``proxyMetaRequest``.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from wuwaterm.application import service_metadata
 from wuwaterm.db import connect
@@ -24,7 +28,19 @@ from tests.test_api import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "site" / "tests" / "helpers" / "project-live-meta.mjs"
+WEB_ROOT = Path(os.environ.get("WUWATERM_WEB_ROOT", str(ROOT / "site"))).resolve()
+HELPER = WEB_ROOT / "tests" / "helpers" / "project-live-meta.mjs"
+pytestmark = pytest.mark.cross_component
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_web_contract_environment():
+    if shutil.which("node") is None:
+        pytest.fail("Cross-component contracts require Node.js 24 on PATH")
+    if not HELPER.is_file():
+        pytest.fail(f"Set WUWATERM_WEB_ROOT to the Web checkout containing {HELPER.name}")
+
+
 VERSION_KEYS = (
     "source_game_version",
     "source_resource_version",
