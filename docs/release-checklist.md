@@ -188,8 +188,9 @@ CI job to pass.
    SHA, its main control revision, and the required backend jobs. A backend
    release may proceed when the only failed job is Windows; a client release
    also requires Windows to pass. The latest run attempt must carry its own
-   receipt, so retry a failed CI run with Re-run all jobs: Re-run failed jobs
-   does not produce a new receipt and the release refuses that attempt. Main
+   receipt, so retry a Windows-only failure with Re-run all jobs: Re-run
+   failed jobs leaves that attempt without a receipt and the release refuses
+   it. Main
    pushes are found automatically. For an
    older source without a receipt, dispatch the current CI on main, wait for it
    to finish, and pass its run ID as `validation_run_id`:

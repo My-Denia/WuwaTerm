@@ -13,8 +13,7 @@ body:
         Two things to know before you write:
 
         - **This project has explicit non-goals.** Four product decisions are
-          settled and enforced by a gate, so a change that crosses one cannot be
-          merged: no callback-URL registration for Telegram, no inline-query
+          settled, so a change that crosses one will not be merged: no callback-URL registration for Telegram, no inline-query
           surface, no synonym layer over the dictionary, and no free-text
           listener beyond the single linked-channel one. See
           [CONTRIBUTING.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/CONTRIBUTING.md#non-goals).

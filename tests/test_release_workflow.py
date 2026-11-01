@@ -143,7 +143,12 @@ def _assert_ci_receipt_gate(workflow):
         line for line in step["run"].splitlines()
         if "scripts/verify_ci_source.py verify" in line
     ]
-    assert len(commands) == 2 and all('"$SOURCE_COMMIT"' in line for line in commands)
+    assert len(commands) == 2
+    assert all(line.split()[:3] == ["python", "scripts/verify_ci_source.py", "verify"]
+               and line.split()[3] == '"$SOURCE_COMMIT"'
+               and "||" not in line for line in commands)
+    assert step["env"]["SOURCE_COMMIT"] == "${{ steps.commit.outputs.source_commit }}"
+    assert "continue-on-error" not in jobs["preflight"]
     for job in ("push-images", "draft-release"):
         assert "preflight" in jobs[job]["needs"], job
 
@@ -152,7 +157,10 @@ def test_ci_receipt_gate_is_wired_before_every_write():
     _assert_ci_receipt_gate(_workflow_config())
 
 
-@pytest.mark.parametrize("mutation", ["removed", "always", "soft_fail", "push_need", "draft_need"])
+@pytest.mark.parametrize("mutation", [
+    "removed", "always", "soft_fail", "job_soft_fail", "or_true", "echo", "wrong_source",
+    "push_need", "draft_need",
+])
 def test_ci_receipt_gate_rejects_bypass(mutation):
     workflow = _workflow_config()
     jobs = workflow["jobs"]
@@ -167,6 +175,15 @@ def test_ci_receipt_gate_rejects_bypass(mutation):
         steps[index]["if"] = "always()"
     elif mutation == "soft_fail":
         steps[index]["continue-on-error"] = "true"
+    elif mutation == "job_soft_fail":
+        jobs["preflight"]["continue-on-error"] = "true"
+    elif mutation == "or_true":
+        steps[index]["run"] = steps[index]["run"].replace(
+            '--run-id "$VALIDATION_RUN_ID"', '--run-id "$VALIDATION_RUN_ID" || true')
+    elif mutation == "echo":
+        steps[index]["run"] = steps[index]["run"].replace("python scripts/", "echo python scripts/")
+    elif mutation == "wrong_source":
+        steps[index]["env"]["SOURCE_COMMIT"] = "${{ github.workflow_sha }}"
     else:
         job = "push-images" if mutation == "push_need" else "draft-release"
         jobs[job]["needs"].remove("preflight")

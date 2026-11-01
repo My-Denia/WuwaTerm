@@ -9,8 +9,7 @@ The service now exposes a versioned HTTP API behind device-principal
 authentication ([ADR 0009](0009-http-api-adapter.md),
 [ADR 0010](0010-device-principal-authentication.md)), and the owner uses a
 Windows desktop machine. An earlier client design reached the service through
-the operator's shell-access channel to the host; that design is revoked, and
-the repository now carries gates that keep it from returning (see
+the operator's shell-access channel to the host; that design is revoked (see
 [ADR 0012](0012-client-transport-selection.md) for how the transport was
 selected). This record documents the desktop client as implemented under
 `client/`: its stack, its plain-text contract, and the transport rules the
@@ -100,10 +99,10 @@ config file, a future caller).
   and no code path that changes it. `client/tests/test_transport_security.py`
   pins this three ways:
   `test_certificate_verification_is_on_for_the_client_it_actually_builds`
-  inspects the SSL context handed to the connection pool
+  records the SSL context `httpx` creates
   (`CERT_REQUIRED`, `check_hostname`),
   `test_the_client_asks_for_verification_explicitly` records the constructor
-  arguments, and `test_the_client_exposes_no_way_to_turn_verification_off`
+  arguments, and `test_the_client_exposes_no_public_verification_toggle`
   asserts no `verify`/`insecure`-shaped parameter exists. The private
   `_test_transport` seam is a private test hook, not a security boundary;
   production clients always verify (`client/tests/test_transport_security.py`).
@@ -246,9 +245,9 @@ path. The wording scanners that once policed this were retired in 2026-11;
 - Positive: the whole client suite runs offline - mocked transport, fake
   keyring, no server - and the transport policy is enforced by constructors
   and guards, not by documentation.
-- Positive: the only secret never touches disk in plain form, and the
-  repository gates make both regressions (a shell-channel client design, a
-  verification toggle) a failing pull request instead of a review catch.
+- Positive: the only secret never touches disk in plain form, and client
+  tests fail on a verification toggle. A shell-channel client design is caught
+  in review.
 - Negative: no code signing means SmartScreen friction on first run, and
   hand distribution is the only channel.
 - Negative: a PySide6 one-folder artifact is large; accepted for an
@@ -266,8 +265,7 @@ path. The wording scanners that once policed this were retired in 2026-11;
 - `client/src/wuwaterm_client/config.py` (`endpoint_is_confidential`,
   `usable_base_url`, `_is_loopback`, `_sane_timeout`)
 - `client/src/wuwaterm_client/api.py` (`ApiClient`,
-  `_guard_request_target`, `_require_verifying_transport`,
-  `_require_confidential_endpoint`)
+  `_guard_request_target`, `_require_confidential_endpoint`)
 - `client/src/wuwaterm_client/credentials.py`, `errors.py`, `strings.py`,
   `app.py`, `ui/`
 - `client/tests/test_transport_security.py`, `test_api.py`,

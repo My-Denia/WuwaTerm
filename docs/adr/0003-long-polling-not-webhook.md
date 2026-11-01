@@ -25,8 +25,8 @@ Do not implement webhook delivery or document webhook HA.
 - Positive: matches single active consumer assumption (one token, one process).
 - Negative: two concurrent pollers on the same token are unsafe (update races);
   multi-instance is unsupported rather than “scale out with sticky webhooks”.
-- Enforcement: `tests/test_bot.py` pins the registered handlers. The former
-  wording scanner `scripts/check_non_goals.py` was retired in 2026-11.
+- Enforcement: code review. The former wording scanner
+  `scripts/check_non_goals.py` was retired in 2026-11.
 
 ## Evidence
 
