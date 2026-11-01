@@ -120,8 +120,7 @@ These are not things this project can help with:
 - **Operating somebody's deployment for them.** Nobody here has access to your
   host, your tokens or your logs, and no one will ask for them. Help looks like
   a documented answer, not a remote hand.
-- **Requests that cross a non-goal.** Four product decisions are settled and
-  enforced by a gate; see [Non-Goals](CONTRIBUTING.md#non-goals).
+- **Requests that cross a non-goal.** Four product decisions are settled; see [Non-Goals](CONTRIBUTING.md#non-goals).
 
 ## If You Want To Help
 

@@ -36,7 +36,7 @@ Presentation modules:
 - Negative: presentation modules are large and hold orchestration that could
   eventually move deeper; accepted concentration for a single-operator bot.
 - Constraint: no webhook server, inline mode, or free-text DM listener as
-  alternate UIs (`scripts/check_non_goals.py`).
+  alternate UIs (`tests/test_bot.py` pins the registered handlers).
 
 ## Evidence
 

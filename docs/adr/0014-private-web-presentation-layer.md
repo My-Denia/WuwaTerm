@@ -10,8 +10,7 @@
      mounts it only when the switch is on, and
      `src/wuwaterm_api/settings.py` defaults that switch off
      (`DEFAULT_WEB_ENABLED = False`). Its behaviour is covered by
-     `tests/test_api_web.py`, and the whole package is inside the scan of
-     `tests/test_client_transport_policy.py` under that gate's strict rule.
+     `tests/test_api_web.py`.
   2. **It has been deployed and in owner use since 2026-08-16.** The read-only
      production readback of 2026-08-19 found the edge route for the mount live
      and configured, the API answering on loopback only, and the API's own

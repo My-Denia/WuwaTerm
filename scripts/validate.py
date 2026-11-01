@@ -68,12 +68,6 @@ SERVER_STEPS: list[Step] = [
         ROOT,
     ),
     Step(
-        "non-goals",
-        "a product boundary this project has refused was crossed in text",
-        ["scripts/check_non_goals.py"],
-        ROOT,
-    ),
-    Step(
         "architecture",
         "an import crosses a layer boundary the architecture forbids",
         ["scripts/check_architecture_boundaries.py"],

@@ -2,10 +2,8 @@
 
 Two rules shape this module.
 
-The first is that no display text is written here. tests/test_ui_strings_source
-statically rejects a literal handed to a text-setting call anywhere under ui/,
-so a component either receives its text from the caller or reads it from
-``strings``. What a component owns is SHAPE and STATE, never wording.
+Components receive their display text from the caller or read it from
+``strings``. They own shape and state rather than wording.
 
 The second is that a Qt widget does not restyle itself when a dynamic
 property changes. ``setProperty`` alone leaves the old style applied; the

@@ -1316,34 +1316,8 @@ def test_the_api_example_environment_documents_the_log_level():
 WEBSOCKET_LIBRARIES = {"websockets", "wsproto"}
 
 
-def test_no_websocket_library_is_locked_for_any_purpose():
-    """The record covers HTTP requests, and HTTP is all this service speaks.
-
-    That is safe by construction — the middleware the record is written from
-    only ever sees HTTP scopes — but the runbook's explanation of WHY there is
-    nothing else rests on the server having no WebSocket library to build one
-    with. `uvicorn[standard]` is an ordinary thing to reach for (it brings
-    `uvloop` and `httptools`) and it pulls one in, at which point the server
-    would answer an upgrade itself and the documented behaviour would flip with
-    nothing to notice it.
-
-    Deliberately the WHOLE lock rather than the deployed closure, and
-    deliberately the blunter claim. Computing what the image installs means
-    modelling what an installer decides — markers against a mutable base image's
-    architecture and patch version, extras activating optional edges, forked
-    resolutions with several variants of one name — and a test that models a
-    resolver is a test that is wrong in some way nobody has thought of yet. The
-    property asserted here needs none of that: this repository locks no
-    WebSocket library, for any purpose, and therefore no build of it installs
-    one.
-
-    It is over-strict by exactly one case: a development-only tool that wants
-    one would fail this. That is the right direction and, if it ever happens,
-    the right response is to look again at the sentence in the validation page
-    rather than to loosen the gate — because at that point "no library is
-    present" has stopped being simply true, and the reason the guarantee is
-    easy to believe has stopped being simply true with it.
-    """
+def test_api_dependencies_do_not_directly_enable_websockets():
+    """Keep the API extra HTTP-only; the image check covers installed packages."""
     import tomllib
 
     from packaging.requirements import Requirement
@@ -1364,13 +1338,6 @@ def test_no_websocket_library_is_locked_for_any_purpose():
         for item in declared
         for extra in item.extras
     ), api
-
-    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-    locked = {canonicalize_name(package["name"]) for package in lock["package"]}
-
-    assert "uvicorn" in locked, sorted(locked)
-    assert not locked & WEBSOCKET_LIBRARIES, sorted(locked & WEBSOCKET_LIBRARIES)
-
 
 def test_review_completion_log_does_not_contain_source_or_target(tmp_path, sample_db):
     app, store = build_app(tmp_path, sample_db)

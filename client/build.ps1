@@ -79,8 +79,7 @@ if ($LASTEXITCODE -ne 0) {
 # program reports about itself. client/tests/test_api_version_compat.py pins
 # that constant against `version` in client/pyproject.toml.
 #
-# The name is exact and load-bearing: the release workflow uses this file when
-# build.ps1 produced it and builds the same name itself when it did not.
+# The name is exact and load-bearing: the release workflow uploads this zip.
 $Version = (& $VenvPython -c "import wuwaterm_client; print(wuwaterm_client.__version__)")
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Could not read wuwaterm_client.__version__ from $VenvPython."

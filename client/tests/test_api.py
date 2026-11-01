@@ -56,6 +56,30 @@ def test_bearer_header_sent_exactly() -> None:
     assert captured["authorization"] == "Bearer wtd1.abc123.supersecret"
 
 
+@pytest.mark.parametrize("target", [
+    "https://other.example.com/stolen",
+    "https://test/redirected",
+])
+def test_redirects_are_not_followed_with_the_device_token(target: str) -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("authorization")))
+        return httpx.Response(307, headers={"location": target})
+
+    client = _client(handler, token_provider=lambda: "wtd1.example.secret")
+
+    async def scenario() -> None:
+        try:
+            response = await client._request("GET", "/v1/meta")
+            assert response.status_code == 307
+        finally:
+            await client.aclose()
+
+    asyncio.run(scenario())
+    assert seen == [("https://test/v1/meta", "Bearer wtd1.example.secret")]
+
+
 def test_to_param_sent_for_forced_direction() -> None:
     captured: dict[str, object] = {}
 

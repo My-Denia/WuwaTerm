@@ -31,8 +31,7 @@ LLM (`bot._fuzzy_dictionary_answer`).
   (`docs/privacy-and-llm.md`).
 - Negative: dictionary coverage and build quality bound result quality;
   missing terms still require LLM or fail closed.
-- Constraint: no secondary name-map layer or inline-mode glossary rewrite
-  (`scripts/check_non_goals.py`).
+- Constraint: no secondary name-map layer or inline-mode glossary rewrite.
 
 ## Evidence
 

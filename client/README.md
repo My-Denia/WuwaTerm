@@ -186,10 +186,6 @@ Get-FileHash .\WuwaTerm-0.2.0-windows-x64.zip -Algorithm SHA256
 端口由部署方配置(`WUWATERM_API_PORT`,默认 8788),这是在和本机服务通信时;
 对于已发布的端点,地址以运营方给你的为准,通常就是一个主机名。
 
-<!-- operations-note: the single place this client's documentation is allowed
-     to name the host administration channel, so that nobody re-introduces it
-     as a way for the application to reach the service. Pinned verbatim by
-     tests/test_client_transport_policy.py. -->
 > Operations note: SSH is how an operator administers the server host. It is
 > not part of this client's path to the service and never a requirement for
 > using it — the application starts no such process, manages no keys, and
@@ -246,12 +242,8 @@ Get-FileHash .\WuwaTerm-0.2.0-windows-x64.zip -Algorithm SHA256
   退回请求已经承诺出去的任何开销。答案被读都不读地丢弃,请求 ID 也随之丢弃,所以这样的一次
   请求事后无法拿去向运营方查询。再按一次翻译是一次新的请求,而到达模型的那一次会再付一次钱。
 
-上面这一段的语义在英文版本里被仓库的门逐字钉住,原文一并保留在这里,以免中文改写在将来
-悄悄偏离它:
+以下英文说明保留相同的取消语义:
 
-<!-- 下面每一句都必须整句留在同一行:tests/test_client_documentation_claims.py
-     把文本的空白折叠后逐句查找,而 markdown 的引用符会留在折叠结果里,
-     一句被折行就会在中间多出一个 ">" 而找不到。 -->
 > **Cancellation stops the waiting, not the work.**
 > While the request is still being handed over, the service does not yet have a whole request to act on, so nothing is translated and nothing is spent.
 > Once it does have the whole request, Cancel no longer reaches the service: it finishes the request and records it as an ordinary completed one.

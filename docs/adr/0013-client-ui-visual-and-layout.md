@@ -130,9 +130,7 @@ view 的构造、信号、asyncio 任务字段不动,只换父容器与切换控
 - 设计方案全文与线框:`docs/client-ui-redesign.md`
 - 现状:`client/src/wuwaterm_client/ui/`(6 文件)、`strings.py`、`errors.py`、
   `app.py`
-- 门:`client/tests/test_ui_strings_source.py`、`tests/test_client_transport_policy.py`、
-  `tests/test_client_documentation_claims.py`、`scripts/check_non_goals.py`、
-  `.github/workflows/ci.yml`(client job)
+- 门:`client/tests/`、`.github/workflows/windows-client.yml`
 - 取消语义既有事实:`client/src/wuwaterm_client/api.py`(`_request` 的
   `CancelledError` 分支)、`client/README.md`(取消语义英文钉死句)
 - Qt 能力事实:样式表参考文档(无变量机制、可定制控件清单)、`QStyleHints`

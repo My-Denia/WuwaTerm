@@ -1,34 +1,10 @@
-"""What the release workflow promises, and what the checklist says it does.
-
-`docs/release-checklist.md` describes a release the maintainer never assembles
-by hand any more: `.github/workflows/release.yml` builds every asset, writes the
-manifest and composes the release notes. Two documents describing one mechanism
-is exactly the shape that drifts - the checklist is read at release time, the
-workflow runs at release time, and nothing else compares them.
-
-So the properties that would be expensive to discover at release time are
-pinned here:
-
-* the note template in the checklist has the SAME section headings, in the same
-  order, as the notes the workflow actually writes. The prose under them is
-  deliberately NOT pinned: making every wording change a two-file edit buys
-  nothing, and the reason to read the generated notes before publishing does
-  not go away.
-* publishing stays a human step - no tag trigger, no `--draft=false` anywhere
-  in the workflow.
-* the write permissions stay where the design put them.
-* the client zip is named the same thing by the build script, the workflow, the
-  client's own guide and the support matrix. That name is a cross-file contract
-  with four holders and no other reader.
-
-Everything here is a TEXT check on purpose. The workflow is YAML, but PyYAML is
-not a dependency of this project and adding one so a test can read a file it
-could read as text would be the wrong trade. The greps below are anchored
-tightly enough to say what they mean.
-"""
+"""Release guard, artifact, registry, and checklist behavior tests."""
 
 from __future__ import annotations
 
+import ast
+import copy
+import itertools
 import json
 import os
 import re
@@ -37,10 +13,10 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
-RECOVERY = ROOT / ".github" / "workflows" / "promote-v060-recovery.yml"
 PROMOTION = ROOT / "scripts" / "promote_release_images.sh"
 CHECKLIST = ROOT / "docs" / "release-checklist.md"
 
@@ -60,30 +36,8 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def _code_lines(text: str) -> list[str]:
-    """Lines that DO something, with comment-only lines dropped.
-
-    A permission named in a comment explaining where permissions live must not
-    be counted as a permission being granted; the first version of this file
-    counted both and failed on its own explanatory comment.
-    """
-    return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
-
-
-def _trigger_keys(text: str) -> list[str]:
-    """The top-level keys of the workflow's `on:` block."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.rstrip() == "on:")
-    keys = []
-    for line in lines[start + 1 :]:
-        if line.strip() == "" or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith(" "):  # back to column 0: the block ended
-            break
-        match = re.match(r"^  ([A-Za-z_]+):", line)
-        if match:
-            keys.append(match.group(1))
-    return keys
+def _workflow_config(text=None):
+    return yaml.load(text if text is not None else _workflow_text(), Loader=yaml.BaseLoader)
 
 
 def _template_block() -> str:
@@ -97,92 +51,206 @@ def _template_block() -> str:
     return blocks[0]
 
 
-def test_release_workflow_exists_and_has_no_tag_trigger():
-    # Dispatch builds the draft; pull_request is always a dry run; release
-    # published only retags recorded GHCR digests. A push or tag trigger
-    # would still make publication a side effect of moving a ref.
-    assert _trigger_keys(_workflow_text()) == [
-        "workflow_dispatch",
-        "pull_request",
-        "release",
-    ]
-    assert re.search(
-        r"^  release:\n    types:\n      - published\s*$",
-        _workflow_text(),
-        re.MULTILINE,
+def _assert_release_triggers(workflow):
+    triggers = workflow["on"]
+    assert set(triggers) == {"workflow_dispatch", "release"}
+    assert triggers["release"]["types"] == ["published"]
+
+
+def _condition_value(condition, context):
+    expression = condition.strip().removeprefix("${{").removesuffix("}}").strip()
+    for source, target in {
+        "github.event.release.tag_name": "tag", "github.event.action": "action",
+        "github.event_name": "event", "needs.preflight.outputs.dry_run": "dry",
+        "startsWith": "starts_with",
+    }.items():
+        expression = expression.replace(source, target)
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    expression = re.sub(r"\btrue\b", "True", expression, flags=re.IGNORECASE)
+    expression = re.sub(r"\bfalse\b(?!')", "False", expression, flags=re.IGNORECASE)
+    tree = ast.parse(expression, mode="eval")
+
+    def read(node):
+        if isinstance(node, ast.Expression):
+            return read(node.body)
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return context[node.id]
+        if isinstance(node, ast.BoolOp):
+            values = [bool(read(item)) for item in node.values]
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            left, right = read(node.left), read(node.comparators[0])
+            if isinstance(node.ops[0], ast.Eq):
+                return left == right
+            if isinstance(node.ops[0], ast.NotEq):
+                return left != right
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "starts_with":
+            return str(read(node.args[0])).startswith(read(node.args[1]))
+        raise AssertionError(f"Unsupported condition: {condition}")
+
+    return bool(read(tree))
+
+
+def _write_scopes(permissions):
+    if isinstance(permissions, str):
+        assert permissions in {"read-all", "write-all"}
+        return {"*"} if permissions == "write-all" else set()
+    assert isinstance(permissions, dict)
+    assert all(value in {"read", "write", "none"} for value in permissions.values())
+    return {scope for scope, value in permissions.items() if value == "write"}
+
+
+def _assert_write_guards(workflow):
+    assert "permissions" in workflow
+    assert not _write_scopes(workflow["permissions"]), "workflow default grants write"
+    expected = {
+        "push-images": {"packages"},
+        "draft-release": {"contents"},
+        "promote-images": {"packages"},
+    }
+    jobs = workflow["jobs"]
+    for name, job in jobs.items():
+        scopes = _write_scopes(job["permissions"]) if "permissions" in job else set()
+        assert scopes == expected.get(name, set()), f"{name}: unexpected write permissions {scopes}"
+    assert expected.keys() <= jobs.keys()
+    for job in expected:
+        condition = jobs[job]["if"]
+        for event, dry, action, tag in itertools.product(
+            ("workflow_dispatch", "pull_request", "push", "release", "schedule"),
+            ("true", "false"), ("published", "draft"), ("v1.0.0", "other"),
+        ):
+            allowed = _condition_value(condition, dict(event=event, dry=dry, action=action, tag=tag))
+            if allowed:
+                if job == "promote-images":
+                    assert event == "release" and action == "published" and tag.startswith("v"), job
+                else:
+                    assert event == "workflow_dispatch" and dry == "false", job
+        valid = dict(event="release", dry="true", action="published", tag="v1.0.0") if job == "promote-images" else dict(event="workflow_dispatch", dry="false", action="draft", tag="other")
+        assert _condition_value(condition, valid), job
+
+
+def _assert_ci_receipt_gate(workflow):
+    jobs = workflow["jobs"]
+    step = next(
+        step for step in jobs["preflight"]["steps"]
+        if step.get("name") == "Verify successful CI for the actual source"
     )
+    assert step["if"] == "steps.mode.outputs.dry_run == 'false'"
+    assert "continue-on-error" not in step
+    commands = [
+        line for line in step["run"].splitlines()
+        if "scripts/verify_ci_source.py verify" in line
+    ]
+    assert len(commands) == 2 and all('"$SOURCE_COMMIT"' in line for line in commands)
+    for job in ("push-images", "draft-release"):
+        assert "preflight" in jobs[job]["needs"], job
+
+
+def test_ci_receipt_gate_is_wired_before_every_write():
+    _assert_ci_receipt_gate(_workflow_config())
+
+
+@pytest.mark.parametrize("mutation", ["removed", "always", "soft_fail", "push_need", "draft_need"])
+def test_ci_receipt_gate_rejects_bypass(mutation):
+    workflow = _workflow_config()
+    jobs = workflow["jobs"]
+    steps = jobs["preflight"]["steps"]
+    index = next(
+        i for i, step in enumerate(steps)
+        if step.get("name") == "Verify successful CI for the actual source"
+    )
+    if mutation == "removed":
+        del steps[index]
+    elif mutation == "always":
+        steps[index]["if"] = "always()"
+    elif mutation == "soft_fail":
+        steps[index]["continue-on-error"] = "true"
+    else:
+        job = "push-images" if mutation == "push_need" else "draft-release"
+        jobs[job]["needs"].remove("preflight")
+    with pytest.raises((AssertionError, StopIteration)):
+        _assert_ci_receipt_gate(workflow)
+
+
+def _publishing_lines(text):
+    return [
+        line for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+        and ("--draft=false" in line or "gh release edit" in line)
+    ]
 
 
 def test_release_workflow_never_publishes():
+    assert _publishing_lines(_workflow_text()) == []
+
+
+def test_publish_guard_rejects_an_added_publish_step():
+    assert _publishing_lines('      - run: gh release edit "$TAG" --draft=false\n')
+
+
+def test_release_triggers_accept_equivalent_yaml_list():
     text = _workflow_text()
-    executable = [
-        line
-        for line in text.splitlines()
-        if "--draft=false" in line and not line.lstrip().startswith("#")
-    ]
-    assert executable == [], (
-        "the workflow must never publish a release; publication is "
-        f"`gh release edit --draft=false`, run by a person: {executable}"
-    )
+    _assert_release_triggers(_workflow_config(text))
+    equivalent = text.replace("types:\n      - published", "types: [published]")
+    assert equivalent != text
+    _assert_release_triggers(_workflow_config(equivalent))
 
 
-def test_release_workflow_keeps_write_permissions_where_the_design_put_them():
-    text = _workflow_text()
-
-    assert re.search(r"^permissions:\n  contents: read\n", text, re.MULTILINE), (
-        "the workflow default must be read-only"
-    )
-    # Two package writes: draft-time sha push, and post-publish digest retag.
-    # One draft job may write releases. More than that is a permission spread.
-    code = _code_lines(text)
-    assert sum("packages: write" in line for line in code) == 2
-    assert sum("contents: write" in line for line in code) == 1
+@pytest.mark.parametrize("job", ["push-images", "draft-release", "promote-images"])
+def test_write_guards_reject_or_true(job):
+    workflow = _workflow_config()
+    _assert_write_guards(workflow)
+    altered = copy.deepcopy(workflow)
+    altered["jobs"][job]["if"] += " || true"
+    with pytest.raises(AssertionError):
+        _assert_write_guards(altered)
 
 
-def test_no_write_scope_is_reachable_from_a_pull_request():
-    """The workflow is inside its own pull_request path filter.
+@pytest.mark.parametrize("where", ["workflow", "non_write_job", "write_job", "other_scope"])
+def test_write_guards_reject_unexpected_permissions(where):
+    workflow = _workflow_config()
+    if where == "workflow":
+        workflow["permissions"] = "write-all"
+    elif where == "non_write_job":
+        workflow["jobs"]["images"]["permissions"] = "write-all"
+    elif where == "write_job":
+        workflow["jobs"]["push-images"]["permissions"] = "write-all"
+    else:
+        workflow["jobs"]["push-images"]["permissions"]["issues"] = "write"
+    with pytest.raises(AssertionError):
+        _assert_write_guards(workflow)
 
-    So a branch pull request can rewrite this file and have it run. Any job
-    that holds a write scope on that run holds it for whatever the pull request
-    turned the job into - the dry-run switch only guards the steps that are
-    checked in. Both widened jobs therefore carry a condition that a
-    pull_request run cannot satisfy, and this test reads the condition rather
-    than trusting the comment above it.
-    """
-    text = _workflow_text()
-    lines = text.splitlines()
-    widened: dict[str, str] = {}
-    current = None
-    for index, line in enumerate(lines):
-        if re.match(r"^  [a-z0-9-]+:$", line):
-            current = line.strip().rstrip(":")
-        if line.lstrip().startswith("#"):
-            continue
-        if "packages: write" in line or "contents: write" in line:
-            # `permissions:` is nested under the job, so the scope belongs to
-            # whichever job header was seen last.
-            assert current is not None, f"a write scope outside any job at line {index + 1}"
-            widened[current] = line.strip()
 
-    assert set(widened) == {"push-images", "draft-release", "promote-images"}, widened
+def test_write_guards_accept_equivalent_permissions_yaml():
+    workflow = _workflow_config()
+    equivalent = copy.deepcopy(workflow)
+    equivalent["permissions"] = "read-all"
+    text = yaml.dump(equivalent)
+    _assert_write_guards(_workflow_config(text))
 
-    for job in widened:
-        start = lines.index(f"  {job}:")
-        block = []
-        for line in lines[start + 1 :]:
-            if re.match(r"^  [a-z0-9-]+:$", line):
-                break
-            block.append(line)
-        condition = [line for line in block if line.strip().startswith("if:")]
-        assert condition, f"{job} holds a write scope with no condition at all"
-        text_of = " ".join(condition)
-        if job == "promote-images":
-            assert "release" in text_of, f"{job}: {text_of}"
-            assert "published" in text_of, f"{job}: {text_of}"
-            assert "pull_request" not in text_of, f"{job}: {text_of}"
-            continue
-        assert "workflow_dispatch" in text_of, f"{job}: {text_of}"
-        assert "dry_run" in text_of and "'false'" in text_of, f"{job}: {text_of}"
+
+@pytest.mark.parametrize("remove_draft", [False, True])
+def test_backend_create_command_requires_draft(tmp_path, remove_draft):
+    script = _step_run(_job_block("draft-release"), "Create the draft release")
+    if remove_draft:
+        script = script.replace("--draft ", "", 1)
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:2] != ['release', 'create'] or '--draft' not in args or '--draft=false' in args:
+    sys.exit(1)
+Path('draft-created').touch()
+""")
+    gh.chmod(0o755)
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+             "TAG": "v1.0.0", "TARGET_COMMIT": "a" * 40, "RUNNER_TEMP": str(tmp_path)})
+    assert (result.returncode == 0) == (not remove_draft), result.stderr
+    assert (tmp_path / "draft-created").exists() == (not remove_draft)
 
 
 def test_note_template_headings_match_the_notes_the_workflow_writes():
@@ -251,95 +319,6 @@ dest.mkdir(parents=True, exist_ok=True)
     assert result.returncode == 0, result.stderr
 
 
-def test_v060_recovery_is_one_release_promotion_only():
-    text = RECOVERY.read_text(encoding="utf-8")
-    assert _trigger_keys(text) == ["workflow_dispatch"]
-    assert "if: github.ref == 'refs/heads/main'" in text
-    assert "ref: ${{ github.sha }}" in text
-    assert "permissions:\n  contents: read" in text
-    assert text.count("packages: write") == 1
-    assert text.count("bash scripts/promote_release_images.sh") == 1
-    assert "group: ${{ github.repository }}-release-promotion" in text
-    assert "group: ${{ github.repository }}-release-promotion" in _job_block("promote-images")
-    for forbidden in ("release create", "release edit", "upload-artifact", "docker buildx build",
-                      "docker buildx imagetools create", "git tag", "git push"):
-        assert forbidden not in text
-
-
-@pytest.mark.parametrize("drift", ["release_id", "tag", "source", "asset_digest",
-                                   "git_tag", "manifest_bytes"])
-def test_v060_recovery_guard_stops_drift_before_registry_write(tmp_path, drift):
-    """Run the actual guard with local GitHub/Git fixtures; no registry exists."""
-    workflow = RECOVERY.read_text(encoding="utf-8")
-    guard_name = "Verify published release, Git tag, five assets and pinned manifest"
-    guard = _step_run(workflow, guard_name)
-    assert workflow.index(guard_name) < workflow.index("Log in to the container registry")
-    assert workflow.index(guard_name) < workflow.index("Retag the recorded digests")
-    assert "docker " not in guard
-    hashes = {
-        "SHA256SUMS": "08983706421e9def6652cfe851505efc65661e9653dccd2bfd14f8b42bc51b72",
-        "WuwaTerm-0.2.0-windows-x64.zip": "df1d2dd86727634da6514223f7aeeffb7c49e3dc00658f680fb9b17b7e10bb17",
-        "release-manifest.json": "078c0f63bbe6637f79e4247f99cfe3da07595f4c4ad906b7ee685ace95ad527d",
-        "wuwaterm-0.6.0-py3-none-any.whl": "285ddd0ec699dd872ee5cf376785c51b22ab89926ab7d2894f05327a6b6d8ba6",
-        "wuwaterm-0.6.0.tar.gz": "216267af7b637086451435fcf1a5278d320a1877eda4d55109d084f3b9993252",
-    }
-    source = "cfe07f7bb90cf0555755cfabae28eb6f3eed86c9"
-    release = {
-        "id": 403374996, "tag_name": "v0.6.0", "target_commitish": source,
-        "draft": False, "prerelease": False, "published_at": "2026-10-05T05:36:00Z",
-        "assets": [{"name": name, "digest": "sha256:" + digest, "state": "uploaded"}
-                   for name, digest in hashes.items()],
-    }
-    if drift == "release_id":
-        release["id"] += 1
-    elif drift == "tag":
-        release["tag_name"] = "v0.6.1"
-    elif drift == "source":
-        release["target_commitish"] = "f" * 40
-    elif drift == "asset_digest":
-        release["assets"][2]["digest"] = "sha256:" + "f" * 64
-    (tmp_path / "release.json").write_text(json.dumps(release))
-    gh = tmp_path / "gh"
-    gh.write_text("""#!/usr/bin/env python3
-import os
-import sys
-from pathlib import Path
-if sys.argv[1] == 'api':
-    print(Path(os.environ['STUB_RELEASE']).read_text())
-elif sys.argv[1:3] == ['release', 'download']:
-    dest = Path(sys.argv[sys.argv.index('--dir') + 1])
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in ('SHA256SUMS', 'WuwaTerm-0.2.0-windows-x64.zip', 'release-manifest.json',
-                 'wuwaterm-0.6.0-py3-none-any.whl', 'wuwaterm-0.6.0.tar.gz'):
-        (dest / name).write_text('fixture bytes')
-else:
-    sys.exit(2)
-""")
-    gh.chmod(0o755)
-    git = tmp_path / "git"
-    git.write_text("""#!/usr/bin/env python3
-import os
-print(os.environ['STUB_TAG_SOURCE'] + '\\trefs/tags/v0.6.0')
-""")
-    git.chmod(0o755)
-    docker = tmp_path / "docker"
-    docker.write_text("#!/bin/sh\ntouch docker-was-called\nexit 97\n")
-    docker.chmod(0o755)
-    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-           "GH_REPO": "My-Denia/WuwaTerm", "TAG": "v0.6.0",
-           "RELEASE_ID": "403374996", "EXPECTED_SOURCE": source,
-           "GH_TOKEN": "fixture", "STUB_RELEASE": str(tmp_path / "release.json"),
-           "STUB_TAG_SOURCE": "f" * 40 if drift == "git_tag" else source}
-    result = subprocess.run(["bash", "-c", guard], cwd=tmp_path, env=env,
-                            text=True, capture_output=True, timeout=10)
-    assert result.returncode != 0, result.stdout
-    assert not (tmp_path / "docker-was-called").exists()
-    if drift == "manifest_bytes":
-        assert "published asset bytes differ" in result.stderr
-    else:
-        assert not (tmp_path / "staging").exists(), result.stderr
-
-
 def test_build_jobs_skip_the_release_event():
     for job in ("preflight", "python-package", "images", "assemble"):
         block = _job_block(job)
@@ -381,7 +360,7 @@ def test_the_note_template_states_the_unsigned_client():
 
 def test_the_client_zip_has_one_name_across_every_file_that_names_it():
     holders = {
-        ".github/workflows/client-release.yml": ROOT / ".github/workflows/client-release.yml",
+        ".github/workflows/windows-client.yml": ROOT / ".github/workflows/windows-client.yml",
         "client/build.ps1": ROOT / "client" / "build.ps1",
         "client/README.md": ROOT / "client" / "README.md",
         "docs/support-matrix.md": ROOT / "docs" / "support-matrix.md",
@@ -556,11 +535,9 @@ def test_release_promotion_refusals_do_not_partially_promote(tmp_path, case):
 def test_release_events_share_a_non_cancelling_promotion_group():
     text = _workflow_text()
     concurrency = text.split("concurrency:\n", 1)[1].split("\njobs:", 1)[0]
-    assert "github.event_name == 'release'" in concurrency
-    assert "&& format('promotion-run-{0}', github.run_id)" in concurrency
+    assert "format('promotion-run-{0}', github.run_id)" in concurrency
     assert "&& 'dispatch'" in concurrency
-    assert "format('pr-{0}', github.ref)" in concurrency
-    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency
+    assert "cancel-in-progress: false" in concurrency
     promotion = _job_block("promote-images")
     assert "      group: ${{ github.repository }}-release-promotion" in promotion
     assert "      queue: max" in promotion
@@ -608,14 +585,14 @@ def _pending_release_contract(tags, policy):
 
 def _release_runs_retained_by_workflow(tags):
     outer = _workflow_text().split("concurrency:\n", 1)[1].split("\njobs:", 1)[0]
-    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in outer
+    assert "cancel-in-progress: false" in outer
     shared_outer = bool(re.search(r"'release'\s*&& 'promotion'", outer))
     if shared_outer:
         queue = re.search(r"^  queue: (single|max)$", outer, re.MULTILINE)
         retained = _pending_release_contract(tags, queue.group(1) if queue else "single")
     else:
         assert re.search(
-            r"'release'\s*&& format\('promotion-run-\{0\}', github.run_id\)", outer
+            r"format\('promotion-run-\{0\}', github.run_id\)", outer
         ), "published releases need unique outer groups before their job queue"
         retained = tags
     promotion = _job_block("promote-images")
@@ -692,7 +669,8 @@ def test_client_release_is_an_independent_draft_with_immutable_source():
     assert "packages: write" not in text
     assert "release-manifest.json" not in text
     assert "client-manifest.json" in text
-    assert "--self-check" in text
+    assert "./.github/workflows/windows-client.yml" in text
+    assert "--self-check" in (ROOT / "client/build.ps1").read_text()
 
 
 @pytest.mark.parametrize("lookup", ["absent", "existing", "error"])

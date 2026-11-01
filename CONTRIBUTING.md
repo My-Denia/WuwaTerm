@@ -4,9 +4,8 @@ Thanks for looking. WuwaTerm is a personal, MIT-licensed hobby project with one
 maintainer, so contributions are welcome but reviewed best-effort — there is no
 promised turnaround. Small, focused changes are the ones that get merged.
 
-Before you build something, read [Non-Goals](#non-goals). Some things this
-project has deliberately refused are enforced by a gate, and a pull request that
-adds one will be rejected no matter how well it is written.
+Before you build something, read [Non-Goals](#non-goals). These product
+boundaries guide what the project accepts.
 
 - Bug reports and questions: [SUPPORT.md](SUPPORT.md).
 - Vulnerabilities: [SECURITY.md](SECURITY.md) — never a public issue.
@@ -134,7 +133,6 @@ status. The steps, in order:
 | Step | What it is for | What a failure means |
 |---|---|---|
 | `hygiene` | Keeps generated databases and runtime state out of the index, and bulk upstream game text — the game-text paths are checked by SIZE, above 1 MB, so a small upstream file passes this gate and is still not welcome | A generated database, a runtime state file, or a large upstream data file would be committed |
-| `non-goals` | Pins four product decisions as text | A boundary this project has refused was crossed in a file |
 | `architecture` | Guards import directions between layers | An import crosses a boundary the architecture forbids |
 | `api-contract` | Ties the published contract to the code | The committed `docs/api/openapi.json` no longer equals the document the application generates |
 | `ruff` | Correctness linting only — rules `E4`, `E7`, `E9`, `F` | An unused import, an undefined name, a broken f-string, or similar. Formatting is not enforced, so do not send a formatting sweep |
@@ -147,8 +145,8 @@ commit.
 Continuous integration runs `python scripts/validate.py` on Python 3.11, 3.12,
 3.13 and 3.14 on `ubuntu-latest`, plus five more jobs: a uv lock-drift check, a
 wheel and sdist packaging audit with a clean-environment install smoke, a
-Windows desktop-client build, a Docker runtime/builder boundary check, and
-the API-to-Web metadata and label contracts against a pinned Web checkout.
+Windows desktop-client build when affected, a Docker runtime/builder boundary
+check, and the API-to-Web metadata and label contracts against a pinned Web checkout.
 The full Site suite runs in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
 CI publishes nothing.
 
@@ -199,18 +197,17 @@ and skips the server ones; run it from the repository root — it changes into
 or macOS the plain `--client` form runs everything in order and is the simpler
 choice.
 
-Everything about the client that can be checked by reading text — its transport
-policy, its documentation claims — is in the main suite instead, so it runs on
-every pull request without a Windows runner.
+The client suite checks transport and credential behavior; the Windows build
+also exercises the packaged executable.
 [client/README.md](client/README.md) is the client's own document.
 
 ## What Makes A Pull Request Easy To Accept
 
 - **One concern.** A small change that does one thing is reviewed in one pass. A
   large change that does four is reviewed in four, if at all.
-- **Tests that would fail without it.** For a fix, the test should be red on the
-  code as it stands and green with the change. A test that passes either way
-  documents nothing.
+- **Evidence for the change.** Use existing or new tests for changed behaviour,
+  or explain the build, manual check or other validation used. Prose-only
+  changes do not require new tests.
 - **Behaviour, not wiring** ([issue #66](https://github.com/My-Denia/wuwa-translate-bot/issues/66)).
   When you add an assertion that a signal is connected, a callback was injected
   or a dependency was passed in, add a second assertion that actually triggers
@@ -222,30 +219,27 @@ every pull request without a Windows runner.
   than `widget.hasFocus()`, because the offscreen platform the suites run on
   never activates a window; and build the case on a **configured** window,
   because a disabled widget correctly refuses focus.
-- **An entry under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md).** Say what
-  changed and why, in the voice of the surrounding entries.
+- **A changelog entry for user-visible changes.** Under `## Unreleased` in
+  [CHANGELOG.md](CHANGELOG.md), say what changed and why.
 - **README parity.** `README.md` (English, the front page) and
   `README.zh-CN.md` (Chinese) are kept aligned: if you touch one, touch the
   other, and keep the same sections, facts and images in both. The READMEs are
   a short introduction; detail belongs in the guides listed in
   [docs/README.md](docs/README.md), not in the front page.
 - **Documentation updated when behaviour changed.** A document that promises
-  something the code does not do is a defect here, and there are text gates that
-  say so.
+  something the code does not do is a defect here.
 - **No secrets and no generated data.** Never commit a generated SQLite
   database, upstream TextMap or game data, runtime state (`state/`,
   `state-api/`, `chat_settings.json`, `channel_replies.json`), or a `.env` file.
   The `hygiene` gate catches most of this; it is not a reason to stop looking.
-- **`python scripts/validate.py` run locally**, with the result in the pull
-  request description.
+- **Validation recorded in the pull request.** Run `python scripts/validate.py`
+  locally for server changes; describe suitable checks for other changes.
 - Signed commits are welcome. The maintainer signs; you are not required to.
 
 ## Non-Goals
 
-Four product decisions are settled and enforced as text by
-[`scripts/check_non_goals.py`](scripts/check_non_goals.py). Please do not send a
-change that adds any of them — the gate goes red and the pull request cannot
-merge:
+Four product decisions are settled. Please do not send a change that adds any
+of them without discussing the decision first:
 
 1. **No callback-URL registration for Telegram.** The bot uses long polling; see
    the decision records in [docs/adr/README.md](docs/adr/README.md).
@@ -255,12 +249,10 @@ merge:
    terminology, and adding a second, unofficial naming layer defeats the point
    of the project.
 4. **No free-text listener beyond the single linked-channel one.** Exactly one
-   listener exists — automatic forwards from the linked channel — and the gate
-   asserts that it is that one and nothing else.
+   listener exists — automatic forwards from the linked channel.
 
-The gate reads the whole tree, so the banned identifiers cannot appear in prose
-either. If you believe one of these decisions should change, open an issue and
-argue it before writing code.
+If you believe one of these decisions should change, open an issue and discuss
+it before writing code.
 
 ## How Review Works
 

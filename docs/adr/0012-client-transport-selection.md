@@ -286,7 +286,6 @@ request rather than a review.
   `endpoint_is_confidential`
 - `client/src/wuwaterm_client/api.py` — verification on, proxies not trusted,
   request-target guard before the credential header
-- `tests/test_client_transport_policy.py` — no shell channel, no weakened TLS
 - `client/tests/test_transport_security.py` — the SSL context actually used
 - `docs/deployment.md` — the route, the readback and the rollback
 - [ADR 0009](0009-http-api-adapter.md),

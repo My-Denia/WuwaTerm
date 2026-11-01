@@ -10,14 +10,15 @@ on:
         description: Build artifacts without creating a draft
         type: boolean
         default: true
-  pull_request:
-    paths:
-      - .github/workflows/client-release.yml
-      - client/**
+      validation_run_id:
+        description: Successful CI dispatch run ID when the source lacks a main-push receipt
+        required: false
+        type: string
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: client-release-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || github.ref }}
+  group: client-release-dispatch
   cancel-in-progress: false
 jobs:
   preflight:
@@ -28,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          ref: ${{ inputs.target_commit }}
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -37,85 +38,52 @@ jobs:
         id: source
         env:
           TARGET: ${{ inputs.target_commit }}
-          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CONTROL_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = workflow_dispatch ]; then
-            [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$DRY_RUN" = false ]; then
+            test "$CONTROL_REF" = refs/heads/main
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$TARGET" origin/main
           fi
           version=$(python -c 'import tomllib; print(tomllib.load(open("client/pyproject.toml", "rb"))["project"]["version"])')
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "client_version=$version" >> "$GITHUB_OUTPUT"
           echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Check out trusted release control
+        if: inputs.dry_run == false
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-control
+          fetch-depth: 0
+      - name: Verify successful CI for the actual source
+        if: inputs.dry_run == false
+        working-directory: .release-control
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [ -n "$VALIDATION_RUN_ID" ]; then
+            python scripts/verify_ci_source.py verify "$SOURCE_COMMIT" --require-client --run-id "$VALIDATION_RUN_ID"
+          else
+            python scripts/verify_ci_source.py verify "$SOURCE_COMMIT" --require-client
+          fi
+
   client:
     name: desktop client zip (windows)
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     needs: preflight
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.preflight.outputs.source_commit }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      # build.ps1 refuses to fall back to a system interpreter, so the same
-      # client-local virtual environment an operator would create is created
-      # here and the build runs through the same script.
-      - run: python -m venv client/.venv
-      - run: client/.venv/Scripts/python.exe -m pip install -U pip
-      - run: client/.venv/Scripts/python.exe -m pip install -e "client[dev,build]"
-      - name: Client test suite
-        working-directory: client
-        run: .venv/Scripts/python.exe -m pytest
-      - name: One-folder PyInstaller build
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File client/build.ps1
-      - name: The built artifact passes its own start-up self-check
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Start-Process -Wait -PassThru, not the call operator: WuwaTerm.exe
-          # is built for the WINDOWS subsystem (console=False in the spec), so
-          # PowerShell does not wait for it and leaves $LASTEXITCODE unset. The
-          # first version of this step used `&` and failed with an empty exit
-          # code on an artifact that had just passed the identical check inside
-          # build.ps1 - which is how build.ps1 already does it, and why.
-          $check = Start-Process -FilePath "client/dist/WuwaTerm/WuwaTerm.exe" `
-            -ArgumentList "--self-check" -Wait -PassThru
-          if ($check.ExitCode -ne 0) {
-            throw "the built artifact failed its start-up self-check (exit $($check.ExitCode))"
-          }
-          Write-Host "self-check exit code: $($check.ExitCode)"
-      - name: Package the one-folder build as the release zip
-        shell: pwsh
-        env:
-          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $folder = "client/dist/WuwaTerm"
-          $zip = "client/dist/WuwaTerm-${env:CLIENT_VERSION}-windows-x64.zip"
-          # build.ps1 may already produce this zip itself. Use the script's own
-          # output when it is there, and produce it here when it is not, so
-          # neither arrangement breaks this job.
-          if (Test-Path -LiteralPath $zip) {
-            Write-Host "using the zip build.ps1 produced: $zip"
-          } else {
-            Write-Host "build.ps1 produced no zip; packaging $folder"
-            Compress-Archive -Path $folder -DestinationPath $zip
-          }
-          $item = Get-Item -LiteralPath $zip
-          if ($item.Length -le 0) {
-            throw "the release zip is empty: $zip"
-          }
-          Write-Host "release zip: $($item.FullName) ($($item.Length) bytes)"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: client-zip
-          path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
-          if-no-files-found: error
+    uses: ./.github/workflows/windows-client.yml
+    with:
+      source_commit: ${{ needs.preflight.outputs.source_commit }}
+      release_zip: true
+      client_version: ${{ needs.preflight.outputs.client_version }}
 
   draft:
     needs: [preflight, client]

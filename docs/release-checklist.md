@@ -86,7 +86,8 @@ notes; do not let "images are published" be read as "no checkout needed".
 ## Independent Windows client release
 
 Client development remains paused. CI still builds and tests the client for
-compatibility; failure does not prevent a backend release workflow from finishing.
+compatibility when affected; backend releases do not require an unconditional
+Windows CI build.
 Use `.github/workflows/client-release.yml` for an independent Windows package.
 It builds `WuwaTerm-<client version>-windows-x64.zip` from a full main SHA,
 runs client tests and the executable self-check, and defaults to a dry run.
@@ -108,7 +109,7 @@ Run the repository's gates from a clean checkout of the candidate commit:
 python scripts/validate.py
 ```
 
-That is hygiene, non-goals, architecture boundaries, the API contract, ruff and
+That is hygiene, architecture boundaries, the API contract, ruff and
 the test suite, in that order, and it is the same entry point CI's server
 matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, the Windows client build and the Docker boundary job are
@@ -125,11 +126,12 @@ python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-di
 
 The packaging gates (`python -m build`, `twine check --strict`,
 `scripts/check_package_artifacts.py`) still exist and still have to pass, but
-the release workflow runs them itself on the exact assets it uploads, which is
-the point: CI's copies and the release's copies are no longer separate builds.
+CI and the release workflow call the same package workflow; the release run
+builds and checks the exact assets it uploads.
 
-Release only after GitHub CI and the configured review workflows are green for
-the exact commit you are about to release.
+Release only after the required backend CI jobs and configured review workflows
+pass for the exact commit. A Windows client release also requires its Windows
+CI job to pass.
 
 ## Privacy And LLM Notes
 
@@ -158,12 +160,10 @@ the exact commit you are about to release.
 1. **Pick the commit.** Fetch and fast-forward `main`, and record the exact
    reviewed `origin/main` commit that passed CI and review. That SHA is the
    release target and is what goes into `target_commit`.
-2. **Dry run first.** Every pull request touching the workflow, `deploy/**`,
-   or `pyproject.toml` already runs the workflow in dry-run mode,
-   and a dry run can also be dispatched deliberately. A dry run builds every
-   asset, builds both images, and publishes nothing — no registry login, no
-   image push, no release. Read its `release-assets` artifact before doing the
-   real run.
+2. **Dry run first.** Dispatch the release workflow with `dry_run=true`. A dry
+   run builds every asset and both images, without a registry login, image push,
+   or release. Read its `release-assets` artifact before the real run. A
+   candidate branch can be used for a dry run without a main CI receipt.
 3. **Record the registry baseline** using the block below before dispatch.
 4. **The real run** creates a **draft**. It is the only mode that logs in to
    the registry, pushes images, or touches releases, and the two jobs that can
@@ -184,9 +184,27 @@ the exact commit you are about to release.
    gh run view "$release_run_id" --repo My-Denia/WuwaTerm --json status,conclusion,jobs
    ```
 
-   The workflow refuses to proceed when `refs/tags/$NEXT_VERSION` already
-   exists, when the declared version is malformed, or when the target is not an
-   ancestor of `origin/main`.
+   Before any write, the workflow verifies a CI receipt for the actual source
+   SHA, its main control revision, and the required backend jobs. A backend
+   release may proceed when the only failed job is Windows; a client release
+   also requires Windows to pass. The latest run attempt must carry its own
+   receipt, so retry a failed CI run with Re-run all jobs: Re-run failed jobs
+   does not produce a new receipt and the release refuses that attempt. Main
+   pushes are found automatically. For an
+   older source without a receipt, dispatch the current CI on main, wait for it
+   to finish, and pass its run ID as `validation_run_id`:
+
+   ```bash
+   gh workflow run ci.yml --ref main -f target_commit="$reviewed_main_commit"
+   # Select and inspect the matching completed dispatch; do not assume latest.
+   gh run list --repo My-Denia/WuwaTerm --workflow=ci.yml --event workflow_dispatch
+   validation_run_id=<matching-completed-ci-run-id>
+   gh workflow run release.yml --ref main -f target_commit="$reviewed_main_commit" \
+     -f dry_run=false -f validation_run_id="$validation_run_id"
+   ```
+
+   The workflow also refuses a present tag, malformed version, or source that
+   is not an ancestor of `origin/main`.
 5. **Read the draft back** ([Draft Readback](#draft-readback)). Everything that can be checked is
    checked while the release is still a draft, because a draft can be deleted
    and a published release cannot.
@@ -520,7 +538,7 @@ generated notes before publishing rather than assuming this page.
 
 ### Validation
 
-- `python scripts/validate.py` (hygiene, non-goals, architecture, API contract,
+- `python scripts/validate.py` (hygiene, architecture, API contract,
   ruff, test suite) on the CI matrix
 - `python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions`
 - Packaging: build, `twine check --strict`,

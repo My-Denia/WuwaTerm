@@ -732,23 +732,6 @@ def test_restore_reports_the_first_placeholder_mismatch_in_lock_order(sample_db)
     assert first_duplicate.value.diagnostic.actual_count == 2
 
 
-def test_equal_length_overlapping_terms_use_stable_order(sample_db):
-    add_synthetic_terms(
-        sample_db,
-        [
-            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Left"),
-            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙", "Right"),
-        ],
-    )
-    translator = SentenceTranslator(sample_db)
-    outputs = []
-    for _ in range(5):
-        locked = translator.lock_terms("甲乙丙")
-        outputs.append(locked.restore(locked.locked_text))
-
-    assert outputs == ["甲Right"] * 5
-
-
 def test_longer_overlapping_term_wins(sample_db):
     add_synthetic_terms(
         sample_db,

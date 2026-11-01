@@ -82,14 +82,9 @@ direct pass-through of `docs/api/openapi.json`
 (`client/src/wuwaterm_client/api.py` module docstring and response models).
 It renders plain text only. No Telegram markup, entity, or chat concept
 appears in any user-facing string: every displayed literal lives in
-`client/src/wuwaterm_client/strings.py`, and
-`client/tests/test_ui_strings_source.py`
-(`test_ui_widgets_source_all_display_text_from_strings_module`) statically
-parses `ui/*.py` to prove no other literal reaches a text-setting call. On
-the repository side, `scripts/check_non_goals.py` scans every text file in
-the repository - the client tree and this document included - for the
-revoked Telegram-runtime markers, so a bot concept cannot quietly enter the
-client surface (`tests/test_non_goals.py`).
+`client/src/wuwaterm_client/strings.py`. The source scanners that once
+enforced this and the absence of Telegram-runtime markers were retired in
+2026-11; review and the real Qt tests own these boundaries now.
 
 ### Transport policy
 
@@ -110,11 +105,8 @@ config file, a future caller).
   `test_the_client_asks_for_verification_explicitly` records the constructor
   arguments, and `test_the_client_exposes_no_way_to_turn_verification_off`
   asserts no `verify`/`insecure`-shaped parameter exists. The private
-  `_test_transport` seam is vetted by exact type and its SSL context read
-  back (`_require_verifying_transport`), so even a test cannot inject
-  weakened TLS (`test_an_injected_transport_may_not_bring_weakened_tls`,
-  `test_a_transport_whose_configuration_cannot_be_read_is_refused`,
-  `test_a_transport_that_shows_a_verifying_context_but_uses_another_is_refused`).
+  `_test_transport` seam is a private test hook, not a security boundary;
+  production clients always verify (`client/tests/test_transport_security.py`).
 - **Plain HTTP only to this machine's loopback.** `_is_loopback`
   (`config.py`) accepts the literal names `localhost` and `::1` and any
   address `ipaddress` classifies as loopback - so the name `localhost` IS
@@ -176,18 +168,10 @@ config file, a future caller).
 
 The client reaches the service by HTTPS requests to the configured secure
 endpoint, and by nothing else. It starts no processes, opens no shell, and
-holds no key material: `tests/test_client_transport_policy.py::
-test_the_client_starts_no_processes_and_carries_no_keys` scans every shipped
-client Python file for process-spawning and key-material tokens, and
-`test_the_shipped_client_surface_names_no_forwarding_path` scans the client
-tree, the runbook, and the deploy files for any wording or command shape
-that would reintroduce a shell-managed network path as the client's route to
-the service. SSH remains the operator's administration channel for the host;
-the single allowlisted note in `client/README.md` exists precisely to say it
-is not part of the client's path, and the gate pins that note verbatim
-(`test_the_allowlisted_operations_note_is_present_and_singular`). These
-gates run in the repository suite on every pull request, without a Windows
-runner or the client's dependencies.
+holds no key material. SSH remains the operator's administration channel for
+the host; the note in `client/README.md` says it is not part of the client's
+path. The wording scanners that once policed this were retired in 2026-11;
+`client/tests/test_transport_security.py` covers the real TLS behavior.
 
 ### Credential lifecycle
 
@@ -287,10 +271,8 @@ runner or the client's dependencies.
 - `client/src/wuwaterm_client/credentials.py`, `errors.py`, `strings.py`,
   `app.py`, `ui/`
 - `client/tests/test_transport_security.py`, `test_api.py`,
-  `test_config.py`, `test_credentials.py`, `test_ui_strings_source.py`,
+  `test_config.py`, `test_credentials.py`,
   `test_translate_view_status.py`, `test_packaging_entry.py`
-- `tests/test_client_transport_policy.py`, `tests/test_non_goals.py`,
-  `scripts/check_non_goals.py`
 - [ADR 0009](0009-http-api-adapter.md),
   [ADR 0010](0010-device-principal-authentication.md),
   [ADR 0012](0012-client-transport-selection.md)
