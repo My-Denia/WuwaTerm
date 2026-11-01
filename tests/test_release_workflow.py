@@ -738,7 +738,7 @@ def _checklist_bash(marker):
     return matches[0]
 
 
-@pytest.mark.parametrize("case", ["valid", "target", "body", "assets", "identity", "not_draft", "existing_tag", "lookup_error", "snapshot"])
+@pytest.mark.parametrize("case", ["valid", "target", "body", "assets", "identity", "not_draft", "existing_tag", "lookup_error", "snapshot", "prerelease", "audited_prerelease", "optimized_body", "optimized_valid"])
 def test_publication_guard_refuses_draft_drift_before_publish(tmp_path, case):
     import hashlib
 
@@ -746,6 +746,7 @@ def test_publication_guard_refuses_draft_drift_before_publish(tmp_path, case):
     tag = "v0.6.1"
     doc = {"url": "https://api.github.com/repos/My-Denia/WuwaTerm/releases/123",
            "id": 123, "name": tag, "tag_name": tag, "draft": True,
+           "prerelease": case == "audited_prerelease",
            "target_commitish": source, "body": "Reviewed release notes", "assets": []}
     for index, name in enumerate(["wuwaterm-0.6.1-py3-none-any.whl", "wuwaterm-0.6.1.tar.gz", "SHA256SUMS", "release-manifest.json"], 1):
         doc["assets"].append({"id": index, "name": name, "size": 10, "state": "uploaded", "digest": "sha256:" + "b" * 64})
@@ -755,8 +756,10 @@ def test_publication_guard_refuses_draft_drift_before_publish(tmp_path, case):
     current = json.loads(json.dumps(doc))
     if case == "target":
         current["target_commitish"] = "c" * 40
-    if case == "body":
+    if case in {"body", "optimized_body"}:
         current["body"] += " changed"
+    if case == "prerelease":
+        current["prerelease"] = True
     if case == "assets":
         current["assets"][0]["size"] += 1
     if case == "identity":
@@ -776,7 +779,7 @@ if args[0] == 'api':
     print(Path('remote.json').read_text())
 elif args[:2] == ['release', 'edit']:
     assert args[2] == 'v0.6.1'
-    assert '--draft=false' in args and '--latest' in args
+    assert '--draft=false' in args and '--latest' in args and '--prerelease=false' in args
     assert args[args.index('--repo') + 1] == 'My-Denia/WuwaTerm'
     assert args[args.index('--target') + 1] == os.environ['reviewed_main_commit']
     Path('published').touch()
@@ -791,10 +794,12 @@ else:
            "NEXT_VERSION": tag, "reviewed_main_commit": source, "verify_dir": str(tmp_path),
            "audited_snapshot_sha256": digest,
            "MOCK_TAG_STATUS": "0" if case == "existing_tag" else "128" if case == "lookup_error" else "2"}
+    if case.startswith("optimized_"):
+        env["PYTHONOPTIMIZE"] = "1"
     result = subprocess.run(["bash", "-c", _checklist_bash("# Publication guard:")],
                             cwd=tmp_path, env=env, text=True, capture_output=True)
-    assert (result.returncode == 0) == (case == "valid"), result.stderr
-    assert (tmp_path / "published").exists() == (case == "valid")
+    assert (result.returncode == 0) == (case in {"valid", "optimized_valid"}), result.stderr
+    assert (tmp_path / "published").exists() == (case in {"valid", "optimized_valid"})
 
 
 @pytest.mark.parametrize("case", ["existing_minor", "first_minor", "changed_minor", "lookup_error", "existing_semver"])
@@ -878,3 +883,31 @@ for name, body in json.loads(Path('remote-assets.json').read_text()).items():
         assert (tmp_path / name).read_text() == body
     if changed:
         assert "published bytes differ" in result.stderr
+
+
+@pytest.mark.parametrize("case", ["valid", "draft", "prerelease", "target", "tag_mismatch"])
+def test_post_publish_state_requires_stable_release_and_exact_source(tmp_path, case):
+    source = "a" * 40
+    release = {"isDraft": case == "draft", "isPrerelease": case == "prerelease",
+               "tagName": "v0.6.1", "targetCommitish": "b" * 40 if case == "target" else source}
+    (tmp_path / "remote.json").write_text(json.dumps(release))
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:3] == ['release', 'view', 'v0.6.1']
+assert args[args.index('--repo') + 1] == 'My-Denia/WuwaTerm'
+assert 'isPrerelease' in args[args.index('--json') + 1]
+print(Path('remote.json').read_text())
+""")
+    gh.chmod(0o755)
+    git = tmp_path / "git"
+    git.write_text('#!/bin/sh\nprintf "%s\\trefs/tags/v0.6.1\\n" "$MOCK_TAG_SHA"\n')
+    git.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "NEXT_VERSION": "v0.6.1", "reviewed_main_commit": source, "verify_dir": str(tmp_path),
+           "PYTHONOPTIMIZE": "1", "MOCK_TAG_SHA": "c" * 40 if case == "tag_mismatch" else source}
+    result = subprocess.run(["bash", "-c", _checklist_bash("# Published release state:")],
+                            cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert (result.returncode == 0) == (case == "valid"), result.stderr

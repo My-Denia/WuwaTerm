@@ -318,6 +318,10 @@ when anonymous access is denied; do not change package visibility implicitly.
 
 ## Publish
 
+The Python checks use isolated mode (`-I`) so `PYTHONOPTIMIZE` or local module
+settings cannot disable or replace their validation. A stable release must have
+`prerelease=false` before and after publication.
+
 **Repeat the tag check here, in the same block as the publish command.** The
 one in the draft readback above finished before the registry probes, and those
 take minutes. GitHub ignores `target_commitish` once the tag exists, so a tag
@@ -332,7 +336,7 @@ set -euo pipefail
 : "${reviewed_main_commit:?Set the reviewed full SHA}"
 : "${verify_dir:?Use the independently reviewed readback directory}"
 : "${audited_snapshot_sha256:?Set the snapshot hash accepted by the artifact audit}"
-release_api="$(python3 - "$verify_dir/audited-release.json" "$audited_snapshot_sha256" <<'PY'
+release_api="$(python3 -I - "$verify_dir/audited-release.json" "$audited_snapshot_sha256" <<'PY'
 import hashlib, json, re, sys
 from pathlib import Path
 raw = Path(sys.argv[1]).read_bytes()
@@ -343,7 +347,7 @@ print(url)
 PY
 )"
 gh api "$release_api" > "$verify_dir/current-release.json"
-python3 - "$verify_dir/audited-release.json" "$verify_dir/current-release.json" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
+python3 -I - "$verify_dir/audited-release.json" "$verify_dir/current-release.json" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
 import json, re, sys
 from pathlib import Path
 old, current = [json.loads(Path(path).read_text()) for path in sys.argv[1:3]]
@@ -352,6 +356,7 @@ assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
 assert re.fullmatch(r'[0-9a-f]{40}', source)
 def fingerprint(doc):
     assert doc['tag_name'] == tag and doc['draft'] is True, 'not the expected draft'
+    assert doc['prerelease'] is False, 'not a stable release draft'
     assert doc['target_commitish'] == source, 'draft target changed'
     assert isinstance(doc['id'], int) and doc['id'] > 0
     assert isinstance(doc['body'], str) and doc['body'].strip()
@@ -373,7 +378,7 @@ tag_lookup_status=0
 git ls-remote --exit-code --tags https://github.com/My-Denia/WuwaTerm.git "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
 test "$tag_lookup_status" -eq 2
 
-gh release edit "$NEXT_VERSION" --repo My-Denia/WuwaTerm --draft=false --latest --target "$reviewed_main_commit"
+gh release edit "$NEXT_VERSION" --repo My-Denia/WuwaTerm --draft=false --prerelease=false --latest --target "$reviewed_main_commit"
 ```
 
 That explicit command publishes the GitHub draft. The sha-tagged images may
@@ -384,10 +389,20 @@ the published result. A published tag/release cannot be taken back quietly.
 ## Post-Publish Readback
 
 ```bash
-NEXT_VERSION=vX.Y.Z
-reviewed_main_commit=<reviewed-main-commit-sha>
-gh release view "$NEXT_VERSION" --json tagName,targetCommitish,isDraft,url,assets
-tag_ref="$(git ls-remote --exit-code --tags origin "refs/tags/$NEXT_VERSION" "refs/tags/$NEXT_VERSION^{}")" || {
+# Published release state: stable, public and bound to the reviewed source.
+set -euo pipefail
+: "${NEXT_VERSION:?Set the published tag}"
+: "${reviewed_main_commit:?Set the reviewed full SHA}"
+: "${verify_dir:?Use the reviewed readback directory}"
+gh release view "$NEXT_VERSION" --repo My-Denia/WuwaTerm --json tagName,targetCommitish,isDraft,isPrerelease,url,assets > "$verify_dir/published-release.json"
+python3 -I - "$verify_dir/published-release.json" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
+import json, sys
+from pathlib import Path
+release = json.loads(Path(sys.argv[1]).read_text())
+assert release['isDraft'] is False and release['isPrerelease'] is False, 'release is not public and stable'
+assert release['tagName'] == sys.argv[2] and release['targetCommitish'] == sys.argv[3], 'published release source differs'
+PY
+tag_ref="$(git ls-remote --exit-code --tags https://github.com/My-Denia/WuwaTerm.git "refs/tags/$NEXT_VERSION" "refs/tags/$NEXT_VERSION^{}")" || {
   echo "tag lookup failed or tag missing; stop"
   exit 1
 }
@@ -426,7 +441,7 @@ set -euo pipefail
 published_dir="$(mktemp -d "$verify_dir/published.XXXXXX")"
 gh release download "$NEXT_VERSION" --repo My-Denia/WuwaTerm --dir "$published_dir"
 (cd "$published_dir" && sha256sum -c SHA256SUMS)
-python3 - "$verify_dir/audited-release.json" "$published_dir" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
+python3 -I - "$verify_dir/audited-release.json" "$published_dir" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 snapshot = json.loads(Path(sys.argv[1]).read_text())
