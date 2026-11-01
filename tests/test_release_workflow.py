@@ -729,3 +729,102 @@ else:
              "LOOKUP": lookup}, capture_output=True, text=True)
     assert (result.returncode == 0) == (lookup == "absent"), result.stderr
     assert (staging / "created").exists() == (lookup == "absent")
+
+
+def _checklist_bash(marker):
+    blocks = re.findall(r"^```bash\n(.*?)^```[ \t]*$", CHECKLIST.read_text(), re.DOTALL | re.MULTILINE)
+    matches = [block for block in blocks if marker in block]
+    assert len(matches) == 1, marker
+    return matches[0]
+
+
+@pytest.mark.parametrize("case", ["valid", "target", "body", "assets", "identity", "not_draft", "existing_tag", "lookup_error", "snapshot"])
+def test_publication_guard_refuses_draft_drift_before_publish(tmp_path, case):
+    import hashlib
+
+    source = "a" * 40
+    tag = "v0.6.1"
+    doc = {"url": "https://api.github.com/repos/My-Denia/WuwaTerm/releases/123",
+           "id": 123, "name": tag, "tag_name": tag, "draft": True,
+           "target_commitish": source, "body": "Reviewed release notes", "assets": []}
+    for index, name in enumerate(["wuwaterm-0.6.1-py3-none-any.whl", "wuwaterm-0.6.1.tar.gz", "SHA256SUMS", "release-manifest.json"], 1):
+        doc["assets"].append({"id": index, "name": name, "size": 10, "state": "uploaded", "digest": "sha256:" + "b" * 64})
+    audited = tmp_path / "audited-release.json"
+    audited.write_text(json.dumps(doc))
+    digest = hashlib.sha256(audited.read_bytes()).hexdigest()
+    current = json.loads(json.dumps(doc))
+    if case == "target":
+        current["target_commitish"] = "c" * 40
+    if case == "body":
+        current["body"] += " changed"
+    if case == "assets":
+        current["assets"][0]["size"] += 1
+    if case == "identity":
+        current["id"] += 1
+    if case == "not_draft":
+        current["draft"] = False
+    if case == "snapshot":
+        audited.write_text(audited.read_text() + " ")
+    (tmp_path / "remote.json").write_text(json.dumps(current))
+    gh = tmp_path / "gh"
+    gh.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == 'api':
+    assert args[1] == 'https://api.github.com/repos/My-Denia/WuwaTerm/releases/123'
+    print(Path('remote.json').read_text())
+elif args[:2] == ['release', 'edit']:
+    assert args[2] == 'v0.6.1'
+    assert '--draft=false' in args and '--latest' in args
+    assert args[args.index('--repo') + 1] == 'My-Denia/WuwaTerm'
+    assert args[args.index('--target') + 1] == os.environ['reviewed_main_commit']
+    Path('published').touch()
+else:
+    sys.exit(3)
+""")
+    gh.chmod(0o755)
+    git = tmp_path / "git"
+    git.write_text('#!/bin/sh\nexit "$MOCK_TAG_STATUS"\n')
+    git.chmod(0o755)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+           "NEXT_VERSION": tag, "reviewed_main_commit": source, "verify_dir": str(tmp_path),
+           "audited_snapshot_sha256": digest,
+           "MOCK_TAG_STATUS": "0" if case == "existing_tag" else "128" if case == "lookup_error" else "2"}
+    result = subprocess.run(["bash", "-c", _checklist_bash("# Publication guard:")],
+                            cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert (result.returncode == 0) == (case == "valid"), result.stderr
+    assert (tmp_path / "published").exists() == (case == "valid")
+
+
+@pytest.mark.parametrize("case", ["existing_minor", "first_minor", "changed_minor", "lookup_error", "existing_semver"])
+def test_draft_registry_guard_preserves_existing_minor_tag(tmp_path, case):
+    digest = "sha256:" + "a" * 64
+    previous = "404 -" if case == "first_minor" else "200 sha256:" + "b" * 64
+    repos = ["my-denia/wuwaterm", "my-denia/wuwaterm-builder"]
+    (tmp_path / "minor-before.tsv").write_text("".join(f"{repo}\t{previous}\n" for repo in repos))
+    (tmp_path / "release-manifest.json").write_text(json.dumps({"images": {
+        str(i): {"name": "ghcr.io/" + repo, "digest": digest} for i, repo in enumerate(repos)}}))
+    stub = '''probe() {
+      printf '%s %s\n' "$1" "$2" >> "$verify_dir/probes"
+      case "$2" in
+        sha-*) printf '%s\n' "$MOCK_SOURCE";;
+        v*) if [ "$MOCK_CASE" = existing_semver ]; then printf '%s\n' "$MOCK_SOURCE"; else printf '404 -\n'; fi;;
+        *) case "$MOCK_CASE" in
+          changed_minor) printf '%s\n' "$MOCK_SOURCE";;
+          lookup_error) printf '403 -\n';;
+          *) printf '%s\n' "$MOCK_MINOR";;
+        esac;;
+      esac
+    }
+'''
+    env = {**os.environ, "NEXT_VERSION": "v0.6.1", "reviewed_main_commit": "a" * 40,
+           "verify_dir": str(tmp_path), "MOCK_SOURCE": "200 " + digest,
+           "MOCK_CASE": case, "MOCK_MINOR": previous}
+    result = subprocess.run(["bash", "-c", stub + _checklist_bash("# Draft registry guard:")],
+                            cwd=tmp_path, env=env, capture_output=True, text=True)
+    probes = (tmp_path / "probes").read_text().splitlines()
+    assert probes, "probe never ran"
+    if case in {"existing_minor", "first_minor"}:
+        assert len(probes) == 6, "both image repositories must be inspected"
+    assert (result.returncode == 0) == (case in {"existing_minor", "first_minor"}), result.stderr

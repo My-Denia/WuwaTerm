@@ -12,8 +12,8 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current project version is `0.6.0`; `v0.5.0` is the
-  previous published release. Set
+  published tag. The current project version is `0.6.1`; `v0.6.0` is the
+  previous-release baseline. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
@@ -164,7 +164,8 @@ the exact commit you are about to release.
    asset, builds both images, and publishes nothing — no registry login, no
    image push, no release. Read its `release-assets` artifact before doing the
    real run.
-3. **The real run** creates a **draft**. It is the only mode that logs in to
+3. **Record the registry baseline** using the block below before dispatch.
+4. **The real run** creates a **draft**. It is the only mode that logs in to
    the registry, pushes images, or touches releases, and the two jobs that can
    do so are unreachable from any other trigger. The push runs only after the
    wheel, the sdist and both image builds have already
@@ -176,17 +177,21 @@ the exact commit you are about to release.
    reviewed_main_commit=<reviewed-main-commit-sha>
    gh workflow run release.yml --ref main \
      -f target_commit="$reviewed_main_commit" -f dry_run=false
-   gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+   gh run list --repo My-Denia/WuwaTerm --workflow=release.yml \
+     --event workflow_dispatch --limit 5 --json databaseId,headSha,createdAt,status
+   # Select the run from this dispatch by time and source; do not assume latest.
+   release_run_id=<matching-run-id>
+   gh run view "$release_run_id" --repo My-Denia/WuwaTerm --json status,conclusion,jobs
    ```
 
    The workflow refuses to proceed when `refs/tags/$NEXT_VERSION` already
    exists, when the declared version is malformed, or when the target is not an
    ancestor of `origin/main`.
-4. **Read the draft back** (next section). Everything that can be checked is
+5. **Read the draft back** ([Draft Readback](#draft-readback)). Everything that can be checked is
    checked while the release is still a draft, because a draft can be deleted
    and a published release cannot.
-5. **Publish** by hand. The workflow never publishes.
-6. **Read the published release back** and only then report it as released.
+6. **Publish** by hand. The workflow never publishes.
+7. **Read the published release back** and only then report it as released.
 
 A draft has no tag. GitHub creates `refs/tags/<tag>` at the moment of
 publication, not at draft creation, which is why deleting a draft leaves
@@ -195,6 +200,43 @@ publish command. The only registry tags a discarded draft can leave are
 `sha-<7>` (unconfusable with `vX.Y.Z` / `X.Y`). If `promote-images` fails
 after publication, re-run that job on the same workflow run; do not create
 another draft.
+
+## Registry Baseline Before Dispatch
+
+Run these blocks in one Bash session after choosing the reviewed source. Keep
+`verify_dir` and the `probe` function for the draft and published readbacks.
+A patch release may already have a minor tag: capture its digest before dispatch
+and require that digest to remain unchanged until publication. The new full-version
+tag must be absent. This example stops on denied/failed lookups; use the existing
+authenticated inspection route to establish equivalent evidence, never infer absence.
+
+```bash
+NEXT_VERSION=vX.Y.Z
+reviewed_main_commit=<reviewed-main-commit-sha>
+set -euo pipefail
+verify_dir="$(mktemp -d)"
+major_minor="${NEXT_VERSION#v}"; major_minor="${major_minor%.*}"
+
+probe() {
+  local repository="$1" ref="$2" token code digest headers
+  headers="$verify_dir/headers-${repository##*/}-$ref"
+  token="$(curl --fail -sS "https://ghcr.io/token?scope=repository:$repository:pull" | jq -er .token)" || return 1
+  code="$(curl -sS -D "$headers" -o "$verify_dir/manifest-${repository##*/}-$ref.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    "https://ghcr.io/v2/$repository/manifests/$ref")" || return 1
+  digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\r", "", $2); print $2}' "$headers")"
+  if [ "$code" = 404 ]; then digest=-; fi
+  printf '%s %s\n' "$code" "${digest:--}"
+}
+
+: > "$verify_dir/minor-before.tsv"
+for repository in my-denia/wuwaterm my-denia/wuwaterm-builder; do
+  observed="$(probe "$repository" "$major_minor")"
+  [[ "$observed" =~ ^(200\ sha256:[a-f0-9]{64}|404\ -)$ ]]
+  printf '%s\t%s\n' "$repository" "$observed" >> "$verify_dir/minor-before.tsv"
+done
+```
 
 ## Draft Readback
 
@@ -210,7 +252,7 @@ test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" 
 gh release view "$NEXT_VERSION" --json assets --jq '.assets[].name' | sort
 
 # 2. The bytes on the release page are the bytes the checksums describe.
-verify_dir="$(mktemp -d)"
+: "${verify_dir:?Run the registry baseline before dispatch}"
 gh release download "$NEXT_VERSION" --dir "$verify_dir"
 (cd "$verify_dir" && sha256sum -c SHA256SUMS)
 
@@ -234,49 +276,45 @@ which is the expected pass state before publication. A status of 0 means the
 tag exists — stop. Any other status is a lookup ERROR, not an absence, and is
 also a stop: the check must fail closed when it cannot answer.
 
-**Then probe GHCR**, without Docker. A first-published user package on this
-registry defaults to private, so an anonymous denial is an expected outcome
-and an owner visibility step, not a defect in the release. At draft time the
-probe must still distinguish “package private” from “semantic tag already
-exists”:
+**Then compare the registry to the pre-dispatch baseline**, without writing tags.
+A new full-version tag must not exist. An existing minor tag must still have its
+old digest; a missing minor tag must still be absent. The draft sha images must
+match the downloaded manifest.
 
 ```bash
-NEXT_VERSION=vX.Y.Z
-reviewed_main_commit=<reviewed-main-commit-sha>
-short="$(printf '%s' "$reviewed_main_commit" | cut -c1-7)"
+# Draft registry guard: preserve the pre-dispatch minor baseline.
+set -euo pipefail
+: "${NEXT_VERSION:?Set the candidate tag}"
+: "${reviewed_main_commit:?Set the reviewed full SHA}"
+: "${verify_dir:?Use the baseline/readback directory}"
+short="${reviewed_main_commit:0:7}"
 major_minor="${NEXT_VERSION#v}"; major_minor="${major_minor%.*}"
-
-probe() {
-  repository="$1"
-  ref="$2"
-  token="$(curl -sS "https://ghcr.io/token?scope=repository:$repository:pull" | jq -r .token)"
-  curl -sS -o /tmp/ghcr-manifest.json -w '%{http_code}' \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
-    "https://ghcr.io/v2/$repository/manifests/$ref"
-}
-
 for repository in my-denia/wuwaterm my-denia/wuwaterm-builder; do
-  sha_code="$(probe "$repository" "sha-$short")"
-  semver_code="$(probe "$repository" "$NEXT_VERSION")"
-  mm_code="$(probe "$repository" "$major_minor")"
-  printf '%s sha-%s=%s %s=%s %s=%s\n' \
-    "$repository" "$short" "$sha_code" "$NEXT_VERSION" "$semver_code" "$major_minor" "$mm_code"
-  # Draft: sha tag must exist (200, or 401/403 if the package is private).
-  # Semantic tags must not exist yet: 404. A 200 here is a stop — the draft
-  # left a release-looking tag. 401/403 on the semantic ref is ambiguous
-  # (private package); confirm with an authenticated `gh api` package-version
-  # listing that `vX.Y.Z` / `X.Y` were not created.
-  test "$semver_code" != "200"
-  test "$mm_code" != "200"
+  expected_digest="$(jq -er --arg name "ghcr.io/$repository" '.images[] | select(.name == $name) | .digest' "$verify_dir/release-manifest.json")"
+  [[ "$expected_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+  test "$(probe "$repository" "sha-$short")" = "200 $expected_digest"
+  test "$(probe "$repository" "$NEXT_VERSION")" = '404 -'
+  before="$(awk -F '\t' -v repo="$repository" '$1 == repo {print $2}' "$verify_dir/minor-before.tsv")"
+  [[ "$before" =~ ^(200\ sha256:[a-f0-9]{64}|404\ -)$ ]]
+  test "$(probe "$repository" "$major_minor")" = "$before"
 done
 ```
 
-After publication, repeat the same probe: `vX.Y.Z` and `X.Y` must resolve to
-the digests in the downloaded `release-manifest.json`. Authenticated
-`docker buildx imagetools inspect` (or `gh api` package versions) is the
-digest compare when anonymous pull is denied. `v0.4.0` / `0.4` must still
-resolve to the historical digests in that older release's manifest.
+Record and independently review the draft itself, not only its manifest. Keep the
+raw response and its SHA256 with the artifact audit. The release API URL identifies
+the same release object for the final read, even if its tag or target is later edited.
+
+```bash
+release_api="$(gh release view "$NEXT_VERSION" --repo My-Denia/WuwaTerm --json apiUrl --jq .apiUrl)"
+gh api "$release_api" > "$verify_dir/audited-release.json"
+sha256sum "$verify_dir/audited-release.json"
+```
+
+After publication, the new full and minor tags must match the release manifest's
+digests. Existing immutable release tags, including `v0.6.0`, must retain their
+recorded digests. Historical `v0.4.0` / `0.4` must also remain unchanged. Use
+an authenticated `docker buildx imagetools inspect` or package-version readback
+when anonymous access is denied; do not change package visibility implicitly.
 
 ## Publish
 
@@ -288,18 +326,60 @@ time — and the check is only worth anything if nothing can happen between it
 and the command it guards:
 
 ```bash
-NEXT_VERSION=vX.Y.Z
+# Publication guard: bind the audited draft, source, body and assets.
 set -euo pipefail
+: "${NEXT_VERSION:?Set the candidate tag}"
+: "${reviewed_main_commit:?Set the reviewed full SHA}"
+: "${verify_dir:?Use the independently reviewed readback directory}"
+: "${audited_snapshot_sha256:?Set the snapshot hash accepted by the artifact audit}"
+release_api="$(python3 - "$verify_dir/audited-release.json" "$audited_snapshot_sha256" <<'PY'
+import hashlib, json, re, sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+assert hashlib.sha256(raw).hexdigest() == sys.argv[2], 'audited snapshot changed'
+url = json.loads(raw)['url']
+assert re.fullmatch(r'https://api.github.com/repos/My-Denia/WuwaTerm/releases/[0-9]+', url), 'wrong release repository/object'
+print(url)
+PY
+)"
+gh api "$release_api" > "$verify_dir/current-release.json"
+python3 - "$verify_dir/audited-release.json" "$verify_dir/current-release.json" "$NEXT_VERSION" "$reviewed_main_commit" <<'PY'
+import json, re, sys
+from pathlib import Path
+old, current = [json.loads(Path(path).read_text()) for path in sys.argv[1:3]]
+tag, source = sys.argv[3:5]
+assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
+assert re.fullmatch(r'[0-9a-f]{40}', source)
+def fingerprint(doc):
+    assert doc['tag_name'] == tag and doc['draft'] is True, 'not the expected draft'
+    assert doc['target_commitish'] == source, 'draft target changed'
+    assert isinstance(doc['id'], int) and doc['id'] > 0
+    assert isinstance(doc['body'], str) and doc['body'].strip()
+    assets = doc['assets']
+    assert len(assets) == 4, 'wrong asset count'
+    version = tag[1:]
+    assert {a['name'] for a in assets} == {
+        f'wuwaterm-{version}-py3-none-any.whl', f'wuwaterm-{version}.tar.gz',
+        'SHA256SUMS', 'release-manifest.json'}, 'wrong asset names'
+    for asset in assets:
+        assert asset['state'] == 'uploaded' and asset['size'] > 0
+        assert re.fullmatch(r'sha256:[0-9a-f]{64}', asset['digest']), 'missing asset digest'
+    return (doc['id'], doc['name'], doc['body'], sorted(
+        (a['id'], a['name'], a['size'], a['digest']) for a in assets))
+assert fingerprint(old) == fingerprint(current), 'audited release body/assets changed'
+PY
 
 tag_lookup_status=0
-git ls-remote --exit-code --tags origin "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
-test "$tag_lookup_status" -eq 2  # absent, and a lookup ERROR also stops here
+git ls-remote --exit-code --tags https://github.com/My-Denia/WuwaTerm.git "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
+test "$tag_lookup_status" -eq 2
 
-gh release edit "$NEXT_VERSION" --draft=false
+gh release edit "$NEXT_VERSION" --repo My-Denia/WuwaTerm --draft=false --latest --target "$reviewed_main_commit"
 ```
 
-That command is the publication gate. Nothing before it is public, and nothing
-after it can be taken back quietly.
+That explicit command publishes the GitHub draft. The sha-tagged images may
+already be visible before it. These reads and publication are not a transaction
+against an independent concurrent publisher; stop on observed drift and verify
+the published result. A published tag/release cannot be taken back quietly.
 
 ## Post-Publish Readback
 

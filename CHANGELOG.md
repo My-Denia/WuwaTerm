@@ -5,6 +5,42 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.6.1
+
+### Backend fixes
+
+- Review and matching: reject ordinary-word and cross-word CJK collisions,
+  including the false certification of character `椿` inside `臭椿`, while
+  retaining genuine character references. HTML-separated matches use full
+  context. Report comparison no longer counts a false certification as resolved.
+- Sentence translation: lock eligible English case and plural variants and
+  remove stray ASCII spaces around restored Chinese terms. Existing ordinary-word
+  exclusions remain; these rules are not general semantic disambiguation.
+- Recovery: journal full-data updates and support explicit interrupted-update
+  recovery. An uncertain container inspection fails closed instead of being
+  treated as a stopped service. Source tests do not establish host adoption.
+
+### Compatibility and distribution
+
+- `/v1`, `review-v1` and `review-v2` remain the protocols. Matcher identity is
+  opt-in; saved choices carrying an older matcher hash may require confirmation.
+  Existing manuscripts remain importable and are not silently recertified.
+- Public Web source and its build now live in
+  [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). Pinned cross-repository
+  metadata and label contracts remain in backend CI. This release does not
+  redeploy the public Web or bundle its Node application.
+- Backend releases contain a wheel, sdist, `SHA256SUMS` and release manifest,
+  plus runtime/builder container images. Windows packaging is independent;
+  existing client compatibility and its paused development status are unchanged.
+- The dictionary source pin is unchanged. No generated databases or game data
+  are distributed. Installing this version or updating an image does not by
+  itself update the host's separate updater script or prove production adoption.
+
+## Pre-split source history after 0.6.0
+
+The notes below preserve the earlier source history. Web-only changes belong to
+its separate repository and hosting releases; they are not backend release assets.
+
 - Repository: move the public Web to [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), retaining immutable cross-repository metadata and label contracts. Python core, API, Bot, builder, VPS tools, private Web and Windows remain here. This source move does not deploy either service.
 
 - Site: pin `next` to 16.4.3 and override `undici` 7.30.1, `zod` 4.6.6, and `fast-uri` 3.1.9 so the site feasibility audit no longer fails on the newly published advisories. No toolchain downgrade.
