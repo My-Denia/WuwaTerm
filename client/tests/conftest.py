@@ -1,10 +1,8 @@
 """Shared pytest setup.
 
 Sets QT_QPA_PLATFORM=offscreen before any PySide6 import so Qt-constructing
-tests run headlessly, without a real display. Only the tests that actually
-import PySide6 pay this cost; the rest of the suite (api, config,
-credentials, errors, and the static strings-source check) never imports Qt
-and needs no event loop at all.
+tests run headlessly, without a real display. The API, configuration,
+credential and error tests do not need Qt or its event loop.
 """
 
 from __future__ import annotations

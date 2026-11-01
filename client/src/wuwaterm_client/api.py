@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import ssl
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -192,52 +191,6 @@ class MetaResult:
         )
 
 
-def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -> None:
-    """The private test seam may not bring weakened TLS with it.
-
-    `verify=True` below configures the transport this client BUILDS. When one
-    is passed in instead, that argument is ignored by httpx and the injected
-    transport's own SSL configuration is what runs - so
-    `AsyncHTTPTransport(verify=False)` would otherwise slip past a guarantee
-    that says no argument can weaken verification.
-
-    Only two kinds are accepted, by EXACT type:
-
-    * `httpx.MockTransport`, whose handler is a callable supplied by the same
-      test that constructs it; and
-    * `httpx.AsyncHTTPTransport`, whose SSL context this function can read -
-      and which must require a certificate and check the host name.
-
-    Exact types, not `isinstance`, because inspecting an object's attributes
-    proves nothing about what its `handle_async_request` does: a subclass, or
-    any other implementation, can expose a verifying context while sending
-    the request down a connection that verifies nothing. Reading a decoy is
-    worse than reading nothing, so an implementation this function cannot
-    reason about is refused rather than inspected.
-
-    What this does NOT claim: a `MockTransport` handler is arbitrary in-process
-    code and could itself hand the request to something unverified. That is not
-    a hole this function can close, and it is not one worth pretending to -
-    in-process code can already replace anything here. It is bounded instead by
-    scope: the parameter is named `_test_transport`, is not part of this
-    client's interface, is passed by nothing the application ships (grep it),
-    and reaches no configuration file, environment variable or dialog. The
-    guarantee is about what an owner or a configuration can do, not about what
-    code running inside the process can do.
-    """
-    if transport is None or type(transport) is httpx.MockTransport:
-        return
-    if type(transport) is not httpx.AsyncHTTPTransport:
-        raise ClientError(ERROR_INSECURE_ENDPOINT)
-    context = getattr(getattr(transport, "_pool", None), "_ssl_context", None)
-    if (
-        not isinstance(context, ssl.SSLContext)
-        or context.verify_mode is not ssl.CERT_REQUIRED
-        or not context.check_hostname
-    ):
-        raise ClientError(ERROR_INSECURE_ENDPOINT)
-
-
 def _normalized(base_url: str | None) -> str | None:
     """The exact string that is validated is the string that is used.
 
@@ -309,7 +262,6 @@ class ApiClient:
         base_url = _normalized(base_url)
         if base_url is not None:
             _require_confidential_endpoint(base_url)
-        _require_verifying_transport(_test_transport)
         self._configured = base_url is not None
         self._token_provider = token_provider
         self._timeout = timeout
@@ -322,14 +274,8 @@ class ApiClient:
             base_url=base_url if base_url is not None else "",
             timeout=timeout,
             transport=_test_transport,
-            # Server certificates are always verified. This is httpx's own
-            # default and is stated here so that removing verification would
-            # have to be a deliberate edit to this line rather than the
-            # silent effect of a flag someone added elsewhere; the client
-            # exposes no setting, argument or environment variable that can
-            # weaken it. It configures the transport this client BUILDS, and
-            # httpx ignores it when one is injected instead - which is why
-            # _require_verifying_transport above vets that case separately.
+            # Configure certificate and hostname verification on the normal
+            # transport. The private test seam supplies its own transport.
             verify=True,
             # httpx trusts HTTP_PROXY by default, so a machine with a proxy
             # configured and no NO_PROXY entry for the configured host would

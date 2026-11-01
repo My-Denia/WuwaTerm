@@ -1,0 +1,54 @@
+name: Python package
+
+on:
+  workflow_call:
+    inputs:
+      source_commit:
+        required: true
+        type: string
+      upload_package:
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -U pip build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - run: python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
+      - name: Install wheel into a clean venv and smoke it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-wheel"
+          "$RUNNER_TEMP/venv-wheel/bin/pip" install --no-cache-dir dist/*.whl
+          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
+          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
+      - name: Install sdist into a clean venv and smoke it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-sdist"
+          "$RUNNER_TEMP/venv-sdist/bin/pip" install --no-cache-dir dist/*.tar.gz
+          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
+          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
+      - uses: actions/upload-artifact@v7
+        if: inputs.upload_package
+        with:
+          name: python-package
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error

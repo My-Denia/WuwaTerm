@@ -1,37 +1,14 @@
 """Every user-facing literal in the WuwaTerm desktop client, in one place.
 
-The ui/ package and errors.py never define display text inline; they import
-constants from this module. tests/test_ui_strings_source.py statically
-checks two things about the ui package, subpackages included: that no literal
-text reaches a known text-setting call, and that no string literal anywhere
-in those files contains a Chinese, Japanese or Korean character - including
-one written above the basic multilingual plane. The second one is the
-reason no Chinese can be written directly into the ui layer at all - not
-behind a local variable, not inside an f-string, not through a setter nobody
-thought to whitelist.
+The ui/ package and errors.py import display-text constants from this module.
+Text provided by Qt or returned by the service is handled separately.
 
 The values are Chinese; the constant NAMES are a contract. Tests and the
 error map identify a message by its name, so a name may never be renamed or
 dropped to change wording - only its value moves.
 
-The module stays a flat list of ``NAME = "text"`` assignments, and the reason
-is worth stating exactly, because an earlier version of this paragraph got it
-wrong. It is NOT that a dict here would break the static gate: measured,
-``test_ui_strings_source.py`` only (a) counts module-level string constants
-against a floor of twenty, (b) forbids string literals at text-setting calls
-in the ui package, and (c) forbids any string literal holding a CJK character
-anywhere in that package, subpackages included and supplementary-plane Han
-included - comments are invisible to it and docstrings are excluded on
-purpose. All three read the ui package, not this file: none of them
-checks that displayed text came from this module, and none of them can see
-text that arrives from Qt or from the service at run time. So values inside a
-dict here are neither more nor less covered than flat ones. The rule is a
-convention with two other justifications: a reader
-can grep a name and see every word this application can display in one list,
-and every service-value-to-text mapping in this client already lives in the
-view that consumes it (``_KIND_LABELS``, ``_REASON_LABELS``,
-``_CATEGORY_LABELS``, ``_CREDENTIAL_BACKEND_LABELS``). Text here, mapping
-there - one shape, no exceptions.
+The flat list makes the application's own wording easy to find. Mappings from
+service values to text live in the views that consume them.
 
 Two wordings here are not free choices:
 

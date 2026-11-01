@@ -533,7 +533,7 @@ TokenDialog 复用同一版式,差异仅三处:标题「输入设备令牌」/�
 | 7 | 首启 / 令牌 / 设置视觉重做 + 未命中桥 + 键盘跳区 | 首启断言 |
 | 8 | 实机验收:四档缩放 + 亮暗截图,更新中文用户文档 | 手动取证 |
 
-每阶段结束跑 `client` 套件 + 仓库级四道门(`test_client_documentation_claims`、`test_client_transport_policy`、`check_non_goals.py`、`check_repo_hygiene.py`)。
+每阶段结束跑 `client` 套件和仓库的 `python scripts/validate.py`。
 
 ---
 
@@ -557,4 +557,4 @@ TokenDialog 复用同一版式,差异仅三处:标题「输入设备令牌」/�
 
 其中四条承重结论由主控回路**独立复读源码复核**:英文「别名」一词的全词禁用规则、`config.json` 三键钉死、`WuwaTerm.spec` 的 `datas=[]` 现状、`tabs.count()==3` 与「在跑即忽略」守卫。两名评审代理运行时安全分类器不可用,其结论仅在与上述实读证据一致处采信。
 
-**本文档自身也过了这些门**:撰写时首版在说明表格里原样写出了两个被禁的英文词,当场被 `check_non_goals.py` 拦下——这恰好证明了 §7.1 那两行的真实性,也是新增中文文档必须做提交前自查的实例。
+撰写时,首版说明表格里的两个英文词被当时的 `check_non_goals.py` 拦下;该文本检查现已移除。

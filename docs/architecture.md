@@ -8,8 +8,7 @@ Claims map to source, tests, deploy scripts, and Compose topology. This is not a
 aspirational redesign.
 
 Operational detail lives in sibling guides. Decision rationale lives in
-[ADRs](adr/). Automated import-direction and non-goal gates live under
-`scripts/` and CI.
+[ADRs](adr/). Automated import-direction checks run under `scripts/` and CI.
 
 ## System context
 
@@ -353,9 +352,8 @@ Observed edges (static imports among shipped modules):
   serving BOTH surfaces from the same image
   (`tests/test_runtime_imports.py`, CI `deploy-boundary` job).
 
-Automated enforcement: `scripts/check_architecture_boundaries.py` plus
-`scripts/check_non_goals.py`, `scripts/check_api_contract.py` and
-`tests/test_runtime_imports.py`.
+Automated enforcement: `scripts/check_architecture_boundaries.py`,
+`scripts/check_api_contract.py` and `tests/test_runtime_imports.py`.
 
 ### Current coupling (honest)
 
@@ -415,8 +413,7 @@ Evidence: `src/wuwaterm_api/app.py` `create_translation`,
 
 ### Linked-channel auto-translation
 
-Evidence: `channel.py` `channel_post_handler`; single listener pin in
-`scripts/check_non_goals.py` / `bot.py`.
+Evidence: `channel.py` `channel_post_handler` and registration in `bot.py`.
 
 1. Update matches `filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL`.
 2. Age / size / CJK-Latin thresholds; kill switch `WUWATERM_CHANNEL_AUTOTRANSLATE`.

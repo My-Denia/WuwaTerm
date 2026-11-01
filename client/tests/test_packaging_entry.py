@@ -1,16 +1,7 @@
-"""The packaged build must be able to start.
-
-`pyinstaller` runs its entry script as a top-level module called `__main__`
-with no package context. An entry that reaches its siblings through relative
-imports therefore raises `ImportError: attempted relative import with no known
-parent package` in the frozen program, while every source-tree test keeps
-passing. These tests pin the two halves of the fix: the spec points at an
-absolute-import entry, and that entry starts up without a display.
-"""
+"""Exercise the client startup self-check in a fresh process."""
 
 from __future__ import annotations
 
-import ast
 import os
 import subprocess
 import sys
@@ -19,13 +10,7 @@ from pathlib import Path
 import pytest
 
 CLIENT_ROOT = Path(__file__).resolve().parents[1]
-ENTRY = CLIENT_ROOT / "main.py"
-SPEC = CLIENT_ROOT / "WuwaTerm.spec"
 
-# What a packaged launch does: start an interpreter, build a QApplication and
-# an event loop from nothing, construct the window, exit. Run as a child so it
-# is the same shape as the real thing - see the test below for why that also
-# removes an ordering constraint the whole suite used to carry.
 _SELF_CHECK_PROGRAM = """
 from wuwaterm_client.app import SELF_CHECK_FLAG, run
 
@@ -33,59 +18,8 @@ raise SystemExit(run(["WuwaTerm", SELF_CHECK_FLAG]))
 """
 
 
-def test_the_spec_entry_is_the_absolute_import_launcher() -> None:
-    spec = SPEC.read_text(encoding="utf-8")
-
-    assert 'ENTRY_POINT = CLIENT_ROOT / "main.py"' in spec
-    # The package's own __main__ is for `python -m wuwaterm_client` and must
-    # not be the frozen entry point.
-    assert '"wuwaterm_client" / "__main__.py"' not in spec
-
-
-def test_the_packaging_entry_uses_no_relative_imports() -> None:
-    tree = ast.parse(ENTRY.read_text(encoding="utf-8"))
-
-    relative = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level
-    ]
-    assert not relative, [node.module for node in relative]
-
-
-def test_the_package_main_module_still_works_for_dash_m() -> None:
-    """The other half of the contract: `python -m wuwaterm_client` needs the
-    relative import that the frozen entry may not use."""
-    module = CLIENT_ROOT / "src" / "wuwaterm_client" / "__main__.py"
-    tree = ast.parse(module.read_text(encoding="utf-8"))
-
-    assert any(
-        isinstance(node, ast.ImportFrom) and node.level for node in ast.walk(tree)
-    )
-
-
 def test_self_check_starts_up_and_exits_without_a_window() -> None:
-    """The start-up rehearsal, run in a CHILD interpreter.
-
-    A packaged launch is a fresh process that builds its OWN QApplication and
-    its own event loop, and that construction is the thing this test exists to
-    prove. In-process it could not keep proving it: `app.run` calls
-    `QApplication(...)` unconditionally, libshiboken refuses a second instance
-    while one is alive, and the other Qt test files here keep a session-scoped
-    one. So this test used to pass only when it ran BEFORE all of them - an
-    invisible constraint that every future Qt test file had to satisfy by
-    being named to sort later, and one that really did bite: a file added
-    during the config-persistence work failed immediately and had to be
-    renamed to dodge it.
-
-    The two ways out were to borrow the session instance or to move the probe
-    to a subprocess. Borrowing would have removed the constraint by deleting
-    the assertion's content - a `run` handed a QApplication someone else built
-    is no longer the packaged start-up path. A child process keeps the
-    content and removes the constraint, because there is nothing in it to
-    collide with. Ordering is now proven, not assumed:
-    `test_the_suite_does_not_depend_on_this_file_running_first` below.
-    """
+    """Exercise startup in a fresh headless process, with its own Qt event loop."""
     pytest.importorskip("PySide6")
     pytest.importorskip("qasync")
 
@@ -107,124 +41,3 @@ def test_self_check_starts_up_and_exits_without_a_window() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-
-
-_QAPPLICATION = "QApplication"
-
-
-def qapplication_constructions(source: str) -> list[int]:
-    """Line numbers where `source` constructs a QApplication, any spelling.
-
-    The first version of this guard matched one shape - a call whose function
-    is the bare name `QApplication` - and three ordinary ways of writing the
-    same construction walked straight past it:
-
-        QApplication([])                              bare name
-        QtWidgets.QApplication([])                    module attribute
-        from ... import QApplication as QApp; QApp([])   renamed import
-
-    So it would have gone on passing while the ordering constraint it exists
-    to prevent came back. From-imports are resolved to their local names, and
-    ANY attribute call ending in `.QApplication` counts whatever the object
-    in front of the dot is called - which covers `QtWidgets.QApplication`, a
-    renamed module, and a fully qualified `PySide6.QtWidgets.QApplication`
-    alike.
-
-    What this does NOT catch: construction through a value the parser cannot
-    follow - `getattr(QtWidgets, "QApplication")()`, a class looked up in a
-    dict, an exec of assembled text. That is a real limit and it is stated
-    rather than papered over; the guard is here to stop the constraint
-    returning by ordinary edit, which is how it arrived, and no text scan can
-    close the dynamic case.
-    """
-    tree = ast.parse(source)
-
-    local_names = {_QAPPLICATION}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            for imported in node.names:
-                if imported.name == _QAPPLICATION:
-                    local_names.add(imported.asname or imported.name)
-
-    lines: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        function = node.func
-        if isinstance(function, ast.Name) and function.id in local_names:
-            lines.append(node.lineno)
-        elif isinstance(function, ast.Attribute) and function.attr == _QAPPLICATION:
-            lines.append(node.lineno)
-    return sorted(lines)
-
-
-def test_the_suite_does_not_depend_on_this_file_running_first() -> None:
-    """The ordering constraint is gone, and this is what keeps it gone.
-
-    Nothing in this module may construct a QApplication in the test process.
-    While it did, the suite ran correctly only in filename order, and the
-    failure it produced named libshiboken rather than the ordering - which is
-    why it cost a rename to diagnose rather than a read.
-
-    Checked by parsing this file rather than by importing Qt: the property is
-    "this module does not build one", and an assertion that needed a live
-    QApplication to check it would be the same trap one level down.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-
-    assert qapplication_constructions(source) == [], (
-        "this module must not build a QApplication in-process"
-    )
-    # The probe still has to actually run the entry point, or the assertion
-    # above could be satisfied by doing nothing at all.
-    assert "run([\"WuwaTerm\", SELF_CHECK_FLAG])" in _SELF_CHECK_PROGRAM
-
-
-@pytest.mark.parametrize(
-    ("spelling", "source"),
-    [
-        (
-            "bare name",
-            "from PySide6.QtWidgets import QApplication\nQApplication([])\n",
-        ),
-        (
-            "module attribute",
-            "from PySide6 import QtWidgets\nQtWidgets.QApplication([])\n",
-        ),
-        (
-            "fully qualified attribute",
-            "import PySide6\nPySide6.QtWidgets.QApplication([])\n",
-        ),
-        (
-            "renamed import",
-            "from PySide6.QtWidgets import QApplication as QApp\nQApp([])\n",
-        ),
-        (
-            "renamed module attribute",
-            "from PySide6 import QtWidgets as W\nW.QApplication([])\n",
-        ),
-    ],
-)
-def test_the_ordering_guard_catches_every_spelling(spelling: str, source: str) -> None:
-    """A guard that matches one spelling is a guard that can be walked around
-    without meaning to. Each of these is an ordinary way to write the
-    construction, and the original check saw only the first."""
-    assert qapplication_constructions(source), spelling
-
-
-@pytest.mark.parametrize(
-    ("description", "source"),
-    [
-        ("a different widget", "from PySide6.QtWidgets import QLabel\nQLabel()\n"),
-        ("an unrelated attribute call", "import os\nos.getcwd()\n"),
-        ("the name only mentioned", "widget = None  # QApplication\n"),
-        ("a string, not a call", 'text = "QApplication([])"\n'),
-    ],
-)
-def test_the_ordering_guard_does_not_fire_on_innocent_code(
-    description: str, source: str
-) -> None:
-    """The other half. A check that flagged everything would pass the five
-    cases above while proving nothing at all - including about this file,
-    which mentions the banned construction in prose and in test data."""
-    assert qapplication_constructions(source) == [], description

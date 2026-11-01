@@ -185,10 +185,9 @@ later changes zero contract bytes.
 
 The client's HTTP client is constructed with certificate verification
 explicitly on and with environment proxy variables not trusted; there is no
-setting, flag, environment variable or code path that turns verification off,
-and the repository fails the build on the textual shapes that would introduce
-one. A test inspects the SSL context actually handed to the connection pool
-rather than trusting the constructor argument. Server identity is therefore
+setting, flag, environment variable or code path that turns verification off.
+A test inspects the SSL context `httpx` actually creates rather than trusting
+the constructor argument. Server identity is therefore
 proven by the certificate chain on every request; client identity is proven by
 the device credential. Neither proves the other.
 
@@ -286,7 +285,6 @@ request rather than a review.
   `endpoint_is_confidential`
 - `client/src/wuwaterm_client/api.py` — verification on, proxies not trusted,
   request-target guard before the credential header
-- `tests/test_client_transport_policy.py` — no shell channel, no weakened TLS
 - `client/tests/test_transport_security.py` — the SSL context actually used
 - `docs/deployment.md` — the route, the readback and the rollback
 - [ADR 0009](0009-http-api-adapter.md),

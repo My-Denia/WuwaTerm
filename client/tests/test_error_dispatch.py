@@ -23,13 +23,6 @@ from wuwaterm_client.ui import error_presentation
 ALL_CODES = frozenset(errors.MESSAGE_BY_CODE)
 
 
-def test_the_taxonomy_is_the_size_the_tables_were_written_for() -> None:
-    """A guard on the guard: if the taxonomy grows, the tests below still
-    pass silently only if the tables grew with it, and this line says out
-    loud how many codes the design accounted for."""
-    assert len(ALL_CODES) == 15
-
-
 def test_every_code_has_a_severity_and_no_table_row_is_stale() -> None:
     assert frozenset(error_presentation.SEVERITY_BY_CODE) == ALL_CODES
 

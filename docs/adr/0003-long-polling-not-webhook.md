@@ -25,12 +25,12 @@ Do not implement webhook delivery or document webhook HA.
 - Positive: matches single active consumer assumption (one token, one process).
 - Negative: two concurrent pollers on the same token are unsafe (update races);
   multi-instance is unsupported rather than “scale out with sticky webhooks”.
-- Enforcement: `scripts/check_non_goals.py` forbids webhook markers outside
-  allowlisted docs/tests; CI runs that script on every PR.
+- Enforcement: code review. The former wording scanner
+  `scripts/check_non_goals.py` was retired in 2026-11.
 
 ## Evidence
 
 - `src/wuwaterm/bot.py` `run_bot` → `app.run_polling()`
 - `deploy/docker-compose.yml` `command: ["bot"]`, no webhook env
 - `docs/deployment.md` (“uses long polling … does not configure webhook”)
-- `scripts/check_non_goals.py`, `tests/test_non_goals.py`
+- `tests/test_bot.py`

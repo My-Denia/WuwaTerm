@@ -99,9 +99,7 @@ cap, and a request time budget.
 
 [ADR 0003](0003-long-polling-not-webhook.md) decided that chat updates arrive
 by long polling. **That decision is unchanged.** The bot still polls; nothing
-in this repository registers a chat-side delivery endpoint, and
-`scripts/check_non_goals.py` still fails the build on the markers that would
-introduce one. What ADR 0003 also said — that this deployment has "no public
+in this repository registers a chat-side delivery endpoint. What ADR 0003 also said — that this deployment has "no public
 application HTTP surface" — is what this record amends: there is now one
 inbound HTTP surface, it belongs to the API adapter, it is authenticated per
 device ([ADR 0010](0010-device-principal-authentication.md)), and it has
@@ -149,5 +147,4 @@ ceiling. See the cost topology section of
 - `scripts/check_architecture_boundaries.py` — the API import allowlist
 - `scripts/check_api_contract.py`, `docs/api/openapi.json` — contract drift
 - `deploy/docker-compose.yml` — the second service, its mounts and its bind
-- `tests/test_api.py`, `tests/test_architecture_boundaries.py`,
-  `tests/test_non_goals.py`
+- `tests/test_api.py`, `tests/test_architecture_boundaries.py`

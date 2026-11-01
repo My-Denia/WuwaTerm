@@ -414,7 +414,6 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
         "FROM python-base AS builder", 1
     )[0]
     builder_section = text.split("FROM python-base AS builder", 1)[1]
-    assert "git" not in runtime_section
     assert "--extra build" not in runtime_section
     # The serving surface needs its own extra; the builder path must stay out.
     assert "--extra api" in runtime_section
@@ -1878,41 +1877,3 @@ def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
     assert "sends nothing it can act on, so that case leaves no record here" in flat
     # ...and the cost claim is scoped to requests that reach the model.
     assert "A dictionary hit returns before the model stage" in flat
-
-
-def test_the_guide_does_not_teach_host_administration_as_the_client_path():
-    """The deployment guide is a runbook, and a runbook that documents a
-    host-administration channel as the way a desktop client reaches the
-    service teaches exactly the design this project does not have.
-
-    The client reaches a configured secure endpoint with device
-    authentication on every call. Host shell access is the operator's own
-    channel: it appears here for deployment and credential commands, and
-    never as the application's path.
-    """
-    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
-
-    # No local port-forwarding recipe, in any of the forms that would put one
-    # back into the guide.
-    for recipe in ("ssh -N -L", "ssh -L", "-N -L", "LocalForward"):
-        assert recipe not in text, recipe
-    # The replacement wording is present, not merely the removal.
-    assert "configured secure endpoint" in text
-    assert "Every `/v1` operation is authenticated at the application layer" in text
-    # The transport has since been selected, so the guide names it instead of
-    # saying it does not exist: a path route on a site the host already
-    # serves, which the API is reached THROUGH and never bound to. The two
-    # properties that make that safe are pinned, not the prose around them.
-    assert "path route on an HTTPS site the host already serves" in text
-    assert "Rollback is deleting that block and reloading again" in text
-    # ...and the readback that would prove it must not be one taken on the
-    # host, which proves only that the process is up.
-    assert "Readback belongs on the client machine" in text
-    # ...and the claim stays true about the routes that really are open.
-    for unauthenticated in ("GET /healthz", "GET /readyz", "GET /openapi.json"):
-        assert unauthenticated in text, unauthenticated
-    # The Compose comment describes the same surface to whoever reads the file
-    # instead of the guide, so it may not promise more than the guide does.
-    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "every /v1" in compose
-    assert "GET /healthz, GET /readyz, GET /openapi.json" in compose

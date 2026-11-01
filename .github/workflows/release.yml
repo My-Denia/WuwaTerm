@@ -4,8 +4,7 @@ name: Release
 # GitHub when a human publishes the draft, so a draft that is discarded leaves
 # no tag behind. This workflow never publishes.
 #
-# A pull_request run is ALWAYS a dry run: it builds everything, pushes nothing,
-# creates nothing, and its manifest records `"dry_run": true` with null digests.
+# A dry-run dispatch builds everything without publishing or pushing images.
 # A release published event runs only promote-images: it retags recorded
 # digests and never publishes a GitHub release.
 on:
@@ -23,11 +22,10 @@ on:
         required: false
         default: true
         type: boolean
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - deploy/**
-      - pyproject.toml
+      validation_run_id:
+        description: Completed CI dispatch run ID when the source lacks a main-push receipt
+        required: false
+        type: string
   # After a human publishes the draft (which is what creates the git tag),
   # promote-images retags the digests already recorded in that release's
   # manifest. This trigger does not publish. Every other job skips it.
@@ -35,30 +33,18 @@ on:
     types:
       - published
 
-# The workflow default is read-only. Exactly two jobs widen it, each by one
-# scope: `push-images` takes packages:write and `draft-release` takes
-# contents:write. BOTH are gated on a workflow_dispatch with dry_run=false, so
-# neither is reachable from the pull_request trigger this workflow also has -
-# which matters because this file is inside its own path filter, and a job that
-# holds a write scope on a pull_request run holds it for whatever that pull
-# request changed the job into.
+# Write permissions are limited to the draft and promotion jobs.
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  # Every dispatch shares ONE group, whatever commit it targets. Keying on
-  # target_commit put two dispatches at different commits in different groups -
-  # and two commits can declare the same version (a retry with a corrected sha
-  # is the obvious case), so both would pass the tag-absence preflight and then
-  # race for the same image tags, leaving whichever finished last in place while
-  # the other run's manifest recorded the digests it had pushed. Pull requests
-  # keep a per-ref group so one pull request never queues behind another.
+  # Real and dry-run dispatches serialize; published releases queue separately
+  # under the shared promotion job group below.
   group: >-
     ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch'
-    && 'dispatch' || github.event_name == 'release'
-    && format('promotion-run-{0}', github.run_id) || format('pr-{0}', github.ref) }}
-  # Never cancel a dispatch or promotion: it may be halfway through writing images.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    && 'dispatch' || format('promotion-run-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   preflight:
@@ -78,14 +64,24 @@ jobs:
       resource_version: ${{ steps.datapin.outputs.resource_version }}
       changelist: ${{ steps.datapin.outputs.changelist }}
     steps:
-      # A dispatch builds the requested commit; a pull_request builds the ref
-      # the event already checked out. Every other job repeats this same
-      # expression rather than checking out a resolved sha, because on a
-      # pull_request the ref is a merge ref that checkout resolves itself.
+      # Build the requested source, while retaining the workflow control revision separately.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          ref: ${{ inputs.target_commit }}
           fetch-depth: 0
+      # A run on main holds the default-branch cache scope, so it may execute
+      # only code already on main. Candidate branches dry-run from their own ref.
+      - name: Runs on main accept only main source
+        env:
+          TARGET: ${{ inputs.target_commit }}
+          CONTROL_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$CONTROL_REF" = refs/heads/main ]; then
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            git merge-base --is-ancestor "$TARGET" origin/main
+          fi
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -176,8 +172,7 @@ jobs:
             echo "- enforced: $([ "$DRY_RUN" = "false" ] && echo yes || echo "no (dry run - reported only)")"
           } >> "$GITHUB_STEP_SUMMARY"
           # Fail-closed only when something is actually going to be pushed. A
-          # dry run reports the state and never blocks: the pipeline must be
-          # testable on a PR while the current version is already released.
+          # dry run reports the state and can test an already released version.
           if [ "$DRY_RUN" = "false" ] && [ "$status" -ne 2 ]; then
             echo "tag preflight failed; stop" >&2
             exit 1
@@ -196,6 +191,32 @@ jobs:
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$TARGET" origin/main
           echo "$TARGET is an ancestor of origin/main"
+
+      - name: Check out trusted release control
+        if: steps.mode.outputs.dry_run == 'false'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-control
+          fetch-depth: 0
+      - name: Verify successful CI for the actual source
+        if: steps.mode.outputs.dry_run == 'false'
+        working-directory: .release-control
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CONTROL_REF: ${{ github.ref }}
+          SOURCE_COMMIT: ${{ steps.commit.outputs.source_commit }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+        run: |
+          set -euo pipefail
+          test "$CONTROL_REF" = refs/heads/main
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [ -n "$VALIDATION_RUN_ID" ]; then
+            python scripts/verify_ci_source.py verify "$SOURCE_COMMIT" --run-id "$VALIDATION_RUN_ID"
+          else
+            python scripts/verify_ci_source.py verify "$SOURCE_COMMIT"
+          fi
 
       - name: Preflight summary
         env:
@@ -237,50 +258,12 @@ jobs:
     name: wheel/sdist build, audit, install
     if: github.event_name != 'release'
     needs: preflight
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-      - run: python -m pip install -U pip build twine
-      - run: python -m build
-      - run: python -m twine check --strict dist/*
-      - run: python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
-      - name: Install wheel into a clean venv and smoke it
-        run: |
-          python -m venv "$RUNNER_TEMP/venv-wheel"
-          "$RUNNER_TEMP/venv-wheel/bin/pip" install --no-cache-dir dist/*.whl
-          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
-          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
-          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
-          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
-      - name: Install sdist into a clean venv and smoke it
-        run: |
-          python -m venv "$RUNNER_TEMP/venv-sdist"
-          "$RUNNER_TEMP/venv-sdist/bin/pip" install --no-cache-dir dist/*.tar.gz
-          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
-          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
-          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
-          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
-      - uses: actions/upload-artifact@v7
-        with:
-          name: python-package
-          path: |
-            dist/*.whl
-            dist/*.tar.gz
-          if-no-files-found: error
+    uses: ./.github/workflows/python-package.yml
+    with:
+      source_commit: ${{ needs.preflight.outputs.source_commit }}
+      upload_package: true
 
-  # Builds both targets and pushes NOTHING, so it needs no registry permission
-  # and is safe to reach from a pull_request. The push lives in push-images
-  # below. Splitting them is not tidiness: this workflow is inside its own
-  # pull_request path filter, so anyone who can open a branch pull request here
-  # can change this file and have it run - and if this job held
-  # `packages: write`, that modified copy could push images under the project's
-  # namespace no matter what the dry-run switch says, because the switch only
-  # guards the steps that are checked in.
+  # Build locally first; write permission belongs only to push-images.
   images:
     name: container images (runtime + builder)
     if: github.event_name != 'release'
@@ -294,7 +277,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          ref: ${{ needs.preflight.outputs.source_commit }}
       - uses: docker/setup-buildx-action@v4
       - name: Build both image targets
         id: build
@@ -313,11 +296,7 @@ jobs:
           # targets build from this commit and produces no registry effect.
           output_flag=--load
 
-          # The OCI labels are set on the build command, never written into
-          # deploy/Dockerfile: the runtime stage may not contain a github.com
-          # string (tests/test_deploy_scripts.py forbids the substring "git"
-          # there). The Dockerfile keeps its own revision label from the
-          # SOURCE_COMMIT build arg; the value passed here is the same commit.
+          # The build labels and Dockerfile revision use the same source commit.
           build_one() {
             target="$1"
             image="$2"
@@ -356,10 +335,8 @@ jobs:
             echo "- vX.Y.Z and X.Y are applied after a human publishes, from the recorded digest"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The push, and the only job that may write packages. Unreachable from a
-  # pull_request by its own condition, and placed AFTER the package and
-  # image jobs so a release tag is never pushed for a commit whose wheel, sdist
-  # build had already failed.
+  # The push is placed after the package and image builds, and runs only for
+  # a non-dry dispatch whose source passed the preflight CI receipt check.
   #
   # Draft-time registry tags are sha-<7> only. vX.Y.Z and X.Y are applied by
   # promote-images after a human publishes the draft, from the exact digests
@@ -379,7 +356,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          ref: ${{ needs.preflight.outputs.source_commit }}
       - uses: docker/setup-buildx-action@v4
       - name: The tag must still be absent, checked here and not only in preflight
         env:
@@ -420,9 +397,6 @@ jobs:
           tag_list="$(IFS=,; echo "${tag_values[*]}")"
 
           # Same labels, same build arg, same commit as the build job above.
-          # The labels are set here and never in deploy/Dockerfile: the runtime
-          # stage may not contain a github.com string, because
-          # tests/test_deploy_scripts.py forbids the substring "git" there.
           push_one() {
             target="$1"
             image="$2"
@@ -483,7 +457,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          ref: ${{ needs.preflight.outputs.source_commit }}
       - uses: actions/download-artifact@v8
         with:
           name: python-package
@@ -604,7 +578,7 @@ jobs:
   # A separate job on purpose: GitHub Actions `permissions:` cannot be made
   # conditional on a workflow input expression, and the release design requires
   # `contents: write` on the draft job only. Folding this back into `assemble`
-  # would hand contents:write to every dry run, including pull_request runs.
+  # would hand contents:write to every dry run.
   # Do not "simplify" it back.
   draft-release:
     name: create the draft release
