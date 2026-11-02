@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 # The runtime image serves both inbound surfaces from one build, so it carries
 # the api extra. The data-build toolchain stays out of it entirely.
 RUN uv sync --locked --no-dev --no-editable --extra api --no-cache \
-    && python -c "from pathlib import Path; import re, shutil; root=Path('/app/.venv'); pat=re.compile(rb'-100[0-9][0-9_ -]*'); [p.write_bytes(pat.sub(b'<telegram-chat-id-example>', p.read_bytes())) for p in root.rglob('*') if p.is_file() and p.suffix in {'.py', '.pyi', '.txt', '.md'} and pat.search(p.read_bytes())]; [shutil.rmtree(p) for p in root.rglob('__pycache__') if p.is_dir()]" \
+    && python -c "from pathlib import Path; import shutil; [shutil.rmtree(p) for p in Path('/app/.venv').rglob('__pycache__') if p.is_dir()]" \
     && rm -f /usr/local/bin/uv /usr/local/bin/uvx
 
 RUN apt-get update \
@@ -44,7 +44,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN uv sync --locked --no-dev --no-editable --extra build --no-cache \
-    && python -c "from pathlib import Path; import re, shutil; root=Path('/app/.venv'); pat=re.compile(rb'-100[0-9][0-9_ -]*'); [p.write_bytes(pat.sub(b'<telegram-chat-id-example>', p.read_bytes())) for p in root.rglob('*') if p.is_file() and p.suffix in {'.py', '.pyi', '.txt', '.md'} and pat.search(p.read_bytes())]; [shutil.rmtree(p) for p in root.rglob('__pycache__') if p.is_dir()]"
+    && python -c "from pathlib import Path; import shutil; [shutil.rmtree(p) for p in Path('/app/.venv').rglob('__pycache__') if p.is_dir()]"
 
 COPY deploy/builder-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
