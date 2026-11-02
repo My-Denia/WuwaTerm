@@ -63,7 +63,10 @@ def verify_record(
     require(run.get("id") == run_id and receipt.get("run_id") == run_id, "wrong run")
     require(run.get("workflow_id") == workflow_id, "wrong workflow")
     require(run.get("path", "").split("@", 1)[0] == ".github/workflows/ci.yml", "wrong workflow path")
-    require(run.get("status") == "completed" and run.get("conclusion") in {"success", "failure"},
+    completed = run.get("status") == "completed" and run.get("conclusion") in {"success", "failure"}
+    waiting_for_windows = (not require_client and run.get("status") == "in_progress"
+                           and run.get("conclusion") is None)
+    require(completed or waiting_for_windows,
             "CI run is incomplete or cancelled")
     require(run.get("event") in {"push", "workflow_dispatch"}, "untrusted CI event")
     require(run.get("head_branch") == "main", "CI control ref is not main")
@@ -86,11 +89,21 @@ def verify_record(
     for name in BACKEND_JOBS + ((WINDOWS_JOB,) if require_client else ()):
         job = by_name.get(name, {})
         require(job.get("status") == "completed" and job.get("conclusion") == "success", f"missing or unsuccessful job: {name}")
-    require(all(job.get("status") == "completed" for job in jobs), "incomplete job")
-    failures = [job for job in jobs if job.get("conclusion") not in {"success", "skipped"}]
-    if run["conclusion"] == "success":
+    incomplete = [job for job in jobs if job.get("status") != "completed"]
+    failures = [job for job in jobs if job.get("status") == "completed"
+                and job.get("conclusion") not in {"success", "skipped"}]
+    if waiting_for_windows:
+        # The receipt does not depend on Windows, but no other job may remain pending.
+        require(receipt["windows_required"] and len(incomplete) == 1
+                and incomplete[0].get("name") == WINDOWS_JOB
+                and incomplete[0].get("status") in {"queued", "in_progress"}
+                and incomplete[0].get("conclusion") is None, "incomplete job")
+        require(not failures, "running CI contains an unsuccessful job")
+    elif run["conclusion"] == "success":
+        require(not incomplete, "incomplete job")
         require(not failures, "successful run contains an unsuccessful job")
     else:
+        require(not incomplete, "incomplete job")
         require(len(failures) == 1 and failures[0].get("name") == WINDOWS_JOB
                 and failures[0].get("conclusion") == "failure", "run failed for more than Windows")
     return control
@@ -106,7 +119,7 @@ def verify_source(source: str, run_id: str | None, *, require_client: bool = Fal
     else:
         listing = gh_json(
             f"repos/{repository}/actions/workflows/ci.yml/runs", "--method", "GET",
-            "-f", "branch=main", "-f", "event=push", "-f", "status=completed",
+            "-f", "branch=main", "-f", "event=push",
             "-f", f"head_sha={source}", "-F", "per_page=100",
         )
         candidates = [item["id"] for item in listing["workflow_runs"]]

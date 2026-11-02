@@ -69,11 +69,20 @@ def _fixture(*, dispatch=True, windows=True):
     "windows_failed_backend", "windows_failed_client", "windows_failed_lookup", "client_success",
     "windows_and_backend_failed", "other_job_failed", "backend_cancelled", "cancelled_run",
     "incomplete_run", "incomplete_job", "control_not_on_main", "valid_lookup",
+    "windows_queued_backend", "windows_running_backend", "windows_running_lookup",
+    "windows_running_client", "windows_running_wrong_source", "windows_running_missing_receipt",
+    "windows_running_failed_backend", "windows_running_missing_backend", "windows_running_other_job",
+    "windows_running_incomplete_backend", "windows_running_incomplete_receipt", "windows_running_wrong_attempt",
+    "windows_running_cancelled", "windows_running_wrong_scope", "windows_running_other_failure",
 ])
 def test_release_source_verification_uses_api_jobs_and_bound_receipt(tmp_path, case):
-    fixture = _fixture(dispatch=case not in {"valid_push_without_windows", "valid_lookup", "windows_failed_lookup"},
+    fixture = _fixture(dispatch=case not in {"valid_push_without_windows", "valid_lookup", "windows_failed_lookup",
+                                             "windows_running_lookup", "windows_running_wrong_scope"},
                        windows=case != "valid_push_without_windows")
     run, receipt, jobs = fixture["run"], fixture["receipt"], fixture["jobs"]
+    if case.startswith(("windows_running_", "windows_queued_")):
+        run.update(status="in_progress", conclusion=None)
+        jobs[-1].update(status="queued" if case == "windows_queued_backend" else "in_progress", conclusion=None)
     if case == "wrong_source":
         receipt["source_commit"] = "c" * 40
     elif case == "wrong_run":
@@ -119,7 +128,26 @@ def test_release_source_verification_uses_api_jobs_and_bound_receipt(tmp_path, c
         run["status"] = "in_progress"
     elif case == "incomplete_job":
         jobs[1]["status"] = "in_progress"
-    fixture["missing_receipt"] = case == "missing_receipt"
+    elif case == "windows_running_wrong_source":
+        receipt["source_commit"] = "c" * 40
+    elif case == "windows_running_failed_backend":
+        jobs[1]["conclusion"] = "failure"
+    elif case == "windows_running_missing_backend":
+        jobs.pop(1)
+    elif case in {"windows_running_incomplete_backend", "windows_running_incomplete_receipt"}:
+        job = jobs[1] if case == "windows_running_incomplete_backend" else jobs[-2]
+        job.update(status="in_progress", conclusion=None)
+    elif case == "windows_running_wrong_attempt":
+        receipt["run_attempt"] = 2
+    elif case == "windows_running_other_job":
+        jobs.append({"name": "unexpected job", "status": "queued", "conclusion": None})
+    elif case == "windows_running_cancelled":
+        run.update(status="completed", conclusion="cancelled")
+    elif case == "windows_running_wrong_scope":
+        receipt["windows_required"] = False
+    elif case == "windows_running_other_failure":
+        jobs.append({"name": "unexpected job", "status": "completed", "conclusion": "failure"})
+    fixture["missing_receipt"] = case in {"missing_receipt", "windows_running_missing_receipt"}
     fixture["main_ancestor"] = case != "control_not_on_main"
     (tmp_path / "fixture.json").write_text(json.dumps(fixture))
 
@@ -136,8 +164,9 @@ if args[:2] == ['run', 'download']:
 elif args[0] == 'api':
     path = args[1]
     if '/workflows/ci.yml/runs' in path:
-        assert 'status=completed' in args
-        print(json.dumps({'workflow_runs': [{'id': 42}]}))
+        assert all(value in args for value in ['branch=main', 'event=push', 'head_sha=' + 'a' * 40])
+        visible = 'status=completed' not in args or data['run']['status'] == 'completed'
+        print(json.dumps({'workflow_runs': [{'id': 42}] if visible else []}))
     elif '/workflows/ci.yml' in path:
         print(json.dumps({'id': 17}))
     elif '/jobs?' in path:
@@ -157,16 +186,16 @@ sys.exit(0 if data['main_ancestor'] else 1)
 ''')
     git.chmod(0o755)
     command = [sys.executable, str(SCRIPT), "verify", SOURCE]
-    if case not in {"valid_lookup", "windows_failed_lookup"}:
+    if case not in {"valid_lookup", "windows_failed_lookup", "windows_running_lookup"}:
         command += ["--run-id", "42"]
-    if case in {"windows_skipped_client", "windows_failed_client", "client_success"}:
+    if case in {"windows_skipped_client", "windows_failed_client", "client_success", "windows_running_client"}:
         command += ["--require-client"]
     result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
         env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
              "GH_REPO": REPOSITORY, "FIXTURE": str(tmp_path / "fixture.json")})
     valid = case in {"valid_dispatch", "valid_push_without_windows", "valid_lookup",
                      "windows_skipped_backend", "windows_failed_backend", "windows_failed_lookup",
-                     "client_success"}
+                     "client_success", "windows_queued_backend", "windows_running_backend", "windows_running_lookup"}
     assert (result.returncode == 0) == valid, result.stderr
     if not valid:
         assert "No trusted CI receipt" in result.stderr
