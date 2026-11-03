@@ -1613,6 +1613,53 @@ def _locked_pairs(translator: SentenceTranslator, text: str) -> list[tuple[str, 
     return [(zh, en) for _placeholder, zh, en in translator.lock_terms(text).locks]
 
 
+@pytest.mark.parametrize("allow_plural_inflection", [False, True])
+@pytest.mark.parametrize("text", ["The audience asked for an encore.", "encore joins."])
+def test_lowercase_encore_is_not_synthesized_as_a_name_lock(
+    sample_db, text, allow_plural_inflection
+):
+    locked = SentenceTranslator(sample_db).lock_terms(
+        text, allow_plural_inflection=allow_plural_inflection
+    )
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+
+@pytest.mark.parametrize("name", ["Encore", "ENCORE", "安可"])
+def test_encore_official_and_uppercase_names_still_lock(sample_db, name):
+    locked = SentenceTranslator(sample_db).lock_terms(f"{name} joins.")
+    assert [(zh, en) for _, zh, en in locked.locks] == [("安可", "Encore")]
+    assert locked.restore(locked.locked_text, to_en=False) == "安可 joins."
+    assert locked.restore(locked.locked_text, to_en=True) == "Encore joins."
+
+
+def test_lowercase_encore_exact_dictionary_source_still_locks(sample_db):
+    with connect(sample_db) as conn:
+        insert_records(conn, [TermRecord("item", "fixture", "20", "20", "返场", "encore")])
+        conn.commit()
+    translator = SentenceTranslator(sample_db)
+    assert _locked_pairs(translator, "encore joins.") == [("返场", "encore")]
+    assert _locked_pairs(translator, "Encore joins.") == [("安可", "Encore")]
+    assert _locked_pairs(translator, "ENCORE joins.") == []
+
+
+def test_lowercase_encore_speaker_prefix_still_resolves(sample_db):
+    translator = SentenceTranslator(sample_db)
+    assert translator.prepare_text("encore: hi") == "Encore: hi"
+    assert _locked_pairs(translator, "encore: hi") == [("安可", "Encore")]
+
+
+def test_lowercase_encore_html_visible_text_and_attributes_stay_unchanged(sample_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(sample_db)
+    html = '<a href="https://example.invalid/encore">The audience asked for an encore.</a>'
+    protected = protect_telegram_html(html)
+    locked = translator._lock_html_terms(protected, allow_plural_inflection=True)
+    assert locked.locks == ()
+    assert translator._restore_html(protected, locked, locked.locked_text, to_en=False) == html
+
+
 @pytest.mark.parametrize("name", ["velmira", "VELMIRA"])
 def test_case_variant_resonator_name_locks_and_restores_both_ways(
     case_variant_db, name
