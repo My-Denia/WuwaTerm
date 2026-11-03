@@ -127,6 +127,10 @@ admin (see that section).
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
   A resonator name typed all-lowercase or all-caps inside a sentence (`jinhsi`, `JINHSI`) is locked
   like its official casing; mixed casing and other term categories still need the exact official form.
+  The lowercase alias `encore` is not synthesized for sentence locking, so `an encore` and a lowercase
+  character mention such as `encore joins` are left to translation. Exact dictionary sources,
+  speaker-prefix resolution, `Encore`, `ENCORE`, `安可`, and whole-input `/tr encore` retain their
+  existing behavior. This does not distinguish ordinary uses of `Encore` or `ENCORE` from the name.
   An English dictionary surface that official text almost always uses as an ordinary word (`It`, `Do`,
   `Fish`) is not locked inside a sentence once a dictionary rebuilt with its free-text exclusion list is
   promoted; `/tr It` alone still returns the dictionary hit.

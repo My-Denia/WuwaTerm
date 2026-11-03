@@ -404,6 +404,8 @@ def _case_variant_sources(
         for variant in (source.lower(), source.upper()):
             if (
                 variant != source
+                # Do not synthesize this ordinary word as a name alias.
+                and variant != "encore"
                 and len(variant) == len(source)
                 and variant not in sources
                 and variant not in emitted

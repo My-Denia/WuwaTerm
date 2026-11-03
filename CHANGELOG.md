@@ -5,6 +5,12 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+- Terms: sentence translation no longer synthesizes lowercase `encore` as a
+  character lock, leaving ordinary uses to translation. A lowercase character
+  mention is also left unlocked; exact dictionary sources, `Encore`, `ENCORE`,
+  `安可`, whole-input lookup and speaker-prefix resolution retain their existing
+  behavior. Capitalized ordinary uses remain ambiguous.
+
 ## 0.6.1
 
 ### Backend fixes

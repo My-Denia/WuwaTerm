@@ -115,6 +115,15 @@ def test_exact_hit_returns_official_english(sample_db):
     assert outcome.direction == "en"
 
 
+def test_encore_whole_input_remains_a_normalized_exact_hit(sample_db):
+    service, translator = build_pair(sample_db)
+    outcome = asyncio.run(
+        translate_request_async(service, translator, TranslationJob(text="  encore  "))
+    )
+    assert outcome.kind == KIND_EXACT
+    assert outcome.text == "安可"
+
+
 def test_forced_direction_overrides_detection(sample_db):
     service, translator = build_pair(sample_db)
 
@@ -259,6 +268,20 @@ def test_llm_path_reports_dictionary_miss_without_wording(monkeypatch, sample_db
     # The application reports the fact; the wording belongs to the adapter.
     assert outcome.dictionary_miss is True
     assert outcome.text == "widget"
+
+
+def test_ordinary_encore_reaches_translation_without_a_name_lock(monkeypatch, sample_db):
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+    text = "The audience asked for an encore."
+
+    outcome = asyncio.run(
+        translate_request_async(service, translator, TranslationJob(text=text))
+    )
+    assert outcome.kind == KIND_LLM
+    assert calls == [(text, ())]
+    assert outcome.text == text
 
 
 def test_llm_failure_maps_to_stable_error_codes(monkeypatch, sample_db):
