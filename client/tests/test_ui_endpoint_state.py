@@ -76,15 +76,17 @@ def _assert_the_three_areas_are_reachable(window: MainWindow) -> None:
     plus a stack can satisfy a count while pointing at nothing, so the claim
     is made in three parts instead of one.
     """
-    assert window.stack.count() == 3
-    assert len(window.nav_buttons) == 3
-    assert [window.stack.widget(index) for index in range(3)] == [
+    assert window.stack.count() == 4
+    assert len(window.nav_buttons) == 4
+    assert [window.stack.widget(index) for index in range(4)] == [
         window.terms_view,
         window.translate_view,
         window.status_view,
+        window.manuscript_view,
     ]
 
     for page, view in (
+        (main_window_module.PAGE_MANUSCRIPT, window.manuscript_view),
         (main_window_module.PAGE_STATUS, window.status_view),
         (main_window_module.PAGE_TRANSLATE, window.translate_view),
         (main_window_module.PAGE_TERMS, window.terms_view),

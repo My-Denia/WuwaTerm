@@ -116,6 +116,8 @@ jobs:
     needs: source
     name: API to Web contract
     runs-on: ubuntu-latest
+    # Dispatch can check a main ancestor; allow cache reads but not writes.
+    cache-mode: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -145,6 +147,13 @@ jobs:
       - run: python -m pytest -m cross_component tests/test_meta_site_contract.py
         env:
           WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
+      - name: Check desktop manuscript files against Web
+        run: |
+          node --version
+          python -m pytest -q client/tests/test_manuscript.py::test_actual_web_and_client_read_each_others_files
+        env:
+          WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
+          PYTHONPATH: ${{ github.workspace }}/client/src
       - run: npm run test:contract
         working-directory: web
         env:
