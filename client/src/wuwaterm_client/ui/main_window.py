@@ -1,4 +1,4 @@
-"""The window the three areas live in, and the two flows that decide what the
+"""The window the four areas live in, and the two flows that decide what the
 client is allowed to do at all.
 
 Four things here are structural rather than cosmetic.
@@ -16,8 +16,8 @@ chip, the global banner and the setup checklist are three non-overlapping
 sentences about that one state: what it is, what it costs, and where to fix
 it. None of the three asks the network anything.
 
-Nothing that refuses is a modal any more, with two exceptions the owner
-confirmed: the destructive "forget this credential" question, and About. A
+Ordinary failures are inline. Modal decisions are reserved for credential
+removal, unsaved manuscript changes, and About. A
 refusal that steals focus and then disappears leaves no trace of what was
 refused; a refusal on a banner or against the field that caused it stays
 readable while the owner fixes it.
@@ -60,6 +60,7 @@ from ..errors import (
 from . import error_presentation
 from .components import Banner, EmptyStateCard, EndpointChip, fit_to_workspace
 from .first_run_dialog import FirstRunDialog
+from .manuscript_view import ManuscriptView
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
 from .terms_view import TermsView
@@ -84,11 +85,12 @@ WINDOW_ABSOLUTE_MINIMUM = (640, 380)
 
 # The order the owner meets the areas in, and the index each keeps for the
 # lifetime of the window: term lookup first because it is the reflex action,
-# translation second because it is the one that spends money, service status
-# last because it is only read when something already looks wrong.
+# translation second because it is the one that spends money, and service status
+# third. The manuscript workbench follows without changing existing shortcuts.
 PAGE_TERMS = 0
 PAGE_TRANSLATE = 1
 PAGE_STATUS = 2
+PAGE_MANUSCRIPT = 3
 
 
 def endpoint_status_text(base_url: str | None) -> str:
@@ -181,6 +183,7 @@ class MainWindow(QMainWindow):
         self.status_view = StatusView(
             self.api_client, self, on_enter_token=self.enter_token
         )
+        self.manuscript_view = ManuscriptView(self.api_client, self)
 
         self.stack = QStackedWidget(self)
         # Index order is the contract PAGE_* above states; the views are
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.terms_view)
         self.stack.addWidget(self.translate_view)
         self.stack.addWidget(self.status_view)
+        self.stack.addWidget(self.manuscript_view)
 
         self.nav_buttons: list[QPushButton] = []
         nav_bar = self._build_navigation()
@@ -228,7 +232,7 @@ class MainWindow(QMainWindow):
     # -- construction ------------------------------------------------------
 
     def _build_navigation(self) -> QFrame:
-        """The column: product name, the three areas, then the address chip.
+        """The column: product name, the four areas, then the address chip.
 
         A QFrame rather than a bare QWidget because it carries a background
         and a border, and a bare QWidget draws neither from a stylesheet.
@@ -250,6 +254,7 @@ class MainWindow(QMainWindow):
             (PAGE_TERMS, strings.NAV_ITEM_TERMS),
             (PAGE_TRANSLATE, strings.NAV_ITEM_TRANSLATE),
             (PAGE_STATUS, strings.NAV_ITEM_STATUS),
+            (PAGE_MANUSCRIPT, strings.NAV_ITEM_MANUSCRIPT),
         ):
             button = QPushButton(label, nav_bar)
             button.setObjectName("navItem")
@@ -294,6 +299,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+1", PAGE_TERMS),
             ("Ctrl+2", PAGE_TRANSLATE),
             ("Ctrl+3", PAGE_STATUS),
+            ("Ctrl+4", PAGE_MANUSCRIPT),
         ):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(lambda target=page: self.show_page(target))
@@ -546,8 +552,15 @@ class MainWindow(QMainWindow):
         Nothing here coordinates the cancellations or waits for them: they
         are fire-and-forget, exactly as the Cancel button's are.
         """
-        for view in (self.translate_view, self.terms_view, self.status_view):
+        for view in (self.translate_view, self.terms_view, self.status_view, self.manuscript_view):
             view.reset_for_endpoint_change()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if not self.manuscript_view.confirm_discard():
+            event.ignore()
+            return
+        self.manuscript_view._cancel_pending()
+        super().closeEvent(event)
 
     # -- settings ----------------------------------------------------------
 

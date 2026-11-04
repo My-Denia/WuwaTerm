@@ -20,5 +20,6 @@ records are intentionally absent.
 | [0012](0012-client-transport-selection.md) | How the desktop client reaches the service | Accepted |
 | [0013](0013-client-ui-visual-and-layout.md) | 桌面客户端的视觉系统与布局选型 | Accepted |
 | [0014](0014-private-web-presentation-layer.md) | Private web presentation layer | Accepted |
+| [0015](0015-desktop-manuscript-workflow.md) | 桌面稿件审校与保存 | Accepted |
 
 Maintainer map: [Architecture](../architecture.md).

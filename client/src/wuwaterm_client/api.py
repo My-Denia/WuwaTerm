@@ -9,6 +9,7 @@ service's response (docs/api/openapi.json).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -27,6 +28,7 @@ from .errors import (
     ERROR_UNKNOWN,
     ClientError,
 )
+from .manuscript import valid_report
 
 TokenProvider = Callable[[], "str | None"]
 
@@ -189,6 +191,27 @@ class MetaResult:
             llm_configured=_as_bool(data["llm_configured"], "llm_configured"),
             request_id=_as_str(data["request_id"], "request_id"),
         )
+
+
+def _review_report(data: Any, source: str, target: str) -> dict[str, Any]:
+    """Accept a report only for the exact text and locations submitted.
+
+    A successful HTTP response alone does not prove that a report belongs to
+    the current draft. Offsets are Unicode scalar indices, not Qt positions.
+    """
+    if not valid_report(data, source, target):
+        raise ValueError("review is not a supported report")
+    for side, text in (("source", source), ("target", target)):
+        revision = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if data[f"{side}_revision"] != revision:
+            raise ValueError(f"{side} revision does not match")
+    if data["rule_version"] != "review-v2":
+        raise ValueError("unexpected review version")
+    # The v2 matcher basis is essential to bind a report to the algorithm
+    # that produced it, and the requested capability guarantees this field.
+    if "matcher_revision" not in data:
+        raise ValueError("missing matcher revision")
+    return data
 
 
 def _normalized(base_url: str | None) -> str | None:
@@ -409,6 +432,7 @@ class ApiClient:
         url: str,
         *,
         timeout: float | None = None,
+        matcher_basis: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
         # Before the target is resolved, before a header is attached, before
@@ -419,10 +443,13 @@ class ApiClient:
             raise ClientError(ERROR_NOT_CONFIGURED)
         self._guard_request_target(url)
         try:
+            headers = self._headers()
+            if matcher_basis:
+                headers["X-WuwaTerm-Matcher-Basis"] = "1"
             response = await self._client.request(
                 method,
                 url,
-                headers=self._headers(),
+                headers=headers,
                 timeout=timeout if timeout is not None else self._timeout,
                 **kwargs,
             )
@@ -526,6 +553,23 @@ class ApiClient:
     async def lookup_terms(self, query: str) -> TermsResult:
         response = await self._request("GET", "/v1/terms", params={"q": query})
         return self._parsed(TermsResult.from_json, self._json(response))
+
+    async def review_pair(
+        self, source: str, target: str, direction: str, *,
+        alignments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "source": source, "target": target, "direction": direction,
+            "review_version": "review-v2",
+        }
+        if alignments is not None:
+            body["alignments"] = alignments
+        response = await self._request(
+            "POST", "/v1/reviews", json=body, matcher_basis=True,
+        )
+        return self._parsed(
+            lambda data: _review_report(data, source, target), self._json(response)
+        )
 
     async def get_meta(self) -> MetaResult:
         response = await self._request("GET", "/v1/meta")
