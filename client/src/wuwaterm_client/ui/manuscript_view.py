@@ -256,7 +256,7 @@ class LosslessEditor(QPlainTextEdit):
         self.set_raw_text(raw)
         self.editRejected.emit()
 
-    def select_raw_span(self, span: dict | None) -> bool:
+    def select_raw_span(self, span: dict | None, *, move_cursor: bool = True) -> bool:
         self.setExtraSelections([])
         if not isinstance(span, dict):
             return False
@@ -273,7 +273,8 @@ class LosslessEditor(QPlainTextEdit):
         cursor = self.textCursor()
         cursor.setPosition(_utf16_position(self._shown, left))
         cursor.setPosition(_utf16_position(self._shown, right), QTextCursor.MoveMode.KeepAnchor)
-        self.setTextCursor(cursor)
+        if move_cursor:
+            self.setTextCursor(cursor)
         selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
         selection.format.setBackground(self.palette().color(QPalette.ColorRole.Highlight))
@@ -431,6 +432,7 @@ class ManuscriptView(QWidget):
         self.review_button.setEnabled(bool(self._api_client.is_configured and valid and not busy and not composing))
         self.cancel_button.setEnabled(busy)
         self.auto_align_button.setEnabled(self._payload["alignments"] is not None)
+        self.findings.setEnabled(not composing)
         index = self.findings.currentRow()
         has_target = (self._report is not None and 0 <= index < len(self._report["findings"])
                       and self._report["findings"][index].get("target_span") is not None)
@@ -489,9 +491,18 @@ class ManuscriptView(QWidget):
         self._update_controls()
 
     def _on_composition_changed(self) -> None:
-        if ((self.source_edit._ime_active or self.target_edit._ime_active)
-                and self._review_state in ("reviewing", "current")):
+        composing = self.source_edit._ime_active or self.target_edit._ime_active
+        if composing and self._review_state == "reviewing":
             self._invalidate_report()
+        index = self.findings.currentRow()
+        if self._report is not None and 0 <= index < len(self._report["findings"]):
+            finding = self._report["findings"][index]
+            for editor, key in ((self.source_edit, "source_span"), (self.target_edit, "target_span")):
+                if editor._ime_active:
+                    # A selected span can collapse while Qt displays preedit.
+                    editor.setExtraSelections([])
+                elif not composing:
+                    editor.select_raw_span(finding.get(key), move_cursor=False)
         self._update_controls()
 
     def _input_ready(self) -> bool:

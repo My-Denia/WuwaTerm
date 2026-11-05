@@ -414,6 +414,133 @@ def test_preedit_cancellation_and_relative_replacement_follow_qt(qapp) -> None:
     assert view._payload == value
 
 
+@pytest.mark.parametrize("side", ["source", "target"])
+@pytest.mark.parametrize("selected", [False, True])
+def test_current_report_survives_preedit_cancel_with_correct_locations(qapp, side, selected) -> None:
+    async def scenario():
+        source, target = "😀 term / term", "😀词 / 词"
+        response = report(source, target)
+        second = copy.deepcopy(response["findings"][0])
+        start = source.rindex("term")
+        second["id"] = f"{start}:{start + 4}:term"
+        second["source_span"] = {"start": start, "end": start + 4, "text": "term"}
+        second["target_span"] = {"start": 1, "end": 2, "text": "词"}
+        response["findings"].append(second)
+        response["coverage"]["evaluated"] = 2
+
+        async def handler(request):
+            return httpx.Response(200, json=response)
+
+        client = client_with(handler)
+        view = ManuscriptView(client)
+        view.show()
+        install(view, source[:-1], target)
+        cursor = view.source_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText("m")
+        cursor.insertText("x")
+        view.undo_button.click()
+        assert view._payload["source"] == source
+        view._start_review()
+        await view._task
+        await asyncio.sleep(0)
+        view.findings.setCurrentRow(0)
+        editor = getattr(view, f"{side}_edit")
+        other = view.target_edit if side == "source" else view.source_edit
+        cursor = editor.textCursor()
+        if not selected:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            editor.setTextCursor(cursor)
+
+        # Compare the resulting caret with an editor that has no report: merely
+        # restoring highlights must not move it after cancellation.
+        reference = LosslessEditor()
+        reference.set_raw_text(editor.raw_text())
+        reference_cursor = reference.textCursor()
+        reference_cursor.setPosition(cursor.anchor())
+        reference_cursor.setPosition(cursor.position(), QTextCursor.MoveMode.KeepAnchor)
+        reference.setTextCursor(reference_cursor)
+
+        def highlight(widget):
+            return [(item.cursor.selectionStart(), item.cursor.selectionEnd(), item.cursor.selectedText())
+                    for item in widget.extraSelections()]
+
+        original_highlights = (highlight(view.source_edit), highlight(view.target_edit))
+        assert original_highlights[0][0][2] == "term"
+        assert original_highlights[1][0][2] == "词"
+        before = copy.deepcopy(view._payload)
+        request_id = view.request_id_label.text()
+        generation = view._generation
+        report_label = view.report_label.text()
+        items = [view.findings.item(i).text() for i in range(view.findings.count())]
+        assert view.replace_button.isEnabled() and view.undo_button.isEnabled() and view.redo_button.isEnabled()
+        for widget in (editor, reference):
+            QCoreApplication.sendEvent(widget, QInputMethodEvent("ni", []))
+        assert view._review_state == "current" and view._report == response
+        assert view._payload == before and view._generation == generation
+        assert view.request_id_label.text() == request_id and view.report_label.text() == report_label
+        assert [view.findings.item(i).text() for i in range(view.findings.count())] == items
+        assert not view.findings.isEnabled() and not view.replace_button.isEnabled()
+        assert not view.review_button.isEnabled() and not view.undo_button.isEnabled() and not view.redo_button.isEnabled()
+        assert highlight(editor) == []
+        assert highlight(other) == original_highlights[1 if side == "source" else 0]
+        QTest.mouseClick(view.findings.viewport(), Qt.MouseButton.LeftButton,
+                         pos=view.findings.visualItemRect(view.findings.item(1)).center())
+        assert view.findings.currentRow() == 0 and editor._ime_active
+
+        for widget in (editor, reference):
+            QCoreApplication.sendEvent(widget, QInputMethodEvent())
+        assert editor.raw_text() == reference.raw_text() and view._payload == before
+        assert (editor.textCursor().position(), editor.textCursor().anchor()) == (
+            reference.textCursor().position(), reference.textCursor().anchor())
+        assert view._review_state == "current" and view._report == response
+        assert view._generation == generation and view.request_id_label.text() == request_id
+        assert view.report_label.text() == report_label and view.findings.currentRow() == 0
+        assert (highlight(view.source_edit), highlight(view.target_edit)) == original_highlights
+        assert view.findings.isEnabled() and view.review_button.isEnabled() and view.replace_button.isEnabled()
+        assert view.undo_button.isEnabled() and view.redo_button.isEnabled()
+
+        view.findings.setFocus()
+        QTest.keyClick(view.findings, Qt.Key.Key_Down)
+        assert view.findings.currentRow() == 1
+        assert highlight(view.source_edit)[0][2] == "term"
+        assert highlight(view.target_edit)[0][2] == "词"
+        assert highlight(view.source_edit)[0][0] == len(source[:start].encode("utf-16-le")) // 2
+        assert highlight(view.target_edit)[0][0] == 2
+        await client.aclose()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("side", ["source", "target"])
+def test_committed_preedit_stales_current_report(qapp, side) -> None:
+    async def scenario():
+        source, target = "term", "词"
+        async def handler(request):
+            return httpx.Response(200, json=report(source, target))
+        client = client_with(handler)
+        view = ManuscriptView(client)
+        install(view, source, target)
+        view._start_review()
+        await view._task
+        await asyncio.sleep(0)
+        view.findings.setCurrentRow(0)
+        editor = getattr(view, f"{side}_edit")
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        editor.setTextCursor(cursor)
+        QCoreApplication.sendEvent(editor, QInputMethodEvent("ni", []))
+        assert view._review_state == "current" and view._report is not None
+        event = QInputMethodEvent()
+        event.setCommitString("字")
+        QCoreApplication.sendEvent(editor, event)
+        assert view._payload[side] == (source if side == "source" else target) + "字"
+        assert view._review_state == "stale" and view._report is None and view.findings.count() == 0
+        assert not view.source_edit.extraSelections() and not view.target_edit.extraSelections()
+        assert view.findings.isEnabled() and view.review_button.isEnabled()
+        await client.aclose()
+    asyncio.run(scenario())
+
+
 def test_keyboard_paste_delete_and_both_undo_routes_share_document_history(qapp) -> None:
     view = ManuscriptView(ApiClient(None))
     original = _document_with_report("term\r\n😀\xa0x", "词")
@@ -577,7 +704,7 @@ def test_actual_filesystem_failure_preserves_existing_path_bytes_and_dirty(qapp,
     assert view._payload == edited and view._saved_payload == original
 
 
-@pytest.mark.parametrize("operation", ["edit", "endpoint", "new", "second"])
+@pytest.mark.parametrize("operation", ["edit", "endpoint", "new", "second", "source_preedit", "target_preedit"])
 @pytest.mark.parametrize("old_status", [200, 429])
 def test_delayed_review_cannot_leave_busy_state_or_overwrite_new_state(qapp, operation, old_status) -> None:
     async def scenario():
@@ -617,6 +744,16 @@ def test_delayed_review_cannot_leave_busy_state_or_overwrite_new_state(qapp, ope
             view.reset_for_endpoint_change()
         elif operation == "new":
             view.new_document()
+        elif operation.endswith("_preedit"):
+            editor = view.source_edit if operation == "source_preedit" else view.target_edit
+            QCoreApplication.sendEvent(editor, QInputMethodEvent("ni", []))
+            assert view._review_state == "stopped" and not view.cancel_button.isEnabled()
+            release.set()
+            await asyncio.gather(old_task, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert view._review_state == "stopped" and view._report is None
+            assert "old-request" not in view.request_id_label.text()
+            QCoreApplication.sendEvent(editor, QInputMethodEvent())
         else:
             view._cancel_review()
             assert view._review_state == "cancelled" and "取消" in view.report_label.text()
