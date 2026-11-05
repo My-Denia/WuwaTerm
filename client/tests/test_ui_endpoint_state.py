@@ -70,31 +70,25 @@ def _visible_texts(window: MainWindow) -> list[str]:
 
 
 def _assert_the_three_areas_are_reachable(window: MainWindow) -> None:
-    """The areas exist, keep their order, and still switch.
+    from wuwaterm_client.ui import main_window as main_window_module
 
-    This is what `tabs.count() == 3` used to stand for. A navigation column
-    plus a stack can satisfy a count while pointing at nothing, so the claim
-    is made in three parts instead of one.
-    """
     assert window.stack.count() == 4
-    assert len(window.nav_buttons) == 4
     assert [window.stack.widget(index) for index in range(4)] == [
-        window.terms_view,
-        window.translate_view,
-        window.status_view,
+        window.terms_view, window.translate_view, window.status_view,
         window.manuscript_view,
     ]
-
     for page, view in (
         (main_window_module.PAGE_MANUSCRIPT, window.manuscript_view),
-        (main_window_module.PAGE_STATUS, window.status_view),
         (main_window_module.PAGE_TRANSLATE, window.translate_view),
         (main_window_module.PAGE_TERMS, window.terms_view),
     ):
-        window.nav_buttons[page].click()
+        window._nav_by_page[page].click()
         assert window.stack.currentWidget() is view
-        assert window.nav_buttons[page].isChecked()
-        assert [button.isChecked() for button in window.nav_buttons].count(True) == 1
+        assert window._nav_by_page[page].isChecked()
+        assert sum(button.isChecked() for button in window.nav_buttons) == 1
+    window.status_action.trigger()
+    assert window.stack.currentWidget() is window.status_view
+    assert not any(button.isChecked() for button in window.nav_buttons)
 
 
 def test_the_state_logic_distinguishes_the_two_cases() -> None:
@@ -147,8 +141,14 @@ def test_the_window_says_so_when_nothing_is_configured(qapp, monkeypatch) -> Non
     # different questions: what is wrong, and what to do about it.
     assert window.global_banner.is_showing() is True
     assert window.global_banner.message_text == strings.GLOBAL_BANNER_NOT_CONFIGURED
-    assert window.setup_card.title_text == strings.SETUP_STEPS_TITLE
-    assert window.setup_card.isVisibleTo(window) is True
+    assert window.endpoint_button.text() == strings.WORKBENCH_ENDPOINT_UNCONFIGURED
+    assert window.stack.currentWidget() is window.manuscript_view
+    assert not window.setup_card.isVisibleTo(window)
+    assert not window.global_banner.isVisibleTo(window)
+    window.show_page(main_window_module.PAGE_TERMS)
+    assert not window.global_banner.isVisibleTo(window)
+    assert window.endpoint_button.isVisibleTo(window)
+    assert not window.terms_view.search_button.isEnabled()
     # The window is still usable: Settings is how the owner recovers, so all
     # three areas have to stay reachable rather than be blocked behind a
     # broken client.
@@ -195,6 +195,9 @@ def test_request_without_id_keeps_request_id_text_visible(
     window.translate_view._show_error(ClientError(ERROR_OFFLINE))
     qapp.processEvents()
 
+    assert window.translate_view.diagnostics_button.isVisibleTo(window)
+    window.translate_view.diagnostics_button.click()
+    qapp.processEvents()
     visible = _visible_texts(window)
     window.hide()
     assert strings.REQUEST_ID_ROW_LABEL in visible

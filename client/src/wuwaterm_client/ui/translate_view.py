@@ -28,15 +28,17 @@ from __future__ import annotations
 
 import asyncio
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +55,7 @@ from .components import (
     StatusStrip,
     mark_field_invalid,
 )
+from .icons import icon
 from .error_presentation import (
     ACTION_ENTER_TOKEN,
     ACTION_OPEN_SETTINGS,
@@ -191,6 +194,17 @@ class TranslateView(QWidget):
         self.result_edit = QPlainTextEdit(self)
         self.result_edit.setReadOnly(True)
         self.result_edit.setPlaceholderText(strings.RESULT_PLACEHOLDER)
+        self.copy_result_button = QPushButton(self)
+        self.copy_result_button.setObjectName("commandButton")
+        self.copy_result_button.setIcon(icon("copy"))
+        self.copy_result_button.setIconSize(QSize(16, 16))
+        self.copy_result_button.setToolTip(strings.TRANSLATE_COPY_RESULT)
+        self.copy_result_button.setAccessibleName(strings.TRANSLATE_COPY_RESULT)
+        self.copy_result_button.setEnabled(False)
+        self.copy_result_button.clicked.connect(self._on_copy_result_clicked)
+        self.result_edit.textChanged.connect(
+            lambda: self.copy_result_button.setEnabled(bool(self.result_edit.toPlainText()))
+        )
 
         self.kind_badge = KindBadge(self)
         self.kind_badge.setVisible(False)
@@ -235,22 +249,45 @@ class TranslateView(QWidget):
         result_label.setBuddy(self.result_edit)
         request_id_row_label = QLabel(strings.REQUEST_ID_ROW_LABEL, self)
 
-        source_row = QHBoxLayout()
-        source_row.addWidget(input_label)
-        source_row.addStretch(1)
-        source_row.addWidget(direction_label)
-        source_row.addWidget(self.direction_combo)
+        toolbar = QFrame(self)
+        toolbar.setObjectName("workbenchToolbar")
+        toolbar_row = QHBoxLayout(toolbar)
+        toolbar_row.setContentsMargins(12, 6, 12, 6)
+        heading = QLabel(strings.PAGE_TITLE_TRANSLATE, toolbar)
+        heading.setObjectName("contextTitle")
+        toolbar_row.addWidget(heading)
+        toolbar_row.addStretch(1)
+        toolbar_row.addWidget(direction_label)
+        toolbar_row.addWidget(self.direction_combo)
+        toolbar_row.addWidget(self.translate_button)
+        toolbar_row.addWidget(self.cancel_button)
 
-        button_row = QHBoxLayout()
-        button_row.addWidget(self.translate_button)
-        button_row.addWidget(self.cancel_button)
-        button_row.addStretch(1)
+        def editor_surface(label: QLabel, editor: QPlainTextEdit) -> QFrame:
+            surface = QFrame(self)
+            surface.setObjectName("editorSurface")
+            column = QVBoxLayout(surface)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(0)
+            header = QFrame(surface)
+            header.setObjectName("editorHeader")
+            header_row = QHBoxLayout(header)
+            header_row.setContentsMargins(14, 5, 14, 5)
+            header_row.addWidget(label)
+            header_row.addStretch(1)
+            if editor is self.result_edit:
+                header_row.addWidget(self.kind_badge)
+                header_row.addWidget(self.miss_badge)
+                header_row.addWidget(self.copy_result_button)
+            column.addWidget(header)
+            column.addWidget(editor, 1)
+            return surface
 
-        result_row = QHBoxLayout()
-        result_row.addWidget(result_label)
-        result_row.addWidget(self.kind_badge)
-        result_row.addWidget(self.miss_badge)
-        result_row.addStretch(1)
+        self.editor_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.editor_splitter.setChildrenCollapsible(False)
+        self.editor_splitter.addWidget(editor_surface(input_label, self.input_edit))
+        self.editor_splitter.addWidget(editor_surface(result_label, self.result_edit))
+        self.editor_splitter.setStretchFactor(0, 1)
+        self.editor_splitter.setStretchFactor(1, 1)
 
         self._request_id_row = QWidget(self)
         request_id_row = QHBoxLayout(self._request_id_row)
@@ -259,19 +296,27 @@ class TranslateView(QWidget):
         request_id_row.addWidget(request_id_row_label)
         request_id_row.addWidget(self.request_id_label, 1)
         request_id_row.addWidget(self.request_id_copy_button)
+        self.diagnostics_button = QPushButton(strings.TRANSLATE_DIAGNOSTICS, self)
+        self.diagnostics_button.setObjectName("linkButton")
+        self.diagnostics_button.setCheckable(True)
+        self.diagnostics_button.toggled.connect(self._request_id_row.setVisible)
 
+        cost_note = QLabel(strings.TRANSLATE_COST_NOTE, self)
+        cost_note.setObjectName("secondaryText")
+        cost_note.setWordWrap(True)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(toolbar)
         layout.addWidget(self.progress_line)
         layout.addWidget(self.banner)
-        layout.addLayout(source_row)
-        layout.addWidget(self.input_edit)
         layout.addWidget(self.field_error)
-        layout.addLayout(button_row)
-        layout.addLayout(result_row)
-        layout.addWidget(self.result_edit)
+        layout.addWidget(self.editor_splitter, 1)
+        layout.addWidget(cost_note)
         layout.addWidget(self.miss_note)
-        layout.addWidget(self._request_id_row)
         layout.addWidget(self.cancel_note)
+        layout.addWidget(self.diagnostics_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._request_id_row)
         layout.addWidget(self.status_label)
 
         # The first paint has to agree with the endpoint too, not only every
@@ -534,12 +579,20 @@ class TranslateView(QWidget):
         """
         applicable = request_id is not NO_REQUEST
         self._request_id = request_id if applicable else None
-        self._request_id_row.setVisible(applicable)
+        self.diagnostics_button.setVisible(applicable)
+        self._request_id_row.setVisible(applicable and self.diagnostics_button.isChecked())
         if not applicable:
             return
         shown = request_id if request_id else strings.REQUEST_ID_PLACEHOLDER
         self.request_id_label.set_full_text(shown)
         self.request_id_copy_button.setEnabled(request_id is not None)
+
+    def _on_copy_result_clicked(self) -> None:
+        value = self.result_edit.toPlainText()
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None and value:
+            clipboard.setText(value)
+            self.status_label.set_text(strings.STATUS_COPIED)
 
     def _on_copy_request_id_clicked(self) -> None:
         if not self._request_id:

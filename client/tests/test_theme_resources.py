@@ -62,6 +62,18 @@ OBJECT_NAMES = (
     "secondaryButton",
     "linkButton",
     "scoreBar",
+    "workbenchToolbar",
+    "editorSurface",
+    "editorHeader",
+    "reviewInspector",
+    "inspectorBody",
+    "commandButton",
+    "activityItem",
+    "contextTitle",
+    "secondaryText",
+    "findingTitle",
+    "findingPair",
+    "findingVerdict",
 )
 
 # The dynamic properties, and the values the views set on them.
@@ -71,6 +83,7 @@ PROPERTY_VALUES = (
     ("state", ("ok", "missing")),
     ("invalid", ("true", "false")),
     ("done", ("true", "false")),
+    ("verdict", ("verified_constraint", "confirmed_conflict", "needs_review", "not_evaluated")),
 )
 
 # Widget classes that appear in this application and would otherwise render in

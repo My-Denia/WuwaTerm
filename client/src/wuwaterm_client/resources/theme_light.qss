@@ -994,3 +994,161 @@ QMessageBox QPushButton:default:hover {
 QDialogButtonBox {
     background-color: transparent;
 }
+
+/* ---------------------------------------------------------- 工作台 */
+
+#workbenchToolbar {
+    background-color: @bg-surface@;
+    border-bottom: 1px solid @border-subtle@;
+}
+
+#editorSurface,
+#reviewInspector {
+    background-color: @bg-surface@;
+    border: 1px solid @border-subtle@;
+    border-radius: 6px;
+}
+
+#inspectorBody {
+    background-color: @bg-surface@;
+}
+
+#reviewInspector QListWidget {
+    background-color: @bg-surface@;
+    color: @text-primary@;
+    border: 1px solid @border-subtle@;
+    border-radius: 6px;
+}
+
+#reviewInspector QListWidget::item {
+    padding: 6px 8px;
+}
+
+#reviewInspector QListWidget::item:hover {
+    background-color: @bg-sunken@;
+}
+
+#reviewInspector QListWidget::item:selected {
+    background-color: @accent-soft-bg@;
+    color: @accent-soft-fg@;
+}
+
+#editorHeader {
+    background-color: @bg-surface@;
+    border: none;
+    border-bottom: 1px solid @border-subtle@;
+    min-height: 40px;
+}
+
+#editorSurface QPlainTextEdit,
+#editorSurface QTextEdit {
+    background-color: @bg-surface@;
+    color: @text-primary@;
+    font-size: @font-size-context@;
+    border: none;
+    border-radius: 0px;
+    padding: 16px 20px;
+    selection-background-color: @accent-soft-bg@;
+    selection-color: @text-primary@;
+}
+
+#editorSurface QPlainTextEdit:focus,
+#editorSurface QTextEdit:focus {
+    border: none;
+    padding: 16px 20px;
+}
+
+#commandButton,
+#activityItem {
+    background-color: transparent;
+    color: @text-primary@;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    min-height: 32px;
+    padding: 4px 8px;
+}
+
+#commandButton:hover,
+#activityItem:hover {
+    background-color: @bg-sunken@;
+    border: 1px solid @border-subtle@;
+}
+
+#commandButton:focus,
+#activityItem:focus {
+    border: 2px solid @focus-ring@;
+    padding: 3px 7px;
+}
+
+#commandButton:disabled,
+#activityItem:disabled {
+    background-color: transparent;
+    color: @text-muted@;
+    border: 1px solid transparent;
+}
+
+#activityItem:checked {
+    background-color: @accent-soft-bg@;
+    color: @accent-soft-fg@;
+    border-left: 2px solid @accent@;
+    padding-left: 7px;
+}
+
+#activityItem:checked:focus {
+    border: 2px solid @focus-ring@;
+    padding: 3px 7px;
+}
+
+#contextTitle {
+    background-color: transparent;
+    color: @text-primary@;
+    font-size: @font-size-section@;
+    font-weight: 600;
+}
+
+#findingTitle,
+#findingPair {
+    background-color: transparent;
+    color: @text-primary@;
+    font-size: @font-size-context@;
+    font-weight: 600;
+}
+
+#findingVerdict {
+    background-color: @bg-sunken@;
+    color: @text-secondary@;
+    border: 1px solid @border-subtle@;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: @font-size-caption@;
+}
+
+#findingVerdict[verdict="verified_constraint"] {
+    background-color: @accent-soft-bg@;
+    color: @accent-soft-fg@;
+    border: 1px solid @accent@;
+}
+
+#findingVerdict[verdict="confirmed_conflict"] {
+    background-color: @danger-soft@;
+    color: @danger@;
+    border: 1px solid @danger@;
+}
+
+#findingVerdict[verdict="needs_review"] {
+    background-color: @warn-soft@;
+    color: @warn@;
+    border: 1px solid @warn@;
+}
+
+#findingVerdict[verdict="not_evaluated"] {
+    background-color: @bg-sunken@;
+    color: @text-secondary@;
+    border: 1px solid @border-subtle@;
+}
+
+#secondaryText {
+    background-color: transparent;
+    color: @text-secondary@;
+    font-size: @font-size-secondary@;
+}

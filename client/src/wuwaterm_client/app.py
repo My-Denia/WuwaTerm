@@ -62,8 +62,6 @@ def run(argv: list[str] | None = None) -> int:
         loop.close()
         return 0
 
-    if not window.ensure_credential():
-        return 0
     window.show()
 
     app_close_event = asyncio.Event()

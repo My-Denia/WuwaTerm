@@ -31,12 +31,15 @@ from collections.abc import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -51,9 +54,7 @@ from .components import (
     Banner,
     EmptyStateCard,
     FieldError,
-    KindBadge,
     ProgressLine,
-    ScoreBar,
     StatusStrip,
     mark_field_invalid,
 )
@@ -95,25 +96,6 @@ _REASON_LABELS = {
     "fuzzy": strings.REASON_LABEL_FUZZY,
     "low-score": strings.REASON_LABEL_LOW_SCORE,
 }
-
-# `KindBadge`'s four values are a SHAPE-AND-COLOR vocabulary, not a claim
-# about where a translation came from: filled dot / success, ring / warn,
-# rounded square / info, dash / muted. The reason column borrows that
-# vocabulary so a match reason and a translation source are read the same way
-# - which is why "fuzzy" maps onto the info shape rather than onto the badge
-# value that happens to share its name. A reason this release has never seen
-# takes the neutral dash and keeps the service's own word for it.
-_REASON_BADGE_KINDS = {
-    "exact": "exact",
-    "pinyin": "fuzzy",
-    "pinyin-abbrev": "fuzzy",
-    "pinyin-prefix": "fuzzy",
-    "pinyin-substring": "fuzzy",
-    "fuzzy": "llm",
-    "low-score": "noop",
-}
-_FALLBACK_REASON_KIND = "noop"
-
 
 # The service's category values, from CATEGORY_ORDER in the server's
 # constants.py and the CategorySpec list that builds the database. The mapping
@@ -170,6 +152,7 @@ class TermsView(QWidget):
         self._api_client = api_client
         self._task: asyncio.Task | None = None
         self._request_id: str | None = None
+        self._matches = ()
 
         self.banner = Banner(self)
 
@@ -209,6 +192,8 @@ class TermsView(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
         # One line per term. With wrapping left on, `resizeRowsToContents`
         # below measures the longest cell against whatever width the column
         # happens to have at that moment and gives that ONE row two or three
@@ -216,6 +201,8 @@ class TermsView(QWidget):
         # neighbours, which reads as the top match being emphasised when it is
         # only longer. A dictionary table is scanned down a column, so equal
         # rows are the point; text too long for its column elides.
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
 
@@ -234,7 +221,11 @@ class TermsView(QWidget):
         # stored the id and then hid it. The one outcome an operator is most
         # likely to be asked about was the one with no visible handle, which
         # is the opposite of what this row is for.
+        self.diagnostics_button = QPushButton(strings.TRANSLATE_DIAGNOSTICS, self)
+        self.diagnostics_button.setObjectName("linkButton")
+        self.diagnostics_button.setCheckable(True)
         self._request_id_row = QWidget(self)
+        self.diagnostics_button.toggled.connect(self._request_id_row.setVisible)
         request_id_row = QHBoxLayout(self._request_id_row)
         request_id_row.setContentsMargins(0, 0, 0, 0)
         request_id_row.setSpacing(8)
@@ -243,34 +234,98 @@ class TermsView(QWidget):
         request_id_row.addStretch(1)
 
         self._results_host = QFrame(self)
-        self._results_host.setObjectName("card")
+        self._results_host.setObjectName("editorSurface")
         results_layout = QVBoxLayout(self._results_host)
-        results_layout.setSpacing(8)
-        results_layout.addWidget(self.table)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_title = QLabel(strings.TERMS_RESULTS_TITLE, self._results_host)
+        results_title.setObjectName("contextTitle")
+        results_layout.addWidget(results_title)
+        results_layout.addWidget(self.table, 1)
 
-        # The translation area labels its three controls; this one had a label
-        # before the redesign and lost it, leaving assistive technology with
-        # the placeholder alone - and once anything is typed, not even that.
-        # Same shape as the other area: a visible label, set as the field's
-        # buddy so the name is carried to the accessibility tree rather than
-        # merely sitting next to it.
+        self.detail_panel = QFrame(self)
+        self.detail_panel.setObjectName("reviewInspector")
+        detail_layout = QVBoxLayout(self.detail_panel)
+        detail_title = QLabel(strings.TERMS_DETAILS_TITLE, self.detail_panel)
+        detail_title.setObjectName("contextTitle")
+        self.detail_prompt = QLabel(strings.TERMS_DETAILS_PROMPT, self.detail_panel)
+        self.detail_prompt.setObjectName("secondaryText")
+        self.detail_prompt.setWordWrap(True)
+        self.detail_zh = QLabel(self.detail_panel)
+        self.detail_zh.setObjectName("findingPair")
+        self.detail_en = QLabel(self.detail_panel)
+        self.detail_en.setObjectName("findingTitle")
+        self.detail_category = QLabel(self.detail_panel)
+        self.detail_score = QLabel(self.detail_panel)
+        self.detail_reason = QLabel(self.detail_panel)
+        # Keep raw values separate for copy/accessibility while presenting a
+        # single quiet metadata line below the actual English/Chinese pair.
+        for value in (self.detail_category, self.detail_score, self.detail_reason):
+            value.hide()
+        for value in (self.detail_zh, self.detail_en):
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_metadata = QLabel(self.detail_panel)
+        self.detail_metadata.setObjectName("secondaryText")
+        self.detail_metadata.setWordWrap(True)
+        self.copy_zh_button = QPushButton(strings.TERMS_COPY_ZH, self.detail_panel)
+        self.copy_en_button = QPushButton(strings.TERMS_COPY_EN, self.detail_panel)
+        for button in (self.copy_zh_button, self.copy_en_button):
+            button.setObjectName("linkButton")
+        self.copy_zh_button.clicked.connect(lambda: self._copy_detail(self.detail_zh.text()))
+        self.copy_en_button.clicked.connect(lambda: self._copy_detail(self.detail_en.text()))
+        copy_row = QHBoxLayout()
+        copy_row.addWidget(self.copy_zh_button)
+        copy_row.addWidget(self.copy_en_button)
+        copy_row.addStretch(1)
+        detail_layout.addWidget(detail_title)
+        detail_layout.addWidget(self.detail_prompt)
+        detail_layout.addWidget(self.detail_en)
+        detail_layout.addWidget(self.detail_zh)
+        detail_layout.addSpacing(10)
+        detail_layout.addWidget(self.detail_metadata)
+        detail_layout.addLayout(copy_row)
+        detail_layout.addStretch(1)
+        self._on_selection_changed()
+
+        self.results_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.detail_scroll = QScrollArea(self)
+        self.detail_scroll.setWidget(self.detail_panel)
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results_splitter.addWidget(self._results_host)
+        self.results_splitter.addWidget(self.detail_scroll)
+        self.results_splitter.setStretchFactor(0, 3)
+        self.results_splitter.setStretchFactor(1, 2)
+        self.results_splitter.setChildrenCollapsible(False)
+
         query_label = QLabel(strings.TERMS_QUERY_LABEL, self)
         query_label.setBuddy(self.query_edit)
+        self.category_filter = QComboBox(self)
+        self.category_filter.setAccessibleName(strings.TERMS_FILTER_LABEL)
+        self.category_filter.addItem(strings.TERMS_FILTER_ALL, None)
+        self.category_filter.currentIndexChanged.connect(self._filter_results)
 
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         search_row.addWidget(query_label)
         search_row.addWidget(self.query_edit, 1)
+        search_row.addWidget(self.category_filter)
         search_row.addWidget(self.search_button)
 
+        title = QLabel(strings.PAGE_TITLE_TERMS, self)
+        title.setObjectName("contextTitle")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 10)
         layout.setSpacing(8)
+        layout.addWidget(title)
         layout.addWidget(self.banner)
         layout.addLayout(search_row)
         layout.addWidget(self.field_error)
         layout.addWidget(self.progress)
         layout.addWidget(self.empty_card)
-        layout.addWidget(self._results_host, 1)
+        layout.addWidget(self.results_splitter, 1)
+        layout.addWidget(self.diagnostics_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self._request_id_row)
         layout.addWidget(self.status_label)
 
@@ -390,21 +445,28 @@ class TermsView(QWidget):
 
     def _render_result(self, result: TermsResult) -> None:
         self.banner.clear()
+        self._matches = result.matches
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem(strings.TERMS_FILTER_ALL, None)
+        for category in sorted({match.category for match in result.matches}):
+            self.category_filter.addItem(_category_label(category), category)
+        self.category_filter.blockSignals(False)
         self.table.setRowCount(len(result.matches))
         for row, match in enumerate(result.matches):
-            for column, value in enumerate(
-                (match.zh, match.en, _category_label(match.category))
-            ):
+            values = (
+                match.zh, match.en, _category_label(match.category),
+                f"{match.score:.2f}", _REASON_LABELS.get(match.reason, match.reason),
+            )
+            for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                # Elided text is unreadable text; the whole value stays one
-                # hover away rather than only in the column that fits it.
                 item.setToolTip(value)
                 self.table.setItem(row, column, item)
-            self.table.setCellWidget(row, 3, self._score_cell(match.score))
-            self.table.setCellWidget(row, 4, self._reason_cell(match.reason))
         self.table.resizeRowsToContents()
         self._apply_request_id(result.request_id)
         if result.matches:
+            self._filter_results()
+            self.table.selectRow(0)
             self._show_results()
             self.status_label.set_text(strings.STATUS_BAR_DONE)
         else:
@@ -419,41 +481,46 @@ class TermsView(QWidget):
             )
             self._show_empty_card()
             self.status_label.set_text(strings.TERMS_EMPTY)
+        # Replacing items can retain the same selected row without emitting
+        # itemSelectionChanged. Details must describe this response anyway.
+        self._on_selection_changed()
 
-    def _score_cell(self, score: float) -> QWidget:
-        """The number and the same number as a length, side by side.
+    def _filter_results(self) -> None:
+        category = self.category_filter.currentData()
+        first_visible = -1
+        for row, match in enumerate(self._matches):
+            visible = category is None or match.category == category
+            self.table.setRowHidden(row, not visible)
+            if visible and first_visible < 0:
+                first_visible = row
+        if first_visible >= 0:
+            self.table.selectRow(first_visible)
+        else:
+            self.table.clearSelection()
+        self._on_selection_changed()
 
-        The bar is the second encoding: a column of numbers has to be read
-        one row at a time, and the point of a score is comparing rows.
-        """
-        cell = QWidget(self.table)
-        label = QLabel(cell)
-        label.setText(f"{score:.2f}")
-        bar = ScoreBar(cell)
-        bar.set_score(score)
-        layout = QHBoxLayout(cell)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(8)
-        layout.addWidget(label)
-        layout.addWidget(bar)
-        layout.addStretch(1)
-        return cell
+    def _on_selection_changed(self) -> None:
+        selected = self.table.selectionModel().selectedRows()
+        row = selected[0].row() if selected else -1
+        match = self._matches[row] if 0 <= row < len(self._matches) else None
+        self.detail_prompt.setVisible(match is None)
+        self.detail_zh.setText(match.zh if match else "")
+        self.detail_en.setText(match.en if match else "")
+        self.detail_category.setText(_category_label(match.category) if match else "")
+        self.detail_score.setText(f"{match.score:.2f}" if match else "")
+        self.detail_reason.setText(_REASON_LABELS.get(match.reason, match.reason) if match else "")
+        self.detail_metadata.setText(strings.TERMS_DETAILS_META.format(
+            category=self.detail_category.text(), score=self.detail_score.text(),
+            reason=self.detail_reason.text(),
+        ) if match else "")
+        self.copy_zh_button.setEnabled(match is not None)
+        self.copy_en_button.setEnabled(match is not None)
 
-    def _reason_cell(self, reason: str) -> QWidget:
-        cell = QWidget(self.table)
-        badge = KindBadge(cell)
-        badge.set_kind(
-            _REASON_BADGE_KINDS.get(reason, _FALLBACK_REASON_KIND),
-            # An unrecognised reason keeps the service's own word rather than
-            # being mapped onto one of ours that it may not mean.
-            _REASON_LABELS.get(reason, reason),
-        )
-        layout = QHBoxLayout(cell)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(0)
-        layout.addWidget(badge)
-        layout.addStretch(1)
-        return cell
+    def _copy_detail(self, value: str) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None and value:
+            clipboard.setText(value)
+            self.status_label.set_text(strings.STATUS_COPIED)
 
     def _render_error(self, exc: ClientError) -> None:
         """Put a failed search where its own error code says it belongs."""
@@ -509,7 +576,9 @@ class TermsView(QWidget):
         visible reads as "the dictionary answered, with nothing", which is a
         different claim from "there is no answer on this screen".
         """
+        self._matches = ()
         self.table.setRowCount(0)
+        self._on_selection_changed()
         # Not the first-launch wording: the owner HAS typed a term and asked
         # for it. "Type any term to start" under a failure banner reads as
         # though the attempt never happened.
@@ -526,7 +595,9 @@ class TermsView(QWidget):
         at first launch: one of them describes a deliberate discard, the
         other describes a client that has never been asked anything.
         """
+        self._matches = ()
         self.table.setRowCount(0)
+        self._on_selection_changed()
         self._apply_request_id()
         if not self._api_client.is_configured:
             # Not the checklist's heading: the window is already showing that
@@ -563,7 +634,9 @@ class TermsView(QWidget):
         text that was never sent anywhere.
         """
         self._clear_outcome_surfaces()
+        self._matches = ()
         self.table.setRowCount(0)
+        self._on_selection_changed()
         self._apply_request_id()
         self.empty_card.set_content(
             strings.TERMS_SENTENCE_HINT_TITLE,
@@ -583,11 +656,11 @@ class TermsView(QWidget):
 
     def _show_empty_card(self) -> None:
         self.empty_card.setVisible(True)
-        self._results_host.setVisible(False)
+        self.results_splitter.setVisible(False)
 
     def _show_results(self) -> None:
         self.empty_card.setVisible(False)
-        self._results_host.setVisible(True)
+        self.results_splitter.setVisible(True)
 
     def _apply_endpoint_state(self) -> None:
         configured = self._api_client.is_configured
@@ -613,7 +686,8 @@ class TermsView(QWidget):
         """
         applicable = request_id is not NO_REQUEST
         self._request_id = request_id if applicable else None
-        self._request_id_row.setVisible(applicable)
+        self.diagnostics_button.setVisible(applicable)
+        self._request_id_row.setVisible(applicable and self.diagnostics_button.isChecked())
         if not applicable:
             return
         shown = self._request_id if self._request_id else strings.REQUEST_ID_PLACEHOLDER

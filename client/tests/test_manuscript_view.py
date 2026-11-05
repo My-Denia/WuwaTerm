@@ -100,6 +100,67 @@ def test_save_reopen_long_document_preserves_original_bytes_semantics(qapp, tmp_
     assert reopened._payload == reopened._saved_payload
 
 
+def test_edit_after_save_replaces_only_the_obsolete_success_notice(qapp, tmp_path) -> None:
+    from wuwaterm_client import strings
+
+    view = ManuscriptView(ApiClient(None))
+    install(view, "source", "target")
+    view._path = tmp_path / "draft.json"
+    assert view.save_document()
+    assert view.status_label.text() == strings.MANUSCRIPT_SAVE_DONE
+    view.source_edit.textCursor().insertText("!")
+    assert view.document_dirty
+    assert view.status_label.text() == strings.MANUSCRIPT_UNSAVED
+    assert load_workfile(view._path)["source"] == "source"
+
+
+def test_edit_after_real_save_failure_keeps_the_failure_and_length_notice(qapp, tmp_path) -> None:
+    from wuwaterm_client import strings
+
+    view = ManuscriptView(ApiClient(None))
+    install(view, "x" * 2000, "target")
+    view._path = tmp_path / "missing-directory" / "draft.json"
+    assert not view.save_document()
+    failure = view.status_label.text()
+    assert failure.startswith(strings.MANUSCRIPT_SAVE_FAILED.split("{reason}")[0])
+    view.source_edit.textCursor().insertText("!")
+    assert view.document_dirty and view.status_label.text() == failure
+    assert not view.limit_label.isHidden()
+
+
+def test_edit_after_choice_conflict_preserves_the_unresolved_notice(qapp, tmp_path, monkeypatch) -> None:
+    from wuwaterm_client import strings
+
+    source, target = "term", "词"
+    prior = report(source, target)
+    first = {"source": source, "direction": "zh", "source_span": prior["findings"][0]["source_span"],
+             "scope": "positional", "choice": "not_a_term", "candidate": None,
+             "basis": {"rule_version": "review-v2", "dictionary": prior["dictionary"],
+                       "matcher_revision": prior["matcher_revision"]}}
+    second = copy.deepcopy(first)
+    second["source"] = "another block\n" + source
+    second["source_span"]["start"] += len("another block\n")
+    second["source_span"]["end"] += len("another block\n")
+    value = empty_workfile()
+    value.update(source=source + "\n" + source, target=target, direction="zh", choices=[first, second])
+    path = tmp_path / "choices.json"
+    save_workfile(path, value)
+    original = path.read_bytes()
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
+    view = ManuscriptView(ApiClient(None))
+    view.open_document()
+    cursor = view.source_edit.textCursor()
+    cursor.setPosition(len(source))
+    cursor.setPosition(len(value["source"]), QTextCursor.MoveMode.KeepAnchor)
+    cursor.removeSelectedText()
+    assert not view.save_document()
+    assert view.status_label.text() == strings.MANUSCRIPT_CHOICES_CONFLICT
+    assert view.conflict_list.count() == 2
+    view.target_edit.textCursor().insertText("!")
+    assert view.status_label.text() == strings.MANUSCRIPT_CHOICES_CONFLICT
+    assert view.conflict_list.count() == 2 and path.read_bytes() == original
+
+
 def test_failed_save_cannot_replace_unsaved_current_document(qapp, tmp_path: Path, monkeypatch) -> None:
     from wuwaterm_client.ui import manuscript_view as module
     current = ManuscriptView(ApiClient(None))
@@ -427,7 +488,7 @@ def test_mouse_save_during_preedit_keeps_focus_and_does_not_save(qapp, tmp_path,
             return httpx.Response(200, json=report(source, target))
         client = client_with(handler)
         monkeypatch.setattr(main_window, "has_token", lambda: False)
-        monkeypatch.setattr(status_view, "has_token", lambda: False)
+        monkeypatch.setattr(status_view, "read_token", lambda: None)
         monkeypatch.setattr(status_view, "active_backend_name", lambda: "test")
         window = main_window.MainWindow(ClientConfig(base_url="https://example.invalid"))
         window_api = window.api_client
@@ -531,23 +592,248 @@ def test_save_buttons_remain_reachable_by_keyboard_tab(qapp, tmp_path, monkeypat
         view.close()
 
 
-def test_manuscript_wheel_scroll_remains_usable(qapp) -> None:
+def test_long_manuscript_scrolls_each_editor_without_scrolling_the_workbench(qapp) -> None:
     view = ManuscriptView(ApiClient(None))
     try:
         view.resize(640, 380)
+        source = "source line\r\n" * 200
+        target = "target line\n" * 200
+        install(view, source, target)
         view.show()
         qapp.processEvents()
-        scroll = view.findChild(QScrollArea)
-        bar = scroll.verticalScrollBar()
-        assert bar.maximum() > 0
-        bar.setValue(0)
-        pos = QPointF(scroll.viewport().rect().center())
-        wheel = QWheelEvent(pos, pos, QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
-                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
-        QCoreApplication.sendEvent(scroll.viewport(), wheel)
-        assert bar.value() > 0
+        inspector_scroll = view.findChild(QScrollArea)
+        assert not inspector_scroll.isAncestorOf(view.source_edit)
+        assert not inspector_scroll.isAncestorOf(view.target_edit)
+        for editor in (view.source_edit, view.target_edit):
+            bar = editor.verticalScrollBar()
+            assert bar.maximum() > 0
+            bar.setValue(0)
+            pos = QPointF(editor.viewport().rect().center())
+            wheel = QWheelEvent(pos, pos, QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+            QCoreApplication.sendEvent(editor.viewport(), wheel)
+            assert bar.value() > 0
+        assert view.source_edit.raw_text() == source
+        assert view.target_edit.raw_text() == target
+        assert not view.review_button.isEnabled()
+        assert view.limit_label.isVisible()
     finally:
         view.close()
+
+
+def test_compact_workbench_keeps_actions_and_both_editors_reachable(qapp, tmp_path, monkeypatch) -> None:
+    from wuwaterm_client import theme
+
+    previous_style = qapp.styleSheet()
+    qapp.setStyleSheet(theme.load_stylesheet("dark"))
+    client = client_with(lambda _request: httpx.Response(500))
+    view = ManuscriptView(client)
+    try:
+        path = tmp_path / ("a-very-long-manuscript-name-" * 5 + "draft.json")
+        value = empty_workfile()
+        value.update(source="source", target="translation", direction="zh")
+        save_workfile(path, value)
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
+        view.open_document()
+        # Smaller than the manuscript area in a 683 x 384 logical window.
+        view.resize(590, 340)
+        view.show()
+        qapp.processEvents()
+        assert view.size().width() == 590
+        assert view.document_title == path.name
+        assert view.document_label.text() != path.name
+        assert view.document_label.toolTip() == path.name
+        assert view.document_label.accessibleName() == path.name
+        assert view.editor_splitter.orientation() == Qt.Orientation.Horizontal
+        assert not view.inspector.isVisible()
+        for button in (view.new_button, view.open_button, view.save_button,
+                       view.save_as_button, view.review_button, view.inspector_button,
+                       view.direction_combo):
+            assert button.isVisible()
+            assert button.accessibleName() or (hasattr(button, "text") and button.text())
+            assert view.rect().contains(button.mapTo(view, button.rect().bottomRight()))
+        assert view.review_button.isEnabled()
+        assert view.source_header_label.isVisible() and view.target_header_label.isVisible()
+        assert view.source_edit.isVisible() and view.target_edit.isVisible()
+        assert view.source_edit.height() > 0 and view.target_edit.height() > 0
+        view.inspector_button.click()
+        qapp.processEvents()
+        assert view.inspector.isVisible()
+        assert view.source_edit.isVisible() and view.target_edit.isVisible()
+        assert view.source_edit.width() > 0 and view.target_edit.width() > 0
+        view.inspector_button.click()
+        assert not view.inspector.isVisible()
+        # Height can change without a width transition; recompute both ways.
+        view.resize(590, 700)
+        qapp.processEvents()
+        assert view.editor_splitter.orientation() == Qt.Orientation.Vertical
+        view.resize(590, 340)
+        qapp.processEvents()
+        assert view.editor_splitter.orientation() == Qt.Orientation.Horizontal
+    finally:
+        view.close()
+        asyncio.run(client.aclose())
+        qapp.setStyleSheet(previous_style)
+
+
+def test_short_full_window_keeps_both_editor_viewports_usable(qapp, monkeypatch) -> None:
+    from wuwaterm_client import theme
+    from wuwaterm_client.config import ClientConfig
+    from wuwaterm_client.ui import main_window, status_view
+    from wuwaterm_client.ui.components import clamp_to_workspace
+
+    previous_style = qapp.styleSheet()
+    qapp.setStyleSheet(theme.load_stylesheet("dark"))
+    monkeypatch.setattr(main_window, "has_token", lambda: False)
+    monkeypatch.setattr(status_view, "read_token", lambda: None)
+    monkeypatch.setattr(status_view, "active_backend_name", lambda: "test")
+    window = main_window.MainWindow(ClientConfig(base_url=None))
+    try:
+        minimum, _ = clamp_to_workspace(
+            (683, 384), main_window.WINDOW_PREFERRED_MINIMUM,
+            main_window.WINDOW_DEFAULT_SIZE, main_window.WINDOW_ABSOLUTE_MINIMUM)
+        window.setMinimumSize(*minimum)
+        window.resize(683, 384)
+        window.show()
+        qapp.processEvents()
+        view = window.manuscript_view
+        assert window.size().toTuple() == (683, 384)
+        assert view.editor_splitter.orientation() == Qt.Orientation.Horizontal
+        assert not view.inspector.isVisible()
+        for editor in (view.source_edit, view.target_edit):
+            assert editor.isVisible()
+            assert editor.viewport().height() >= 90
+        for button in (view.new_button, view.open_button, view.save_button,
+                       view.save_as_button, view.review_button, view.inspector_button,
+                       view.direction_combo):
+            assert button.isVisibleTo(window)
+            assert window.rect().contains(button.mapTo(window, button.rect().bottomRight()))
+    finally:
+        window.close()
+        asyncio.run(window.api_client.aclose())
+        qapp.setStyleSheet(previous_style)
+
+
+def test_document_signal_and_title_follow_edits_save_open_and_new(qapp, tmp_path, monkeypatch) -> None:
+    from wuwaterm_client import strings
+
+    view = ManuscriptView(ApiClient(None))
+    changes = []
+    view.documentChanged.connect(lambda: changes.append((view.document_title, view.document_dirty)))
+    assert view.document_title == strings.MANUSCRIPT_UNTITLED and not view.document_dirty
+    view.source_edit.textCursor().insertText("a")
+    assert changes[-1] == (strings.MANUSCRIPT_UNTITLED, True)
+    count = len(changes)
+    view.source_edit.textCursor().insertText("b")
+    assert len(changes) > count
+    path = tmp_path / "draft.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
+    assert view.save_document()
+    assert changes[-1] == ("draft.json", False)
+    view.source_edit.textCursor().insertText("c")
+    monkeypatch.setattr(QMessageBox, "exec", lambda _box: QMessageBox.StandardButton.Discard)
+    view.new_document()
+    assert changes[-1] == (strings.MANUSCRIPT_UNTITLED, False)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
+    view.open_document()
+    assert changes[-1] == ("draft.json", False)
+    assert view.source_edit.raw_text() == "ab"
+
+
+def test_missing_target_span_is_manual_and_lookup_uses_real_source(qapp) -> None:
+    async def scenario():
+        source, target = "term", "译文"
+        payload = report(source, "词")
+        payload["target_revision"] = hashlib.sha256(target.encode()).hexdigest()
+        payload["findings"][0]["target_span"] = None
+        payload["findings"][0]["rule_id"] = "review.term_pair"
+        async def handler(request):
+            return httpx.Response(200, json=payload)
+        client = client_with(handler)
+        view = ManuscriptView(client)
+        try:
+            view.resize(1100, 800)
+            view.show()
+            install(view, source, target)
+            view._start_review()
+            await view._task
+            await asyncio.sleep(0)
+            qapp.processEvents()
+            assert view.findings.currentRow() == 0
+            assert view.manual_edit_label.isVisible()
+            assert not view.replace_toggle.isVisible()
+            assert not view.replacement_area.isVisible()
+            assert not view.replace_button.isEnabled()
+            assert "term" in view.finding_title.text()
+            assert "正确词" in view.candidates_label.text()
+            assert "术语配对" in view.finding_rule.text()
+            requested = []
+            view.lookup_requested.connect(requested.append)
+            view.lookup_button.click()
+            assert requested == ["term"]
+            assert view.target_edit.raw_text() == target
+        finally:
+            view.close()
+            await client.aclose()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("verdict", ["verified_constraint", "confirmed_conflict"])
+def test_replacement_action_requires_a_located_nonverified_finding(qapp, verdict) -> None:
+    async def scenario():
+        payload = report("term", "词")
+        payload["findings"][0]["verdict"] = verdict
+        async def handler(_request):
+            return httpx.Response(200, json=payload)
+        client = client_with(handler)
+        view = ManuscriptView(client)
+        try:
+            view.resize(1100, 800)
+            view.show()
+            install(view, "term", "词")
+            view._start_review()
+            await view._task
+            await asyncio.sleep(0)
+            qapp.processEvents()
+            assert not view.manual_edit_label.isVisible()
+            assert view.replace_toggle.isVisible() == (verdict == "confirmed_conflict")
+            assert not view.replacement_area.isVisible()
+            if verdict == "confirmed_conflict":
+                view.replace_toggle.click()
+                assert view.replacement_area.isVisible()
+                assert view.replace_button.isEnabled()
+        finally:
+            view.close()
+            await client.aclose()
+    asyncio.run(scenario())
+
+
+def test_successful_empty_review_does_not_say_unreviewed(qapp) -> None:
+    from wuwaterm_client import strings
+
+    async def scenario():
+        payload = report("term", "词")
+        payload["findings"] = []
+        async def handler(_request):
+            return httpx.Response(200, json=payload)
+        client = client_with(handler)
+        view = ManuscriptView(client)
+        try:
+            view.resize(1100, 800)
+            view.show()
+            install(view, "term", "词")
+            view._start_review()
+            await view._task
+            await asyncio.sleep(0)
+            qapp.processEvents()
+            assert view._review_state == "current"
+            assert view.finding_title.text() == strings.MANUSCRIPT_NO_FINDINGS
+            assert not view.findings.isVisible()
+            assert "0" in view.report_label.text()
+        finally:
+            view.close()
+            await client.aclose()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("side", ["source", "target"])

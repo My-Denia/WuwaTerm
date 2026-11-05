@@ -202,7 +202,7 @@ TERMS_SEARCHING = "正在搜索术语…"
 TERMS_SENTENCE_HINT_TITLE = "这更像是一句话，而不是一个术语"
 TERMS_SENTENCE_HINT_SUBTITLE = "查词只处理短术语。整句请改用文本翻译区。"
 TERMS_TOO_SHORT_HINT = "再多输入一个字就会开始查询。"
-TERMS_TRANSLATE_BRIDGE_BUTTON = "用模型翻译「{query}」"
+TERMS_TRANSLATE_BRIDGE_BUTTON = "前往文本翻译「{query}」"
 
 # The match-reason vocabulary, shown as a shape plus a word so the reason is
 # readable in a grayscale screenshot and by a color-blind reader. The service
@@ -305,7 +305,7 @@ DIALOG_NO_BUTTON = "取消"
 
 EMPTY_TERMS_UNCONFIGURED_TITLE = "查询结果会显示在这里"
 EMPTY_STATUS_UNCONFIGURED_TITLE = "服务信息会显示在这里"
-EMPTY_UNCONFIGURED_SUBTITLE = "请先按上方步骤填写服务器地址。"
+EMPTY_UNCONFIGURED_SUBTITLE = "请先在设置中填写服务器地址，再使用在线功能。"
 
 # -- 凭据存储后端 -----------------------------------------------------------
 # 这一行显示的原本是 keyring 库的**类名**,既不是这个程序写的字,也不在 Qt 自带
@@ -430,7 +430,7 @@ FIRST_RUN_QUIT_BUTTON = "退出"
 # read the same send the owner to the same action, and the point of keeping
 # fifteen of them apart is that they do not.
 
-ERROR_MSG_UNAUTHORIZED = "已保存的设备凭据被拒绝。请输入一个新的设备令牌。"
+ERROR_MSG_UNAUTHORIZED = "设备凭据不可用或被拒绝。请输入设备令牌。"
 ERROR_MSG_FORBIDDEN = "这个设备凭据没有执行该操作的权限。"
 ERROR_MSG_RATE_LIMITED = "请求过于频繁。请稍等片刻再试。"
 ERROR_MSG_PAYLOAD_TOO_LARGE = "这段内容体积过大，无法发送。"
@@ -449,3 +449,44 @@ ERROR_MSG_INSECURE_ENDPOINT = (
 ERROR_MSG_NOT_CONFIGURED = (
     "尚未配置服务器地址，因此没有发出任何请求。请在设置中填写服务器地址。"
 )
+
+# -- Workbench manuscript inspector ----------------------------------------
+MANUSCRIPT_UNTITLED = "未命名稿件"
+MANUSCRIPT_INSPECTOR_TITLE = "术语审校"
+MANUSCRIPT_INSPECTOR_SHOW = "显示审校面板"
+MANUSCRIPT_INSPECTOR_HIDE = "隐藏审校面板"
+MANUSCRIPT_FINDING_PROMPT = "选择一条发现查看详情。"
+MANUSCRIPT_CANDIDATES = "候选术语"
+MANUSCRIPT_RULE = "审校规则：{rule}"
+MANUSCRIPT_POSITION = "{side}位置：{start}–{end}"
+MANUSCRIPT_MANUAL_EDIT = "无法精确定位译文，请在译文中手动查看和修改。"
+MANUSCRIPT_DIAGNOSTICS = "诊断信息"
+MANUSCRIPT_FINDING_COUNT = "{current} / {total}"
+MANUSCRIPT_DETAILS = "更多操作"
+
+# -- Workbench navigation and details -------------------------------------
+WORKBENCH_ENDPOINT_CONFIGURED = "服务器已配置"
+WORKBENCH_ENDPOINT_UNCONFIGURED = "服务器未配置 · 设置"
+WORKBENCH_DIAGNOSTICS = "服务诊断"
+TERMS_DETAILS_TITLE = "术语详情"
+TERMS_DETAILS_PROMPT = "选择一条术语查看详情。"
+TERMS_COPY_ZH = "复制中文"
+TERMS_COPY_EN = "复制英文"
+TRANSLATE_COST_NOTE = "词典匹配不调用模型；需要模型时可能产生费用。"
+TRANSLATE_DIAGNOSTICS = "请求诊断"
+SETTINGS_TOKEN_STATUS_UNKNOWN = "无法读取凭据存储；凭据状态未知。"
+MANUSCRIPT_SOURCE_PLACEHOLDER = "在此输入或粘贴原文…"
+MANUSCRIPT_TARGET_PLACEHOLDER = "在此输入或粘贴译文…"
+MANUSCRIPT_REVIEW_LIMIT = "审校每侧最多 2,000 个字符；较长稿件仍可编辑和保存。"
+MANUSCRIPT_RULE_TERM_PAIR = "术语配对"
+TERMS_FILTER_ALL = "全部分类"
+TERMS_FILTER_LABEL = "分类筛选"
+TERMS_RESULTS_TITLE = "匹配结果"
+SETTINGS_APPEARANCE_DESCRIPTION = "选择桌面客户端的外观。更改会立即预览，取消时恢复。"
+SETTINGS_CONNECTION_DESCRIPTION = "配置在线查词、翻译和审校使用的服务地址。地址已配置不代表连接成功。"
+SETTINGS_CREDENTIAL_DESCRIPTION = "设备令牌保存在系统凭据存储中；修改凭据会立即生效。"
+SETTINGS_OPEN_DIAGNOSTICS = "放弃未保存的设置并打开服务诊断"
+SETTINGS_CATEGORY_LABEL = "设置分类"
+MANUSCRIPT_NO_FINDINGS = "本次报告没有术语发现。"
+TERMS_DETAILS_META = "{category} · 匹配度 {score} · {reason}"
+TRANSLATE_COPY_RESULT = "复制译文"

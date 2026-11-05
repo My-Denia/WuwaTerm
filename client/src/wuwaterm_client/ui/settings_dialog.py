@@ -1,25 +1,18 @@
-"""Base URL / timeout / credential lifecycle / appearance settings dialog.
+"""Appearance, service and device credential settings.
 
-Three cards, because the three groups fail independently: an address can be
-refused while the credential is fine, a credential store can be unavailable
-while the address is good, and the appearance is never wrong at all. A single
-flat form made every one of those look like a fault of "the settings".
-
-Nothing in here writes anything. The address and the timeout leave through
-``result_config`` and are applied by the window; the credential buttons are
-the exception and say so - they take effect immediately, which is why the
-window refreshes its credential state whether or not this dialog was
-accepted.
+Appearance is previewed immediately and reverted on cancel. Service settings
+are applied only on acceptance; credential changes take effect immediately.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -31,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -49,7 +43,7 @@ from ..credentials import (
     CredentialStoreUnavailable,
     active_backend_name,
     delete_token,
-    has_token,
+    read_token,
     store_token,
 )
 from .components import (
@@ -61,13 +55,14 @@ from .components import (
 )
 from .error_presentation import SEVERITY_DANGER
 from .token_dialog import TokenDialog
+from .icons import icon
 
 BaseUrlValidator = Callable[[str], "str | None"]
 
 # What the three cards want when nothing constrains them; a PREFERENCE, not a
 # floor. `fit_to_workspace` clamps it to the desktop that is actually there.
-SETTINGS_PREFERRED_MINIMUM = (360, 560)
-SETTINGS_DEFAULT_SIZE = (420, 620)
+SETTINGS_PREFERRED_MINIMUM = (600, 400)
+SETTINGS_DEFAULT_SIZE = (760, 560)
 # The floor. Small enough for a 1366x768 panel at 200% scaling, which reports
 # roughly 683x384 logical pixels - the case that made the button box
 # unreachable before the scroll area existed.
@@ -101,6 +96,8 @@ class SettingsDialog(QDialog):
     owner is looking at, instead of after the dialog has closed on a value it
     will never use.
     """
+
+    diagnosticsRequested = Signal()
 
     def __init__(
         self,
@@ -161,7 +158,12 @@ class SettingsDialog(QDialog):
         )
 
         self.backend_label = QLabel(credential_card)
-        apply_credential_backend(self.backend_label, active_backend_name())
+        try:
+            backend = active_backend_name()
+        except Exception:
+            self.backend_label.setText(strings.STATUS_UNKNOWN_VALUE)
+        else:
+            apply_credential_backend(self.backend_label, backend)
 
         backend_row = QHBoxLayout()
         backend_row.setContentsMargins(0, 0, 0, 0)
@@ -252,15 +254,10 @@ class SettingsDialog(QDialog):
         initial_button.setChecked(True)
         initial_button.blockSignals(was_blocked)
 
-        theme_row = QHBoxLayout()
-        theme_row.setContentsMargins(0, 0, 0, 0)
-        theme_row.setSpacing(16)
-        theme_row.addWidget(QLabel(strings.SETTINGS_THEME_LABEL, appearance_card))
-        theme_row.addWidget(self.theme_system_radio)
-        theme_row.addWidget(self.theme_light_radio)
-        theme_row.addWidget(self.theme_dark_radio)
-        theme_row.addStretch(1)
-        appearance_layout.addLayout(theme_row)
+        theme_label = QLabel(strings.SETTINGS_THEME_LABEL, appearance_card)
+        appearance_layout.addWidget(theme_label)
+        for radio in (self.theme_system_radio, self.theme_light_radio, self.theme_dark_radio):
+            appearance_layout.addWidget(radio)
 
         # -- frame ------------------------------------------------------------
 
@@ -285,38 +282,76 @@ class SettingsDialog(QDialog):
         # colour than it found it.
         self.rejected.connect(self._restore_initial_appearance)
 
-        # The three cards go inside a scroll area and the button box stays
-        # OUTSIDE it. Measured: this stack wants 584 logical pixels of height,
-        # and a 1366x768 panel at 200% scaling offers about 384 - so on that
-        # desktop the dialog opened taller than the screen and Ok/Cancel sat
-        # below its bottom edge, unreachable. Scrolling the cards is what makes
-        # the content reachable; keeping the buttons out of the scroll area is
-        # what makes the DECISION always reachable, which matters more.
-        scroll_body = QWidget(self)
-        body_layout = QVBoxLayout(scroll_body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(12)
-        body_layout.addWidget(title)
-        body_layout.addWidget(connection_card)
-        body_layout.addWidget(credential_card)
-        body_layout.addWidget(appearance_card)
-        body_layout.addStretch(1)
+        # Each category remains a separate scrollable page. The navigation
+        # becomes a combo at compact widths, leaving the controls usable.
+        self.category_stack = QStackedWidget(self)
+        for card, description in (
+            (appearance_card, strings.SETTINGS_APPEARANCE_DESCRIPTION),
+            (connection_card, strings.SETTINGS_CONNECTION_DESCRIPTION),
+            (credential_card, strings.SETTINGS_CREDENTIAL_DESCRIPTION),
+        ):
+            page = QWidget(self.category_stack)
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(8, 8, 8, 8)
+            page_layout.setSpacing(14)
+            subtitle = QLabel(description, page)
+            subtitle.setObjectName("secondaryText")
+            subtitle.setWordWrap(True)
+            page_layout.addWidget(subtitle)
+            page_layout.addWidget(card)
+            page_layout.addStretch(1)
+            self.category_stack.addWidget(page)
+
+        self.diagnostics_button = QPushButton(strings.SETTINGS_OPEN_DIAGNOSTICS, connection_card)
+        self.diagnostics_button.setObjectName("commandButton")
+        self.diagnostics_button.clicked.connect(self._open_diagnostics)
+        connection_layout.addWidget(self.diagnostics_button)
 
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setObjectName("settingsScroll")
-        self.scroll_area.setWidget(scroll_body)
-        # Without this the inner widget keeps its sizeHint and the scroll area
-        # shows a horizontal bar instead of letting the cards use the width.
+        self.scroll_area.setWidget(self.category_stack)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
+        categories = (
+            (strings.SETTINGS_APPEARANCE_SECTION_TITLE, "panels-top-left"),
+            (strings.SETTINGS_CONNECTION_SECTION_TITLE, "link-2"),
+            (strings.SETTINGS_CREDENTIAL_SECTION_TITLE, "clipboard"),
+        )
+        self.category_sidebar = QFrame(self)
+        sidebar_layout = QVBoxLayout(self.category_sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 8, 0)
+        sidebar_layout.setSpacing(4)
+        self.category_buttons = []
+        self.category_combo = QComboBox(self)
+        self.category_combo.setAccessibleName(strings.SETTINGS_CATEGORY_LABEL)
+        for index, (label, icon_name) in enumerate(categories):
+            button = QPushButton(label, self.category_sidebar)
+            button.setObjectName("activityItem")
+            button.setCheckable(True)
+            button.setIcon(icon(icon_name))
+            button.setIconSize(QSize(17, 17))
+            button.clicked.connect(lambda _checked=False, page=index: self._select_category(page))
+            sidebar_layout.addWidget(button)
+            self.category_buttons.append(button)
+            self.category_combo.addItem(label)
+        sidebar_layout.addStretch(1)
+        self.category_combo.currentIndexChanged.connect(self._select_category)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        body.addWidget(self.category_sidebar)
+        body.addWidget(self.scroll_area, 1)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
-        layout.addWidget(self.scroll_area, 1)
+        layout.addWidget(title)
+        layout.addWidget(self.category_combo)
+        layout.addLayout(body, 1)
         layout.addWidget(buttons)
+        self._select_category(0)
+        self._update_compact_navigation()
 
         # Same clamp the main window uses, from the same function. The dialog
         # is the reason that function is shared rather than a method: it had no
@@ -331,6 +366,31 @@ class SettingsDialog(QDialog):
 
         self._refresh_credential_status()
 
+    def _select_category(self, index: int) -> None:
+        if not 0 <= index < self.category_stack.count():
+            return
+        self.category_stack.setCurrentIndex(index)
+        for number, button in enumerate(self.category_buttons):
+            button.setChecked(number == index)
+        self.category_combo.blockSignals(True)
+        self.category_combo.setCurrentIndex(index)
+        self.category_combo.blockSignals(False)
+        self.scroll_area.verticalScrollBar().setValue(0)
+
+    def _update_compact_navigation(self) -> None:
+        compact = self.width() < 560
+        self.category_sidebar.setVisible(not compact)
+        self.category_combo.setVisible(compact)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "category_sidebar"):
+            self._update_compact_navigation()
+
+    def _open_diagnostics(self) -> None:
+        self.reject()
+        self.diagnosticsRequested.emit()
+
     # -- public API --------------------------------------------------------
 
     def show_base_url_error(self, text: str) -> None:
@@ -341,6 +401,7 @@ class SettingsDialog(QDialog):
         token in the clear, and that answer has to land on the field that
         holds it rather than in a box over a dialog that has already closed.
         """
+        self._select_category(1)
         self.base_url_error.show_error(text)
         mark_field_invalid(self.base_url_edit, True)
         self.base_url_edit.setFocus()
@@ -349,9 +410,8 @@ class SettingsDialog(QDialog):
         """The edited settings.
 
         An empty field is `None` - unconfigured - and not a development
-        address substituted for one. `_on_accepted` refuses an empty field
-        before this is reached, so the branch is a floor rather than a path;
-        what it must never do is invent an address nobody typed.
+        address substituted for one. Leaving an already unconfigured address
+        empty is valid; clearing a configured address is refused.
         """
         base_url = self.base_url_edit.text().strip() or None
         return ClientConfig(
@@ -370,16 +430,19 @@ class SettingsDialog(QDialog):
     # -- internals ---------------------------------------------------------
 
     def _refresh_credential_status(self) -> None:
-        stored = has_token()
+        try:
+            stored = read_token() is not None
+        except CredentialStoreUnavailable:
+            self.credential_status_label.setText(strings.SETTINGS_TOKEN_STATUS_UNKNOWN)
+            self.enter_token_button.setText(strings.SETTINGS_ENTER_TOKEN_BUTTON)
+            return
         self.credential_status_label.setText(
             strings.SETTINGS_TOKEN_STATUS_STORED
-            if stored
-            else strings.SETTINGS_TOKEN_STATUS_MISSING
+            if stored else strings.SETTINGS_TOKEN_STATUS_MISSING
         )
         self.enter_token_button.setText(
             strings.SETTINGS_CHANGE_TOKEN_BUTTON
-            if stored
-            else strings.SETTINGS_ENTER_TOKEN_BUTTON
+            if stored else strings.SETTINGS_ENTER_TOKEN_BUTTON
         )
 
     def _on_base_url_changed(self) -> None:
@@ -474,10 +537,13 @@ class SettingsDialog(QDialog):
         """
         self._clear_base_url_error()
         candidate = self.base_url_edit.text().strip()
-        if not usable_base_url(candidate):
+        # An unchanged unconfigured endpoint is valid for local work. Clearing
+        # an existing endpoint is not an implicit disconnect operation.
+        unchanged_unconfigured = not candidate and self._config.base_url is None
+        if not unchanged_unconfigured and not usable_base_url(candidate):
             self.show_base_url_error(strings.SETTINGS_INVALID_BASE_URL_MESSAGE)
             return
-        if self._validator is not None:
+        if self._validator is not None and not unchanged_unconfigured:
             message = self._validator(candidate)
             if message:
                 self.show_base_url_error(message)
