@@ -44,6 +44,9 @@ from typing import Deque, Hashable
 from .lookup import TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
+from .protected_text import ProtectedStructure as ProtectedStructure
+from .protected_text import ProtectedText as ProtectedText
+from .protected_text import ProtectedTextIntegrityError as ProtectedTextIntegrityError
 from .review import (
     MAX_SIDE_SCALARS,
     ReviewReport,
@@ -509,7 +512,18 @@ async def translate_request_async(
         )
 
     if request.markup and markup_translator is not None:
-        markup = await markup_translator(request.markup, to_chinese=to_chinese)
+        if before_llm_call is None:
+            # Existing two-argument adapter hooks remain supported for callers
+            # which did not request a pre-call guard.
+            markup = await markup_translator(request.markup, to_chinese=to_chinese)
+        else:
+            # Incompatible hooks fail without a retry; otherwise a guard could
+            # silently disappear before an actual upstream request.
+            markup = await markup_translator(
+                request.markup,
+                to_chinese=to_chinese,
+                before_llm_call=before_llm_call,
+            )
         if markup.text is not None:
             return TranslationOutcome(
                 kind=KIND_LLM,

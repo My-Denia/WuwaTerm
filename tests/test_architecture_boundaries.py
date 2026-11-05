@@ -112,6 +112,50 @@ def test_domain_lookup_has_no_presentation_runtime_imports():
     assert "channel" not in runtime_local
 
 
+def test_sentence_only_allows_the_named_direct_lazy_legacy_imports(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    real_modules, collisions = cab._discover_modules()
+    sample = tmp_path / "sentence.py"
+    sample.write_text(
+        "class SentenceTranslator:\n"
+        "    def translate_html(self):\n"
+        "        from .telegram_html import translate_html\n"
+        "    def translate_protected(self):\n"
+        "        from .telegram_html import translate_html\n",
+        encoding="utf-8",
+    )
+    assert cab._sentence_legacy_bridge_lines(sample) == {3}
+    modules = dict(real_modules)
+    modules["sentence"] = sample
+    monkeypatch.setattr(cab, "_discover_modules", lambda: (modules, collisions))
+    assert any("telegram_html" in failure for failure in cab.check())
+
+    sample.write_text(
+        "from .telegram_html import translate_html\n"
+        "class SentenceTranslator:\n"
+        "    def translate_html(self):\n"
+        "        from .telegram_html import translate_html\n",
+        encoding="utf-8",
+    )
+    assert any("telegram_html" in failure for failure in cab.check())
+
+
+def test_sentence_legacy_bridge_cannot_allow_other_imports(tmp_path: Path):
+    from scripts import check_architecture_boundaries as cab
+
+    sample = tmp_path / "sentence.py"
+    sample.write_text(
+        "class SentenceTranslator:\n"
+        "    def translate_html(self):\n"
+        "        if True:\n"
+        "            from .telegram_html import translate_html\n"
+        "        from .telegram_html import protect_telegram_html\n",
+        encoding="utf-8",
+    )
+    assert cab._sentence_legacy_bridge_lines(sample) == set()
+
+
 def test_check_reports_unclassified_modules(monkeypatch):
     from scripts import check_architecture_boundaries as cab
 

@@ -35,6 +35,7 @@ jobs:
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          "$RUNNER_TEMP/venv-wheel/bin/python" -I scripts/check_package_public_interface.py --mode core
           "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
           "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
       - name: Install API and build extras into clean venvs
@@ -45,6 +46,7 @@ jobs:
             python -m venv "$RUNNER_TEMP/venv-$extra"
             "$RUNNER_TEMP/venv-$extra/bin/pip" install --no-cache-dir "${wheel[0]}[$extra]"
             "$RUNNER_TEMP/venv-$extra/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+            "$RUNNER_TEMP/venv-$extra/bin/python" -I scripts/check_package_public_interface.py --mode "$extra"
             "$RUNNER_TEMP/venv-$extra/bin/wuwaterm" --help
           done
           "$RUNNER_TEMP/venv-api/bin/python" -c "import wuwaterm_api.app"
@@ -56,6 +58,7 @@ jobs:
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          "$RUNNER_TEMP/venv-sdist/bin/python" -I scripts/check_package_public_interface.py --mode core
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
       - uses: actions/upload-artifact@v7

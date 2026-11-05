@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
 import re
-import secrets
+
+from .protected_text import ProtectedStructure, ProtectedText, ProtectedTextIntegrityError
 
 
 # Telegram's HTML subset: https://core.telegram.org/bots/api#html-style
@@ -33,11 +35,6 @@ ALLOWED_TAGS = frozenset(
 _ENTITY_RE = re.compile(
     r"&(?:#[xX][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);"
 )
-_RESERVED_HTML_PLACEHOLDER_RE = re.compile(
-    r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4}__"
-)
-
-
 class TelegramHTMLIntegrityError(ValueError):
     """Translated HTML no longer contains the protected source structure."""
 
@@ -46,74 +43,57 @@ class TelegramHTMLIntegrityError(ValueError):
 class ProtectedTelegramHTML:
     """Telegram HTML with every structural token replaced by an opaque token."""
 
-    protected_text: str
-    structures: tuple[tuple[str, str], ...]
-    placeholder_prefix: str
+    neutral: ProtectedText
+
+    @property
+    def protected_text(self) -> str:
+        return self.neutral.for_model()
+
+    @property
+    def structures(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (token, structure.original)
+            for token, structure in zip(
+                self.neutral._placeholders, self.neutral.structures, strict=True
+            )
+        )
+
+    @property
+    def placeholder_prefix(self) -> str:
+        return self.neutral._prefix
 
     def visible_segments(self) -> tuple[str, ...]:
         """Return text-node segments without exposing structural bytes."""
 
-        segments: list[str] = []
-        cursor = 0
-        for placeholder, _raw in self.structures:
-            position = self.protected_text.find(placeholder, cursor)
-            if position < 0:  # pragma: no cover - constructor invariant
-                raise TelegramHTMLIntegrityError("protected HTML is inconsistent")
-            segments.append(self.protected_text[cursor:position])
-            cursor = position + len(placeholder)
-        segments.append(self.protected_text[cursor:])
-        return tuple(segments)
+        return self.neutral.visible_segments
 
     def interleave_visible_segments(self, segments: tuple[str, ...]) -> str:
-        if len(segments) != len(self.structures) + 1:
-            raise TelegramHTMLIntegrityError("visible segment count changed")
-        parts: list[str] = []
-        for segment, (placeholder, _raw) in zip(
-            segments, self.structures, strict=False
-        ):
-            parts.extend((segment, placeholder))
-        parts.append(segments[-1])
-        return "".join(parts)
+        try:
+            return self.neutral.for_model(segments)
+        except ProtectedTextIntegrityError as exc:
+            raise TelegramHTMLIntegrityError(str(exc)) from exc
 
     def restore(self, translated: str) -> str:
         """Restore exact source bytes after enforcing structural integrity."""
 
-        positions: list[int] = []
-        without_known = translated
-        for placeholder, _raw in self.structures:
-            if translated.count(placeholder) != 1:
-                raise TelegramHTMLIntegrityError(
-                    "structural placeholder is missing or duplicated"
-                )
-            positions.append(translated.index(placeholder))
-            without_known = without_known.replace(placeholder, "")
-        if positions != sorted(positions):
-            raise TelegramHTMLIntegrityError("structural placeholder order changed")
-        if (
-            self.placeholder_prefix in without_known
-            or _RESERVED_HTML_PLACEHOLDER_RE.search(without_known)
-        ):
-            raise TelegramHTMLIntegrityError("unknown structural placeholder")
-        if "<" in without_known:
-            raise TelegramHTMLIntegrityError("translated text added tag-like structure")
-        if _structural_tokens(without_known):
+        try:
+            return _validate_restored_html(self.neutral.restore(translated))
+        except ProtectedTextIntegrityError as exc:
+            raise TelegramHTMLIntegrityError(str(exc)) from exc
+
+
+def _validate_restored_html(translated: ProtectedText) -> str:
+    # Inspect model-produced text separately: valid new tags or entities are
+    # still additions, even when the final string would parse as valid HTML.
+    for segment in translated.visible_segments:
+        if "<" in segment or _structural_tokens(segment):
             raise TelegramHTMLIntegrityError("translated text added HTML structure")
-
-        restored = translated
-        for placeholder, raw in self.structures:
-            restored = restored.replace(placeholder, raw)
-        if _structural_tokens(restored) != tuple(raw for _placeholder, raw in self.structures):
-            raise TelegramHTMLIntegrityError("restored HTML structure changed")
-        if not validate_telegram_html(restored):
-            raise TelegramHTMLIntegrityError("restored HTML is invalid")
-        return restored
-
-
-def _new_html_placeholder_prefix(source_text: str) -> str:
-    while True:
-        prefix = f"__WUWA_HTML_{secrets.token_hex(8)}_"
-        if prefix not in source_text:
-            return prefix
+    restored = translated.render()
+    if _structural_tokens(restored) != tuple(s.original for s in translated.structures):
+        raise TelegramHTMLIntegrityError("restored HTML structure changed")
+    if not validate_telegram_html(restored):
+        raise TelegramHTMLIntegrityError("restored HTML is invalid")
+    return restored
 
 
 def _tag_end(text: str, start: int) -> int | None:
@@ -158,23 +138,74 @@ def _structural_tokens(html_text: str) -> tuple[str, ...]:
 def protect_telegram_html(html_text: str) -> ProtectedTelegramHTML:
     """Replace tags, exact attribute bytes, and entities with opaque tokens."""
 
-    prefix = _new_html_placeholder_prefix(html_text)
-    parts: list[str] = []
-    structures: list[tuple[str, str]] = []
+    segments: list[str] = []
+    structures: list[ProtectedStructure] = []
     cursor = 0
-    for index, (start, end) in enumerate(_structural_spans(html_text)):
-        parts.append(html_text[cursor:start])
-        placeholder = f"{prefix}{index:04d}__"
+    for start, end in _structural_spans(html_text):
+        segments.append(html_text[cursor:start])
         raw = html_text[start:end]
-        parts.append(placeholder)
-        structures.append((placeholder, raw))
+        structures.append(ProtectedStructure(raw, unescape(raw) if raw.startswith("&") else ""))
         cursor = end
-    parts.append(html_text[cursor:])
-    return ProtectedTelegramHTML(
-        protected_text="".join(parts),
-        structures=tuple(structures),
-        placeholder_prefix=prefix,
-    )
+    segments.append(html_text[cursor:])
+    return ProtectedTelegramHTML(ProtectedText(tuple(segments), tuple(structures)))
+
+
+def _legacy_failure(exc: Exception) -> Exception:
+    """Keep the historic HTML failure reason and its safe diagnostic aligned."""
+    from .sentence import LLMTranslationError, TRANSLATION_UNAVAILABLE_NOTICE
+
+    if isinstance(exc, LLMTranslationError) and exc.reason != "protected_text_integrity":
+        return exc
+    return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="html_integrity")
+
+
+def restore_html(protected, locked, translated: str, *, to_en: bool) -> str:
+    """Compatibility bridge for the former private restoration helper."""
+    from .sentence import LLMTranslationError, SentenceTranslator
+
+    try:
+        result = SentenceTranslator._restore_protected(
+            protected.neutral, locked, translated, to_en=to_en
+        )
+        return _validate_restored_html(result)
+    except (LLMTranslationError, TelegramHTMLIntegrityError) as exc:
+        mapped = _legacy_failure(exc)
+        if mapped is exc:
+            raise
+        raise mapped from exc
+
+
+def translate_html(translator, html_text: str, *, to_chinese: bool = False) -> str:
+    """Compatibility adapter over the neutral protected-text pipeline."""
+    from .sentence import LLMTranslationError
+
+    protected = protect_telegram_html(html_text)
+    try:
+        translated = translator.translate_protected(protected.neutral, to_chinese=to_chinese)
+        return _validate_restored_html(translated)
+    except (LLMTranslationError, TelegramHTMLIntegrityError) as exc:
+        mapped = _legacy_failure(exc)
+        if mapped is exc:
+            raise
+        raise mapped from exc
+
+
+async def translate_html_async(
+    translator, html_text: str, *, to_chinese: bool = False, before_llm_call=None
+) -> str:
+    from .sentence import LLMTranslationError
+
+    protected = protect_telegram_html(html_text)
+    try:
+        translated = await translator.translate_protected_async(
+            protected.neutral, to_chinese=to_chinese, before_llm_call=before_llm_call
+        )
+        return _validate_restored_html(translated)
+    except (LLMTranslationError, TelegramHTMLIntegrityError) as exc:
+        mapped = _legacy_failure(exc)
+        if mapped is exc:
+            raise
+        raise mapped from exc
 
 
 class _TelegramHTMLValidator(HTMLParser):

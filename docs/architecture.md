@@ -294,8 +294,8 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `protected_text` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Domain + provider | `sentence` | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
@@ -332,6 +332,17 @@ outcome: `channel.py` owns channel admission, freshness, edits, delivery and
 its exact-first path while sharing protocol-neutral term and sentence
 primitives. This is a contract distinction, not a request to merge the flows.
 
+Adapters can construct `ProtectedText` and `ProtectedStructure` through
+`application` and call the translator's `translate_protected` or
+`translate_protected_async`. Each opaque structure carries its own visible
+context; Core uses that context for term boundaries, locks terms within each
+visible segment, validates placeholders and returns translated segments with
+their original structures. The adapter owns parsing and output validation.
+Telegram decodes entity context itself and rejects newly generated HTML before
+reassembling and validating the original structure. A guarded markup hook must
+forward `before_llm_call` to the translator; the guard runs after acquiring the
+shared model slot. Unguarded legacy hooks remain supported.
+
 Observed edges (static imports among shipped modules):
 
 - `bot` → `channel` (handler registration + flood retry); `channel` → `bot`
@@ -345,7 +356,9 @@ Observed edges (static imports among shipped modules):
   which imports the shared input ceiling rather than restating it. Those three
   modules are the whole of what the package imports from `wuwaterm` today; the
   guard permits one more (`models`) and nothing beyond the four.
-- `sentence` → `lookup`, `normalize`, `telegram_html`, `httpx`.
+- `sentence` → `lookup`, `normalize`, `protected_text`, `httpx`; only its old
+  `translate_html`, `translate_html_async`, and `_restore_html` methods lazily
+  import their matching Telegram compatibility functions.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
 - Runtime image refuses `build-db` and excludes builder tooling, while
@@ -362,7 +375,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 | Large `bot.py` (config, auth, rate limit, translate orchestration, migration, polling) | Accepted concentration | Documented; not mass-split in this formalization |
 | `translate_query*` in `bot.py` are thin wrappers over `application` | Resolved | The pipeline itself lives in `application.py`; `bot.py` only adds Telegram wording, HTML parse mode and the UTF-16 splitter |
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
-| `sentence` → `telegram_html` | Accepted | HTML term-lock is part of Telegram-HTML translation fidelity |
+| `sentence` → `telegram_html` | Transitional | Three lazy legacy forwarding methods remain until the Telegram product cutover; the neutral translation path has no presentation dependency |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
 | Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |
 
