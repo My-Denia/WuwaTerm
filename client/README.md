@@ -343,4 +343,4 @@ client\.venv\Scripts\python.exe -m pytest
 
 ## 独立发布
 
-客户端功能开发仍暂停，源码和 Windows CI 兼容构建继续保留。后端正式发布不再等待客户端新构建。需要发布客户端时，使用 `client-release.yml`，以主干完整 SHA 手动运行；默认仅构建，非 dry-run 创建 `client-vX.Y.Z` 草稿。发布前核对 ZIP、SHA256SUMS 和 client-manifest.json，保持 `--latest=false`，不要覆盖后端最新版本入口。客户端仍未签名，API 兼容范围见 [支持矩阵](../docs/support-matrix.md)。
+源码已实现首版稿件工作台，Windows 端仅完成部分验收，尚未正式发布包含该功能的新客户端版本。Windows CI 兼容构建继续保留。后端正式发布不再等待客户端新构建。需要发布客户端时，使用 `client-release.yml`，以主干完整 SHA 手动运行；默认仅构建，非 dry-run 创建 `client-vX.Y.Z` 草稿。发布前核对 ZIP、SHA256SUMS 和 client-manifest.json，保持 `--latest=false`，不要覆盖后端最新版本入口。客户端仍未签名，API 兼容范围见 [支持矩阵](../docs/support-matrix.md)。
