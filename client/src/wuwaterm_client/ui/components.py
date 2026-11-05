@@ -20,7 +20,7 @@ import math
 
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, QMargins, QObject, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
@@ -724,40 +724,88 @@ def fit_to_workspace(
 ) -> None:
     """Size a top-level widget against the desktop it will actually appear on.
 
-    Sizes here are DEVICE-INDEPENDENT pixels, so a fixed minimum that "fits a
-    1366x768 laptop" is true at 100% scaling and false at every other setting:
-    the same panel offers about 911x512 of them at 150% and about 683x384 at
-    200%. A minimum larger than the workspace cannot be honoured - the widget
-    opens taller than the desktop, and anything along its bottom edge goes
-    off-screen with no way to reach it.
+    Qt reports both the workspace and window geometry in logical pixels. The
+    window's client area must leave room for the visible frame as well as the
+    taskbar, even when that leaves less room than the desired minimum.
 
-    So the preferred minimum is clamped to what the screen reports and the
-    absolute floor is what remains, and the default size is clamped the same
-    way, or the widget would open larger than the desktop and land in the same
-    place by a different route.
-
-    One function rather than one per top-level widget: the main window had
-    this logic and the settings dialog did not, which is exactly how the
-    dialog came to need 584 logical pixels of height on a desktop that offers
-    384. A second copy would have been a second thing to forget.
+    Native frame margins may change on first show. Recheck once after that
+    show, without resetting a size or position that already fits.
     """
-    screen = widget.screen() or QGuiApplication.primaryScreen()
-    if screen is None:
-        # No screen to measure - the offscreen platform used by the test
-        # suite and by --self-check. Take the preference as given.
+    widget.ensurePolished()
+    widget.winId()  # Create the native window before asking for its frame.
+    available = _available_workspace(widget)
+    if available is None:
+        # Without a screen there is no measured limit to apply.
         widget.setMinimumSize(*preferred_minimum)
         widget.resize(*default_size)
-        return
-    # availableGeometry, not geometry: the taskbar is not workspace.
-    available = screen.availableGeometry()
-    minimum, size = clamp_to_workspace(
-        (available.width(), available.height()),
-        preferred_minimum,
-        default_size,
-        absolute_minimum,
-    )
-    widget.setMinimumSize(*minimum)
-    widget.resize(*size)
+    else:
+        minimum, size = clamp_to_workspace(
+            (available.width(), available.height()),
+            preferred_minimum,
+            default_size,
+            absolute_minimum,
+            _frame_margins(widget),
+        )
+        widget.setMinimumSize(*minimum)
+        widget.resize(*size)
+
+    if not hasattr(widget, "_workspace_fit_correction"):
+        widget._workspace_fit_correction = _FirstShowWorkspaceFit(widget)
+
+
+def _available_workspace(widget: QWidget) -> QRect | None:
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+
+
+def _frame_margins(widget: QWidget) -> QMargins:
+    window = widget.windowHandle()
+    return window.frameMargins() if window is not None else QMargins()
+
+
+class _FirstShowWorkspaceFit(QObject):
+    """Correct the frame once native decorations have been established."""
+
+    def __init__(self, widget: QWidget) -> None:
+        super().__init__(widget)
+        self._widget = widget
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._correct)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched is self._widget and event.type() == QEvent.Type.Show:
+            self._widget.removeEventFilter(self)
+            self._timer.start(0)
+        return False
+
+    def _correct(self) -> None:
+        widget = self._widget
+        available = _available_workspace(widget)
+        window = widget.windowHandle()
+        if available is None or window is None:
+            return
+
+        old_minimum = (widget.minimumWidth(), widget.minimumHeight())
+        old_size = (widget.width(), widget.height())
+        minimum, size = clamp_to_workspace(
+            (available.width(), available.height()),
+            old_minimum,
+            old_size,
+            (0, 0),
+            _frame_margins(widget),
+        )
+        if minimum != old_minimum:
+            widget.setMinimumSize(*minimum)
+        if size != old_size:
+            widget.resize(*size)
+
+        frame = window.frameGeometry()
+        x = max(available.left(), min(frame.left(), available.right() - frame.width() + 1))
+        y = max(available.top(), min(frame.top(), available.bottom() - frame.height() + 1))
+        if (x, y) != (frame.left(), frame.top()):
+            window.setFramePosition(QPoint(x, y))
 
 
 def clamp_to_workspace(
@@ -765,25 +813,20 @@ def clamp_to_workspace(
     preferred_minimum: tuple[int, int],
     default_size: tuple[int, int],
     absolute_minimum: tuple[int, int],
+    frame_margins: QMargins | None = None,
 ) -> tuple[tuple[int, int], tuple[int, int]]:
-    """The arithmetic of `fit_to_workspace`, with no Qt and no screen.
-
-    Split out because the test that was supposed to cover this could not
-    actually fail. It measured the REAL screen and asserted the minimum fit
-    inside it - which on any ordinary monitor is true whether or not the
-    clamp exists, since the unclamped minimum is 960x640. The case that
-    matters is a workspace SMALLER than the preference, and that case cannot
-    be reached by asking the machine the suite happens to run on.
-
-    Taking the workspace as an argument makes 683x384 - a 1366x768 panel at
-    200% scaling - an ordinary test input.
-    """
-    minimum = (
-        max(min(preferred_minimum[0], workspace[0]), absolute_minimum[0]),
-        max(min(preferred_minimum[1], workspace[1]), absolute_minimum[1]),
+    """Clamp client dimensions to the space left after window decorations."""
+    if frame_margins is None:
+        frame_margins = QMargins()
+    budget = (
+        max(1, workspace[0] - frame_margins.left() - frame_margins.right()),
+        max(1, workspace[1] - frame_margins.top() - frame_margins.bottom()),
     )
-    size = (
-        max(min(default_size[0], workspace[0]), minimum[0]),
-        max(min(default_size[1], workspace[1]), minimum[1]),
+    minimum = tuple(
+        min(budget[i], max(preferred_minimum[i], absolute_minimum[i]))
+        for i in range(2)
+    )
+    size = tuple(
+        min(budget[i], max(default_size[i], minimum[i])) for i in range(2)
     )
     return minimum, size

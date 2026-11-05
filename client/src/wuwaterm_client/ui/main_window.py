@@ -56,10 +56,8 @@ NAV_BAR_WIDTH = 60
 WINDOW_PREFERRED_MINIMUM = (960, 640)
 WINDOW_DEFAULT_SIZE = (1440, 900)
 
-# Below this the window stops being usable at all, so it is the one hard
-# floor. Small enough to fit the smallest workspace this application can
-# reasonably meet: a 1366x768 panel at 200% scaling reports roughly 683x384
-# logical pixels.
+# The smallest useful client size when the workspace permits it. On smaller
+# workspaces even this preference must give way to the visible window frame.
 WINDOW_ABSOLUTE_MINIMUM = (640, 380)
 
 # The order the owner meets the areas in, and the index each keeps for the
@@ -142,7 +140,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(strings.APP_TITLE)
-        self._fit_to_workspace()
         self.config = config if config is not None else ClientConfig.load()
         self.api_client = ApiClient.from_config(self.config)
 
@@ -231,6 +228,7 @@ class MainWindow(QMainWindow):
 
         self.show_page(PAGE_MANUSCRIPT)
         self._refresh_endpoint_state()
+        self._fit_to_workspace()
 
     # -- construction ------------------------------------------------------
 
