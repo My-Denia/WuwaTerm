@@ -16,7 +16,7 @@ its failure means. The run stops at the first failing step and names it, and
 the exit status is that step's.
 
 This is the entry point the **server test matrix** uses: the `pytest (py3.x)`
-jobs install `.[dev]` and then run `python scripts/validate.py`, so a green run
+jobs install `.[dev,telegram]` and then run `python scripts/validate.py`, so a green run
 here and a green matrix job are the same claim, on the same file. Before it
 existed, CI carried one list, the README a shorter one, and this page a third,
 and a gate added to one of them was invisible in the others.
@@ -198,7 +198,7 @@ Windows commands are still supported when needed:
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -U pip
-.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m pip install -e ".[dev,telegram]"
 $env:TELEGRAM_BOT_TOKEN="..."
 $env:WUWATERM_DB_PATH="data\terms.db"
 ```

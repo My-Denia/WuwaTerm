@@ -55,7 +55,7 @@ body:
       description: For self-hosting, give the operating system, Python version, and installation method. For the public beta Site, give the operating system and browser version.
       placeholder: |
         Public beta: Windows 11, Firefox 142
-        Self-hosted: Ubuntu 24.04, Python 3.12.7, source (uv sync --locked --extra dev)
+        Self-hosted: Ubuntu 24.04, Python 3.12.7, source (uv sync --locked --extra dev --extra telegram)
     validations:
       required: true
 

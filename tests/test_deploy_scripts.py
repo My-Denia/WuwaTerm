@@ -408,16 +408,18 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
 
     assert "FROM python-base AS runtime" in text
     assert "FROM python-base AS builder" in text
-    assert "uv sync --locked --no-dev --no-editable --extra api --no-cache" in text
+    assert "uv sync --locked --no-dev --no-editable --extra telegram --extra api --no-cache" in text
     assert "uv sync --locked --no-dev --no-editable --extra build --no-cache" in text
     runtime_section = text.split("FROM python-base AS runtime", 1)[1].split(
         "FROM python-base AS builder", 1
     )[0]
     builder_section = text.split("FROM python-base AS builder", 1)[1]
     assert "--extra build" not in runtime_section
-    # The serving surface needs its own extra; the builder path must stay out.
+    # The combined serving image needs both extras; the builder needs neither.
     assert "--extra api" in runtime_section
+    assert "--extra telegram" in runtime_section
     assert "--extra api" not in builder_section
+    assert "--extra telegram" not in builder_section
     assert "apt-get install -y --no-install-recommends git ca-certificates" in builder_section
     assert "deploy/entrypoint.sh" in runtime_section
     assert "deploy/builder-entrypoint.sh" in builder_section

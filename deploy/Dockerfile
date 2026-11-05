@@ -21,8 +21,8 @@ ARG SOURCE_COMMIT=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 
 # The runtime image serves both inbound surfaces from one build, so it carries
-# the api extra. The data-build toolchain stays out of it entirely.
-RUN uv sync --locked --no-dev --no-editable --extra api --no-cache \
+# the telegram and api extras. The data-build toolchain stays out of it entirely.
+RUN uv sync --locked --no-dev --no-editable --extra telegram --extra api --no-cache \
     && python -c "from pathlib import Path; import shutil; [shutil.rmtree(p) for p in Path('/app/.venv').rglob('__pycache__') if p.is_dir()]" \
     && rm -f /usr/local/bin/uv /usr/local/bin/uvx
 
