@@ -91,7 +91,19 @@ def test_the_spec_packages_the_translation() -> None:
     # 目标目录是运行时靠 Qt 自己报告的翻译路径找到它的地方;写错了就等于没打。
     assert "PySide6/translations" in spec
     assert "QT_TRANSLATION_DATAS" in spec
-    assert "datas=RESOURCE_DATAS + QT_TRANSLATION_DATAS" in spec
+    import ast
+
+    tree = ast.parse(spec)
+    analysis_calls = [node for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name)
+                      and node.func.id == "Analysis"]
+    assert analysis_calls
+    datas = next(keyword.value for keyword in analysis_calls[0].keywords
+                 if keyword.arg == "datas")
+    assert "QT_TRANSLATION_DATAS" in {
+        node.id for node in ast.walk(datas) if isinstance(node, ast.Name)
+    }
 
 
 def test_the_spec_can_actually_find_the_translation_on_this_install() -> None:

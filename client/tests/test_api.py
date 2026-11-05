@@ -352,34 +352,26 @@ def test_get_meta_keeps_known_fields_when_the_server_adds_fields() -> None:
     assert "source_game_version" not in result.__dataclass_fields__
 
 
-def test_a_request_without_a_stored_credential_sends_no_auth_header() -> None:
-    """No credential must mean no header, not an empty or literal one."""
-    captured: dict[str, str | None] = {}
+def test_a_request_without_a_stored_credential_is_refused_before_transport() -> None:
+    called = False
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        captured["authorization"] = request.headers.get("authorization")
-        return httpx.Response(
-            200,
-            json={
-                "service_version": "0.2.1",
-                "api_version": "v1",
-                "schema_version": "2",
-                "source_profile": "p",
-                "source_commit": "c",
-                "term_count": 1,
-                "llm_configured": False,
-                "request_id": "req-meta",
-            },
-        )
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={})
 
     client = _client(handler, token_provider=lambda: None)
 
     async def scenario() -> None:
-        await client.get_meta()
-        await client.aclose()
+        try:
+            with pytest.raises(ClientError) as raised:
+                await client.get_meta()
+            assert raised.value.code == errors.ERROR_UNAUTHORIZED
+        finally:
+            await client.aclose()
 
     asyncio.run(scenario())
-    assert captured["authorization"] is None
+    assert not called
 
 
 def test_a_server_side_deadline_is_reported_as_a_timeout() -> None:

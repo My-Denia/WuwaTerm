@@ -38,12 +38,13 @@ STYLESHEET_FILE_NAMES = {
 # "亮暗两份占位符集合必须完全一致"这条测试能成立的前提。
 _TYPOGRAPHY_TOKENS = {
     "font-family": (
-        '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "SimSun", sans-serif'
+        '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
     ),
     "font-family-mono": '"Cascadia Mono", "Consolas", "Courier New", monospace',
     "font-size-display": "18pt",
     "font-size-title": "14pt",
     "font-size-section": "12pt",
+    "font-size-context": "13.5pt",
     "font-size-body": "10.5pt",
     "font-size-secondary": "9.5pt",
     "font-size-caption": "9pt",
@@ -51,45 +52,45 @@ _TYPOGRAPHY_TOKENS = {
 
 LIGHT_TOKENS = {
     **_TYPOGRAPHY_TOKENS,
-    "bg-canvas": "#F5F6F8",
+    "bg-canvas": "#F0F5F4",
     "bg-surface": "#FFFFFF",
-    "bg-sunken": "#EDEFF3",
-    "border-subtle": "#E2E5EB",
-    "border-strong": "#C9CED8",
-    "text-primary": "#1B1F26",
-    "text-secondary": "#5A6270",
-    "text-muted": "#8A929F",
-    "accent": "#0F7A6C",
-    "accent-hover": "#0C6357",
+    "bg-sunken": "#E8F0EF",
+    "border-subtle": "#D2DEDD",
+    "border-strong": "#A8BEBC",
+    "text-primary": "#192C30",
+    "text-secondary": "#4E6569",
+    "text-muted": "#657B7E",
+    "accent": "#087E75",
+    "accent-hover": "#096B64",
     "accent-fg": "#FFFFFF",
-    "accent-soft-bg": "#E4F2EF",
-    "accent-soft-fg": "#0B5A50",
+    "accent-soft-bg": "#DAEFEB",
+    "accent-soft-fg": "#08675F",
     "success": "#17794F",
     "success-soft": "#E6F4EC",
-    "warn": "#9A6400",
+    "warn": "#925C00",
     "warn-soft": "#FDF1DC",
     "danger": "#B4232B",
     "danger-soft": "#FCE9E9",
     "info": "#1F5FA8",
     "info-soft": "#E7F0FB",
-    "focus-ring": "#0F7A6C",
+    "focus-ring": "#087E75",
 }
 
 DARK_TOKENS = {
     **_TYPOGRAPHY_TOKENS,
-    "bg-canvas": "#14171C",
-    "bg-surface": "#1B1F26",
-    "bg-sunken": "#101318",
-    "border-subtle": "#2A303A",
-    "border-strong": "#3A424F",
-    "text-primary": "#E8EBF0",
-    "text-secondary": "#A6AEBC",
-    "text-muted": "#767E8C",
-    "accent": "#3FBFAA",
-    "accent-hover": "#55D0BB",
-    "accent-fg": "#0B1F1C",
-    "accent-soft-bg": "#14312C",
-    "accent-soft-fg": "#6FDCC7",
+    "bg-canvas": "#10191D",
+    "bg-surface": "#182328",
+    "bg-sunken": "#111C21",
+    "border-subtle": "#304047",
+    "border-strong": "#485B60",
+    "text-primary": "#E7EFF0",
+    "text-secondary": "#B2C0C2",
+    "text-muted": "#91A3A5",
+    "accent": "#34C4B6",
+    "accent-hover": "#58D5C8",
+    "accent-fg": "#0B2523",
+    "accent-soft-bg": "#183B3A",
+    "accent-soft-fg": "#79DED2",
     "success": "#4ECB8C",
     "success-soft": "#142A20",
     "warn": "#E0A64A",
@@ -98,7 +99,7 @@ DARK_TOKENS = {
     "danger-soft": "#3A1B1E",
     "info": "#6FA8E8",
     "info-soft": "#14243A",
-    "focus-ring": "#3FBFAA",
+    "focus-ring": "#34C4B6",
 }
 
 TOKENS_BY_SCHEME = {
@@ -211,6 +212,11 @@ def resolve_scheme(config_value: object) -> str:
     if config_value == SCHEME_LIGHT:
         return SCHEME_LIGHT
     return _system_scheme()
+
+
+def current_scheme() -> str:
+    """Return the rendered scheme without changing the saved preference."""
+    return resolve_scheme(_preference)
 
 
 def _normalized_preference(config_value: object) -> str:

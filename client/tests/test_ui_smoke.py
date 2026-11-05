@@ -35,35 +35,25 @@ def _dummy_client() -> ApiClient:
 
 
 def _assert_the_three_areas_are_reachable(window: MainWindow) -> None:
-    """The areas survived the move off tabs, in order, and still switch.
-
-    The window used to hold a `QTabWidget` and `tabs.count() == 3` stood for
-    "all three areas are here". A navigation column plus a stack can satisfy a
-    count while pointing at nothing, so the same claim now has to be made in
-    three parts: the pages exist, they are in the order the owner decided, and
-    activating a navigation item really brings its page to the front.
-    """
     from wuwaterm_client.ui import main_window as main_window_module
 
     assert window.stack.count() == 4
-    assert len(window.nav_buttons) == 4
     assert [window.stack.widget(index) for index in range(4)] == [
-        window.terms_view,
-        window.translate_view,
-        window.status_view,
+        window.terms_view, window.translate_view, window.status_view,
         window.manuscript_view,
     ]
-
     for page, view in (
         (main_window_module.PAGE_MANUSCRIPT, window.manuscript_view),
-        (main_window_module.PAGE_STATUS, window.status_view),
         (main_window_module.PAGE_TRANSLATE, window.translate_view),
         (main_window_module.PAGE_TERMS, window.terms_view),
     ):
-        window.nav_buttons[page].click()
+        window._nav_by_page[page].click()
         assert window.stack.currentWidget() is view
-        assert window.nav_buttons[page].isChecked()
-        assert [button.isChecked() for button in window.nav_buttons].count(True) == 1
+        assert window._nav_by_page[page].isChecked()
+        assert sum(button.isChecked() for button in window.nav_buttons) == 1
+    window.status_action.trigger()
+    assert window.stack.currentWidget() is window.status_view
+    assert not any(button.isChecked() for button in window.nav_buttons)
 
 
 def test_translate_view_constructs(qapp) -> None:
@@ -101,15 +91,13 @@ def test_main_window_constructs(qapp, tmp_path, monkeypatch) -> None:
     window = MainWindow(config=ClientConfig())
 
     assert window.windowTitle()
+    assert window.stack.currentWidget() is window.manuscript_view
+    assert window._nav_by_page[main_window_module.PAGE_MANUSCRIPT].isChecked()
     _assert_the_three_areas_are_reachable(window)
-    # Term lookup is where the window lands: it is the reflex action, and the
-    # one area that costs nothing to use.
-    assert window.stack.currentWidget() is window.terms_view
-    assert window.nav_buttons[main_window_module.PAGE_TERMS].isChecked()
-    # An index nobody has is not a page change; the column must not end up
-    # naming an area that is not on screen.
+    # An invalid page must leave the current page unchanged.
+    current = window.stack.currentWidget()
     window.show_page(99)
-    assert window.stack.currentWidget() is window.terms_view
+    assert window.stack.currentWidget() is current
 
 
 def test_settings_push_the_new_timeouts_into_the_live_client(qapp, tmp_path, monkeypatch) -> None:

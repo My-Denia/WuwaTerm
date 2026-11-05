@@ -375,7 +375,7 @@ class ApiClient:
             # status line saying the work is still in progress.
             raise ClientError(ERROR_UNAUTHORIZED) from None
         if not token:
-            return {}
+            raise ClientError(ERROR_UNAUTHORIZED)
         try:
             token.encode("ascii")
         except UnicodeEncodeError:

@@ -66,8 +66,8 @@ SRC_ROOT = CLIENT_ROOT / "src"
 # known parent package". See client/main.py.
 ENTRY_POINT = CLIENT_ROOT / "main.py"
 
-# The stylesheets are the only non-code files the application reads at run
-# time, and a build that ships without them starts perfectly well and looks
+# The stylesheets are non-code files the application reads at run time,
+# and a build that ships without them starts perfectly well and looks
 # like an unstyled prototype - which the artifact's own --self-check cannot
 # see, because it constructs the window and never looks at it.
 #
@@ -85,6 +85,49 @@ RESOURCE_FILES = (
 )
 RESOURCE_DATAS = [
     (str(RESOURCES_DIR / name), RESOURCES_TARGET) for name in RESOURCE_FILES
+]
+
+# Preserve the icon resource path used by theme.resource_path in frozen builds.
+# The list includes the upstream license and provenance beside the SVGs.
+ICON_FILES = (
+    "LICENSE",
+    "README.md",
+    "SHA256SUMS",
+    "arrow-right.svg",
+    "book-open.svg",
+    "check.svg",
+    "chevron-down.svg",
+    "chevron-left.svg",
+    "chevron-right.svg",
+    "circle-check.svg",
+    "clipboard.svg",
+    "copy.svg",
+    "external-link.svg",
+    "file-plus.svg",
+    "file-text.svg",
+    "folder-open.svg",
+    "languages.svg",
+    "link-2.svg",
+    "menu.svg",
+    "panel-right-close.svg",
+    "panel-right-open.svg",
+    "panel-right.svg",
+    "panels-top-left.svg",
+    "plus.svg",
+    "redo-2.svg",
+    "refresh-cw.svg",
+    "rotate-ccw-clock.svg",
+    "save-all.svg",
+    "save.svg",
+    "search.svg",
+    "settings.svg",
+    "undo-2.svg",
+    "waves-horizontal.svg",
+    "x.svg",
+)
+ICON_DATAS = [
+    (str(RESOURCES_DIR / "icons" / name), str(Path(RESOURCES_TARGET) / "icons"))
+    for name in ICON_FILES
 ]
 
 # Qt 自带部件的中文:输入框右键菜单(撤销/剪切/复制/粘贴/全选)和标准按钮的
@@ -126,7 +169,7 @@ a = Analysis(
     [str(ENTRY_POINT)],
     pathex=[str(SRC_ROOT)],
     binaries=OPENSSL_BINARIES,
-    datas=RESOURCE_DATAS + QT_TRANSLATION_DATAS,
+    datas=RESOURCE_DATAS + ICON_DATAS + QT_TRANSLATION_DATAS,
     hiddenimports=[
         "keyring.backends.Windows",
     ],

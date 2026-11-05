@@ -14,19 +14,21 @@ from __future__ import annotations
 
 import asyncio
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import strings
 from ..api import SUPPORTED_API_VERSIONS, ApiClient, MetaResult
-from ..credentials import active_backend_name, has_token
+from ..credentials import CredentialStoreUnavailable, active_backend_name, read_token
 from ..errors import ClientError
 from . import error_presentation
 from .components import (
@@ -155,17 +157,27 @@ class StatusView(QWidget):
         action_row.addStretch(1)
         action_row.addWidget(self.refresh_button)
 
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 12, 12, 12)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(self._progress)
+        body_layout.addWidget(self._banner)
+        body_layout.addLayout(action_row)
+        body_layout.addWidget(self._empty_card)
+        body_layout.addWidget(self._service_card)
+        body_layout.addWidget(self._credential_card)
+        body_layout.addStretch(1)
+        scroll = QScrollArea(self)
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        layout.addWidget(self._progress)
-        layout.addWidget(self._banner)
-        layout.addLayout(action_row)
-        layout.addWidget(self._empty_card)
-        layout.addWidget(self._service_card)
-        layout.addWidget(self._credential_card)
-        layout.addStretch(1)
+        layout.addWidget(scroll, 1)
         layout.addWidget(self.status_label)
+        self.scroll_area = scroll
 
         self._refresh_credential_labels()
         self._apply_empty_state()
@@ -231,13 +243,24 @@ class StatusView(QWidget):
     # -- internals ---------------------------------------------------------
 
     def _refresh_credential_labels(self) -> None:
-        apply_credential_backend(self.keyring_backend_value, active_backend_name())
-        stored = has_token()
-        credential_status = (
-            strings.SETTINGS_TOKEN_STATUS_STORED
-            if stored
-            else strings.SETTINGS_TOKEN_STATUS_MISSING
-        )
+        try:
+            backend = active_backend_name()
+        except Exception:
+            # Keyring backend discovery itself can fail before a read is
+            # attempted; it must not prevent the local editor from opening.
+            self.keyring_backend_value.setText(strings.STATUS_UNKNOWN_VALUE)
+            self.keyring_backend_value.setToolTip("")
+        else:
+            apply_credential_backend(self.keyring_backend_value, backend)
+        try:
+            stored = read_token() is not None
+        except CredentialStoreUnavailable:
+            credential_status = strings.SETTINGS_TOKEN_STATUS_UNKNOWN
+        else:
+            credential_status = (
+                strings.SETTINGS_TOKEN_STATUS_STORED
+                if stored else strings.SETTINGS_TOKEN_STATUS_MISSING
+            )
         self.credential_status_value.setText(credential_status)
 
     def _apply_endpoint_state(self) -> None:
@@ -263,13 +286,7 @@ class StatusView(QWidget):
             self._service_card.setVisible(True)
             return
         if not self._api_client.is_configured:
-            # Read from configuration and the credential store only. Drawing
-            # this costs no request, which matters: it is precisely the state
-            # in which no request may be sent.
-            # The window draws the checklist itself, directly above this
-            # card. Drawing a second copy here put the same three steps on
-            # screen twice, which reads as two different lists that happen to
-            # agree. This one describes the area instead.
+            # This state is local and must not trigger a service request.
             self._empty_card.set_content(
                 strings.EMPTY_STATUS_UNCONFIGURED_TITLE,
                 strings.EMPTY_UNCONFIGURED_SUBTITLE,

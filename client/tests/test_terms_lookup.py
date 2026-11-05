@@ -208,6 +208,8 @@ def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:
     view._render_result(result)
 
     assert view._request_id == "req-empty"
+    assert view.diagnostics_button.isVisibleTo(view)
+    view.diagnostics_button.click()
     assert view._request_id_row.isVisibleTo(view) is True, "空结果把请求 ID 行一起藏了"
     assert "req-empty" in view._request_id_label.text()
 
@@ -227,6 +229,8 @@ def test_no_request_id_row_before_any_lookup(qapp) -> None:
 
     # 有请求、但没拿到 ID:该行出现,带占位符。
     view._apply_request_id(None)
+    assert view.diagnostics_button.isVisibleTo(view)
+    view.diagnostics_button.click()
     assert view._request_id_row.isVisibleTo(view) is True
     assert strings.REQUEST_ID_PLACEHOLDER in view._request_id_label.text()
 

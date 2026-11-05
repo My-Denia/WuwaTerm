@@ -1,31 +1,8 @@
-"""The window the four areas live in, and the two flows that decide what the
-client is allowed to do at all.
+"""Local-first workbench shell and online configuration flows.
 
-Four things here are structural rather than cosmetic.
-
-The areas are switched by a navigation column, not by tabs. Tabs put the three
-areas on one line and gave nothing a permanent home; the column has a foot,
-and the foot is where the address this client talks to is stated - once, in
-one widget, visible from every area.
-
-That statement is the reason this file exists in the shape it does. The client
-used to substitute a machine-local development address whenever its settings
-file could not be read, and nothing on screen said which address was in use,
-so a missing ``config.json`` looked exactly like an unreachable service. The
-chip, the global banner and the setup checklist are three non-overlapping
-sentences about that one state: what it is, what it costs, and where to fix
-it. None of the three asks the network anything.
-
-Ordinary failures are inline. Modal decisions are reserved for credential
-removal, unsaved manuscript changes, and About. A
-refusal that steals focus and then disappears leaves no trace of what was
-refused; a refusal on a banner or against the field that caused it stays
-readable while the owner fixes it.
-
-And a refusal must not half-apply. The address goes to the live transport
-first because it is the only part that can be refused, and every line that
-follows - timeouts, the discard of the previous endpoint's state, the chip,
-the file on disk - is downstream of that one check.
+The manuscript owns its file state and canonical actions. Navigation keeps the
+existing page indices and keyboard shortcuts; endpoint metadata is local state,
+not a claim that a service connection has been tested.
 """
 
 from __future__ import annotations
@@ -33,15 +10,16 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -60,6 +38,7 @@ from ..errors import (
 from . import error_presentation
 from .components import Banner, EmptyStateCard, EndpointChip, fit_to_workspace
 from .first_run_dialog import FirstRunDialog
+from .icons import icon
 from .manuscript_view import ManuscriptView
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
@@ -69,13 +48,13 @@ from .translate_view import TranslateView
 
 # The navigation column is fixed: it is a landmark, and a landmark that
 # resizes with the window stops being one. The content area takes the rest.
-NAV_BAR_WIDTH = 168
+NAV_BAR_WIDTH = 60
 
 # What the widest area (the term table's five columns) wants before a
 # horizontal scrollbar appears. A PREFERENCE, not a floor: see
 # `_fit_to_workspace`.
 WINDOW_PREFERRED_MINIMUM = (960, 640)
-WINDOW_DEFAULT_SIZE = (1100, 720)
+WINDOW_DEFAULT_SIZE = (1440, 900)
 
 # Below this the window stops being usable at all, so it is the one hard
 # floor. Small enough to fit the smallest workspace this application can
@@ -186,6 +165,9 @@ class MainWindow(QMainWindow):
         self.manuscript_view = ManuscriptView(self.api_client, self)
 
         self.stack = QStackedWidget(self)
+        # The pages adapt or scroll internally on a small workspace. Do not
+        # let an inactive page impose its full size hint on the whole window.
+        self.stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         # Index order is the contract PAGE_* above states; the views are
         # inserted in that order and never reordered afterwards.
         self.stack.addWidget(self.terms_view)
@@ -194,6 +176,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.manuscript_view)
 
         self.nav_buttons: list[QPushButton] = []
+        self._nav_by_page: dict[int, QPushButton] = {}
         nav_bar = self._build_navigation()
 
         # Above every area rather than inside one: what it says - no address,
@@ -208,11 +191,26 @@ class MainWindow(QMainWindow):
 
         content = QWidget(self)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(16, 16, 16, 16)
-        content_layout.setSpacing(12)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
         content_layout.addWidget(self.global_banner)
         content_layout.addWidget(self.setup_card)
         content_layout.addWidget(self.stack, 1)
+
+        footer = QFrame(content)
+        footer.setObjectName("workbenchToolbar")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(12, 2, 12, 2)
+        self.endpoint_button = QPushButton(footer)
+        self.endpoint_button.setObjectName("commandButton")
+        self.endpoint_button.clicked.connect(self._on_settings_clicked)
+        self.diagnostics_button = QPushButton(strings.WORKBENCH_DIAGNOSTICS, footer)
+        self.diagnostics_button.setObjectName("commandButton")
+        self.diagnostics_button.clicked.connect(lambda: self.show_page(PAGE_STATUS))
+        footer_layout.addWidget(self.endpoint_button)
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(self.diagnostics_button)
+        content_layout.addWidget(footer)
 
         central = QWidget(self)
         central_layout = QHBoxLayout(central)
@@ -225,60 +223,81 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_shortcuts()
         self._connect_translate_bridge()
+        lookup_signal = getattr(self.manuscript_view, "lookup_requested", None)
+        if lookup_signal is not None:
+            lookup_signal.connect(self._on_lookup_requested)
+        self.manuscript_view.documentChanged.connect(self._update_window_title)
+        self._update_window_title()
 
-        self.show_page(PAGE_TERMS)
+        self.show_page(PAGE_MANUSCRIPT)
         self._refresh_endpoint_state()
 
     # -- construction ------------------------------------------------------
 
     def _build_navigation(self) -> QFrame:
-        """The column: product name, the four areas, then the address chip.
-
-        A QFrame rather than a bare QWidget because it carries a background
-        and a border, and a bare QWidget draws neither from a stylesheet.
-        """
+        """A narrow activity rail; service status stays in diagnostics."""
         nav_bar = QFrame(self)
         nav_bar.setObjectName("navBar")
         nav_bar.setFixedWidth(NAV_BAR_WIDTH)
-
-        brand = QLabel(strings.APP_TITLE, nav_bar)
-        brand.setObjectName("sectionTitle")
-
         layout = QVBoxLayout(nav_bar)
-        layout.setContentsMargins(12, 16, 12, 16)
+        layout.setContentsMargins(5, 12, 5, 8)
         layout.setSpacing(4)
-        layout.addWidget(brand)
-        layout.addSpacing(16)
-
-        for index, label in (
-            (PAGE_TERMS, strings.NAV_ITEM_TERMS),
-            (PAGE_TRANSLATE, strings.NAV_ITEM_TRANSLATE),
-            (PAGE_STATUS, strings.NAV_ITEM_STATUS),
-            (PAGE_MANUSCRIPT, strings.NAV_ITEM_MANUSCRIPT),
+        for page, label, name in (
+            (PAGE_MANUSCRIPT, strings.NAV_ITEM_MANUSCRIPT, "file-text"),
+            (PAGE_TERMS, strings.NAV_ITEM_TERMS, "book-open"),
+            (PAGE_TRANSLATE, strings.NAV_ITEM_TRANSLATE, "languages"),
         ):
-            button = QPushButton(label, nav_bar)
-            button.setObjectName("navItem")
+            button = QPushButton(nav_bar)
+            button.setObjectName("activityItem")
             button.setCheckable(True)
-            # Siblings under one parent, so Qt keeps exactly one checked and
-            # the current area cannot be un-selected into nothing.
-            button.setAutoExclusive(True)
-            button.clicked.connect(
-                lambda _checked=False, page=index: self.show_page(page)
-            )
+            button.setIcon(icon(name))
+            button.setIconSize(QSize(22, 22))
+            button.setFixedSize(50, 46)
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+            button.clicked.connect(lambda _checked=False, target=page: self.show_page(target))
             layout.addWidget(button)
+            self._nav_by_page[page] = button
             self.nav_buttons.append(button)
-
         layout.addStretch(1)
-
+        settings = QPushButton(nav_bar)
+        settings.setObjectName("activityItem")
+        settings.setIcon(icon("settings"))
+        settings.setIconSize(QSize(22, 22))
+        settings.setFixedSize(50, 46)
+        settings.setToolTip(strings.SETTINGS_TITLE)
+        settings.setAccessibleName(strings.SETTINGS_TITLE)
+        settings.clicked.connect(self._on_settings_clicked)
+        layout.addWidget(settings)
+        self.settings_button = settings
+        # Keep the full, accessible endpoint state in one existing component.
+        # Its compact visual representation lives in the footer instead.
         self.endpoint_chip = EndpointChip(nav_bar)
-        layout.addWidget(self.endpoint_chip)
+        self.endpoint_chip.hide()
         return nav_bar
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(strings.MENU_FILE)
+        for text, shortcut, handler in (
+            (strings.MANUSCRIPT_NEW, "Ctrl+N", self.manuscript_view.new_document),
+            (strings.MANUSCRIPT_OPEN, "Ctrl+O", self.manuscript_view.open_document),
+            (strings.MANUSCRIPT_SAVE, "Ctrl+S", self.manuscript_view.save_document),
+            (strings.MANUSCRIPT_SAVE_AS, "Ctrl+Shift+S", lambda: self.manuscript_view.save_document(save_as=True)),
+        ):
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(
+                lambda _checked=False, callback=handler: self._run_manuscript_action(callback)
+            )
+            file_menu.addAction(action)
+        file_menu.addSeparator()
         settings_action = QAction(strings.SETTINGS_MENU_LABEL, self)
         settings_action.triggered.connect(self._on_settings_clicked)
         file_menu.addAction(settings_action)
+        status_action = QAction(strings.WORKBENCH_DIAGNOSTICS, self)
+        status_action.triggered.connect(lambda: self.show_page(PAGE_STATUS))
+        file_menu.addAction(status_action)
+        self.status_action = status_action
         quit_action = QAction(strings.MENU_QUIT, self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
@@ -287,6 +306,19 @@ class MainWindow(QMainWindow):
         about_action = QAction(strings.MENU_ABOUT, self)
         about_action.triggered.connect(self._on_about_clicked)
         help_menu.addAction(about_action)
+
+    def _run_manuscript_action(self, handler: Callable[[], object]) -> None:
+        # Do not change focus while an IME composition is pending. The
+        # canonical handlers repeat the same guard before touching the file.
+        if not self.manuscript_view._input_ready():
+            if self.stack.currentIndex() != PAGE_MANUSCRIPT:
+                self._show_global_banner(
+                    strings.MANUSCRIPT_FINISH_INPUT,
+                    error_presentation.SEVERITY_WARN,
+                )
+            return
+        self.show_page(PAGE_MANUSCRIPT)
+        handler()
 
     def _build_shortcuts(self) -> None:
         """Reaching an area, and its input, without the mouse.
@@ -336,8 +368,12 @@ class MainWindow(QMainWindow):
         if not 0 <= index < self.stack.count():
             return
         self.stack.setCurrentIndex(index)
-        for position, button in enumerate(self.nav_buttons):
-            button.setChecked(position == index)
+        for page, button in self._nav_by_page.items():
+            button.setChecked(page == index)
+        # The footer and each online page already state an unconfigured
+        # service; preserve the banner space for actual refusals or errors.
+        standing_notice = self.global_banner.message_text == strings.GLOBAL_BANNER_NOT_CONFIGURED
+        self.global_banner.setVisible(self.global_banner.is_showing() and not standing_notice)
 
     def _fit_to_workspace(self) -> None:
         """Size the window against the desktop it will actually appear on.
@@ -371,6 +407,16 @@ class MainWindow(QMainWindow):
             focuser()
             return
         page.setFocus()
+
+    def _update_window_title(self) -> None:
+        title = self.manuscript_view.document_title
+        dirty = " *" if self.manuscript_view.document_dirty else ""
+        self.setWindowTitle(f"{title}{dirty} — {strings.APP_TITLE}")
+
+    def _on_lookup_requested(self, query: str) -> None:
+        self.show_page(PAGE_TERMS)
+        self.terms_view.query_edit.setText(query)
+        self.terms_view.query_edit.setFocus()
 
     def _on_translate_requested(self, query: str) -> None:
         self.show_page(PAGE_TRANSLATE)
@@ -415,6 +461,12 @@ class MainWindow(QMainWindow):
         # reader gets, so the state is not only available to someone who can
         # read an elided address.
         self.endpoint_chip.setAccessibleName(endpoint_status_text(base_url))
+        self.endpoint_button.setText(
+            strings.WORKBENCH_ENDPOINT_CONFIGURED if configured
+            else strings.WORKBENCH_ENDPOINT_UNCONFIGURED
+        )
+        self.endpoint_button.setToolTip(endpoint_status_text(base_url))
+        self.endpoint_button.setAccessibleName(endpoint_status_text(base_url))
 
     def _refresh_global_banner(self) -> None:
         """Show the standing "nothing will be sent" notice, or take it down.
@@ -430,33 +482,14 @@ class MainWindow(QMainWindow):
                 action=error_presentation.ACTION_OPEN_SETTINGS,
                 closable=False,
             )
+            self.global_banner.hide()
             return
         self.global_banner.clear()
 
     def _refresh_setup_card(self) -> None:
-        """The checklist for a client that cannot send anything yet.
-
-        Read from `config.base_url` and the credential store, and from
-        nothing else: the state this describes is precisely the one in which
-        no request may be made, so asking the service would be both
-        impossible and beside the point.
-        """
-        if self.config.base_url is not None:
-            self.setup_card.setVisible(False)
-            return
-        credential_stored = has_token()
-        # set_content first, because only it sets the card's heading; the
-        # checklist call that follows replaces the body.
-        self.setup_card.set_content(strings.SETUP_STEPS_TITLE)
-        self.setup_card.set_steps(
-            (
-                (strings.SETUP_STEP_BASE_URL, False),
-                (strings.SETUP_STEP_TOKEN, credential_stored),
-                (strings.SETUP_STEP_QUERY, False),
-            ),
-            (strings.ACTION_OPEN_SETTINGS, self._on_settings_clicked),
-        )
-        self.setup_card.setVisible(True)
+        # Online pages expose configuration in their own empty states; local
+        # work must never be displaced by a setup checklist.
+        self.setup_card.setVisible(False)
 
     def _show_global_banner(
         self,
@@ -583,8 +616,13 @@ class MainWindow(QMainWindow):
         already gone.
         """
         if _accepts_validator(SettingsDialog):
-            return SettingsDialog(self.config, self, validator=base_url_refusal)
-        return SettingsDialog(self.config, self)
+            dialog = SettingsDialog(self.config, self, validator=base_url_refusal)
+        else:
+            dialog = SettingsDialog(self.config, self)
+        signal = getattr(dialog, "diagnosticsRequested", None)
+        if signal is not None:
+            signal.connect(lambda: self.show_page(PAGE_STATUS))
+        return dialog
 
     def _apply_settings(self, new_config: ClientConfig) -> None:
         """Adopt an accepted settings change, or refuse it whole.
@@ -602,11 +640,12 @@ class MainWindow(QMainWindow):
         because every one of them is written after the raising call.
         """
         previous_base_url = self.config.base_url
-        try:
-            self.api_client.update_base_url(new_config.base_url)
-        except ClientError as exc:
-            self._show_refusal(exc)
-            return
+        if new_config.base_url != previous_base_url:
+            try:
+                self.api_client.update_base_url(new_config.base_url)
+            except ClientError as exc:
+                self._show_refusal(exc)
+                return
         self.config = new_config
         # Timeouts too, or the saved settings and the running client
         # disagree until the next launch.

@@ -10,12 +10,12 @@ import asyncio
 import copy
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QPalette, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTextEdit,
-    QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .. import strings
@@ -24,6 +24,7 @@ from ..manuscript import (
     WorkfileError, choice_conflict_groups, empty_workfile, load_workfile,
     save_workfile, serialize_workfile,
 )
+from .icons import icon
 
 
 def _display_map(raw: str) -> tuple[str, list[int]]:
@@ -283,7 +284,38 @@ class LosslessEditor(QPlainTextEdit):
         return True
 
 
+class _ElidedDocumentLabel(QLabel):
+    """Keep long filenames inside the command bar and available to readers."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text)
+        self.setAccessibleName(text)
+        self._update_elision()
+
+    def _update_elision(self) -> None:
+        self.setText(self.fontMetrics().elidedText(
+            self._full_text, Qt.TextElideMode.ElideMiddle, max(0, self.contentsRect().width())
+        ))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._update_elision()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "_full_text"):
+            self._update_elision()
+
+
 class ManuscriptView(QWidget):
+    documentChanged = Signal()
+    lookup_requested = Signal(str)
+
     def __init__(self, api_client, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._api_client = api_client
@@ -303,12 +335,18 @@ class ManuscriptView(QWidget):
         self._request_id: str | None = None
         self._conflict_mode = False
         self._conflict_indexes: list[int] = []
+        self._document_state: tuple[Path | None, bool, int] | None = None
+        self._document_revision = 0
+        self._compact = False
+        self._inspector_requested = True
 
         self.source_edit = LosslessEditor(self)
         self.target_edit = LosslessEditor(self)
+        self.source_edit.setPlaceholderText(strings.MANUSCRIPT_SOURCE_PLACEHOLDER)
+        self.target_edit.setPlaceholderText(strings.MANUSCRIPT_TARGET_PLACEHOLDER)
         for editor in (self.source_edit, self.target_edit):
-            editor.setMinimumHeight(90)
-            editor.setMaximumHeight(160)
+            editor.setMinimumHeight(36)
+            editor.setMinimumWidth(80)
             editor.rawChanged.connect(self._on_edit)
             editor.undoRequested.connect(self._undo_replace)
             editor.redoRequested.connect(self._redo_edit)
@@ -326,8 +364,11 @@ class ManuscriptView(QWidget):
         self.auto_align_button = QPushButton(strings.MANUSCRIPT_AUTO_ALIGN, self)
         self.auto_align_button.clicked.connect(self._use_auto_alignment)
         self.findings = QListWidget(self)
-        self.findings.setMinimumHeight(85)
-        self.findings.setMaximumHeight(110)
+        self.findings.setMinimumHeight(76)
+        self.findings.setMaximumHeight(150)
+        self.findings.setWordWrap(True)
+        self.findings.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.findings.setAccessibleName(strings.MANUSCRIPT_INSPECTOR_TITLE)
         self.findings.currentRowChanged.connect(self._select_finding)
         self.replacement_edit = QLineEdit(self)
         self.replacement_edit.setPlaceholderText(strings.MANUSCRIPT_REPLACEMENT_HINT)
@@ -351,6 +392,7 @@ class ManuscriptView(QWidget):
         self.save_as_button.clicked.connect(lambda: self.save_document(save_as=True))
         self.status_label = QLabel(self)
         self.status_label.setWordWrap(True)
+        self.status_label.setText(strings.MANUSCRIPT_REPORT_NOTE)
         self.save_label = QLabel(self)
         self.report_label = QLabel(self)
         self.report_label.setWordWrap(True)
@@ -368,83 +410,375 @@ class ManuscriptView(QWidget):
         for widget in (self.conflict_label, self.conflict_list, self.remove_choice_button):
             widget.setVisible(False)
 
-        body = QWidget(self)
-        layout = QVBoxLayout(body)
-        title = QLabel(strings.MANUSCRIPT_TITLE, body)
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-        layout.addWidget(self.save_label)
-        direction_row = QHBoxLayout()
-        direction_label = QLabel(strings.DIRECTION_LABEL, body)
-        direction_label.setBuddy(self.direction_combo)
-        direction_row.addWidget(direction_label)
-        direction_row.addWidget(self.direction_combo)
-        direction_row.addStretch(1)
-        layout.addLayout(direction_row)
-        editors = QHBoxLayout()
-        for text, editor in ((strings.INPUT_LABEL, self.source_edit), (strings.RESULT_LABEL, self.target_edit)):
-            column = QVBoxLayout()
-            label = QLabel(text, body)
-            label.setBuddy(editor)
-            column.addWidget(label)
-            column.addWidget(editor)
-            editors.addLayout(column, 1)
-        layout.addLayout(editors)
-        for buttons in ((self.review_button, self.cancel_button, self.auto_align_button),
-                        (self.new_button, self.open_button, self.save_button, self.save_as_button)):
-            actions = QHBoxLayout()
-            for button in buttons:
-                actions.addWidget(button)
-            actions.addStretch(1)
-            layout.addLayout(actions)
-        layout.addWidget(self.report_label)
-        note = QLabel(strings.MANUSCRIPT_REPORT_NOTE, body)
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addWidget(self.request_id_label)
-        layout.addWidget(self.history_label)
-        layout.addWidget(self.conflict_label)
-        layout.addWidget(self.conflict_list)
-        layout.addWidget(self.remove_choice_button)
-        layout.addWidget(self.findings)
-        replace_row = QHBoxLayout()
-        replacement_label = QLabel(strings.MANUSCRIPT_REPLACEMENT, body)
-        replacement_label.setBuddy(self.replacement_edit)
-        replace_row.addWidget(replacement_label)
-        replace_row.addWidget(self.replacement_edit, 1)
-        replace_row.addWidget(self.replace_button)
-        replace_row.addWidget(self.undo_button)
-        replace_row.addWidget(self.redo_button)
-        layout.addLayout(replace_row)
-        layout.addWidget(self.status_label)
-        scroll = QScrollArea(self)
-        scroll.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(body)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        outer.setSpacing(0)
+
+        # These compact, named buttons are actual controls (rather than an
+        # icon-only decoration), and keep the save buttons in the tab order.
+        self.toolbar = QFrame(self)
+        self.toolbar.setObjectName("workbenchToolbar")
+        toolbar = QHBoxLayout(self.toolbar)
+        toolbar.setContentsMargins(10, 5, 10, 5)
+        toolbar.setSpacing(2)
+        self.document_icon = QLabel(self.toolbar)
+        self.document_icon.setFixedWidth(24)
+        self._refresh_document_icon()
+        toolbar.addWidget(self.document_icon)
+        self.document_label = _ElidedDocumentLabel(self.toolbar)
+        self.document_label.setObjectName("contextTitle")
+        self.document_label.setMinimumWidth(44)
+        self.document_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(self.document_label, 1)
+        self.save_label.setObjectName("secondaryText")
+        toolbar.addWidget(self.save_label)
+        for button, name, description in (
+            (self.new_button, "file-plus", strings.MANUSCRIPT_NEW),
+            (self.open_button, "folder-open", strings.MANUSCRIPT_OPEN),
+            (self.save_button, "save", strings.MANUSCRIPT_SAVE),
+            (self.save_as_button, "save", strings.MANUSCRIPT_SAVE_AS),
+            (self.undo_button, "undo-2", strings.MANUSCRIPT_UNDO),
+            (self.redo_button, "redo-2", strings.MANUSCRIPT_REDO),
+        ):
+            button.setObjectName("commandButton")
+            button.setText("")
+            button.setIcon(icon(name))
+            button.setIconSize(QSize(18, 18))
+            button.setFixedWidth(34)
+            button.setToolTip(description)
+            button.setAccessibleName(description)
+            toolbar.addWidget(button)
+        self.direction_combo.setAccessibleName(strings.DIRECTION_LABEL)
+        toolbar.addWidget(self.direction_combo)
+        toolbar.addWidget(self.review_button)
+        toolbar.addWidget(self.cancel_button)
+        self.inspector_button = QPushButton(self.toolbar)
+        self.inspector_button.setObjectName("commandButton")
+        self.inspector_button.setFixedWidth(34)
+        self.inspector_button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.inspector_button.clicked.connect(self._toggle_inspector)
+        toolbar.addWidget(self.inspector_button)
+        outer.addWidget(self.toolbar)
+
+        self.editor_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.editor_splitter.setChildrenCollapsible(False)
+        self.editor_splitter.setHandleWidth(8)
+        for text, editor in ((strings.INPUT_LABEL, self.source_edit), (strings.RESULT_LABEL, self.target_edit)):
+            surface = QFrame(self.editor_splitter)
+            surface.setObjectName("editorSurface")
+            column = QVBoxLayout(surface)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(0)
+            header = QFrame(surface)
+            header.setObjectName("editorHeader")
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(14, 4, 14, 4)
+            label = QLabel(text, header)
+            label.setBuddy(editor)
+            if editor is self.source_edit:
+                self.source_header_label = label
+            else:
+                self.target_header_label = label
+            header_layout.addWidget(label)
+            header_layout.addStretch(1)
+            column.addWidget(header)
+            column.addWidget(editor, 1)
+            self.editor_splitter.addWidget(surface)
+        self.editor_splitter.setStretchFactor(0, 1)
+        self.editor_splitter.setStretchFactor(1, 1)
+
+        self.inspector = QFrame(self)
+        self.inspector.setObjectName("reviewInspector")
+        self.inspector.setMinimumWidth(260)
+        self.inspector.setMaximumWidth(330)
+        inspector_layout = QVBoxLayout(self.inspector)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(0)
+        inspector_header = QFrame(self.inspector)
+        inspector_header.setObjectName("editorHeader")
+        inspector_heading = QHBoxLayout(inspector_header)
+        inspector_heading.setContentsMargins(14, 4, 8, 4)
+        heading = QLabel(strings.MANUSCRIPT_INSPECTOR_TITLE, inspector_header)
+        heading.setObjectName("contextTitle")
+        self.finding_count = QLabel(inspector_header)
+        inspector_heading.addWidget(heading, 1)
+        inspector_heading.addWidget(self.finding_count)
+        inspector_layout.addWidget(inspector_header)
+        inspector_scroll = QScrollArea(self.inspector)
+        inspector_scroll.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        inspector_scroll.setWidgetResizable(True)
+        inspector_body = QWidget(inspector_scroll)
+        inspector_body.setObjectName("inspectorBody")
+        details = QVBoxLayout(inspector_body)
+        details.setContentsMargins(18, 18, 18, 18)
+        details.setSpacing(12)
+        summary = QHBoxLayout()
+        pair = QVBoxLayout()
+        self.finding_title = QLabel(strings.MANUSCRIPT_FINDING_PROMPT, inspector_body)
+        self.finding_title.setObjectName("findingTitle")
+        self.finding_title.setWordWrap(True)
+        pair.addWidget(self.finding_title)
+        self.finding_pair = QLabel(inspector_body)
+        self.finding_pair.setObjectName("findingPair")
+        self.finding_pair.setTextFormat(Qt.TextFormat.PlainText)
+        self.finding_pair.setWordWrap(True)
+        pair.addWidget(self.finding_pair)
+        summary.addLayout(pair, 1)
+        self.finding_verdict = QLabel(inspector_body)
+        self.finding_verdict.setObjectName("findingVerdict")
+        self.finding_verdict.setWordWrap(True)
+        summary.addWidget(self.finding_verdict, 0, Qt.AlignmentFlag.AlignTop)
+        details.addLayout(summary)
+        self.finding_rule = QLabel(inspector_body)
+        self.finding_rule.setObjectName("secondaryText")
+        self.finding_rule.setWordWrap(True)
+        self.finding_positions = QLabel(inspector_body)
+        self.finding_positions.setObjectName("secondaryText")
+        self.finding_positions.setWordWrap(True)
+        self.candidates_label = QLabel(inspector_body)
+        self.candidates_label.setWordWrap(True)
+        details.addWidget(self.candidates_label)
+        self.lookup_button = QPushButton(strings.NAV_ITEM_TERMS, inspector_body)
+        self.lookup_button.setIcon(icon("external-link"))
+        self.lookup_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.lookup_button.clicked.connect(self._request_lookup)
+        details.addWidget(self.lookup_button)
+        self.manual_edit_label = QLabel(strings.MANUSCRIPT_MANUAL_EDIT, inspector_body)
+        self.manual_edit_label.setWordWrap(True)
+        details.addWidget(self.manual_edit_label)
+        self.replace_toggle = QPushButton(strings.MANUSCRIPT_REPLACE, inspector_body)
+        self.replace_toggle.setCheckable(True)
+        self.replace_toggle.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        details.addWidget(self.replace_toggle)
+        self.replacement_area = QWidget(inspector_body)
+        self.replacement_area.setObjectName("inspectorBody")
+        replacement = QVBoxLayout(self.replacement_area)
+        replacement.setContentsMargins(0, 0, 0, 0)
+        replacement_label = QLabel(strings.MANUSCRIPT_REPLACEMENT, self.replacement_area)
+        replacement_label.setBuddy(self.replacement_edit)
+        replacement.addWidget(replacement_label)
+        replacement.addWidget(self.replacement_edit)
+        replacement.addWidget(self.replace_button)
+        self.replace_toggle.toggled.connect(self.replacement_area.setVisible)
+        details.addWidget(self.replacement_area)
+        details.addWidget(self.findings)
+        details.addWidget(self.conflict_label)
+        details.addWidget(self.conflict_list)
+        details.addWidget(self.remove_choice_button)
+        self.details_button = QPushButton(strings.MANUSCRIPT_DETAILS, inspector_body)
+        self.details_button.setObjectName("commandButton")
+        self.details_button.setCheckable(True)
+        details.addWidget(self.details_button)
+        self.more_details = QWidget(inspector_body)
+        self.more_details.setObjectName("inspectorBody")
+        more = QVBoxLayout(self.more_details)
+        more.setContentsMargins(0, 0, 0, 0)
+        more.addWidget(self.finding_rule)
+        more.addWidget(self.finding_positions)
+        more.addWidget(self.history_label)
+        more.addWidget(self.auto_align_button)
+        self.request_id_label.setObjectName("secondaryText")
+        self.request_id_label.setWordWrap(True)
+        more.addWidget(self.request_id_label)
+        self.more_details.hide()
+        self.details_button.toggled.connect(self.more_details.setVisible)
+        details.addWidget(self.more_details)
+        details.addStretch(1)
+        inspector_scroll.setWidget(inspector_body)
+        inspector_layout.addWidget(inspector_scroll, 1)
+
+        self.work_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.work_splitter.setChildrenCollapsible(False)
+        self.work_splitter.setHandleWidth(8)
+        self.work_splitter.addWidget(self.editor_splitter)
+        self.work_splitter.addWidget(self.inspector)
+        self.work_splitter.setStretchFactor(0, 1)
+        self.work_splitter.setStretchFactor(1, 0)
+        self.work_splitter.setSizes([1000, 300])
+        workspace = QWidget(self)
+        workspace_layout = QHBoxLayout(workspace)
+        workspace_layout.setContentsMargins(12, 10, 12, 10)
+        workspace_layout.addWidget(self.work_splitter)
+        outer.addWidget(workspace, 1)
+
+        footer = QFrame(self)
+        footer.setObjectName("workbenchToolbar")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(12, 4, 12, 4)
+        self.report_label.setObjectName("secondaryText")
+        self.status_label.setObjectName("secondaryText")
+        self.limit_label = QLabel(strings.MANUSCRIPT_REVIEW_LIMIT, footer)
+        self.limit_label.setObjectName("secondaryText")
+        self.limit_label.setWordWrap(True)
+        footer_layout.addWidget(self.report_label, 1)
+        footer_layout.addWidget(self.limit_label, 1)
+        footer_layout.addWidget(self.status_label, 1)
+        outer.addWidget(footer)
+        self._render_finding(-1)
+        self._update_inspector_button()
         self._update_controls()
 
     def focus_input(self) -> None:
         self.source_edit.setFocus()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange) and hasattr(self, "document_icon"):
+            self._refresh_document_icon()
+
+    def _refresh_document_icon(self) -> None:
+        self.document_icon.setPixmap(icon("file-text").pixmap(18, 18))
+
+    @property
+    def document_title(self) -> str:
+        return self._path.name if self._path is not None else strings.MANUSCRIPT_UNTITLED
+
+    @property
+    def document_dirty(self) -> bool:
+        return self._payload != self._saved_payload
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        # Short workspaces need the available height for both editing areas.
+        # On a narrow but tall workspace, stacking still offers wider lines.
+        stacked = compact and event.size().height() >= 560
+        orientation = Qt.Orientation.Vertical if stacked else Qt.Orientation.Horizontal
+        if self.editor_splitter.orientation() != orientation:
+            self.editor_splitter.setOrientation(orientation)
+        if compact != self._compact:
+            self._compact = compact
+            # On a small workspace make room for the manuscript. The action
+            # remains available so the inspector can be opened deliberately.
+            self.inspector.setVisible(False if compact else self._inspector_requested)
+            self.save_label.setVisible(not compact)
+            self._update_inspector_button()
+
+    def _toggle_inspector(self) -> None:
+        self._inspector_requested = self.inspector.isHidden()
+        self.inspector.setVisible(self._inspector_requested)
+        if self._inspector_requested:
+            self.work_splitter.setSizes([max(1, self.width() - 300), 300])
+        self._update_inspector_button()
+
+    def _update_inspector_button(self) -> None:
+        showing = not self.inspector.isHidden()
+        description = strings.MANUSCRIPT_INSPECTOR_HIDE if showing else strings.MANUSCRIPT_INSPECTOR_SHOW
+        self.inspector_button.setIcon(icon("panel-right-close" if showing else "panel-right-open"))
+        self.inspector_button.setIconSize(QSize(18, 18))
+        self.inspector_button.setToolTip(description)
+        self.inspector_button.setAccessibleName(description)
+
+    def _target_span_reliable(self, span: object) -> bool:
+        if not isinstance(span, dict):
+            return False
+        start, end, value = span.get("start"), span.get("end"), span.get("text")
+        raw = self.target_edit.raw_text()
+        return (type(start) is int and type(end) is int and isinstance(value, str)
+                and 0 <= start < end <= len(raw) and raw[start:end] == value
+                and start in self.target_edit._bounds and end in self.target_edit._bounds)
+
+    def _render_finding(self, index: int) -> None:
+        report = self._report
+        finding = report["findings"][index] if report is not None and 0 <= index < len(report["findings"]) else None
+        total = len(report["findings"]) if report is not None else 0
+        self.finding_count.setText(strings.MANUSCRIPT_FINDING_COUNT.format(
+            current=index + 1 if finding is not None else 0, total=total))
+        self.findings.setVisible(total > 0)
+        if finding is None:
+            self.finding_title.setText(
+                strings.MANUSCRIPT_FINDING_PROMPT if total else
+                strings.MANUSCRIPT_NO_FINDINGS if report is not None else self.report_label.text()
+            )
+            for label in (self.finding_verdict, self.finding_pair, self.finding_rule, self.finding_positions, self.candidates_label):
+                label.clear()
+            self.finding_verdict.hide()
+            self.lookup_button.hide()
+            self.manual_edit_label.hide()
+            self.replace_toggle.hide()
+            self.replace_toggle.setChecked(False)
+            self.replacement_area.hide()
+            return
+        source = finding.get("source_span") or {}
+        target = finding.get("target_span")
+        self.finding_verdict.show()
+        self.finding_title.setTextFormat(Qt.TextFormat.PlainText)
+        self.finding_title.setText(source.get("text", ""))
+        verdicts = {"verified_constraint": strings.MANUSCRIPT_VERDICT_VERIFIED,
+                    "confirmed_conflict": strings.MANUSCRIPT_VERDICT_CONFLICT,
+                    "needs_review": strings.MANUSCRIPT_VERDICT_NEEDS_REVIEW,
+                    "not_evaluated": strings.MANUSCRIPT_VERDICT_NOT_EVALUATED}
+        self.finding_verdict.setText(verdicts.get(finding["verdict"], finding["verdict"]))
+        self.finding_verdict.setProperty("verdict", finding["verdict"])
+        self.finding_verdict.style().unpolish(self.finding_verdict)
+        self.finding_verdict.style().polish(self.finding_verdict)
+        self.finding_pair.setText(target["text"] if isinstance(target, dict) and isinstance(target.get("text"), str) else "")
+        rule = strings.MANUSCRIPT_RULE_TERM_PAIR if finding["rule_id"] == "review.term_pair" else finding["rule_id"]
+        self.finding_rule.setText(strings.MANUSCRIPT_RULE.format(rule=rule))
+        positions = []
+        for side, span in ((strings.INPUT_LABEL, source), (strings.RESULT_LABEL, target)):
+            if isinstance(span, dict) and type(span.get("start")) is int and type(span.get("end")) is int:
+                positions.append(strings.MANUSCRIPT_POSITION.format(side=side, start=span["start"] + 1, end=span["end"]))
+        self.finding_positions.setText("\n".join(positions))
+        categories = {"core_term": strings.CATEGORY_LABEL_CORE_TERM,
+                      "resonator": strings.CATEGORY_LABEL_RESONATOR,
+                      "weapon": strings.CATEGORY_LABEL_WEAPON,
+                      "echo": strings.CATEGORY_LABEL_ECHO,
+                      "skill": strings.CATEGORY_LABEL_SKILL,
+                      "sonata_effect": strings.CATEGORY_LABEL_SONATA_EFFECT,
+                      "location": strings.CATEGORY_LABEL_LOCATION,
+                      "item": strings.CATEGORY_LABEL_ITEM,
+                      "speaker": strings.CATEGORY_LABEL_SPEAKER}
+        pairs = [f'{item["zh"]} ↔ {item["en"]} · {categories.get(item["category"], item["category"])}'
+                 for item in finding["candidates"]]
+        self.candidates_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.candidates_label.setText("\n".join([strings.MANUSCRIPT_CANDIDATES, *pairs]))
+        self.lookup_button.setVisible(bool(source.get("text")))
+        reliable = self._target_span_reliable(target)
+        self.manual_edit_label.setVisible(not reliable)
+        self.replace_toggle.setChecked(False)
+        self.replace_toggle.setVisible(reliable and finding["verdict"] != "verified_constraint")
+        self.replacement_area.hide()
+
+    def _request_lookup(self) -> None:
+        if not self._input_ready():
+            return
+        index = self.findings.currentRow()
+        if self._report is not None and 0 <= index < len(self._report["findings"]):
+            source = self._report["findings"][index].get("source_span") or {}
+            term = source.get("text")
+            if isinstance(term, str) and term:
+                self.lookup_requested.emit(term)
 
     def _update_controls(self) -> None:
         busy = self._review_state == "reviewing"
         composing = self.source_edit._ime_active or self.target_edit._ime_active
         valid = all(0 < len(value) <= 2000 for value in (self._payload["source"], self._payload["target"]))
         self.review_button.setEnabled(bool(self._api_client.is_configured and valid and not busy and not composing))
+        self.review_button.setVisible(not busy)
         self.cancel_button.setEnabled(busy)
+        self.cancel_button.setVisible(busy)
         self.auto_align_button.setEnabled(self._payload["alignments"] is not None)
         self.findings.setEnabled(not composing)
+        self.lookup_button.setEnabled(not composing)
+        self.replace_toggle.setEnabled(not composing)
         index = self.findings.currentRow()
         has_target = (self._report is not None and 0 <= index < len(self._report["findings"])
-                      and self._report["findings"][index].get("target_span") is not None)
+                      and self._target_span_reliable(self._report["findings"][index].get("target_span")))
         self.replace_button.setEnabled(bool(has_target and self.replacement_edit.text() and not composing))
         self.undo_button.setEnabled(bool(self._undo_history) and not composing)
         self.redo_button.setEnabled(bool(self._redo_history) and not composing)
         self.remove_choice_button.setEnabled(0 <= self.conflict_list.currentRow() < len(self._conflict_indexes))
         self.save_label.setText(strings.MANUSCRIPT_SAVED if self._payload == self._saved_payload else strings.MANUSCRIPT_UNSAVED)
+        source_language, target_language = (("EN", "ZH") if self._payload["direction"] == "zh" else ("ZH", "EN"))
+        self.source_header_label.setText(f"{strings.INPUT_LABEL} · {source_language}")
+        self.target_header_label.setText(f"{strings.RESULT_LABEL} · {target_language}")
+        self.limit_label.setVisible(any(len(self._payload[key]) > 2000 for key in ("source", "target")))
+        self.document_label.set_full_text(self.document_title + (" *" if self.document_dirty else ""))
+        state = (self._path, self.document_dirty, self._document_revision)
+        if state != self._document_state:
+            self._document_state = state
+            self.documentChanged.emit()
         choices, history = len(self._payload["choices"]), len(self._payload["history"])
         self.history_label.setVisible(bool(choices or history))
         self.history_label.setText(strings.MANUSCRIPT_SAVED_DETAILS.format(choices=choices, history=history))
@@ -468,11 +802,14 @@ class ManuscriptView(QWidget):
         else:
             label = labels.get(self._review_state, strings.MANUSCRIPT_NO_REPORT)
         self.report_label.setText(label)
+        self.report_label.setToolTip(strings.MANUSCRIPT_REPORT_NOTE)
         self.request_id_label.setText(strings.REQUEST_ID_LABEL.format(request_id=self._request_id or strings.REQUEST_ID_PLACEHOLDER))
 
     def _set_review_state(self, state: str, *, detail: str = "", request_id: str | None = None) -> None:
         self._review_state, self._review_detail, self._request_id = state, detail, request_id
         self._render_review_state()
+        if self._report is None:
+            self._render_finding(-1)
 
     def _draft_snapshot(self) -> dict:
         return copy.deepcopy({key: self._payload[key] for key in ("source", "target", "direction", "alignments", "choices")})
@@ -484,6 +821,9 @@ class ManuscriptView(QWidget):
         self._undo_history = (self._undo_history + [before])[-20:]
         self._redo_history.clear()
         self._payload.update(copy.deepcopy(value))
+        self._document_revision += 1
+        if self.status_label.text() == strings.MANUSCRIPT_SAVE_DONE:
+            self.status_label.setText(strings.MANUSCRIPT_UNSAVED)
         if not editors_already_updated:
             self._set_payload(self._payload)
         self._invalidate_report()
@@ -605,16 +945,24 @@ class ManuscriptView(QWidget):
                     self._refresh_conflicts()
                 return
             self._payload = candidate
+            self._document_revision += 1
             self._report = report
             self._set_review_state("current", request_id=report["request_id"])
             for finding in report["findings"]:
-                candidates = " / ".join(f'{c["zh"]} ↔ {c["en"]}' for c in finding["candidates"])
                 source_span = finding.get("source_span") or {}
+                target_span = finding.get("target_span") or {}
                 verdicts = {"verified_constraint": strings.MANUSCRIPT_VERDICT_VERIFIED,
                             "confirmed_conflict": strings.MANUSCRIPT_VERDICT_CONFLICT,
                             "needs_review": strings.MANUSCRIPT_VERDICT_NEEDS_REVIEW,
                             "not_evaluated": strings.MANUSCRIPT_VERDICT_NOT_EVALUATED}
-                self.findings.addItem(f'{verdicts[finding["verdict"]]} · {source_span.get("text", "")} · {candidates}')
+                target_text = target_span.get("text")
+                verdict = verdicts[finding["verdict"]]
+                second_line = f"{target_text} · {verdict}" if target_text else verdict
+                self.findings.addItem(f'{source_span.get("text", "")}\n{second_line}')
+            if self.findings.count():
+                self.findings.setCurrentRow(0)
+            else:
+                self._render_finding(-1)
             self.status_label.setText(strings.MANUSCRIPT_REPORT_NOTE)
             self._update_controls()
 
@@ -634,6 +982,7 @@ class ManuscriptView(QWidget):
         self._update_controls()
 
     def _select_finding(self, index: int) -> None:
+        self._render_finding(index)
         if self._report is None or not 0 <= index < len(self._report["findings"]):
             self._update_controls()
             return
@@ -707,6 +1056,7 @@ class ManuscriptView(QWidget):
             self.target_edit.set_raw_text(value["target"])
             self.direction_combo.setCurrentIndex(self.direction_combo.findData(value["direction"]))
             self._payload = copy.deepcopy(value)
+            self._document_revision += 1
         finally:
             self._updating = False
 
@@ -729,6 +1079,10 @@ class ManuscriptView(QWidget):
                     start=start + 1, end=end))
         for widget in (self.conflict_label, self.conflict_list, self.remove_choice_button):
             widget.setVisible(bool(groups))
+        if groups:
+            self._inspector_requested = True
+            self.inspector.show()
+            self._update_inspector_button()
         self._update_controls()
 
     def _remove_conflicting_choice(self) -> None:

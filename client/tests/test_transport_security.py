@@ -258,7 +258,7 @@ def test_custom_test_transport_receives_the_request() -> None:
 
     client = ApiClient(
         "https://api.example.com", _test_transport=TestTransport(),
-        token_provider=lambda: None,
+        token_provider=lambda: "example-token",
     )
 
     async def scenario() -> None:
