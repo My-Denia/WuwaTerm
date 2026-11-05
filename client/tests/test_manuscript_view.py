@@ -9,10 +9,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-from PySide6.QtCore import QCoreApplication, QMimeData, Qt
-from PySide6.QtGui import QInputMethodEvent, QTextCursor
+from PySide6.QtCore import QCoreApplication, QMimeData, QPoint, QPointF, Qt
+from PySide6.QtGui import QInputMethodEvent, QTextCursor, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QScrollArea
 
 from wuwaterm_client.api import ApiClient
 from wuwaterm_client.manuscript import empty_workfile, load_workfile, save_workfile
@@ -412,6 +412,142 @@ def test_preedit_cancellation_and_relative_replacement_follow_qt(qapp) -> None:
     assert editor.raw_text() == "字b😀cd term"
     QTest.keyClick(editor, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert view._payload == value
+
+
+@pytest.mark.parametrize("side", ["source", "target"])
+@pytest.mark.parametrize("save_as", [False, True])
+@pytest.mark.parametrize("resolution", ["cancel", "commit"])
+def test_mouse_save_during_preedit_keeps_focus_and_does_not_save(qapp, tmp_path, monkeypatch, side, save_as, resolution) -> None:
+    async def scenario():
+        from wuwaterm_client.config import ClientConfig
+        from wuwaterm_client.ui import main_window, status_view
+
+        source, target = "term", "词"
+        async def handler(request):
+            return httpx.Response(200, json=report(source, target))
+        client = client_with(handler)
+        monkeypatch.setattr(main_window, "has_token", lambda: False)
+        monkeypatch.setattr(status_view, "has_token", lambda: False)
+        monkeypatch.setattr(status_view, "active_backend_name", lambda: "test")
+        window = main_window.MainWindow(ClientConfig(base_url="https://example.invalid"))
+        window_api = window.api_client
+        view = window.manuscript_view
+        view._api_client = client
+        try:
+            window.show_page(main_window.PAGE_MANUSCRIPT)
+            window.resize(1100, 800)
+            window.show()
+            window.activateWindow()
+            install(view, source, target)
+            view._start_review()
+            await view._task
+            await asyncio.sleep(0)
+            assert view._review_state == "current" and view._report is not None
+            view.findings.setCurrentRow(0)
+            path, alternate = tmp_path / "draft.json", tmp_path / "copy.json"
+            view._path = path
+            assert view.save_document()
+            original_bytes = path.read_bytes()
+            before = copy.deepcopy(view._payload)
+            saved_before = copy.deepcopy(view._saved_payload)
+            current_report = copy.deepcopy(view._report)
+            request_id, generation = view.request_id_label.text(), view._generation
+            dialogs = []
+            def choose_file(*_args):
+                dialogs.append(True)
+                return str(alternate), ""
+            monkeypatch.setattr(QFileDialog, "getSaveFileName", choose_file)
+
+            editor = getattr(view, f"{side}_edit")
+            button = view.save_as_button if save_as else view.save_button
+            cursor = editor.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            editor.setTextCursor(cursor)
+            editor.setFocus()
+            qapp.processEvents()
+            assert editor.hasFocus()
+            QCoreApplication.sendEvent(editor, QInputMethodEvent("zhong", []))
+            assert editor._ime_active and not view.review_button.isEnabled()
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            assert editor.hasFocus()
+            assert editor._ime_active and view._payload == before
+            assert view._saved_payload == saved_before and not view.review_button.isEnabled()
+            assert view._report == current_report and view._review_state == "current"
+            assert view._generation == generation and view.request_id_label.text() == request_id
+            assert view.findings.currentRow() == 0 and view.findings.count() == 1
+            assert path.read_bytes() == original_bytes and not alternate.exists() and dialogs == []
+            assert "完成或取消" in view.status_label.text()
+
+            event = QInputMethodEvent()
+            if resolution == "commit":
+                event.setCommitString("中")
+            QCoreApplication.sendEvent(editor, event)
+            if resolution == "cancel":
+                assert view._payload == before and view._report == current_report
+                assert view._generation == generation and view.request_id_label.text() == request_id
+                assert view.review_button.isEnabled()
+                QTest.keyClicks(editor, "x")
+            added = "x" if resolution == "cancel" else "中"
+            assert view._payload[side] == (source if side == "source" else target) + added
+            assert view._review_state == "stale" and view._report is None
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            saved_path = alternate if save_as else path
+            assert load_workfile(saved_path) == view._payload == view._saved_payload
+            assert dialogs == ([True] if save_as else [])
+            if save_as:
+                assert path.read_bytes() == original_bytes
+            else:
+                assert path.read_bytes() != original_bytes
+        finally:
+            window.hide()
+            await client.aclose()
+            await window_api.aclose()
+            window.deleteLater()
+    asyncio.run(scenario())
+
+
+def test_save_buttons_remain_reachable_by_keyboard_tab(qapp, tmp_path, monkeypatch) -> None:
+    view = ManuscriptView(ApiClient(None))
+    try:
+        install(view, "source", "target")
+        path, alternate = tmp_path / "draft.json", tmp_path / "copy.json"
+        view._path = path
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(alternate), ""))
+        view.resize(1100, 800)
+        view.show()
+        view.activateWindow()
+        view.open_button.setFocus()
+        qapp.processEvents()
+        assert view.open_button.hasFocus()
+        QTest.keyClick(view.open_button, Qt.Key.Key_Tab)
+        assert view.save_button.hasFocus()
+        QTest.keyClick(view.save_button, Qt.Key.Key_Space)
+        assert load_workfile(path) == view._payload == view._saved_payload
+        QTest.keyClick(view.save_button, Qt.Key.Key_Tab)
+        assert view.save_as_button.hasFocus()
+        QTest.keyClick(view.save_as_button, Qt.Key.Key_Space)
+        assert load_workfile(alternate) == view._payload == view._saved_payload
+    finally:
+        view.close()
+
+
+def test_manuscript_wheel_scroll_remains_usable(qapp) -> None:
+    view = ManuscriptView(ApiClient(None))
+    try:
+        view.resize(640, 380)
+        view.show()
+        qapp.processEvents()
+        scroll = view.findChild(QScrollArea)
+        bar = scroll.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(0)
+        pos = QPointF(scroll.viewport().rect().center())
+        wheel = QWheelEvent(pos, pos, QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        QCoreApplication.sendEvent(scroll.viewport(), wheel)
+        assert bar.value() > 0
+    finally:
+        view.close()
 
 
 @pytest.mark.parametrize("side", ["source", "target"])
