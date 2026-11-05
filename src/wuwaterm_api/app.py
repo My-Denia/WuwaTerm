@@ -86,6 +86,19 @@ _ROUTING_ERROR_CODES = {
 LOGGER = logging.getLogger("wuwaterm_api")
 
 REQUEST_ID_HEADER = "X-Request-Id"
+AUTH_STATUS_PATH = f"/{API_VERSION}/auth/status"
+AUTH_STATUS_RESPONSE_HEADERS = {
+    "Cache-Control": {"description": "Always no-store", "schema": {"type": "string"}},
+    "X-Request-Id": {"description": "Server-generated request ID", "schema": {"type": "string"}},
+}
+
+
+def _status_response_headers(request: Request) -> dict[str, str]:
+    """Keep authentication status responses out of caches, including errors."""
+    if request.url.path == AUTH_STATUS_PATH:
+        return {"Cache-Control": "no-store"}
+    return {}
+
 
 # --------------------------------------------------------------------------
 # Log field rendering
@@ -684,6 +697,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             status_code = response.status_code
             response.headers[REQUEST_ID_HEADER] = request_id
+            response.headers.update(_status_response_headers(request))
             return response
         except (ClientDisconnect, asyncio.CancelledError):
             # The caller went away, or the work was cancelled out from under
@@ -983,11 +997,9 @@ def _device_llm_guard(request: Request, device: Device) -> LlmCallGuard:
     return before_llm_call
 
 
-async def authenticated_device(
+async def _verified_device(
     request: Request,
-    presented: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(BEARER_SCHEME)
-    ] = None,
+    presented: HTTPAuthorizationCredentials | None,
 ) -> Device:
     if presented is None or presented.scheme.lower() != "bearer":
         raise ApiError(ERROR_UNAUTHORIZED)
@@ -1050,6 +1062,17 @@ async def authenticated_device(
     # and it is recorded with none. Nothing branches on this attribute; it
     # exists to be logged.
     request.state.device = device
+    return device
+
+
+async def authenticated_device(
+    request: Request,
+    presented: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(BEARER_SCHEME)
+    ] = None,
+) -> Device:
+    device = await _verified_device(request, presented)
+    store: DeviceStore = request.app.state.device_store
     limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
     if not limiter.allow(device.device_id):
         LOGGER.info(
@@ -1087,6 +1110,28 @@ async def authenticated_device(
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
+    return device
+
+
+async def status_device(
+    request: Request,
+    presented: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(BEARER_SCHEME)
+    ] = None,
+) -> Device:
+    """Verify a meta-scoped device without spending its business allowance."""
+    device = await _verified_device(request, presented)
+    if not device.has_scope(SCOPE_META):
+        raise ApiError(ERROR_FORBIDDEN)
+    limiter: SlidingWindowRateLimiter = request.app.state.auth_status_rate_limiter
+    if not limiter.allow(device.device_id):
+        LOGGER.info(
+            "auth status rate limited device=%s request_id=%s",
+            redact_id(device.device_id),
+            _request_id(request),
+        )
+        raise ApiError(ERROR_RATE_LIMITED)
+    await _require_active_device(request, device, serve_on_store_error=False)
     return device
 
 
@@ -1184,7 +1229,7 @@ def create_app(
     term_service=None,
     translator=None,
 ) -> FastAPI:
-    from .settings import ApiSettings
+    from .settings import ApiSettings, DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
 
     resolved = settings or ApiSettings.from_env()
 
@@ -1248,6 +1293,9 @@ def create_app(
     )
     app.state.rate_limiter = SlidingWindowRateLimiter(
         limit=resolved.rate_limit_per_minute
+    )
+    app.state.auth_status_rate_limiter = SlidingWindowRateLimiter(
+        limit=DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
     # Two halves of one mechanism, both sized by auth_max_concurrency:
@@ -1361,9 +1409,13 @@ def _register_error_handlers(app: FastAPI) -> None:
             _route_label(request),
             _request_id(request),
         )
+        headers = _status_response_headers(request)
+        if headers:
+            headers[REQUEST_ID_HEADER] = _request_id(request)
         return JSONResponse(
             status_code=500,
             content=error_body(ERROR_INTERNAL, "internal error", _request_id(request)),
+            headers=headers,
         )
 
 
@@ -1397,6 +1449,34 @@ def _register_routes(app: FastAPI) -> None:
                 ERROR_INTERNAL, "dictionary is not readable", status_code=503
             )
         return HealthResponseBody(status="ready")
+
+    @app.get(
+        AUTH_STATUS_PATH,
+        status_code=204,
+        response_class=Response,
+        tags=["authentication"],
+        responses={
+            204: {
+                "description": "Credential is active and has the meta scope",
+                "headers": AUTH_STATUS_RESPONSE_HEADERS,
+            },
+            **{
+                code: {**ERROR_RESPONSES[code], "headers": AUTH_STATUS_RESPONSE_HEADERS}
+                for code in (400, 401, 403, 413, 429, 500, 503, 504)
+            },
+        },
+    )
+    async def auth_status(
+        device: Annotated[Device, Depends(status_device)],
+    ) -> Response:
+        """Verify an active meta-scoped credential without a business quota debit.
+
+        Each request performs full credential verification and uses the shared
+        verification concurrency limit. Probes have an independent per-device
+        limit of 120 per minute and do not update last-used time. Responses,
+        including errors, carry Cache-Control: no-store.
+        """
+        return Response(status_code=204)
 
     @app.post(
         f"{prefix}/translations",

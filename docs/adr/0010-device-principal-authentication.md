@@ -74,7 +74,8 @@ device and old-shape rows are all one uniform rejection.
 ### Scopes and the principal model
 
 Devices carry scopes, drawn from a closed set: `translate` (POST
-/v1/translations) and `meta` (GET /v1/terms, GET /v1/meta). Both are granted
+/v1/translations) and `meta` (GET /v1/terms, GET /v1/meta, GET
+/v1/auth/status). Both are granted
 by default; unknown scopes are refused at issuance (`normalize_scopes`). A
 device that authenticates but lacks the required scope is answered 403 with
 the enumerated code `forbidden` (`require_scope` in `src/wuwaterm_api/app.py`,
@@ -110,6 +111,12 @@ revocation that commits after the final read but before the response is
 written is still served, and a transient store failure on the post-model
 re-check serves rather than discards (`_require_active_device` in
 `src/wuwaterm_api/app.py`).
+
+The authentication status route also performs the final active-device read
+with transient store errors failing closed as 503. It does not call
+`record_use`; its separate probe limiter runs after full verification and the
+scope check, without consuming the business limiter. It therefore narrows the
+same revocation window without changing `last_used_at`.
 
 ### The request path cannot create or resurrect the store
 
