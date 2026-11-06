@@ -25,11 +25,18 @@ def main() -> None:
     from wuwaterm.application import (
         ProtectedStructure,
         ProtectedText,
+        TRANSLATION_UNAVAILABLE_NOTICE,
         build_term_service,
         build_translator,
+        count_cjk,
+        count_latin,
         lookup_exact_terms,
     )
     from wuwaterm.db import initialize
+
+    assert count_cjk("声骸 Echo") == 2
+    assert count_latin("声骸 Echo") == 4
+    assert "temporarily unavailable" in TRANSLATION_UNAVAILABLE_NOTICE
 
     requests = []
 
