@@ -3,8 +3,8 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     lookup, normalize, models, review, cjk_span
-  domain+LLM:      sentence  (may use telegram_html; must not import bot/channel)
+  domain core:     lookup, normalize, models, review, cjk_span, protected_text
+  domain+LLM:      sentence (three lazy Telegram compatibility bridges only)
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
                    or builder modules)
@@ -63,7 +63,7 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
     {"application", "models", "translation_policy", "logging_utils"}
 )
 
-DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review", "cjk_span"})
+DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review", "cjk_span", "protected_text"})
 DOMAIN_LLM = frozenset({"sentence"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
@@ -90,7 +90,7 @@ BOOTSTRAP = frozenset({"cli"})
 
 # Modules that must never depend on Telegram presentation or the Bot SDK.
 NO_TELEGRAM_PRESENTATION = (
-    DOMAIN_CORE | APPLICATION | SHARED | LOCAL_STATE | STORAGE | BUILDER
+    DOMAIN_CORE | DOMAIN_LLM | APPLICATION | SHARED | LOCAL_STATE | STORAGE | BUILDER
 )
 
 # Modules that must never pull builder-only graph into the bot edge.
@@ -332,6 +332,37 @@ def _is_telegram_sdk(name: str) -> bool:
     return name == "telegram" or name.startswith("telegram.")
 
 
+def _sentence_legacy_bridge_lines(path: Path) -> set[int]:
+    """Allow only specific lazy imports inside the old forwarding methods."""
+    allowed = {
+        "_restore_html": "restore_html",
+        "translate_html": "translate_html",
+        "translate_html_async": "translate_html_async",
+    }
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    lines: set[int] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "SentenceTranslator":
+            continue
+        for method in node.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            expected = allowed.get(method.name)
+            if expected is None:
+                continue
+            for statement in method.body:
+                if (
+                    isinstance(statement, ast.ImportFrom)
+                    and statement.level == 1
+                    and statement.module == "telegram_html"
+                    and len(statement.names) == 1
+                    and statement.names[0].name == expected
+                    and statement.names[0].asname is None
+                ):
+                    lines.add(statement.lineno)
+    return lines
+
+
 def _api_wuwaterm_imports(path: Path) -> list[tuple[str, int]]:
     """Return (imported wuwaterm target, lineno) for one adapter module.
 
@@ -444,7 +475,13 @@ def check() -> list[str]:
         if name in NO_TELEGRAM_PRESENTATION:
             # Fail closed on type-only edges too: only channel has a documented
             # TYPE_CHECKING exception for BotConfig (handled below separately).
-            bad_pres = sorted(local_all & PRESENTATION)
+            legacy_lines = _sentence_legacy_bridge_lines(path) if name == "sentence" else set()
+            bad_pres = sorted({
+                imported for imported, _type_only, lineno in events
+                if imported in PRESENTATION and not (
+                    name == "sentence" and imported == "telegram_html" and lineno in legacy_lines
+                )
+            })
             if bad_pres:
                 failures.append(
                     f"{rel}: domain/infra/builder module must not import "

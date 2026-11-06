@@ -12,7 +12,6 @@ import inspect
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
-from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +29,7 @@ from .exclusion_metadata import (
 from .lookup import TermService
 from .models import TermEntry
 from .normalize import normalize_user_text
-from .telegram_html import (
-    ProtectedTelegramHTML,
-    TelegramHTMLIntegrityError,
-    protect_telegram_html,
-)
+from .protected_text import ProtectedText, ProtectedTextIntegrityError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +62,7 @@ _LLM_FAILURE_REASONS = frozenset(
         "http",
         "invalid_api_response",
         "invalid_response",
+        "protected_text_integrity",
         "html_integrity",
         "stale_before_llm",
         "authorization_changed_before_llm",
@@ -701,6 +697,8 @@ class SentenceTranslator:
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
         single_character_context: tuple[str, int] | None = None,
         allow_plural_inflection: bool = False,
+        placeholder_prefix: str | None = None,
+        placeholder_offset: int = 0,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
@@ -712,13 +710,13 @@ class SentenceTranslator:
             context_offset,
             allow_plural_inflection=allow_plural_inflection,
         )
-        prefix = _new_placeholder_prefix(text)
+        prefix = placeholder_prefix or _new_placeholder_prefix(text)
         locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
         index = 0
         for span in selected:
             locked_parts.append(text[index : span.start])
-            placeholder = f"{prefix}{len(locks):04d}__"
+            placeholder = f"{prefix}{placeholder_offset + len(locks):04d}__"
             locked_parts.append(placeholder)
             zh, en = span.official
             locks.append((placeholder, zh, en))
@@ -726,18 +724,16 @@ class SentenceTranslator:
         locked_parts.append(text[index:])
         return LockedSentence(locked_text="".join(locked_parts), locks=tuple(locks))
 
-    def _lock_html_terms(
+    def _lock_protected_terms(
         self,
-        protected: ProtectedTelegramHTML,
+        protected: ProtectedText,
         *,
         allow_plural_inflection: bool = False,
     ) -> LockedSentence:
-        """Lock terms only in visible segments, never in tags or attributes."""
+        """Select terms per visible segment with the complete visible context."""
 
         lockable = self._eligible_lockable_sources()
-        segments = protected.visible_segments()
-        # Formatting tags have no visible width; entities contribute decoded
-        # text to term context while their original bytes remain protected.
+        segments = protected.visible_segments
         context_parts: list[str] = []
         offsets: list[int] = []
         offset = 0
@@ -746,42 +742,57 @@ class SentenceTranslator:
             context_parts.append(segment)
             offset += len(segment)
             if index < len(protected.structures):
-                raw = protected.structures[index][1]
-                entity_text = unescape(raw) if raw.startswith("&") else ""
-                context_parts.append(entity_text)
-                offset += len(entity_text)
+                context = protected.structures[index].visible_context
+                context_parts.append(context)
+                offset += len(context)
         context_text = "".join(context_parts)
         locked_segments: list[str] = []
         locks: list[tuple[str, str, str]] = []
+        prefix = _new_placeholder_prefix(protected.for_model())
         for segment, offset in zip(segments, offsets, strict=True):
             locked = self._lock_terms(
                 segment,
                 lockable=lockable,
                 single_character_context=(context_text, offset),
                 allow_plural_inflection=allow_plural_inflection,
+                placeholder_prefix=prefix,
+                placeholder_offset=len(locks),
             )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)
         return LockedSentence(
-            locked_text=protected.interleave_visible_segments(tuple(locked_segments)),
+            locked_text=protected.for_model(tuple(locked_segments)),
             locks=tuple(locks),
         )
 
     @staticmethod
-    def _restore_html(
-        protected: ProtectedTelegramHTML,
+    def _restore_protected(
+        protected: ProtectedText,
         locked: LockedSentence,
         translated: str,
         *,
         to_en: bool,
-    ) -> str:
+    ) -> ProtectedText:
         restored_terms = locked.restore(translated, to_en=to_en)
         try:
             return protected.restore(restored_terms)
-        except TelegramHTMLIntegrityError as exc:
+        except ProtectedTextIntegrityError as exc:
             raise LLMTranslationError(
-                TRANSLATION_UNAVAILABLE_NOTICE, reason="html_integrity"
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="protected_text_integrity"
             ) from exc
+
+    def _lock_html_terms(self, protected, *, allow_plural_inflection: bool = False):
+        """Compatibility bridge for callers of the former private helper."""
+        return self._lock_protected_terms(
+            protected.neutral, allow_plural_inflection=allow_plural_inflection
+        )
+
+    @staticmethod
+    def _restore_html(protected, locked, translated: str, *, to_en: bool) -> str:
+        """Compatibility bridge; parsing and HTML validation remain in the adapter."""
+        from .telegram_html import restore_html
+
+        return restore_html(protected, locked, translated, to_en=to_en)
 
     def translate(self, text: str, *, to_chinese: bool = False) -> str:
         """Translate plain text through the synchronous API.
@@ -870,68 +881,62 @@ class SentenceTranslator:
             )
             return exc.user_message
 
-    def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
-        """Translate Telegram-HTML text with DB terms locked and tags untouched.
+    def translate_protected(
+        self, protected: ProtectedText, *, to_chinese: bool = False
+    ) -> ProtectedText:
+        """Translate visible segments, preserving opaque originals and context.
 
-        Skips ``prepare_text``/``normalize_user_text`` on purpose: normalization
-        would mangle tags and strip ``>`` quote bars. ``LLMTranslationError``
-        propagates to the caller so the passive channel path can stay silent.
-        Async callers should use ``translate_html_async``; the sync API cannot
-        run an LLM request inside an existing event loop.
+        As with the historic markup path, failures propagate and this skips
+        plain-text preparation; the adapter decides how to handle failures.
         """
-        protected = protect_telegram_html(html_text)
-        locked = self._lock_html_terms(
+        locked = self._lock_protected_terms(
             protected, allow_plural_inflection=to_chinese
         )
-        if to_chinese:
-            translated = self._call_llm_sync(
-                locked.locked_text, locked.locks, html_mode=True, to_chinese=True
-            )
-        else:
-            translated = self._call_llm_sync(
-                locked.locked_text, locked.locks, html_mode=True
-            )
-        translated = _require_nonblank_llm_output(translated)
-        return self._restore_html(
-            protected,
-            locked,
-            translated,
+        translated = self._call_llm_sync(
+            locked.locked_text, locked.locks, html_mode=True, to_chinese=to_chinese
+        )
+        return self._restore_protected(
+            protected, locked, _require_nonblank_llm_output(translated),
             to_en=not to_chinese,
         )
 
-    async def translate_html_async(
+    async def translate_protected_async(
         self,
-        html_text: str,
+        protected: ProtectedText,
         *,
         to_chinese: bool = False,
         before_llm_call=None,
-    ) -> str:
-        """Async version of translate_html; LLMTranslationError propagates."""
-        protected = protect_telegram_html(html_text)
-        locked = self._lock_html_terms(
+    ) -> ProtectedText:
+        """Async protected translation, with the guard inside the shared slot."""
+        locked = self._lock_protected_terms(
             protected, allow_plural_inflection=to_chinese
         )
-        if to_chinese:
-            translated = await self._call_llm_async_limited(
-                locked.locked_text,
-                locked.locks,
-                html_mode=True,
-                to_chinese=True,
-                before_llm_call=before_llm_call,
-            )
-        else:
-            translated = await self._call_llm_async_limited(
-                locked.locked_text,
-                locked.locks,
-                html_mode=True,
-                before_llm_call=before_llm_call,
-            )
-        translated = _require_nonblank_llm_output(translated)
-        return self._restore_html(
-            protected,
-            locked,
-            translated,
+        translated = await self._call_llm_async_limited(
+            locked.locked_text,
+            locked.locks,
+            html_mode=True,
+            to_chinese=to_chinese,
+            before_llm_call=before_llm_call,
+        )
+        return self._restore_protected(
+            protected, locked, _require_nonblank_llm_output(translated),
             to_en=not to_chinese,
+        )
+
+    def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
+        """Compatibility bridge to the Telegram HTML adapter."""
+        from .telegram_html import translate_html
+
+        return translate_html(self, html_text, to_chinese=to_chinese)
+
+    async def translate_html_async(
+        self, html_text: str, *, to_chinese: bool = False, before_llm_call=None
+    ) -> str:
+        """Async compatibility bridge to the Telegram HTML adapter."""
+        from .telegram_html import translate_html_async
+
+        return await translate_html_async(
+            self, html_text, to_chinese=to_chinese, before_llm_call=before_llm_call
         )
 
     async def _call_llm_async_limited(
@@ -1110,15 +1115,13 @@ def _llm_configured() -> bool:
 
 
 _HTML_MODE_INSTRUCTION = (
-    "Opaque placeholders represent every Telegram HTML tag, attribute, and "
-    "entity; copy every tag placeholder exactly once in the same order, carry "
-    "every attribute through exactly unchanged, translate only the visible "
+    "Opaque placeholders represent source structure; copy every structural "
+    "placeholder exactly once in the same order, translate only the visible "
     "human-readable text between placeholders, and return English only.\n"
 )
 _HTML_MODE_INSTRUCTION_ZH = (
-    "Opaque placeholders represent every Telegram HTML tag, attribute, and "
-    "entity; copy every tag placeholder exactly once in the same order, carry "
-    "every attribute through exactly unchanged, translate only the visible "
+    "Opaque placeholders represent source structure; copy every structural "
+    "placeholder exactly once in the same order, translate only the visible "
     "human-readable text between placeholders, and return Chinese only.\n"
 )
 _UNTRUSTED_SOURCE_INSTRUCTION = (
