@@ -253,21 +253,23 @@ def _run_full(root: Path, env: dict[str, str]):
 
 
 @pytest.mark.parametrize("different_root", [False, True])
-def test_runtime_lock_is_bound_to_current_deployment_root(tmp_path, monkeypatch, different_root):
-    import fcntl
-    import scripts.runtime_update as runtime_update
-
+def test_runtime_lock_is_bound_to_current_deployment_root(tmp_path, different_root):
     root = tmp_path / "current"
     other = tmp_path / "other"
-    monkeypatch.setattr(runtime_update, "ROOT", root)
+    for directory in (root, other):
+        (directory / ".deployments").mkdir(parents=True)
+        (directory / ".deployments/.deployment.lock").touch()
     lock_target = (other if different_root else root) / ".deployments" / ".deployment.lock"
-    monkeypatch.setattr(os, "readlink", lambda _path: str(lock_target))
-    monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+    code = ("import pathlib,sys; from scripts import runtime_update as runtime; "
+            "runtime.ROOT=pathlib.Path(sys.argv[1]); runtime._require_held_lock()")
+    result = subprocess.run(
+        ["sh", "-c", 'exec 9>>"$1"; flock -n 9; exec "$2" -B -c "$3" "$4"',
+         "lock-fixture", str(lock_target), sys.executable, code, str(root)],
+        capture_output=True, text=True, check=False,
+    )
+    assert (result.returncode == 0) is (not different_root)
     if different_root:
-        with pytest.raises(runtime_update.RuntimeUpdateError, match="deployment_lock_missing"):
-            runtime_update._require_held_lock()
-    else:
-        runtime_update._require_held_lock()
+        assert "deployment_lock_missing" in result.stderr
 
 
 @pytest.mark.parametrize("lock_mode", ["available", "inherited", "contended"])
@@ -299,7 +301,8 @@ raise SystemExit(runtime.main(['--runtime-only']))
     if lock_mode == "contended":
         assert result.returncode != 0
         assert "admitted" not in result.stdout
-        assert "deployment_lock" in result.stderr
+        assert "deployment admission" in result.stderr
+        assert "lock" in result.stderr
     else:
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "admitted"
@@ -1028,7 +1031,9 @@ def test_runtime_only_lock_blocks_a_second_transaction(runtime_harness):
         second = _run_runtime(root, env)
         assert second.returncode != 0
         assert "already in progress" in second.stderr
-        assert (root / "actions.log").read_text(encoding="utf-8") == before
+        assert (root / "actions.log").read_text(encoding="utf-8") == (
+            before + "python3 -B scripts/deployment_admission.py legacy-precheck\n"
+        )
         (root / "start-release").write_text("release\n", encoding="ascii")
         first_returncode = first.wait(timeout=30)
         stdout, stderr = first.communicate()

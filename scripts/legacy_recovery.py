@@ -19,7 +19,9 @@ from typing import Any
 
 # The scripts are retained together outside the checkout. Keep that import
 # usable under Python isolated mode, which ignores inherited PYTHON* settings.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import deployment_admission  # noqa: E402
 from package_recovery_source import (  # noqa: E402
     CapsuleError,
     DeploymentLock,
@@ -187,6 +189,7 @@ def verify_checkout(root: Path, journal: dict[str, Any], manifest: dict[str, Any
 
 def run(root: Path, capsule: Path, kind: str, *, recover: bool) -> int:
     root = root.resolve(strict=True)
+    deployment_admission.legacy_metadata_absent(root)
     absolute = capsule.absolute()
     if any(part.is_symlink() for part in (absolute, *absolute.parents)):
         raise CapsuleError("capsule path contains a symlink")
@@ -205,6 +208,7 @@ def run(root: Path, capsule: Path, kind: str, *, recover: bool) -> int:
         return 0
 
     held_lock = deployment_lock(root)
+    deployment_admission.admit_legacy(root)
     locked_raw, locked_journal, locked_manifest = source_preflight(root, capsule, kind)
     if locked_raw != raw or locked_journal != journal or locked_manifest != manifest:
         raise CapsuleError("journal or capsule changed during preflight")
@@ -230,6 +234,7 @@ def run(root: Path, capsule: Path, kind: str, *, recover: bool) -> int:
         "refs/capsule/source", lock=held_lock)
     git(root, "checkout", "--detach", "--no-overwrite-ignore", journal["source_commit"],
         lock=held_lock)
+    deployment_admission.admit_legacy(root)
     verify_checkout(root, journal, manifest)
     if read_journal(root, kind)[0] != raw:
         raise CapsuleError("journal changed before recovery")
@@ -249,7 +254,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return run(args.root, args.capsule, args.kind, recover=args.recover)
-    except (CapsuleError, OSError, UnicodeError, ValueError) as exc:
+    except (CapsuleError, deployment_admission.AdmissionError, OSError, UnicodeError, ValueError) as exc:
         print(f"legacy recovery refused: {exc}", file=sys.stderr)
         return 1
 

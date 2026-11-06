@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# WUWATERM-LEGACY-ADMISSION-FINGERPRINT: v2
 """Transactional runtime-only updater for the two serving containers.
 
 This path deliberately keeps ``data/terms.db`` out of the transaction.  It
@@ -27,7 +28,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
+sys.dont_write_bytecode = True
 
+from scripts import deployment_admission  # noqa: E402
 from scripts.deployment_manifest import (  # noqa: E402
     ManifestError,
     build_manifest,
@@ -242,20 +245,9 @@ def _journal_path() -> Path:
 
 
 def _require_held_lock() -> None:
-    if os.name != "posix":
-        raise RuntimeUpdateError("deployment_lock_missing")
     try:
-        lock_target = os.readlink("/proc/self/fd/9")
-    except OSError:
-        raise RuntimeUpdateError("deployment_lock_missing") from None
-    expected_lock = str((ROOT / ".deployments" / ".deployment.lock").resolve())
-    if lock_target != expected_lock:
-        raise RuntimeUpdateError("deployment_lock_missing")
-    try:
-        import fcntl
-
-        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (ImportError, OSError):
+        deployment_admission.require_lock(ROOT)
+    except deployment_admission.AdmissionError:
         raise RuntimeUpdateError("deployment_lock_missing") from None
 
 
@@ -296,8 +288,8 @@ def _set_journal(journal: dict[str, Any], *, phase: str, status: str | None = No
     _write_json_atomic(_journal_path(), journal)
 
 
-def _load_journal() -> dict[str, Any]:
-    path = _journal_path()
+def _load_journal(path: Path | None = None) -> dict[str, Any]:
+    path = _journal_path() if path is None else path
     if not path.is_file() or path.is_symlink():
         raise RuntimeUpdateError("invalid_journal")
     try:
@@ -406,6 +398,7 @@ def _tool_hash() -> str:
         "deploy/docker-compose.yml",
         "scripts/deployment_manifest.py",
         "scripts/runtime_update.py",
+        "scripts/deployment_admission.py",
     ):
         path = ROOT / relative
         if not path.is_file() or path.is_symlink():
@@ -1277,9 +1270,9 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--check-runtime-journal", action="store_true")
     args = parser.parse_args(argv)
     try:
-        _require_held_lock()
-    except RuntimeUpdateError as exc:
-        print(f"runtime-only deployment failed: {exc.code}", file=sys.stderr)
+        deployment_admission.admit_legacy(ROOT)
+    except deployment_admission.AdmissionError as exc:
+        print(f"deployment admission refused: {exc}", file=sys.stderr)
         return 1
     if args.check_runtime_journal:
         try:

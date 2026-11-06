@@ -284,6 +284,67 @@ def test_preflight_is_read_only(tmp_path, capsule):
     assert not (root / "docker.log").exists()
 
 
+@pytest.mark.parametrize("marker", [".deploy_current", ".deployments/.component-runtime-transaction.json",
+                                    ".deployments/.component-full-transaction.json"])
+def test_dispatcher_rejects_new_metadata_before_source_mutation(tmp_path, capsule, marker):
+    root, env, _payload = deployment(tmp_path, capsule, "full")
+    head = git(root, "rev-parse", "HEAD")
+    journal = root / ".deployments/.full-transaction.json"
+    before = journal.read_bytes()
+    db = (root / "data/terms.db").read_bytes()
+    marker_path = root / marker
+    marker_path.symlink_to("missing-record")
+    entries = {path.name for path in (root / ".deployments").iterdir()}
+
+    result = dispatch(root, env, capsule, "full")
+
+    assert result.returncode != 0
+    assert "component deployment metadata" in result.stderr
+    assert git(root, "rev-parse", "HEAD") == head
+    assert journal.read_bytes() == before
+    assert (root / "data/terms.db").read_bytes() == db
+    assert {path.name for path in (root / ".deployments").iterdir()} == entries
+    assert not (root / "docker.log").exists()
+
+
+@pytest.mark.parametrize("stage", ["before-lock", "after-checkout"])
+def test_dispatcher_rechecks_new_metadata_across_checkout(tmp_path, capsule, stage):
+    root, env, _payload = deployment(tmp_path, capsule, "full")
+    head = git(root, "rev-parse", "HEAD")
+    journal = root / ".deployments/.full-transaction.json"
+    before = journal.read_bytes()
+    db = (root / "data/terms.db").read_bytes()
+    wrapper = tmp_path / "harness/bin/git"
+    wrapper.write_text('''#!/bin/sh
+/usr/bin/git "$@"
+status=$?
+if [ "$status" -eq 0 ]; then
+  case "$LEGACY_RACE_STAGE:$*" in
+    *"before-lock:"*" ls-files -v -z"|*"after-checkout:"*" checkout --detach --no-overwrite-ignore "*)
+      printf 'invalid\\n' > "$FAKE_DEPLOY_ROOT/.deploy_current" ;;
+  esac
+fi
+exit "$status"
+''', encoding="utf-8")
+    wrapper.chmod(0o755)
+    env["LEGACY_RACE_STAGE"] = stage
+
+    result = dispatch(root, env, capsule, "full")
+
+    assert result.returncode != 0
+    assert "component deployment metadata" in result.stderr
+    assert (root / ".deploy_current").read_bytes() == b"invalid\n"
+    assert journal.read_bytes() == before
+    assert (root / "data/terms.db").read_bytes() == db
+    assert not (root / "docker.log").exists()
+    if stage == "before-lock":
+        assert git(root, "rev-parse", "HEAD") == head
+        assert not list((root / ".deployments").glob("legacy-source-return-*"))
+    else:
+        assert git(root, "rev-parse", "HEAD") == source_commit(capsule)
+        assert len(list((root / ".deployments").glob("legacy-source-return-*"))) == 1
+
+
 def test_inherited_git_and_python_environment_cannot_redirect_recovery(tmp_path, capsule):
     root, env, _payload = deployment(tmp_path, capsule, "full")
     env.update(GIT_DIR=str(tmp_path / "foreign.git"), GIT_WORK_TREE=str(tmp_path / "foreign"),
@@ -669,3 +730,110 @@ os.execv("/usr/bin/git", ["git", *args])
     assert lock.stat().st_ino == inode
     assert (root / "data/terms.db").read_bytes() == data
     print(f"{stage}: lock held across Git write to {written.relative_to(root)}")
+
+
+def test_repeated_git_interruption_blocks_current_writer_until_legacy_recovery(tmp_path, capsule, git_write_barrier):
+    root, env, _payload = deployment(tmp_path, capsule, "full")
+    # Install the actual current entrypoints in this isolated Git fixture. The
+    # dispatcher must still restore the historical journal's original source.
+    paths = (
+        "deploy/vps-update.sh", "scripts/deployment_admission.py", "scripts/deployment_manifest.py",
+        "scripts/runtime_update.py", "scripts/full_update.py", "scripts/component_runtime.py",
+        "scripts/component_build.py", "scripts/product_manifest.py", "scripts/package_recovery_source.py",
+    )
+    for name in paths:
+        destination = root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, destination)
+    with (root / "README.md").open("a", encoding="utf-8") as stream:
+        stream.write("\ncurrent admission fixture\n")
+    git(root, "add", "--", *paths, "README.md")
+    git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture current admission")
+    source = git(root, "rev-parse", "HEAD")
+    lock = root / ".deployments/.deployment.lock"
+    journal = root / ".deployments/.full-transaction.json"
+    journal_before = journal.read_bytes()
+    data = (root / "data/terms.db").read_bytes()
+    wrapper = tmp_path / "harness/bin/git"
+    wrapper.write_text('''#!/usr/bin/python3
+import os, sys
+args = sys.argv[1:]
+root = os.environ.get("FAKE_DEPLOY_ROOT", "")
+repo = args[args.index("-C") + 1] if "-C" in args else ""
+stage = os.environ.get("LEGACY_PAUSE_STAGE")
+if repo == root and ((stage == "fetch" and "fetch" in args) or (stage == "archive" and "archive" in args)):
+    os.environ["LD_PRELOAD"] = os.environ["LEGACY_PAUSE_LIBRARY"]
+os.execv("/usr/bin/git", ["git", *args])
+''', encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    def current_writer():
+        command = ('exec 9>>"$1"; shift; exec "$@"')
+        return subprocess.run(
+            ["sh", "-c", command, "fixture", str(lock), sys.executable, "-I", "-B",
+             str(root / "scripts/component_runtime.py"), "--root", str(root), "adopt"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+
+    for attempt, stage in enumerate(("archive", "fetch")):
+        marker, release = tmp_path / f"paused-{attempt}", tmp_path / f"release-{attempt}"
+        env.update(LEGACY_PAUSE_STAGE=stage, LEGACY_PAUSE_MARKER=str(marker),
+                   LEGACY_PAUSE_RELEASE=str(release), LEGACY_PAUSE_LIBRARY=str(git_write_barrier))
+        args = [sys.executable, "-I", str(DISPATCH), "--root", str(root), "--capsule", str(capsule),
+                "--kind", "full", "--recover"]
+        process = subprocess.Popen(args, env=env, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = None
+        try:
+            deadline = time.monotonic() + 30
+            while not marker.exists() or len(marker.read_text().splitlines()) != 2:
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    pytest.fail(f"dispatcher exited before {stage} Git write: {stdout!r} {stderr!r}")
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            pid, written_path = marker.read_text().splitlines()
+            child = int(pid)
+            if stage == "fetch":
+                assert Path(written_path).is_relative_to(root / ".git/objects")
+            else:
+                assert Path(written_path).name == "source.tar"
+            assert hashlib.sha256(Path(f"/proc/{child}/exe").read_bytes()).digest() == hashlib.sha256(
+                Path("/usr/bin/git").read_bytes()).digest()
+            os.kill(process.pid, signal.SIGKILL)
+            process.communicate(timeout=10)
+            assert process.returncode == -signal.SIGKILL
+            blocked = current_writer()
+            assert blocked.returncode != 0
+            assert "deployment lock" in blocked.stderr
+            assert journal.read_bytes() == journal_before
+        finally:
+            release.write_text("continue", encoding="ascii")
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+        assert child is not None
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                state = Path(f"/proc/{child}/stat").read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        for key in ("LEGACY_PAUSE_STAGE", "LEGACY_PAUSE_MARKER", "LEGACY_PAUSE_RELEASE", "LEGACY_PAUSE_LIBRARY"):
+            env.pop(key)
+        blocked = current_writer()
+        assert blocked.returncode != 0
+        assert "legacy full transaction requires recovery" in blocked.stderr
+        assert journal.read_bytes() == journal_before
+        assert (root / "data/terms.db").read_bytes() == data
+        assert git(root, "rev-parse", "HEAD") == source
+        assert not (root / "docker.log").exists()
+
+    recovered = dispatch(root, env, capsule, "full")
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert not journal.exists()
+    assert (root / "data/terms.db").read_bytes() == data

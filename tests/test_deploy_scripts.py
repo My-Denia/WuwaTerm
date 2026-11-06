@@ -675,6 +675,7 @@ def _make_deploy_harness(tmp_path):
     for relative in (
         "deploy/vps-update.sh",
         "deploy/docker-compose.yml",
+        "scripts/deployment_admission.py",
         "scripts/deployment_manifest.py",
         "scripts/full_update.py",
         "scripts/validate_state_file.py",

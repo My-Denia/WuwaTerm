@@ -1,4 +1,5 @@
 #!/bin/sh
+# WUWATERM-LEGACY-ADMISSION-FINGERPRINT: v2
 set -eu
 
 mode="full"
@@ -31,6 +32,10 @@ DEPLOY_ROOT="${WUWATERM_DEPLOY_ROOT:-/opt/wuwaterm/current}"
 FAIL_STEP="${WUWATERM_FAIL_STEP:-}"
 
 cd "$DEPLOY_ROOT"
+
+# Read-only rejection avoids creating the lock directory when a newer
+# deployment is already recorded. Repeat the check under FD 9 below.
+python3 -B scripts/deployment_admission.py legacy-precheck
 
 # One nonblocking lock covers both the legacy data deployment and the
 # runtime-only transaction. File descriptor 9 stays open through exec and is
@@ -105,6 +110,8 @@ if ! flock -n 9; then
   echo "deployment already in progress" >&2
   exit 75
 fi
+
+python3 -B scripts/deployment_admission.py legacy
 
 case "$mode" in
   runtime-only)

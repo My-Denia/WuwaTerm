@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import os
+from pathlib import Path
+import sqlite3
+
+import pytest
+
+from scripts import product_manifest as pm
+from wuwaterm.db import SCHEMA
+
+
+A = "a" * 40
+B = "b" * 40
+C = "c" * 40
+D = "d" * 40
+H = "1" * 64
+J = "2" * 64
+DEPLOYMENT_ID = "20261106T110000Z-0123456789abcdef0123456789abcdef"
+
+
+def make_database(path: Path) -> dict:
+    metadata = {
+        "schema_version": "2", "source_profile": "arikatsu",
+        "source_repo_url": "https://github.com/example/data.git", "source_commit": A,
+        "source_game_version": "1.0", "source_resource_version": "1",
+        "source_changelist": "1", "wutheringdata_commit": A,
+    }
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        conn.executemany("INSERT INTO metadata (key, value) VALUES (?, ?)", metadata.items())
+    database, _ = pm.read_database_snapshot(path)
+    return database
+
+
+def snapshot(service: str, image_id: str) -> dict:
+    return {
+        "schema_version": 1, "image_id": image_id,
+        "project": "project", "service": service, "container_name": None,
+        "command": ["api"] if service == "wuwaterm-api" else ["--db", "/app/data/terms.db"],
+        "entrypoint": ["/app/entrypoint.sh"],
+        "mounts": [{"host": "/srv/product/data", "container": "/app/data", "read_only": True}],
+        "env_files": ["/srv/product/.env"], "network_mode": "host", "ports": [],
+        "restart": {"name": "unless-stopped", "maximum_retry_count": 0},
+        "user": None, "working_dir": "/app",
+        "environment_overrides": [
+            {"name": "WUWATERM_DB_PATH", "mode": "literal", "value": "/app/data/terms.db"},
+            {"name": "TELEGRAM_BOT_TOKEN", "mode": "empty"},
+        ],
+        "runtime_options": {
+            "read_only_root": False, "privileged": False, "init": None,
+            "pid_mode": "", "ipc_mode": "private", "cap_add": [], "cap_drop": [],
+            "security_opt": [], "dns": [], "extra_hosts": [],
+        },
+    }
+
+
+def component(root: Path, name: str) -> dict:
+    if name == "api":
+        image_id, commit, tree = "sha256:" + H, A, B
+        service, version = "wuwaterm-api", "0.7.0.dev1"
+        source = {"revision_claim": commit, "verified_commit": commit, "verified_tree": tree}
+        core = {"version": version, **source}
+        provenance = {
+            "kind": "source-image", "build_recipe_sha256": H,
+            "build_receipt_sha256": J, "wheel_identity": "not-built-from-wheel",
+        }
+        repository = "My-Denia/WuwaTerm"
+    else:
+        image_id, commit = "sha256:" + J, C
+        service, version = "wuwaterm-telegram", "0.1.0.dev1"
+        source = {"revision_claim": commit, "verified_commit": None, "verified_tree": None}
+        core = {"version": "0.7.0.dev1", "revision_claim": D, "verified_commit": None, "verified_tree": None}
+        provenance = {
+            "kind": "wheel-image", "telegram_wheel_sha256": J,
+            "core_wheel_sha256": H, "core_lock_sha256": J,
+            "core_producer_kind": "github-actions-artifact",
+        }
+        repository = "My-Denia/WuwaTerm-Telegram"
+    snap = snapshot(service, image_id)
+    snapshot_path, digest = pm.write_recipe_snapshot(root, snap)
+    recipe = {key: snap[key] for key in pm._RECIPE_FIELDS}
+    recipe.update({"snapshot_path": snapshot_path, "sha256": digest})
+    return {
+        "repository": repository, "version": version, "source": source, "core": core,
+        "image": {"ref": "runtime:test", "id": image_id, "digest": image_id, "revision": commit},
+        "recipe": recipe, "provenance": provenance,
+    }
+
+
+@pytest.fixture
+def payload(tmp_path: Path) -> dict:
+    return {
+        "schema_version": 2, "deployment_id": DEPLOYMENT_ID,
+        "deployment_utc": "2026-11-06T11:00:00Z",
+        "operations": {"repository": "My-Denia/WuwaTerm", "source_commit": A,
+                       "source_tree": B, "source_tool_sha256": H},
+        "components": {"api": component(tmp_path, "api"), "telegram": component(tmp_path, "telegram")},
+        "database": make_database(tmp_path / "terms.db"),
+        "api_identity": {"path": "/srv/product/state-api/devices.db", "device": 1, "inode": 2},
+    }
+
+
+def test_immutable_manifest_records_independent_components_and_db(tmp_path: Path, payload: dict) -> None:
+    path = pm.write_manifest(tmp_path, payload)
+    assert path == tmp_path / ".deployments" / "products" / f"{DEPLOYMENT_ID}.json"
+    assert path.stat().st_mode & 0o222 == 0
+    assert pm.read_manifest(tmp_path, DEPLOYMENT_ID) == payload
+    assert pm.manifest_sha256(tmp_path, DEPLOYMENT_ID) == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert payload["components"]["api"]["core"]["revision_claim"] != payload["components"]["telegram"]["core"]["revision_claim"]
+    assert pm.verify_database_binding(payload["database"])["inode"] == (tmp_path / "terms.db").stat().st_ino
+    with pytest.raises(pm.ManifestError, match="already exists"):
+        pm.write_manifest(tmp_path, payload)
+    assert pm.read_manifest(tmp_path, DEPLOYMENT_ID) == payload
+
+
+def test_stopped_or_absent_component_representation_and_distinct_ids(tmp_path: Path, payload: dict) -> None:
+    payload["components"]["telegram"] = None
+    pm.write_manifest(tmp_path, payload)
+    second = copy.deepcopy(payload)
+    second["deployment_id"] = "20261106T110000Z-fedcba9876543210fedcba9876543210"
+    pm.write_manifest(tmp_path, second)
+    assert pm.read_manifest(tmp_path, DEPLOYMENT_ID)["components"]["telegram"] is None
+    assert pm.read_manifest(tmp_path, second["deployment_id"])["operations"] == payload["operations"]
+    assert pm.new_deployment_id() != pm.new_deployment_id()
+
+
+def test_legacy_provenance_does_not_invent_wheel_evidence(payload: dict) -> None:
+    legacy = payload["components"]["telegram"]
+    legacy["core"]["revision_claim"] = legacy["source"]["revision_claim"]
+    legacy["provenance"] = {"kind": "legacy-image", "legacy_manifest_sha256": H,
+                            "wheel_identity": "unavailable", "lock_identity": "unavailable"}
+    pm.validate_manifest(payload)
+    legacy["provenance"]["wheel_identity"] = H
+    with pytest.raises(pm.ManifestError, match="unavailable"):
+        pm.validate_manifest(payload)
+
+
+def test_unverified_wheel_revision_can_be_absent_without_false_attestation(payload: dict) -> None:
+    telegram = payload["components"]["telegram"]
+    telegram["source"]["revision_claim"] = None
+    telegram["image"]["revision"] = None
+    pm.validate_manifest(payload)
+    telegram["source"]["verified_commit"] = C
+    with pytest.raises(pm.ManifestError, match="recorded together"):
+        pm.validate_manifest(payload)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda p: p.update(schema_version=True),
+    lambda p: p.update(schema_version=3),
+    lambda p: p.update(deployment_id=A),
+    lambda p: p.update(extra="not allowed"),
+    lambda p: p["components"].update(api=None, telegram=None),
+    lambda p: p["components"]["api"]["recipe"].update(environment={"TOKEN": "secret"}),
+    lambda p: p["components"]["api"]["recipe"].update(snapshot_path="../../outside"),
+    lambda p: p["components"]["api"]["image"].update(revision=C),
+    lambda p: p["components"]["api"]["source"].update(verified_tree=None),
+    lambda p: p["database"].update(schema_version=3),
+    lambda p: p["database"]["provenance"].update(source_commit=C),
+    lambda p: p["database"]["provenance"].update(source_repo_url="https://user:secret@example.com/x"),
+    lambda p: p["api_identity"].update(sha256=H),
+    lambda p: p["components"]["api"]["recipe"]["command"].append("--token=secret"),
+    lambda p: p["components"]["api"]["recipe"]["command"].extend(["--api-key", "secret"]),
+])
+def test_bad_manifest_is_rejected_before_publication(tmp_path: Path, payload: dict, mutation) -> None:
+    mutation(payload)
+    with pytest.raises(pm.ManifestError):
+        pm.write_manifest(tmp_path, payload)
+    assert not (tmp_path / ".deployments" / "products" / f"{DEPLOYMENT_ID}.json").exists()
+
+
+def test_recipe_snapshot_is_immutable_and_refuses_secret_values(tmp_path: Path) -> None:
+    item = snapshot("wuwaterm-api", "sha256:" + H)
+    path, digest = pm.write_recipe_snapshot(tmp_path, item)
+    assert pm.read_recipe_snapshot(tmp_path, digest) == item
+    assert pm.write_recipe_snapshot(tmp_path, item) == (path, digest)
+    for override in (
+        {"name": "TELEGRAM_BOT_TOKEN", "mode": "literal", "value": "secret"},
+        {"name": "WUWATERM_API_PORT", "mode": "literal", "value": "secret"},
+    ):
+        bad = copy.deepcopy(item)
+        bad["environment_overrides"] = [override]
+        with pytest.raises(pm.ManifestError):
+            pm.write_recipe_snapshot(tmp_path, bad)
+
+
+def test_recipe_preserves_null_and_empty_command_separately(tmp_path: Path) -> None:
+    item = snapshot("wuwaterm-api", "sha256:" + H)
+    item["command"] = None
+    item["entrypoint"] = []
+    _, digest = pm.write_recipe_snapshot(tmp_path, item)
+    stored = pm.read_recipe_snapshot(tmp_path, digest)
+    assert stored["command"] is None
+    assert stored["entrypoint"] == []
+
+
+def test_poll_health_tmpfs_recipe_and_nonroot_owner_are_preserved(tmp_path: Path) -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["user"] = "1000:1000"
+    item["mounts"].append({
+        "type": "tmpfs", "container": "/run/wuwaterm-telegram",
+        "options": ["rw", "noexec", "nosuid", "nodev", "mode=0700", "uid=1000", "gid=1000", "size=4194304"],
+    })
+    item["environment_overrides"].append({"name": "WUWATERM_POLL_HEALTH", "mode": "literal", "value": "1"})
+    path, digest = pm.write_recipe_snapshot(tmp_path, item)
+    restored = pm.read_recipe_snapshot(tmp_path, digest)
+    assert restored == item
+    assert path.endswith(digest + ".json")
+    pm.verify_poll_health_mount(restored, effective_uid=1000)
+    with pytest.raises(pm.ManifestError, match="differs"):
+        pm.verify_poll_health_mount(restored, effective_uid=1001)
+
+
+@pytest.mark.parametrize("options", [
+    ["rw", "ro"], ["mode=0700", "mode=0755"], ["uid=1", "uid=2"],
+    ["size=0"], ["size=9223372036854775808"], ["mode=8888"],
+    ["uid=4294967295"], ["gid=-1"], ["unknown"],
+])
+def test_tmpfs_refuses_ambiguous_or_unsafe_options(options: list[str]) -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["mounts"].append({"type": "tmpfs", "container": "/run/wuwaterm-telegram", "options": options})
+    with pytest.raises(pm.ManifestError):
+        pm.validate_recipe_snapshot(item)
+
+
+def test_tmpfs_cannot_duplicate_bind_destination_or_hide_nonroot_owner() -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["mounts"].append({"type": "tmpfs", "container": "/app/data", "options": ["mode=0700"]})
+    with pytest.raises(pm.ManifestError, match="duplicate"):
+        pm.validate_recipe_snapshot(item)
+    item["mounts"][-1]["container"] = "/run/wuwaterm-telegram"
+    item["environment_overrides"].append({"name": "WUWATERM_POLL_HEALTH", "mode": "literal", "value": "1"})
+    with pytest.raises(pm.ManifestError, match="not explicit"):
+        pm.verify_poll_health_mount(item, effective_uid=1000)
+    item["mounts"][-1]["options"] += ["uid=1000", "ro"]
+    with pytest.raises(pm.ManifestError, match="read-only"):
+        pm.verify_poll_health_mount(item, effective_uid=1000)
+
+
+def test_poll_health_flag_refuses_nonboolean_and_secret_literals() -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["environment_overrides"].append({"name": "WUWATERM_POLL_HEALTH", "mode": "literal", "value": "secret"})
+    with pytest.raises(pm.ManifestError, match="health flag"):
+        pm.validate_recipe_snapshot(item)
+
+
+def test_manifest_refuses_missing_different_and_tampered_snapshots(tmp_path: Path, payload: dict) -> None:
+    recipe = payload["components"]["api"]["recipe"]
+    recipe["sha256"] = "9" * 64
+    recipe["snapshot_path"] = ".deployments/product-recipes/" + "9" * 64 + ".json"
+    with pytest.raises(pm.ManifestError):
+        pm.write_manifest(tmp_path, payload)
+    recipe = payload["components"]["telegram"]["recipe"]
+    filename = tmp_path / recipe["snapshot_path"]
+    os.chmod(filename, 0o600)
+    filename.write_text("{}\n")
+    os.chmod(filename, 0o400)
+    with pytest.raises(pm.ManifestError):
+        pm.read_recipe_snapshot(tmp_path, recipe["sha256"])
+
+
+def test_recipe_cannot_disagree_with_snapshot(tmp_path: Path, payload: dict) -> None:
+    payload["components"]["api"]["recipe"]["restart"]["name"] = "always"
+    with pytest.raises(pm.ManifestError, match="does not match"):
+        pm.write_manifest(tmp_path, payload)
+
+
+@pytest.mark.parametrize("target", ["parent", "leaf"])
+def test_symlinked_manifest_paths_are_rejected(tmp_path: Path, payload: dict, target: str) -> None:
+    if target == "parent":
+        other = tmp_path / "other"
+        other.mkdir()
+        (tmp_path / ".deployments" / "products").symlink_to(other, target_is_directory=True)
+    else:
+        products = tmp_path / ".deployments" / "products"
+        products.mkdir()
+        (products / f"{DEPLOYMENT_ID}.json").symlink_to(tmp_path / "terms.db")
+    with pytest.raises(pm.ManifestError):
+        pm.write_manifest(tmp_path, payload)
+    with pytest.raises(pm.ManifestError):
+        pm.read_manifest(tmp_path, DEPLOYMENT_ID)
+
+
+def test_symlinked_root_ancestor_is_rejected(tmp_path: Path, payload: dict) -> None:
+    alias = tmp_path.parent / (tmp_path.name + "-alias")
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(pm.ManifestError):
+        pm.write_manifest(alias, payload)
+
+
+def test_nonregular_manifest_is_rejected_without_blocking(tmp_path: Path, payload: dict) -> None:
+    products = tmp_path / ".deployments" / "products"
+    products.mkdir()
+    os.mkfifo(products / f"{DEPLOYMENT_ID}.json")
+    with pytest.raises(pm.ManifestError, match="regular file"):
+        pm.read_manifest(tmp_path, DEPLOYMENT_ID)
+
+
+def test_duplicate_json_keys_and_nonfinite_numbers_are_rejected_on_read(tmp_path: Path, payload: dict) -> None:
+    path = pm.write_manifest(tmp_path, payload)
+    raw = path.read_text()
+    for replacement in ('"schema_version": 2, "schema_version": 2,', '"schema_version": NaN,'):
+        os.chmod(path, 0o600)
+        path.write_text(raw.replace('"schema_version": 2,', replacement, 1))
+        os.chmod(path, 0o400)
+        with pytest.raises(pm.ManifestError):
+            pm.read_manifest(tmp_path, DEPLOYMENT_ID)
+
+
+def test_database_actual_provenance_schema_and_sidecars_are_verified(tmp_path: Path, payload: dict) -> None:
+    path = tmp_path / "terms.db"
+    before = pm.verify_database_binding(payload["database"])
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE metadata SET value = 'wrong' WHERE key = 'source_profile'")
+    with pytest.raises(pm.ManifestError, match="differs"):
+        pm.verify_database_binding(payload["database"])
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX idx_terms_en_norm")
+    with pytest.raises(pm.ManifestError, match="schema 2"):
+        pm.read_database_snapshot(path)
+    assert path.stat().st_ino == before["inode"]
+
+    second = tmp_path / "second.db"
+    make_database(second)
+    (tmp_path / "second.db-wal").symlink_to(tmp_path / "missing")
+    with pytest.raises(pm.ManifestError, match="sidecar"):
+        pm.read_database_snapshot(second)

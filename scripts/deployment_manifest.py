@@ -14,8 +14,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
+from scripts import deployment_admission  # noqa: E402
 from wuwaterm.constants import get_source_profile  # noqa: E402
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
 
@@ -349,6 +352,16 @@ def main() -> int:
 
     args = parser.parse_args()
     try:
+        if args.command in ("create", "publish-pointer", "durable-replace", "durable-remove"):
+            deployment_admission.admit_legacy(ROOT)
+            paths = ((args.source, args.destination) if args.command == "durable-replace"
+                     else (args.path,))
+            if args.command == "create" and not args.immutable:
+                # SQLite mode=ro can still write WAL shared memory. Treat its
+                # database and companion files as potential write paths.
+                paths += (args.db, *(args.db.with_name(args.db.name + suffix)
+                                    for suffix in ("-wal", "-shm", "-journal")))
+            deployment_admission.require_root_paths(ROOT, *paths)
         if args.command == "create":
             payload = build_manifest(
                 source_commit=args.source_commit,
@@ -374,13 +387,16 @@ def main() -> int:
             else:
                 write_manifest(args.path, payload)
         elif args.command == "verify":
+            # A SQLite read-only connection can still create or update WAL
+            # shared-memory files. CLI verification is lock-free and must not
+            # write, so refuse sidecars and use SQLite's immutable read mode.
             verify_manifest(
                 args.path,
                 source_commit=args.source_commit,
                 image_id=args.image_id,
                 image_digest=args.image_digest,
                 db_path=args.db,
-                immutable=args.immutable,
+                immutable=True,
             )
         elif args.command == "publish-pointer":
             publish_commit_pointer(args.path, args.source_commit)
@@ -390,6 +406,9 @@ def main() -> int:
             durable_remove(args.path)
         else:
             verify_commit_pointer(args.path, args.source_commit)
+    except deployment_admission.AdmissionError as exc:
+        print(f"deployment admission refused: {exc}", file=sys.stderr)
+        return 1
     except ManifestError as exc:
         print(f"deployment manifest error: {exc}", file=sys.stderr)
         return 1
