@@ -82,9 +82,9 @@ for you — the redaction is yours to do.
 In scope:
 
 - The code in this repository: the Telegram bot, the HTTP API under `/v1`, the
-  owner-private web presentation layer, the public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), the
-  desktop client under `client/`, the data-build scripts, and the packaging
-  and deployment material under `deploy/`.
+  owner-private web presentation layer, the data-build scripts, and the packaging
+  and deployment material under `deploy/`. The independent [Web](https://github.com/My-Denia/WuwaTerm-Web)
+  and [Windows](https://github.com/My-Denia/WuwaTerm-Windows) repositories maintain their own source and security reporting guidance.
 - The deployment guidance this project publishes, when following it as written
   leaves an instance exposed. A wrong instruction is a defect worth reporting.
 

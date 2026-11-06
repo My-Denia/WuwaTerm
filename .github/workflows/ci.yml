@@ -24,21 +24,18 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
-      windows_required: ${{ steps.resolve.outputs.windows_required }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
-      - name: Resolve source and affected paths
+      - name: Resolve source
         id: resolve
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
           TARGET: ${{ inputs.target_commit }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = workflow_dispatch ]; then
@@ -47,14 +44,10 @@ jobs:
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$TARGET" origin/main
             source_commit=$(git rev-parse "$TARGET^{commit}")
-            windows_required=true
           else
             source_commit=$(git rev-parse "$EVENT_SHA^{commit}")
-            if [ "$EVENT" = pull_request ]; then base="$PR_BASE"; else base="$PUSH_BEFORE"; fi
-            windows_required=$(python scripts/verify_ci_source.py client-required "$base" "$source_commit")
           fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
-          echo "windows_required=$windows_required" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve.outputs.source_commit }}
@@ -135,11 +128,25 @@ jobs:
           repository: My-Denia/WuwaTerm-Web
           ref: ${{ steps.web.outputs.revision }}
           path: web
-      - name: Record Web source
-        run: git -C web rev-parse HEAD
+      - name: Verify Web source
+        run: test "$(git -C web rev-parse HEAD)" = "${{ steps.web.outputs.revision }}"
+      - name: Read Web's immutable Windows revision
+        id: web-windows
+        run: |
+          set -euo pipefail
+          revision=$(cat web/contracts/windows-ref.txt)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: My-Denia/WuwaTerm-Windows
+          ref: ${{ steps.web-windows.outputs.revision }}
+          path: windows
+      - name: Verify Web's Windows source
+        run: test "$(git -C windows rev-parse HEAD)" = "${{ steps.web-windows.outputs.revision }}"
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -147,17 +154,41 @@ jobs:
       - run: python -m pytest -m cross_component tests/test_meta_site_contract.py
         env:
           WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
-      - name: Check desktop manuscript files against Web
-        run: |
-          node --version
-          python -m pytest -q client/tests/test_manuscript.py::test_actual_web_and_client_read_each_others_files
-        env:
-          WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
-          PYTHONPATH: ${{ github.workspace }}/client/src
       - run: npm run test:contract
         working-directory: web
         env:
           WUWATERM_BACKEND_ROOT: ${{ github.workspace }}
+          WUWATERM_WINDOWS_ROOT: ${{ github.workspace }}/windows
+
+  windows-contract:
+    needs: source
+    name: API to Windows contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.source_commit }}
+      - name: Read immutable Windows revision
+        id: windows
+        run: |
+          set -euo pipefail
+          revision=$(cat contracts/windows-ref.txt)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: My-Denia/WuwaTerm-Windows
+          ref: ${{ steps.windows.outputs.revision }}
+          path: windows
+      - name: Verify Windows source
+        run: test "$(git -C windows rev-parse HEAD)" = "${{ steps.windows.outputs.revision }}"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev,telegram]"
+      - run: python -m pytest -m cross_component tests/test_windows_contract.py
+        env:
+          WUWATERM_WINDOWS_ROOT: ${{ github.workspace }}/windows
 
   package:
     name: wheel/sdist build, audit, install
@@ -167,14 +198,6 @@ jobs:
       source_commit: ${{ needs.source.outputs.source_commit }}
       upload_package: true
       candidate_metadata: true
-
-  client:
-    name: desktop client build (windows)
-    needs: source
-    if: needs.source.outputs.windows_required == 'true'
-    uses: ./.github/workflows/windows-client.yml
-    with:
-      source_commit: ${{ needs.source.outputs.source_commit }}
 
   deploy-boundary:
     needs: source
@@ -217,11 +240,12 @@ jobs:
 
   receipt:
     name: validated source
-    needs: [source, test, lock, web-contract, package, deploy-boundary]
+    needs: [source, test, lock, web-contract, windows-contract, package, deploy-boundary]
     if: >-
       ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.source.result == 'success' && needs.test.result == 'success'
       && needs.lock.result == 'success' && needs.web-contract.result == 'success'
+      && needs.windows-contract.result == 'success'
       && needs.package.result == 'success' && needs.deploy-boundary.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -229,7 +253,6 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ needs.source.outputs.source_commit }}
           CONTROL_COMMIT: ${{ github.workflow_sha }}
-          WINDOWS_REQUIRED: ${{ needs.source.outputs.windows_required }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT: ${{ github.event_name }}
@@ -245,7 +268,6 @@ jobs:
               'run_attempt': int(os.environ['RUN_ATTEMPT']),
               'event': os.environ['EVENT'],
               'backend_scope': 'full',
-              'windows_required': os.environ['WINDOWS_REQUIRED'] == 'true',
           }) + '\n')
           PYRECEIPT
       - uses: actions/upload-artifact@v7

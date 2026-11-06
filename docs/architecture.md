@@ -54,8 +54,16 @@ Three presentation adapters, one application layer, two consumers:
 | Telegram bot | Presentation adapter: commands, chat authorization, chat wording, markup | `src/wuwaterm/bot.py`, `channel.py` |
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
 | Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
-| Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
+| Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) |
 | Public beta Site | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that anonymously exposes same-origin `/api/*` and proxies `/v1` with a server-side device token | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) |
+
+Desktop source moved to the independent Windows product after its v0.3.0
+release. The original desktop design made dictionary versus model cost and
+answer provenance clear, used Chinese and themes, and kept errors inline; the
+independent product preserves that work while owning its build and release.
+See the [original Core source](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client) and the
+[Windows migration provenance](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/provenance/client-source.json). Core retains the API and checks its producer
+contract against a pinned Windows consumer.
 
 The desktop client is deliberately outside the service: it renders answers the
 API produced, and every rule the API applies is applied whether the caller is

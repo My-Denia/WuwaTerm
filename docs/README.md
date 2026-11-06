@@ -9,9 +9,7 @@ desktop client guide and a few design and audit records are in Chinese.
 
 - [Public Beta Site](sites.md): links to the independent Web repository, product
   guide, privacy boundary, cross-repository contracts and deployment receipts.
-- [Windows client](../client/README.md): the desktop app for the HTTP API,
-  how to get and run the release zip, server address, device credential and
-  build. In Chinese.
+- [Windows client](https://github.com/My-Denia/WuwaTerm-Windows): the independent desktop app, release, build and support guide.
 - [Telegram Behavior](telegram-behavior.md): commands, direction flags, group
   authorization, public mode, linked-channel auto-translation and
   Telegram-specific limits.
@@ -57,7 +55,7 @@ desktop client guide and a few design and audit records are in Chinese.
 - [Web Presentation Layer](web-presentation-layer.md): the owner-private
   browser interface inside the API process. Off by default, not the public
   beta, and an extension of the [Deployment](deployment.md) runbook.
-- [Desktop client UI redesign](client-ui-redesign.md): a staged design proposal
+- [Desktop client UI redesign](client-ui-redesign.md): the historical design proposal
   for the client interface. In Chinese.
 - [Repository audit](repo-audit.md): a dated, read-only inventory of the tree at
   one commit. In Chinese.

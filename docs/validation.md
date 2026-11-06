@@ -7,7 +7,6 @@ python scripts/validate.py            # every gate, in order
 python scripts/validate.py --list     # what it would run; runs nothing
 python scripts/validate.py --quick    # every gate except the test suite
 python scripts/validate.py --only ruff
-python scripts/validate.py --client   # additionally: the desktop client suite
 ```
 
 The steps, in order: `hygiene`, `architecture`, `api-contract`,
@@ -21,21 +20,9 @@ here and a green matrix job are the same claim, on the same file. Before it
 existed, CI carried one list, the README a shorter one, and this page a third,
 and a gate added to one of them was invisible in the others.
 
-It is **not** the whole pull request. CI also runs the uv lock-drift check, the
-wheel and sdist build with its packaging audit and clean-venv install smoke, the
-Windows desktop-client build when affected, the Docker runtime/builder boundary
-job, and the cross-repository `web-contract` job — five jobs this command does not contain, needing
-`uv`, a build, a Windows runner, Docker, and Node respectively. If a change
-touches the lock file, the packaging metadata, `client/`, the API/Web contract or
-`deploy/`, a green run here is necessary and not sufficient; the job list is
-in [the gate table below](#gates-for-the-http-api-and-the-desktop-client)
-and in `.github/workflows/ci.yml`.
-
-CI owns the automatic package and Windows builds. It selects Windows for
-changes affecting the client, API contracts, build configuration or workflows,
-and for unclassified paths; a historical-source dispatch runs the full set.
-Release workflows run only when dispatched, or on the backend release-published
-event. A dry-run dispatch builds release artifacts without publishing them.
+It is **not** the whole pull request. CI separately checks the lock, package,
+Docker boundary, and contracts against pinned Web and Windows checkouts. Windows
+build and release validation runs in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows).
 
 `.github/workflows/selfhost-smoke.yml` runs when the pull request changes
 `deploy/**` or [Self-Hosting](self-hosting.md): it follows that guide's
@@ -64,14 +51,6 @@ interpreter that runs the script, so there is no POSIX-only path in it:
 ```bash
 .venv/bin/python scripts/validate.py
 ```
-
-`--client` is opt-in, and it runs under `client/.venv` rather than under the
-interpreter that started the script: the client is a separate package needing
-Qt, `keyring` and `qasync` and at least Python 3.12, while that environment
-carries none of the server's dependencies, so no single interpreter can run
-both sides. If `client/.venv` does not exist the step says so and how to make
-it, instead of failing in test collection. Everything about the client that can
-be checked by reading text is in the main suite instead (see the table below).
 
 The linter is `ruff`, installed by the `dev` extra and bounded to one minor
 release. The enabled rules are written out in `pyproject.toml` under
@@ -145,20 +124,20 @@ presentation, domain, and builder modules, and enforces the HTTP adapter's
 four-module import allowlist into `wuwaterm` (see
 [Architecture](architecture.md)).
 
-## Gates For The HTTP API And The Desktop Client
+## Gates For The HTTP API And Consumers
 
 | Gate | What it proves | Where it runs |
 |---|---|---|
 | `scripts/check_api_contract.py` | The committed `docs/api/openapi.json` still equals the document the application generates. A route, model or error code cannot change without the published contract changing in the same commit | `scripts/validate.py`, offline and in every CI matrix job, before the suite |
-| `client/.venv/Scripts/python.exe -m pytest` (in `client/`) | The client's own behaviour: transport refusals, the request-target guard, credential storage, cancellation, and error rendering | CI `desktop client build (windows)` job on `windows-latest` |
-| `client/build.ps1` | The one-folder PyInstaller artifact builds from the committed spec and passes its own `--self-check`, and the build leaves nothing untracked in the working tree. Not that two builds agree: there is no lock file for the client and no byte comparison, and the script says so | Same CI job; the artifact is uploaded there |
 | `tests/test_api_request_logging.py` | Every HTTP request leaves exactly one server-side **completion** record — on the authenticated path, on `401`, on a failure that never reaches a handler — carrying the same `request_id` the caller was given; and that no record the deployed process would write holds any of what the service itself knows: a credential, the device id behind an authenticated principal, or submitted text. A caller-supplied target is recorded escaped, bounded, and replaced entirely when it could be a credential. The adapter's other diagnostic lines are outside the one-per-request count and inside the privacy scan. Asserted against captured records rather than by reading the source, because a field added later is invisible to inspection | The repository `pytest` run |
 | `WUWATERM_WEB_ROOT=... python -m pytest -m cross_component tests/test_meta_site_contract.py`; Web `npm run test:contract` | Real API metadata through the pinned BFF plus category/reason/client-label compatibility; strict response projection retained | Backend CI `web-contract`; Web CI also tests a pinned backend |
 
-The client suite exercises transport, TLS and credential behavior; the suite and
-the packaged executable run on the Windows runner when affected.
+`WUWATERM_WINDOWS_ROOT=... python -m pytest -m cross_component tests/test_windows_contract.py`
+checks the pinned Windows version declaration and pure manuscript validator against
+actual Core API responses, including a nonempty review. Web and Windows product CI
+check their full file interoperability.
 
-Neither the API contract gate nor the client build proves anything about a
+Neither the API contract gate nor consumer tests prove anything about a
 deployed service. A request answered on the service host is evidence about the
 process; evidence about the published endpoint has to come from the client
 machine (see [Deployment](deployment.md)).
@@ -193,7 +172,7 @@ may not contain is a test, not a convention — see the table above.
 
 ## Windows Reference
 
-Windows commands are still supported when needed:
+The server test suite is unsupported on a native Windows host. The following commands show environment setup only; use Linux for the server validation gate:
 
 ```powershell
 python -m venv .venv

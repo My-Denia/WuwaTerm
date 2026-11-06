@@ -10,7 +10,7 @@ an intention.
 | --- | --- |
 | Declared range | `requires-python >=3.11`, no upper bound (`pyproject.toml`) |
 | Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
-| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build, the Docker boundary job and the `web-contract` job run separately ([Validation](validation.md)) |
+| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Docker boundary job and the Web and Windows contract jobs run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
 | Published images from v0.4.0 onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |
 | Supported development platform | **Linux.** The suite is green there. |
@@ -37,43 +37,19 @@ Neither is guarded by a platform skip today, so a Windows contributor running
 suite on Linux — a WSL checkout is enough, and a Linux run of the suite is
 green at roughly 1028 tests.
 
-The *client* suite is the opposite case: it runs on Windows, in the client's own
-virtual environment, and everything about the client that can be checked by
-reading text is in the server suite instead so that it runs on every pull
-request without a Windows runner.
+## Desktop client and API compatibility
 
-## Desktop client
+[WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop source, builds, support and
+release process. The independent [v0.3.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0) is unsigned.
+Core CI tests the current `/v1` API and a real nonempty review report against
+the pinned Windows consumer, without importing Qt or the client transport.
+The `api_version` in `/v1/meta` identifies the protocol; `service_version`
+identifies the Core release. The desktop warns about an unsupported API version
+on a status refresh rather than refusing the response. The API snapshot is [OpenAPI](api/openapi.json).
+Windows and Web product CI own full manuscript file interoperability.
 
-| | |
-| --- | --- |
-| Operating system | Windows 10 and Windows 11, x64 — the **intended targets**, not a measured claim. CI builds and tests the client on GitHub's `windows-latest` runner image, which is not pinned to either desktop release, so a defect specific to one of them would not turn CI red. |
-| Python to build | 3.12 or newer (`client/pyproject.toml` declares `requires-python >=3.12`); the client keeps its own virtual environment, separate from the server's |
-| GUI toolkit | PySide6 (`>=6.7,<7`) |
-| Build | one-folder PyInstaller build from the committed spec, via `client/build.ps1` |
-| Signing | **None.** The build is unsigned and there is no installer, so Windows SmartScreen shows a warning the user has to click through. |
-| Byte-for-byte equality between two builds | Not claimed and not checked. There is no lock file for the client and no comparison of build outputs. |
-| Distribution between releases | a CI workflow artifact from the `desktop client build (windows)` job, retained for 90 days and requiring a GitHub login. The independent `client-release.yml` workflow builds the same zip and can create a `client-vX.Y.Z` draft. Backend releases do not require a new client build. |
-| Distribution | a release asset, `WuwaTerm-0.2.0-windows-x64.zip`, listed in `SHA256SUMS`; v0.4.0–v0.6.0 bundled it with the backend, future client releases use `client-vX.Y.Z` |
-| Tested in CI | the client's own suite on `windows-latest` with Python 3.12, followed by the build; the release workflow repeats the suite, the build and the `--self-check` start-up rehearsal before it packages the zip |
-
-## Compatibility contract
-
-| | |
-| --- | --- |
-| Client 0.1.x — every build before this change | speaks HTTP API `v1`, served by wuwaterm **>= 0.3.0**. It parsed `api_version` and did nothing with it: pointed at a server speaking something else, it would have failed one request at a time with no explanation. |
-| Client 0.2.x — what the tree carries now (`client/pyproject.toml`, `client/src/wuwaterm_client/__init__.py`), and the first publicly distributed build | the same contract, now stated in code as `SUPPORTED_API_VERSIONS` in `client/src/wuwaterm_client/api.py` and **checked**. A reply whose `api_version` is outside that tuple raises a warning naming the version the server reported and the version this client speaks. It is a warning, not a refusal: the service facts stay on screen and nothing is blocked, because the client cannot know that every route it needs has changed. |
-| When the check runs | on the `/v1/meta` reply the status view already fetches when the owner presses 刷新. **No request was added, and none happens at startup** — an unconfigured or freshly started client still sends nothing, which is a tested invariant (issues #68 and #80), not a side effect. |
-| How the client learns which PROTOCOL the server speaks | `api_version` in the body of `GET /v1/meta`. It is the contract identifier — `"v1"` — and it is stable across server releases, so it answers "can I talk to this at all", not "which release is this" |
-| How the client learns which RELEASE is running | `service_version` in the same body, which is the installed package version and is what the desktop status view shows. That is the field to read against the `>= 0.3.0` boundary above |
-| Where the contract lives | [`docs/api/openapi.json`](api/openapi.json), committed and drift-gated by `scripts/check_api_contract.py`, so a route, model or error code cannot change without the published contract changing in the same commit |
-
-The owner-private web presentation layer is deliberately outside this contract:
-it is off by default and has no entry in the published API document
-([Web Presentation Layer](web-presentation-layer.md)).
-
-The anonymous public beta Site is also outside this contract: it is a separately
-hosted proxy with its own error envelope, checked by the Web repository CI, not by
-the desktop client ([Public Beta Site](sites.md)).
+The owner-private Web and public beta have separate presentation boundaries;
+see [Web Presentation Layer](web-presentation-layer.md) and [Public Beta Site](sites.md).
 
 ## Public beta Site
 

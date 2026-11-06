@@ -57,9 +57,9 @@ FORBIDDEN_NAME_PREFIXES = (
     ".channel_replies.",
     "id_rsa",
 )
-# `wuwaterm_client` is the desktop client. It lives outside src/, has its own
-# pyproject.toml and is deliberately never published, so its appearance in a
-# server distribution means the packaging configuration changed underneath us.
+# `wuwaterm_client` is the independent desktop client. It has its own
+# distribution boundary; its appearance in a server distribution means the
+# packaging configuration changed underneath us.
 FORBIDDEN_NAME_MARKERS = ("wutheringdata", "credential", "wuwaterm_client")
 
 # The public wheel deliberately ships BOTH adapters: the Telegram bot and the

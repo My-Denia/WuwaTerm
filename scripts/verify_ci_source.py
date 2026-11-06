@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select Windows coverage and verify a release source's trusted CI receipt."""
+"""Verify a release source's trusted CI receipt."""
 
 from __future__ import annotations
 
@@ -18,32 +18,11 @@ BACKEND_JOBS = (
     *(f"pytest (py{version})" for version in ("3.11", "3.12", "3.13", "3.14")),
     "uv locked runtime behavior (py3.11)",
     "API to Web contract",
+    "API to Windows contract",
     "wheel/sdist build, audit, install / build and smoke",
     "docker runtime/builder boundary",
     "validated source",
 )
-WINDOWS_JOB = "desktop client build (windows) / build and test"
-
-
-def client_required(paths: list[str]) -> bool:
-    """Skip Windows only for paths known not to affect its build or contract."""
-    safe_exact = {
-        "README.md", "README.zh-CN.md", "CHANGELOG.md", "CONTRIBUTING.md",
-        "SUPPORT.md", ".github/PULL_REQUEST_TEMPLATE.md",
-        "tests/test_release_workflow.py", "tests/test_ci_source.py",
-        "tests/test_deploy_scripts.py", "tests/test_sentence.py",
-    }
-    for path in paths:
-        if path in safe_exact or path.startswith(("deploy/", ".github/ISSUE_TEMPLATE/")):
-            continue
-        if path.startswith("docs/") and not path.startswith("docs/api/"):
-            continue
-        return True
-    return False
-
-
-def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True).strip()
 
 
 def gh_json(*args: str) -> object:
@@ -52,7 +31,7 @@ def gh_json(*args: str) -> object:
 
 def verify_record(
     run: dict, jobs: list[dict], receipt: dict, workflow_id: int,
-    repository: str, source: str, run_id: int, *, require_client: bool = False,
+    repository: str, source: str, run_id: int,
 ) -> str:
     """Check API metadata, complete job coverage, and the bound artifact."""
     def require(condition: bool, message: str) -> None:
@@ -63,11 +42,8 @@ def verify_record(
     require(run.get("id") == run_id and receipt.get("run_id") == run_id, "wrong run")
     require(run.get("workflow_id") == workflow_id, "wrong workflow")
     require(run.get("path", "").split("@", 1)[0] == ".github/workflows/ci.yml", "wrong workflow path")
-    completed = run.get("status") == "completed" and run.get("conclusion") in {"success", "failure"}
-    waiting_for_windows = (not require_client and run.get("status") == "in_progress"
-                           and run.get("conclusion") is None)
-    require(completed or waiting_for_windows,
-            "CI run is incomplete or cancelled")
+    require(run.get("status") == "completed" and run.get("conclusion") == "success",
+            "CI run is incomplete or unsuccessful")
     require(run.get("event") in {"push", "workflow_dispatch"}, "untrusted CI event")
     require(run.get("head_branch") == "main", "CI control ref is not main")
     for field in ("repository", "head_repository"):
@@ -78,38 +54,23 @@ def verify_record(
     require(bool(SHA.fullmatch(control)) and run.get("head_sha") == control, "wrong control SHA")
     require(receipt.get("event") == run.get("event"), "wrong event in receipt")
     require(receipt.get("run_attempt") == run.get("run_attempt"), "wrong run attempt")
-    require(isinstance(receipt.get("windows_required"), bool), "missing Windows scope")
     require(receipt.get("backend_scope") == "full", "incomplete backend scope")
     if run["event"] == "push":
         require(control == source, "push did not validate its own source")
-    else:
-        require(receipt["windows_required"], "historical dispatch was not full")
     by_name = {job.get("name"): job for job in jobs}
     require(len(by_name) == len(jobs), "ambiguous job names")
-    for name in BACKEND_JOBS + ((WINDOWS_JOB,) if require_client else ()):
+    for name in BACKEND_JOBS:
         job = by_name.get(name, {})
         require(job.get("status") == "completed" and job.get("conclusion") == "success", f"missing or unsuccessful job: {name}")
     incomplete = [job for job in jobs if job.get("status") != "completed"]
     failures = [job for job in jobs if job.get("status") == "completed"
                 and job.get("conclusion") not in {"success", "skipped"}]
-    if waiting_for_windows:
-        # The receipt does not depend on Windows, but no other job may remain pending.
-        require(receipt["windows_required"] and len(incomplete) == 1
-                and incomplete[0].get("name") == WINDOWS_JOB
-                and incomplete[0].get("status") in {"queued", "in_progress"}
-                and incomplete[0].get("conclusion") is None, "incomplete job")
-        require(not failures, "running CI contains an unsuccessful job")
-    elif run["conclusion"] == "success":
-        require(not incomplete, "incomplete job")
-        require(not failures, "successful run contains an unsuccessful job")
-    else:
-        require(not incomplete, "incomplete job")
-        require(len(failures) == 1 and failures[0].get("name") == WINDOWS_JOB
-                and failures[0].get("conclusion") == "failure", "run failed for more than Windows")
+    require(not incomplete, "incomplete job")
+    require(not failures, "successful run contains an unsuccessful job")
     return control
 
 
-def verify_source(source: str, run_id: str | None, *, require_client: bool = False) -> None:
+def verify_source(source: str, run_id: str | None) -> None:
     repository = os.environ["GH_REPO"]
     workflow = gh_json(f"repos/{repository}/actions/workflows/ci.yml")
     if run_id:
@@ -136,8 +97,7 @@ def verify_source(source: str, run_id: str | None, *, require_client: bool = Fal
                     check=True, stdout=subprocess.DEVNULL,
                 )
                 receipt = json.loads((Path(directory) / "validated-source.json").read_text())
-            control = verify_record(run, jobs, receipt, workflow["id"], repository, source, candidate,
-                                    require_client=require_client)
+            control = verify_record(run, jobs, receipt, workflow["id"], repository, source, candidate)
             subprocess.run(["git", "merge-base", "--is-ancestor", control, "origin/main"], check=True)
             print(f"CI run {candidate} validated source {source} using main control {control}")
             return
@@ -154,28 +114,12 @@ def verify_source(source: str, run_id: str | None, *, require_client: bool = Fal
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    paths = sub.add_parser("client-required")
-    paths.add_argument("base")
-    paths.add_argument("source")
     verify = sub.add_parser("verify")
     verify.add_argument("source")
     verify.add_argument("--run-id")
-    verify.add_argument("--require-client", action="store_true")
     args = parser.parse_args()
     try:
-        if args.command == "client-required":
-            if not SHA.fullmatch(args.base) or not SHA.fullmatch(args.source) or args.base == "0" * 40:
-                print("true")
-            else:
-                try:
-                    names = git("diff", "--name-only", "--no-renames", args.base, args.source).splitlines()
-                except subprocess.CalledProcessError:
-                    # A rewritten or unavailable base cannot establish that Windows is unaffected.
-                    print("true")
-                else:
-                    print(str(client_required(names)).lower())
-        else:
-            verify_source(args.source, args.run_id, require_client=args.require_client)
+        verify_source(args.source, args.run_id)
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f"CI source verification failed: {exc}", file=sys.stderr)
         return 1

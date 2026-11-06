@@ -12,13 +12,10 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current project version is `0.6.1`; `v0.6.0` is the
-  previous-release baseline. Set
+  published tag. The current Core version is `0.7.0.dev1`, a candidate, not an eligible stable release; `v0.6.0` is the previous-release baseline. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
-- Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
-  independently of the server and carried in a separate client release as
-  `WuwaTerm-0.2.0-windows-x64.zip`
+- Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -85,21 +82,10 @@ notes; do not let "images are published" be read as "no checkout needed".
 
 ## Independent Windows client release
 
-Client development remains paused. CI still builds and tests the client for
-compatibility when affected; backend releases do not require an unconditional
-Windows CI build.
-Use `.github/workflows/client-release.yml` for an independent Windows package.
-It builds `WuwaTerm-<client version>-windows-x64.zip` from a full main SHA,
-runs client tests and the executable self-check, and defaults to a dry run.
-A non-dry dispatch creates a `client-vX.Y.Z` draft with the zip, `SHA256SUMS`
-and `client-manifest.json`. It does not publish or promote backend images.
-Review the exact source SHA, download and verify all three assets, then publish
-manually with `--latest=false` so it does not replace the latest backend release.
-The API compatibility boundary remains the one in [Support Matrix](support-matrix.md).
-
-The Windows client is **UNSIGNED**. Its release notes must disclose the
-SmartScreen warning. There is no installer, and builds are not claimed to be
-byte-identical. Existing bundled release assets remain available unchanged.
+[WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns its own build and release workflow.
+The [v0.3.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0) is unsigned; see its repository for
+current release instructions and SmartScreen guidance. Existing Core bundled
+release assets remain available unchanged.
 
 ## Validation
 
@@ -112,7 +98,7 @@ python scripts/validate.py
 That is hygiene, architecture boundaries, the API contract, ruff and
 the test suite, in that order, and it is the same entry point CI's server
 matrix runs. It is not the whole pull request: the lock-drift check, the
-packaging audit, the Windows client build and the Docker boundary job are
+packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
 For a locally built release candidate database, also run:
@@ -129,9 +115,8 @@ The packaging gates (`python -m build`, `twine check --strict`,
 CI and the release workflow call the same package workflow; the release run
 builds and checks the exact assets it uploads.
 
-Release only after the required backend CI jobs and configured review workflows
-pass for the exact commit. A Windows client release also requires its Windows
-CI job to pass.
+Release only after all required Core CI jobs and configured review workflows
+pass for the exact commit. Windows releases follow their own repository gates.
 
 ## Privacy And LLM Notes
 
@@ -187,13 +172,10 @@ CI job to pass.
    ```
 
    Before any write, the workflow verifies a CI receipt for the actual source
-   SHA, its main control revision, and the required backend jobs. A backend
-   release may proceed when the only failed job is Windows; a client release
-   also requires Windows to pass. The latest run attempt must carry its own
-   receipt, so retry a Windows-only failure with Re-run all jobs: Re-run
-   failed jobs leaves that attempt without a receipt and the release refuses
-   it. Main
-   pushes are found automatically. For an
+   SHA, its main control revision, and all required Core jobs, including both
+   consumer contracts. The run must complete successfully. Each attempt needs
+   its own receipt: use Re-run all jobs because Re-run failed jobs leaves the
+   new attempt without a receipt. Main pushes are found automatically. For an
    older source without a receipt, dispatch the current CI on main, wait for it
    to finish, and pass its run ID as `validation_run_id`:
 

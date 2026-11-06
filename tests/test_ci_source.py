@@ -23,25 +23,7 @@ CONTROL = "b" * 40
 REPOSITORY = "example/project"
 
 
-@pytest.mark.parametrize(
-    ("paths", "expected"),
-    [
-        (["docs/validation.md", "deploy/Dockerfile"], False),
-        (["tests/test_release_workflow.py"], False),
-        (["client/src/wuwaterm_client/api.py"], True),
-        (["src/wuwaterm_api/app.py"], True),
-        (["contracts/web-ref.txt"], True),
-        (["docs/api/openapi.json"], True),
-        (["pyproject.toml"], True),
-        ([".github/workflows/ci.yml"], True),
-        (["new-unclassified-file"], True),
-    ],
-)
-def test_windows_path_selection(paths, expected):
-    assert ci_source.client_required(paths) is expected
-
-
-def _fixture(*, dispatch=True, windows=True):
+def _fixture(*, dispatch=True):
     event = "workflow_dispatch" if dispatch else "push"
     control = CONTROL if dispatch else SOURCE
     run = {
@@ -54,35 +36,23 @@ def _fixture(*, dispatch=True, windows=True):
     receipt = {
         "schema": 1, "source_commit": SOURCE, "control_commit": control,
         "run_id": 42, "run_attempt": 1, "event": event,
-        "backend_scope": "full", "windows_required": windows,
+        "backend_scope": "full",
     }
-    names = ci_source.BACKEND_JOBS + ((ci_source.WINDOWS_JOB,) if windows else ())
+    names = ci_source.BACKEND_JOBS
     jobs = [{"name": name, "status": "completed", "conclusion": "success"} for name in names]
     return {"run": run, "receipt": receipt, "jobs": jobs}
 
 
 @pytest.mark.parametrize("case", [
-    "valid_dispatch", "valid_push_without_windows", "wrong_source", "wrong_run", "wrong_workflow",
+    "valid_dispatch", "valid_push", "valid_lookup", "wrong_source", "wrong_run", "wrong_workflow",
     "wrong_workflow_path", "wrong_ref", "wrong_repository", "wrong_control", "failed_run",
-    "failed_job", "missing_job", "missing_receipt", "wrong_attempt", "incomplete_scope",
-    "dispatch_skips_windows", "windows_skipped_backend", "windows_skipped_client",
-    "windows_failed_backend", "windows_failed_client", "windows_failed_lookup", "client_success",
-    "windows_and_backend_failed", "other_job_failed", "backend_cancelled", "cancelled_run",
-    "incomplete_run", "incomplete_job", "control_not_on_main", "valid_lookup",
-    "windows_queued_backend", "windows_running_backend", "windows_running_lookup",
-    "windows_running_client", "windows_running_wrong_source", "windows_running_missing_receipt",
-    "windows_running_failed_backend", "windows_running_missing_backend", "windows_running_other_job",
-    "windows_running_incomplete_backend", "windows_running_incomplete_receipt", "windows_running_wrong_attempt",
-    "windows_running_cancelled", "windows_running_wrong_scope", "windows_running_other_failure",
+    "failed_job", "missing_job", "missing_windows_contract", "skipped_windows_contract",
+    "missing_receipt", "wrong_attempt", "incomplete_scope", "other_job_failed",
+    "backend_cancelled", "cancelled_run", "incomplete_run", "incomplete_job", "control_not_on_main",
 ])
 def test_release_source_verification_uses_api_jobs_and_bound_receipt(tmp_path, case):
-    fixture = _fixture(dispatch=case not in {"valid_push_without_windows", "valid_lookup", "windows_failed_lookup",
-                                             "windows_running_lookup", "windows_running_wrong_scope"},
-                       windows=case != "valid_push_without_windows")
+    fixture = _fixture(dispatch=case not in {"valid_push", "valid_lookup"})
     run, receipt, jobs = fixture["run"], fixture["receipt"], fixture["jobs"]
-    if case.startswith(("windows_running_", "windows_queued_")):
-        run.update(status="in_progress", conclusion=None)
-        jobs[-1].update(status="queued" if case == "windows_queued_backend" else "in_progress", conclusion=None)
     if case == "wrong_source":
         receipt["source_commit"] = "c" * 40
     elif case == "wrong_run":
@@ -103,51 +73,25 @@ def test_release_source_verification_uses_api_jobs_and_bound_receipt(tmp_path, c
         jobs[1]["conclusion"] = "failure"
     elif case == "missing_job":
         jobs.pop(1)
+    elif case == "missing_windows_contract":
+        jobs[:] = [job for job in jobs if job["name"] != "API to Windows contract"]
+    elif case == "skipped_windows_contract":
+        next(job for job in jobs if job["name"] == "API to Windows contract")["conclusion"] = "skipped"
     elif case == "wrong_attempt":
         receipt["run_attempt"] = 2
     elif case == "incomplete_scope":
         receipt["backend_scope"] = "partial"
-    elif case == "dispatch_skips_windows":
-        receipt["windows_required"] = False
-    elif case in {"windows_skipped_backend", "windows_skipped_client"}:
-        jobs[-1]["conclusion"] = "skipped"
-    elif case in {"windows_failed_backend", "windows_failed_client", "windows_failed_lookup", "windows_and_backend_failed"}:
-        run["conclusion"] = "failure"
-        jobs[-1]["conclusion"] = "failure"
-        if case == "windows_and_backend_failed":
-            jobs[1]["conclusion"] = "failure"
     elif case == "other_job_failed":
-        run["conclusion"] = "failure"
         jobs.append({"name": "unexpected failed job", "status": "completed", "conclusion": "failure"})
     elif case == "backend_cancelled":
-        run["conclusion"] = "failure"
         jobs[1]["conclusion"] = "cancelled"
     elif case == "cancelled_run":
         run["conclusion"] = "cancelled"
     elif case == "incomplete_run":
-        run["status"] = "in_progress"
+        run.update(status="in_progress", conclusion=None)
     elif case == "incomplete_job":
-        jobs[1]["status"] = "in_progress"
-    elif case == "windows_running_wrong_source":
-        receipt["source_commit"] = "c" * 40
-    elif case == "windows_running_failed_backend":
-        jobs[1]["conclusion"] = "failure"
-    elif case == "windows_running_missing_backend":
-        jobs.pop(1)
-    elif case in {"windows_running_incomplete_backend", "windows_running_incomplete_receipt"}:
-        job = jobs[1] if case == "windows_running_incomplete_backend" else jobs[-2]
-        job.update(status="in_progress", conclusion=None)
-    elif case == "windows_running_wrong_attempt":
-        receipt["run_attempt"] = 2
-    elif case == "windows_running_other_job":
-        jobs.append({"name": "unexpected job", "status": "queued", "conclusion": None})
-    elif case == "windows_running_cancelled":
-        run.update(status="completed", conclusion="cancelled")
-    elif case == "windows_running_wrong_scope":
-        receipt["windows_required"] = False
-    elif case == "windows_running_other_failure":
-        jobs.append({"name": "unexpected job", "status": "completed", "conclusion": "failure"})
-    fixture["missing_receipt"] = case in {"missing_receipt", "windows_running_missing_receipt"}
+        jobs[1].update(status="in_progress", conclusion=None)
+    fixture["missing_receipt"] = case == "missing_receipt"
     fixture["main_ancestor"] = case != "control_not_on_main"
     (tmp_path / "fixture.json").write_text(json.dumps(fixture))
 
@@ -186,51 +130,44 @@ sys.exit(0 if data['main_ancestor'] else 1)
 ''')
     git.chmod(0o755)
     command = [sys.executable, str(SCRIPT), "verify", SOURCE]
-    if case not in {"valid_lookup", "windows_failed_lookup", "windows_running_lookup"}:
+    if case != "valid_lookup":
         command += ["--run-id", "42"]
-    if case in {"windows_skipped_client", "windows_failed_client", "client_success", "windows_running_client"}:
-        command += ["--require-client"]
     result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
         env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
              "GH_REPO": REPOSITORY, "FIXTURE": str(tmp_path / "fixture.json")})
-    valid = case in {"valid_dispatch", "valid_push_without_windows", "valid_lookup",
-                     "windows_skipped_backend", "windows_failed_backend", "windows_failed_lookup",
-                     "client_success", "windows_queued_backend", "windows_running_backend", "windows_running_lookup"}
+    valid = case in {"valid_dispatch", "valid_push", "valid_lookup"}
     assert (result.returncode == 0) == valid, result.stderr
     if not valid:
         assert "No trusted CI receipt" in result.stderr
 
 
-def test_backend_receipt_does_not_wait_for_windows():
+def test_receipt_requires_both_consumer_contracts():
     workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
     receipt = workflow["jobs"]["receipt"]
-    assert "client" not in receipt["needs"]
-    assert "needs.client" not in receipt["if"]
-    assert {"source", "test", "lock", "web-contract", "package", "deploy-boundary"} <= set(receipt["needs"])
+    assert {"source", "test", "lock", "web-contract", "windows-contract", "package", "deploy-boundary"} <= set(receipt["needs"])
+    assert "needs.windows-contract.result == 'success'" in receipt["if"]
 
 
-def test_client_release_requires_windows_evidence():
-    workflow = yaml.load((ROOT / ".github/workflows/client-release.yml").read_text(), Loader=yaml.BaseLoader)
-    steps = workflow["jobs"]["preflight"]["steps"]
-    verification = next(step for step in steps if step.get("name") == "Verify successful CI for the actual source")
-    commands = [line for line in verification["run"].splitlines() if "scripts/verify_ci_source.py verify" in line]
-    assert len(commands) == 2 and all("--require-client" in line for line in commands)
+def test_consumer_contract_jobs_checkout_and_pass_their_pins():
+    workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+    assert "client" not in jobs
+    web_steps = jobs["web-contract"]["steps"]
+    checkout = next(step for step in web_steps if step.get("with", {}).get("repository") == "My-Denia/WuwaTerm-Windows")
+    assert checkout["with"]["ref"] == "${{ steps.web-windows.outputs.revision }}"
+    read_pin = next(step for step in web_steps if step.get("id") == "web-windows")
+    assert "web/contracts/windows-ref.txt" in read_pin["run"]
+    npm = next(step for step in web_steps if step.get("run") == "npm run test:contract")
+    assert npm["env"]["WUWATERM_WINDOWS_ROOT"] == "${{ github.workspace }}/windows"
+    assert any(step.get("with", {}).get("python-version") == "3.12" for step in web_steps)
 
-
-def test_missing_diff_base_forces_windows(tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "client-required", "0" * 40, SOURCE],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert result.returncode == 0
-    assert result.stdout.strip() == "true"
-
-    unknown_base = subprocess.run(
-        [sys.executable, str(SCRIPT), "client-required", "b" * 40, SOURCE],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert unknown_base.returncode == 0
-    assert unknown_base.stdout.strip() == "true"
+    windows_steps = jobs["windows-contract"]["steps"]
+    read_pin = next(step for step in windows_steps if step.get("id") == "windows")
+    assert "contracts/windows-ref.txt" in read_pin["run"]
+    checkout = next(step for step in windows_steps if step.get("with", {}).get("repository") == "My-Denia/WuwaTerm-Windows")
+    assert checkout["with"]["ref"] == "${{ steps.windows.outputs.revision }}"
+    contract = next(step for step in windows_steps if "tests/test_windows_contract.py" in step.get("run", ""))
+    assert contract["env"]["WUWATERM_WINDOWS_ROOT"] == "${{ github.workspace }}/windows"
 
 
 def _source_repo(path):
@@ -242,8 +179,7 @@ def _source_repo(path):
 
     path.mkdir()
     git("init", "-q", "-b", "main")
-    (path / "client").mkdir()
-    (path / "client/pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
+    (path / "fixture.txt").write_text("fixture\n")
     git("add", ".")
     git("commit", "-qm", "main")
     main = git("rev-parse", "HEAD")
@@ -264,7 +200,6 @@ def _guard_script(workflow, step_name):
 
 @pytest.mark.parametrize(("workflow", "step_name"), [
     ("release.yml", "Runs on main accept only main source"),
-    ("client-release.yml", "Validate source and client version"),
 ])
 @pytest.mark.parametrize(("ref", "target", "allowed"), [
     ("refs/heads/main", "main", True),
