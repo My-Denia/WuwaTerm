@@ -68,6 +68,25 @@ record refuses every deployment mode until recovery resolves it. The shell's
 EXIT rollback may clear the record only through the same observed old-binding
 verification. See `docs/deployment.md` for the operator contract.
 
+### Historical source during a later topology migration
+
+Runtime schema 1 recovery requires the original source commit as the real
+clean Git HEAD and a matching tool fingerprint. Full schema 2 recovery checks
+its tool fingerprint but does not impose the same HEAD check. Both tools also
+import code outside the four fingerprinted files. Retain the complete historical
+tracked source and its reachable Git identity for each journal commit; a core
+wheel or a copy of the four files is insufficient. Early runtime-only source
+does not contain the later full-recovery helper; the capsule records which
+recovery kinds that source actually supports and their original fingerprints.
+
+The explicit legacy dispatcher verifies the capsule against the trusted
+journal, preserves the current clean source for return, and restores the
+historical commit under the existing deployment lock in the same checkout. The
+backup, object import and checkout child processes retain that lock if the
+dispatcher dies during their writes. It then runs the original recovery entry
+without changing the journal, ROOT, or legacy checks. It does not convert
+journals or itself authorize a deployment.
+
 ## Consequences
 
 - Positive: provenance is auditable; rollback path is scripted.
