@@ -81,12 +81,13 @@ from a moving branch is possible and is a worse idea than it looks: the data pin
 and the schema version travel with the source, so a tag is what makes a working
 install describable later.
 
-For the source path, create the environment and install the API extra:
+For the source path, create the environment with the Bot, API, and builder
+extras. This supports every source-path command in this guide:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e ".[api,build]"
+.venv/bin/python -m pip install -e ".[telegram,api,build]"
 ```
 
 If the first line fails with `ensurepip is not available`, this host's Python
@@ -98,14 +99,18 @@ system package at all:
 
 ```bash
 uv venv --seed .venv
-.venv/bin/python -m pip install -e ".[api,build]"
+.venv/bin/python -m pip install -e ".[telegram,api,build]"
 ```
 
 Either way the environment ends up at `.venv/` and every later command in this
 document works unchanged.
 
-`api` carries FastAPI and uvicorn; `build` carries what the data build needs.
-The Telegram bot needs neither extra beyond the base install.
+The base install (`pip install -e .`) provides the shared core. The `telegram`
+extra installs the Bot's Telegram SDK; `api` carries FastAPI and uvicorn; and
+`build` carries what the data build needs. A fresh API-only environment can
+install `.[api,build]` for the API and local data build without the Telegram
+SDK. For the combined Bot and API runtime without data-build tooling, install
+`.[telegram,api]`.
 
 ## Configure
 
@@ -608,7 +613,7 @@ docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-bui
 into the virtual environment rather than only restarting:
 
 ```bash
-.venv/bin/python -m pip install -e ".[api,build]"
+.venv/bin/python -m pip install -e ".[telegram,api,build]"
 ```
 
 Then rebuild and re-verify the data before restarting, because a release can
@@ -762,7 +767,7 @@ docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-bui
 ```
 
 ```bash
-.venv/bin/python -m pip install -e ".[api,build]"
+.venv/bin/python -m pip install -e ".[telegram,api,build]"
 ```
 
 The first block is the container path, the second the source path. The builder

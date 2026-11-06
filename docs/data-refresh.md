@@ -41,7 +41,7 @@ permissions, line endings, and virtualenv scripts behave like Linux.
 
 ```bash
 test -x .venv/bin/python || uv venv .venv
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra telegram
 ```
 
 Use `uv venv --clear .venv` only when intentionally rebuilding the local
@@ -53,7 +53,7 @@ path also works:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev,telegram]"
 ```
 
 Docker data refresh uses the build image, not the production runtime image:

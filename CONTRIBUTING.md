@@ -84,7 +84,7 @@ With uv:
 
 ```bash
 uv venv .venv
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra telegram
 ```
 
 With a plain virtual environment:
@@ -92,7 +92,7 @@ With a plain virtual environment:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,telegram]"
 ```
 
 `--locked` makes uv honour `uv.lock` rather than re-resolving it; CI has a job

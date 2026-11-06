@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .bot import run_bot
 from .builder import build_database, build_database_atomic
 from .constants import DEFAULT_SOURCE_PROFILE_NAME, source_profile_choices
 from .data_source import refresh_data
@@ -74,6 +73,15 @@ def main(argv: list[str] | None = None) -> int:
         print(SentenceTranslator(args.db).translate(args.text))
         return 0
     if args.command == "bot":
+        try:
+            from .bot import run_bot
+        except ModuleNotFoundError as exc:
+            if exc.name != "telegram":
+                raise
+            parser.error(
+                "the bot command requires the Telegram extra; "
+                "install wuwaterm[telegram]"
+            )
         run_bot(Path(args.db))
         return 0
     parser.error("unhandled command")
