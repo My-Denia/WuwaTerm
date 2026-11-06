@@ -652,6 +652,67 @@ or the journal/image binding cannot be trusted, stop and resolve that condition
 before serving. Do not delete the journal, rewrite a manifest, or manually tag
 another image merely to make a precondition pass.
 
+### Retaining historical recovery source
+
+If a later source tree removes these legacy tools, retain a source capsule for
+each historical commit that may have an unfinished transaction. A core Python
+wheel does not contain the deployment scripts. From a trusted local Git
+repository containing the exact commit, create a capsule in a new directory:
+
+```bash
+python3 -I scripts/package_recovery_source.py --repository /path/to/repository \
+  --source-commit <full-commit-sha> --output /path/to/new-capsule
+```
+
+The archive covers the complete tracked tree; the Git bundle contains the
+selected commit and its reachable history. The manifest records the tree,
+file blobs and modes, SHA-256 digests, supported recovery kinds and their
+original tool fingerprints. An older runtime-only source can legitimately lack
+the later full-recovery tool; its full fingerprint is absent. The packager
+refuses protected deployment files in the tree or reachable history,
+symlinks and unsupported Git tree entries. It does not read `.env`, deployment
+state, ignored files, reflogs or unrelated refs. Preserve the capsule in trusted
+storage: its manifest is an integrity record, not authority to recover an
+arbitrary transaction. The trusted journal supplies the commit and tool hash.
+
+Keep copies of `scripts/legacy_recovery.py` and
+`scripts/package_recovery_source.py` together outside the checkout before
+retiring them from that tree. For an existing runtime schema 1 or full schema 2
+journal, run the copied dispatcher with the real deployment root and the
+matching capsule. Without `--recover` it performs read-only preflight:
+
+```bash
+python3 -I /path/to/tools/legacy_recovery.py --root /path/to/deployment \
+  --capsule /path/to/capsule --kind runtime
+```
+
+Use `--kind full` for a full-data journal. After reviewing the preflight,
+repeat the command with `--recover` to acquire the existing shared lock,
+preserve the current clean source under `.deployments/legacy-source-return-*`,
+restore the exact journal commit in this same checkout, and invoke its original
+shell recovery entry. The selected journal kind must be supported by that exact
+source and match its recorded fingerprint. The shared lock remains held by Git
+while it writes the backup, imports objects or checks out source, even if the
+dispatcher is killed. The dispatcher leaves the checkout detached at that
+commit. The original recovery still decides whether the observed images,
+database, pointers and other state permit recovery; the capsule does not waive
+any of its checks. A dirty source tree, an overwrite of an untracked or ignored
+file, an unsupported journal, or a mismatch refuses the operation.
+
+The return directory contains a bundle and `return.json` identifying the
+previous commit and branch. Keep it until the source transition is settled.
+Before returning to that source, verify the backup against the separately
+recorded previous commit:
+
+```bash
+python3 -I /path/to/tools/package_recovery_source.py --verify \
+  --source-commit <previous-full-commit-sha> --output /path/to/return-directory
+```
+
+Any subsequent source switch must hold the same deployment lock, preserve the
+clean checkout and use a non-forced checkout in the same deployment root.
+This manual recovery tool does not integrate or deploy a new topology.
+
 This path activates reviewed runtime code; it does not prove a translation
 provider is reliable or establish the cause of an earlier LLM failure.
 
