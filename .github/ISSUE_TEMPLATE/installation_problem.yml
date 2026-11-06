@@ -21,6 +21,8 @@ body:
         is required only to BUILD it from source. Please check the support
         matrix before reporting a host mismatch.
 
+        Desktop-specific issues and requests belong in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/issues).
+
         **Redact before you paste.** Tokens, API keys, device credentials, real
         Telegram ids and `.env` contents do not belong in a public issue.
 
@@ -46,7 +48,6 @@ body:
         - Turning on the private web presentation layer
         - Issuing or using a device credential
         - Getting the desktop client to talk to the API
-        - Building the desktop client
         - Running python scripts/validate.py
         - Something else
     validations:
@@ -62,7 +63,6 @@ body:
         - From source with uv
         - From source with a plain virtual environment
         - Installed the published wheel or sdist
-        - Desktop client only
     validations:
       required: true
 
@@ -76,7 +76,6 @@ body:
         - docs/deployment.md
         - docs/data-refresh.md
         - docs/validation.md
-        - client/README.md
         - README.md or README.zh-CN.md
         - No guide, or a guide elsewhere
     validations:

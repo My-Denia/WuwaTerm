@@ -236,7 +236,7 @@ handle_path /wuwaterm-api/* {
 `/v1/...`: the client's HTTP library merges a relative route onto a base that
 carries a path, so `/v1/translations` is sent as
 `/wuwaterm-api/v1/translations` (pinned by
-`client/tests/test_api.py::test_a_base_address_with_a_path_prefix_keeps_it_on_every_route`).
+[the Windows transport test](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/tests/test_api.py)).
 
 The trailing `/*` is deliberate. `/wuwaterm-api*` would also match a sibling
 path that merely starts with the same characters — `/wuwaterm-api-docs`, say —

@@ -7,6 +7,9 @@
 # still have somewhere to go that is not a form.
 blank_issues_enabled: false
 contact_links:
+  - name: Windows desktop issues
+    url: https://github.com/My-Denia/WuwaTerm-Windows/issues
+    about: Desktop source, setup, builds, releases and feature requests.
   - name: Report a security vulnerability
     url: https://github.com/My-Denia/wuwa-translate-bot/security/policy
     about: >-

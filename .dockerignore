@@ -8,7 +8,6 @@ deploy/env.example
 data
 state
 state-api
-client
 goal-runs
 .deployments
 .deploy_commit

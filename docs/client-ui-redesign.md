@@ -1,5 +1,7 @@
 # 桌面客户端 UI/UX 现代化改版 · 设计方案(待 owner 中审)
 
+> Historical record: desktop source and releases are now maintained in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows); the prior Core source is [cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client).
+
 > 本文保留 2026 年 8 月方案及其历史讨论。后续签收见 ADR 0013；2026-11-06 owner 选择的内容主导工作台方向与新的验收标准见 [ADR 0016](adr/0016-desktop-resonance-workbench.md)。下文“待放行”和旧布局参数不再是当前实施门槛。
 
 - 状态:**待放行**。本文是分阶段门的第一道交付物;owner 放行前不进入实现。

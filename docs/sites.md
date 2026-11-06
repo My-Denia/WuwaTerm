@@ -12,7 +12,7 @@ The existing public beta remains at <https://wuwaterm.denia-official.chatgpt.sit
 Repository extraction does not publish a new hosting version or change its resource binding.
 
 This backend repository retains Python core/application logic, HTTP API, Telegram Bot,
-dictionary builder, VPS tools, the private in-process Web and the Windows client.
+dictionary builder, VPS tools, and the private in-process Web. [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product.
 The public Web consumes the API; it does not duplicate authoritative translation logic.
 One existing Linear WuwaTerm Project coordinates linked changes across both repositories.
 

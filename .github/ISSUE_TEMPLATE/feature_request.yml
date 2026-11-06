@@ -10,6 +10,8 @@ body:
         the problem can be solved in a way nobody had thought of; one that names
         only a solution can only be accepted or refused.
 
+        Desktop-specific issues and requests belong in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/issues).
+
         Two things to know before you write:
 
         - **This project has explicit non-goals.** Four product decisions are

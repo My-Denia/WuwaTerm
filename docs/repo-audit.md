@@ -1,5 +1,7 @@
 # WuwaTerm 仓库盘点与审计
 
+> Historical record: desktop source and releases are now maintained in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows); the prior Core source is [cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client).
+
 - **仓库**：<https://github.com/My-Denia/wuwa-translate-bot>
 - **审计对象**：当前 `main` 的 `HEAD`
 - **已核实 SHA**：`291d82d80c40a870b7bde9483486e60d37cc5669`（`feat: ship private Sites product v1 (#98)`）

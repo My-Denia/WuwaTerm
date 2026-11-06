@@ -15,6 +15,8 @@ body:
         **Do not report a vulnerability here.** Use the private path described
         in [SECURITY.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/SECURITY.md).
 
+        Desktop-specific issues and requests belong in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/issues).
+
         **Redact before you paste.** Remove tokens, API keys, device
         credentials, real Telegram ids and `.env` contents from everything you
         include.
