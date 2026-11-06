@@ -71,7 +71,9 @@ A good share of what gets asked is already documented:
   owner-private web layer, which is off by default.
 - [docs/data-refresh.md](docs/data-refresh.md) — refreshing the dictionary from
   upstream game data.
-- [client/README.md](client/README.md) — the Windows desktop client.
+- [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) — desktop use, builds, and issues.
+
+Desktop-specific bugs and feature requests belong in [WuwaTerm-Windows issues](https://github.com/My-Denia/WuwaTerm-Windows/issues); API and Core defects belong here.
 
 ## What To Include In A Report
 

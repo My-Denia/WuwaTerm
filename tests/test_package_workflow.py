@@ -155,3 +155,121 @@ def test_every_existing_package_caller_is_covered():
             if job.get("uses") == "./.github/workflows/python-package.yml":
                 callers.add(workflow.name)
     assert callers == {"ci.yml", "release.yml"}
+
+
+@pytest.mark.parametrize(
+    "telegram_optional,public_smoke", [(False, False), (True, False), (True, True)]
+)
+def test_package_smokes_follow_resolved_historical_capabilities(
+    tmp_path, telegram_optional, public_smoke
+):
+    """Run the actual workflow steps; a selected smoke must execute and exist."""
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "dist").mkdir()
+    (root / "dist" / "package.whl").touch()
+    (root / "dist" / "package.tar.gz").touch()
+    (root / "scripts").mkdir()
+    if public_smoke:
+        (root / "scripts" / "check_package_public_interface.py").touch()
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    stub = tmp_path / "python"
+    stub.write_text('''#!/bin/bash
+set -eu
+if [ "${1-}" = -m ] && [ "${2-}" = venv ]; then
+  mkdir -p "$3/bin"
+  for cmd in python pip wuwaterm wuwaterm-api; do cp "$MOCK_PYTHON" "$3/bin/$cmd"; done
+  exit 0
+fi
+printf '%s\\n' "$*" >> "$MOCK_LOG"
+case "${1-}" in
+  -I) test -f "$2" ;;
+  -c)
+    case "$2" in
+      *"find_spec('telegram') is None"*) test "$MOCK_INSTALLED" = false ;;
+      "import telegram") test "$MOCK_INSTALLED" = true ;;
+    esac ;;
+esac
+''')
+    stub.chmod(0o755)
+    log = tmp_path / "invocations"
+    env = {
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "MOCK_PYTHON": str(stub), "MOCK_LOG": str(log), "RUNNER_TEMP": str(runner),
+        "MOCK_INSTALLED": str(not telegram_optional).lower(),
+        "TELEGRAM_OPTIONAL": str(telegram_optional).lower(),
+        "PUBLIC_INTERFACE_SMOKE": str(public_smoke).lower(),
+    }
+    steps = _workflow("python-package.yml")["jobs"]["build"]["steps"]
+    for name in (
+        "Install wheel into a clean venv and smoke it",
+        "Install API and build extras into clean venvs",
+        "Install sdist into a clean venv and smoke it",
+    ):
+        step = _step(steps, name)
+        assert step["env"] == {
+            "TELEGRAM_OPTIONAL": "${{ steps.epoch.outputs.telegram_optional }}",
+            "PUBLIC_INTERFACE_SMOKE": "${{ steps.epoch.outputs.public_interface_smoke }}",
+        }
+        result = _run(step["run"], root, env)
+        assert result.returncode == 0, (name, result.stderr)
+    calls = log.read_text().splitlines()
+    assert sum("find_spec('telegram') is None" in line for line in calls) == (4 if telegram_optional else 0)
+    assert calls.count("-c import telegram") == (0 if telegram_optional else 4)
+    assert sum("check_package_public_interface.py" in line for line in calls) == (4 if public_smoke else 0)
+    if public_smoke:
+        (root / "scripts" / "check_package_public_interface.py").unlink()
+        step = _step(steps, "Install wheel into a clean venv and smoke it")
+        assert _run(step["run"], root, env).returncode != 0
+
+
+def test_package_resolves_at_control_before_checking_out_source():
+    steps = _workflow("python-package.yml")["jobs"]["build"]["steps"]
+    control = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ github.workflow_sha }}")
+    epoch = next(i for i, step in enumerate(steps) if step.get("id") == "epoch")
+    source = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ inputs.source_commit }}")
+    assert control < epoch < source
+    assert steps[control]["with"]["fetch-depth"] == "0"
+    assert 'test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"' in steps[epoch]["run"]
+    assert 'python scripts/ci_source_epoch.py resolve "$SOURCE_COMMIT"' in steps[epoch]["run"]
+    assert set(_workflow("python-package.yml")["on"]["workflow_call"]["inputs"]) == {
+        "source_commit", "upload_package", "candidate_metadata"
+    }
+
+
+@pytest.mark.parametrize(
+    "epoch,valid",
+    [
+        ({"telegram_optional": False, "public_interface_smoke": False}, True),
+        ({"telegram_optional": True, "public_interface_smoke": True}, True),
+        ({"telegram_optional": False}, False),
+        ({"telegram_optional": "false", "public_interface_smoke": False}, False),
+    ],
+)
+def test_package_rejects_missing_or_invalid_resolver_outputs(tmp_path, epoch, valid):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "ci_source_epoch.py").write_text('import os\nprint(os.environ["MOCK_EPOCH"])\n')
+    setup = _run(
+        "git init -q && git add . && "
+        "git -c user.name=Fixture -c user.email=fixture@example.invalid "
+        "-c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm fixture",
+        tmp_path,
+    )
+    assert setup.returncode == 0, setup.stderr
+    control = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True,
+                                      env=_environment()).strip()
+    output = tmp_path / "output"
+    step = _step(_workflow("python-package.yml")["jobs"]["build"]["steps"],
+                 "Resolve source epoch from workflow control")
+    result = _run(step["run"], tmp_path, {"CONTROL_COMMIT": control, "SOURCE_COMMIT": "a" * 40,
+                                         "MOCK_EPOCH": json.dumps(epoch), "GITHUB_OUTPUT": str(output)})
+    assert (result.returncode == 0) == valid, result.stderr
+    if valid:
+        assert output.read_text().splitlines() == [
+            f'telegram_optional={str(epoch["telegram_optional"]).lower()}',
+            f'public_interface_smoke={str(epoch["public_interface_smoke"]).lower()}',
+        ]
+    else:
+        assert not output.exists()

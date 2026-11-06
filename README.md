@@ -82,7 +82,7 @@ The [self-hosting guide](docs/self-hosting.md) goes from a checkout at a release
 
 ### Windows client
 
-Download `WuwaTerm-<client version>-windows-x64.zip` from a [client release](https://github.com/My-Denia/wuwa-translate-bot/releases) (`client-vX.Y.Z`, or the existing bundled v0.6.0 release), not the “Source code” archive. It is a portable, unsigned build, so Windows SmartScreen asks you to choose “More info” and then “Run anyway”. The client talks to a WuwaTerm server through its API and needs a device token from whoever runs that server; it does not connect to the public beta. See the [client guide](client/README.md) (in Chinese).
+Download the portable package from [WuwaTerm-Windows v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 
@@ -105,7 +105,7 @@ Versioned `/v1` routes cover terms, translations and reviews, each authenticated
 | For users | For self-hosters | For contributors |
 | --- | --- | --- |
 | [Public Beta Site](docs/sites.md) | [Self-Hosting](docs/self-hosting.md) | [Contributing](CONTRIBUTING.md) |
-| [Windows client](client/README.md) (in Chinese) | [Support Matrix](docs/support-matrix.md) | [Architecture](docs/architecture.md) |
+| [Windows client](https://github.com/My-Denia/WuwaTerm-Windows) (in Chinese) | [Support Matrix](docs/support-matrix.md) | [Architecture](docs/architecture.md) |
 | [Telegram Behavior](docs/telegram-behavior.md) | [Data Refresh](docs/data-refresh.md) | [Decision records](docs/adr/README.md) |
 | [Privacy and LLM](docs/privacy-and-llm.md) | [HTTP API contract](docs/api/openapi.json) | [Validation](docs/validation.md) |
 
@@ -113,7 +113,7 @@ Every guide is listed in the [documentation index](docs/README.md).
 
 ## Under the hood
 
-Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, Bot, dictionary builder, deployment tools and Windows client.
+Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, Bot, dictionary builder, and deployment tools; [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product.
 
 - **Python 3.11+** with python-telegram-bot (long polling) and FastAPI, over a SQLite dictionary that the serving containers mount read-only.
 - **Architecture rules that CI enforces**: the application layer imports no presentation code, and the API contract is drift-checked against a committed OpenAPI snapshot ([ADR 0009](docs/adr/0009-http-api-adapter.md)).

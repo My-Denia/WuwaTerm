@@ -24,7 +24,7 @@ term-locking primitives (the last two surfaces are API consumers, not adapters):
 - an HTTP API under `/v1`,
 - an owner-private web presentation layer that lives inside the API process and
   is off by default,
-- a Windows desktop client under `client/`, which only calls the API,
+- a Windows desktop client in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), which only calls the API,
 - an anonymous public beta in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), a separately hosted same-origin proxy.
   It is not the in-process `/wuwaterm-web` layer; see
   [Public Beta Site](docs/sites.md).
@@ -59,11 +59,12 @@ CI pins that checkout using `contracts/web-ref.txt`. To reproduce the pair local
 git clone https://github.com/My-Denia/WuwaTerm-Web.git web
 git -C web checkout --detach "$(cat contracts/web-ref.txt)"
 WUWATERM_WEB_ROOT="$PWD/web" python -m pytest -m cross_component tests/test_meta_site_contract.py
-WUWATERM_BACKEND_ROOT="$PWD" npm --prefix web run test:contract
+WUWATERM_BACKEND_ROOT="$PWD" WUWATERM_WINDOWS_ROOT=/path/to/windows npm --prefix web run test:contract
 ```
 
-The label contract requires Node 24 but no npm dependency installation. Full Web
-validation belongs to the Web repository. Keep its pin immutable and update it
+The Web contract requires Node 24, Python 3.12 or newer and its pinned Windows
+checkout, but no npm dependency installation. Full Web validation belongs to the
+Web repository. Keep its pin immutable and update it
 through a reviewed PR when the producer/consumer contract changes.
 
 ## Getting The Code
@@ -114,17 +115,15 @@ python scripts/validate.py
 That is the whole local gate, and it is exactly what the server test matrix
 runs in CI — the same file, not a second list that drifts from this one. It is
 not the whole pull request, though: CI also runs the lock-drift check, the
-wheel and sdist build with its install audit, the Windows desktop-client build,
-the Docker runtime and builder boundary, and the cross-repository `web-contract` job,
+wheel and sdist build with its install audit, the Docker runtime and builder boundary, and the cross-repository Web and Windows contract jobs,
 and none of those is in this command. If your change touches the lock file,
-the packaging metadata, the client, the API/Web contract, or anything under `deploy/`, a
+the packaging metadata, the consumer contracts, or anything under `deploy/`, a
 green run here is necessary and not sufficient — see the job list further down.
 
 ```bash
 python scripts/validate.py --list        # what it would run; runs nothing
 python scripts/validate.py --quick       # everything except the test suites
 python scripts/validate.py --only ruff   # a single step by name
-python scripts/validate.py --client      # additionally: the desktop client suite
 ```
 
 The run stops at the first failing step, names it, and exits with that step's
@@ -143,63 +142,24 @@ candidate-database checks that belong to a data refresh rather than to every
 commit.
 
 Continuous integration runs `python scripts/validate.py` on Python 3.11, 3.12,
-3.13 and 3.14 on `ubuntu-latest`, plus five more jobs: a uv lock-drift check, a
-wheel and sdist packaging audit with a clean-environment install smoke, a
-Windows desktop-client build when affected, a Docker runtime/builder boundary
-check, and the API-to-Web metadata and label contracts against a pinned Web checkout.
+3.13 and 3.14 on `ubuntu-latest`, plus a uv lock-drift check, package audit,
+Docker boundary check, and contracts against pinned Web and Windows checkouts.
 The full Site suite runs in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
 CI publishes nothing.
 
-## Working On The Desktop Client
+## Windows consumer contract
 
-The client is a separate package with its own virtual environment. It needs
-Python 3.12 or newer, and it pulls in PySide6, `keyring` and `qasync` — none of
-which the server environment carries, and it carries none of the server's
-dependencies either. No single interpreter can run both suites, which is why
-`--client` runs under `client/.venv`.
+Windows source, tests, builds, releases and issues live in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows).
+Core CI checks the exact revision in `contracts/windows-ref.txt` without Qt or
+keyring. With that revision checked out at `WUWATERM_WINDOWS_ROOT`, run:
 
-On Windows:
-
-```powershell
-py -3.12 -m venv client\.venv
-client\.venv\Scripts\python.exe -m pip install -e "client[dev,build]"
-Push-Location client; .venv\Scripts\python.exe -m pytest; Pop-Location
-client\build.ps1
+```sh
+WUWATERM_WINDOWS_ROOT=/path/to/windows python -m pytest -m cross_component tests/test_windows_contract.py
 ```
 
-The third line changes directory on purpose. `pytest` reads its configuration
-from the working directory, and the repository root's `testpaths` points at the
-SERVER suite — so running it from the root with the client interpreter collects
-the wrong suite and fails on the first import. Measured, not guessed.
-
-Any interpreter that satisfies the declared range will do — `py -3.12` picks a
-registered 3.12 whoever shipped it, `py -3.13` is equally fine, and on a
-machine without the launcher, `python3.12 -m venv client\.venv` or the full
-path to the interpreter works the same way. The version is a requirement; the
-vendor is not.
-
-`client/build.ps1` produces the one-folder PyInstaller artifact, runs its
-start-up self-check, and packages the folder as
-`client/dist/WuwaTerm-<version>-windows-x64.zip` — the same name the release
-carries.
-
-**On Windows, run the client suite directly, as the block above does.** From
-the repository root, `python scripts/validate.py --client` APPENDS the client
-suite to the six server steps rather than replacing them, and the runner stops
-at the first failing step — so on a Windows host the server steps fail for the
-platform reasons [docs/support-matrix.md](docs/support-matrix.md) records, and
-the client suite you were trying to run never starts. Run it directly, from
-inside `client/`, as the third line of the block above does:
-`.venv\Scripts\python.exe -m pytest`. If you want the entry point's reporting,
-`python scripts/validate.py --client --only client-tests` selects that one step
-and skips the server ones; run it from the repository root — it changes into
-`client/` itself and finds the client environment itself. On Linux
-or macOS the plain `--client` form runs everything in order and is the simpler
-choice.
-
-The client suite checks transport and credential behavior; the Windows build
-also exercises the packaged executable.
-[client/README.md](client/README.md) is the client's own document.
+The test reads the consumer's API versions and sends a synthetic review through
+the current Core HTTP app to the Windows manuscript validator. Web and Windows
+CI own the full manuscript file interoperability checks.
 
 ## What Makes A Pull Request Easy To Accept
 

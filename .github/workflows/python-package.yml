@@ -21,6 +21,26 @@ jobs:
     name: build and smoke
     runs-on: ubuntu-latest
     steps:
+      # The reusable workflow is from CONTROL, even when SOURCE is older and
+      # has no epoch resolver. Resolve before replacing the checkout.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+      - name: Resolve source epoch from workflow control
+        id: epoch
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CONTROL_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          epoch=$(python scripts/ci_source_epoch.py resolve "$SOURCE_COMMIT" --workflow .github/workflows/ci.yml)
+          telegram_optional=$(jq -er '.telegram_optional | if type == "boolean" then tostring else error("expected boolean") end' <<< "$epoch")
+          public_interface_smoke=$(jq -er '.public_interface_smoke | if type == "boolean" then tostring else error("expected boolean") end' <<< "$epoch")
+          echo "telegram_optional=$telegram_optional" >> "$GITHUB_OUTPUT"
+          echo "public_interface_smoke=$public_interface_smoke" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_commit }}
@@ -40,36 +60,72 @@ jobs:
       - run: python -m twine check --strict dist/*
       - run: python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
       - name: Install wheel into a clean venv and smoke it
+        env:
+          TELEGRAM_OPTIONAL: ${{ steps.epoch.outputs.telegram_optional }}
+          PUBLIC_INTERFACE_SMOKE: ${{ steps.epoch.outputs.public_interface_smoke }}
         run: |
           python -m venv "$RUNNER_TEMP/venv-wheel"
           "$RUNNER_TEMP/venv-wheel/bin/pip" install --no-cache-dir dist/*.whl
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
-          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
-          "$RUNNER_TEMP/venv-wheel/bin/python" -I scripts/check_package_public_interface.py --mode core
+          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+            "$RUNNER_TEMP/venv-wheel/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          else
+            test "$TELEGRAM_OPTIONAL" = false
+            "$RUNNER_TEMP/venv-wheel/bin/python" -c "import telegram"
+          fi
+          if [ "$PUBLIC_INTERFACE_SMOKE" = true ]; then
+            "$RUNNER_TEMP/venv-wheel/bin/python" -I scripts/check_package_public_interface.py --mode core
+          else
+            test "$PUBLIC_INTERFACE_SMOKE" = false
+          fi
           "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
           "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
       - name: Install API and build extras into clean venvs
+        env:
+          TELEGRAM_OPTIONAL: ${{ steps.epoch.outputs.telegram_optional }}
+          PUBLIC_INTERFACE_SMOKE: ${{ steps.epoch.outputs.public_interface_smoke }}
         run: |
           wheel=(dist/*.whl)
           test "${#wheel[@]}" -eq 1
           for extra in api build; do
             python -m venv "$RUNNER_TEMP/venv-$extra"
             "$RUNNER_TEMP/venv-$extra/bin/pip" install --no-cache-dir "${wheel[0]}[$extra]"
-            "$RUNNER_TEMP/venv-$extra/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
-            "$RUNNER_TEMP/venv-$extra/bin/python" -I scripts/check_package_public_interface.py --mode "$extra"
+            if [ "$TELEGRAM_OPTIONAL" = true ]; then
+              "$RUNNER_TEMP/venv-$extra/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+            else
+              test "$TELEGRAM_OPTIONAL" = false
+              "$RUNNER_TEMP/venv-$extra/bin/python" -c "import telegram"
+            fi
+            if [ "$PUBLIC_INTERFACE_SMOKE" = true ]; then
+              "$RUNNER_TEMP/venv-$extra/bin/python" -I scripts/check_package_public_interface.py --mode "$extra"
+            else
+              test "$PUBLIC_INTERFACE_SMOKE" = false
+            fi
             "$RUNNER_TEMP/venv-$extra/bin/wuwaterm" --help
           done
           "$RUNNER_TEMP/venv-api/bin/python" -c "import wuwaterm_api.app"
           "$RUNNER_TEMP/venv-build/bin/python" -c "import pypinyin, wuwaterm.builder"
       - name: Install sdist into a clean venv and smoke it
+        env:
+          TELEGRAM_OPTIONAL: ${{ steps.epoch.outputs.telegram_optional }}
+          PUBLIC_INTERFACE_SMOKE: ${{ steps.epoch.outputs.public_interface_smoke }}
         run: |
           python -m venv "$RUNNER_TEMP/venv-sdist"
           "$RUNNER_TEMP/venv-sdist/bin/pip" install --no-cache-dir dist/*.tar.gz
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
-          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
-          "$RUNNER_TEMP/venv-sdist/bin/python" -I scripts/check_package_public_interface.py --mode core
+          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+            "$RUNNER_TEMP/venv-sdist/bin/python" -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          else
+            test "$TELEGRAM_OPTIONAL" = false
+            "$RUNNER_TEMP/venv-sdist/bin/python" -c "import telegram"
+          fi
+          if [ "$PUBLIC_INTERFACE_SMOKE" = true ]; then
+            "$RUNNER_TEMP/venv-sdist/bin/python" -I scripts/check_package_public_interface.py --mode core
+          else
+            test "$PUBLIC_INTERFACE_SMOKE" = false
+          fi
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
       - name: Record package checksums and source

@@ -1,5 +1,7 @@
 # ADR 0015: 桌面稿件审校与保存
 
+> Migration notice (2026-11-06): desktop ownership moved from the [Core source at cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client) to [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), released as [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0). The [Windows source provenance](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/provenance/client-source.json) maps the original files. This record preserves the original design rationale.
+
 - Status: Accepted
 - Date: 2026-11-04
 - 关联：[ADR 0011](0011-pc-client-stack.md)（客户端与传输）、

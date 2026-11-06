@@ -13,9 +13,7 @@ they have worked out which extras to install, and it must be able to tell them
 that the linter or the test runner is missing rather than fail on its own
 imports. Server steps are spawned with ``sys.executable``, so the interpreter
 that runs this script is the interpreter they run under - on Windows as well as
-on Linux, where the documented `.venv/bin/python` prefix does not exist. The
-opt-in client suite is the one exception and says so: it runs under
-``client/.venv``, because no single environment can hold both sides.
+on Linux, where the documented `.venv/bin/python` prefix does not exist.
 
 The working directory does not matter; the repository root is derived from this
 file's location and every step is run there.
@@ -24,7 +22,6 @@ file's location and every step is run there.
     python scripts/validate.py --list     # what it would run, runs nothing
     python scripts/validate.py --quick    # everything except the test suite
     python scripts/validate.py --only ruff
-    python scripts/validate.py --client   # additionally: the desktop client suite
 
 Exit status is 0 only when every selected step passed. The first failing step
 stops the run and its name is printed, so the output says which gate failed
@@ -51,13 +48,6 @@ class Step(NamedTuple):
     # Arguments after the interpreter.
     argv: list[str]
     cwd: Path
-    # Which interpreter runs it. The client suite cannot use this one: the
-    # client is a separate package with its own dependencies (Qt, keyring,
-    # qasync) and its own floor of Python 3.12, and the root environment
-    # installs none of it - while the client environment installs none of the
-    # server's. There is no single interpreter that can run both, so the step
-    # names the environment it needs instead of pretending otherwise.
-    interpreter: str = "self"
 
 
 SERVER_STEPS: list[Step] = [
@@ -93,51 +83,9 @@ SERVER_STEPS: list[Step] = [
     ),
 ]
 
-# Not part of the default run: the client is a separate package, it needs Qt,
-# keyring and qasync, and its own floor is Python 3.12 - which is why the
-# client's text-level gates live in the main suite instead. Opt in with
-# --client, and note the interpreter: the root environment cannot run this
-# step, so it is run with the client's own virtual environment.
-CLIENT_STEP = Step(
-    "client-tests",
-    "the desktop client suite is red",
-    ["-m", "pytest"],
-    ROOT / "client",
-    interpreter="client-venv",
-)
-
-SLOW_STEPS = {"pytest", "client-tests"}
-
-CLIENT_VENV = ROOT / "client" / ".venv"
-# Windows and POSIX layouts; the client is a Windows application, but its suite
-# is not, so both are looked for.
-CLIENT_PYTHONS = (
-    CLIENT_VENV / "Scripts" / "python.exe",
-    CLIENT_VENV / "bin" / "python",
-)
-
-
-def interpreter_for(step: Step) -> tuple[str | None, str | None]:
-    """The executable for a step, or the reason there is not one."""
-    if step.interpreter == "self":
-        return sys.executable, None
-    for candidate in CLIENT_PYTHONS:
-        if candidate.exists():
-            return str(candidate), None
-    return None, (
-        "the desktop client suite needs the client's own virtual environment "
-        f"at {CLIENT_VENV.relative_to(ROOT).as_posix()}, which does not exist. "
-        "It cannot share this one: the client is a separate package needing "
-        "Qt, keyring and qasync and at least Python 3.12, while that "
-        "environment does not carry the server's dependencies. Create it as "
-        "client/README.md describes, then install client[dev] into it."
-    )
-
 
 def selected_steps(args: argparse.Namespace) -> list[Step]:
     steps = list(SERVER_STEPS)
-    if args.client:
-        steps.append(CLIENT_STEP)
     if args.only:
         by_name = {step.name: step for step in steps}
         if args.only not in by_name:
@@ -147,7 +95,7 @@ def selected_steps(args: argparse.Namespace) -> list[Step]:
             )
         return [by_name[args.only]]
     if args.quick:
-        steps = [step for step in steps if step.name not in SLOW_STEPS]
+        steps = [step for step in steps if step.name not in {"pytest"}]
     return steps
 
 
@@ -159,7 +107,7 @@ def describe(steps: list[Step]) -> None:
             if step.cwd == ROOT
             else f"  (in {step.cwd.relative_to(ROOT).as_posix()}/)"
         )
-        python = "python" if step.interpreter == "self" else "client/.venv python"
+        python = "python"
         print(f"{step.name.ljust(width)}  {python} {' '.join(step.argv)}{where}")
         print(f"{' ' * width}  fails when: {step.meaning}")
 
@@ -167,12 +115,7 @@ def describe(steps: list[Step]) -> None:
 def run(steps: list[Step]) -> int:
     for position, step in enumerate(steps, start=1):
         name = step.name
-        executable, unavailable = interpreter_for(step)
-        if executable is None:
-            print(f"[{position}/{len(steps)}] {name}", flush=True)
-            print(f"validate: step {name!r} cannot run: {unavailable}", file=sys.stderr)
-            return 1
-        command = [executable, *step.argv]
+        command = [sys.executable, *step.argv]
         print(f"[{position}/{len(steps)}] {name}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         try:
@@ -213,11 +156,6 @@ def main(argv: list[str] | None = None) -> int:
         "--only",
         metavar="NAME",
         help="run a single step by name",
-    )
-    parser.add_argument(
-        "--client",
-        action="store_true",
-        help="also run the desktop client suite, under client/.venv",
     )
     args = parser.parse_args(argv)
 

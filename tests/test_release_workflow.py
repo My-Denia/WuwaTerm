@@ -29,7 +29,6 @@ NOTES_SECTION = re.compile(r'^\s*"(### .+)",$', re.MULTILINE)
 # placeholder, a Chinese one, a shell variable - so it is matched loosely and
 # normalised away below. The prefix, the platform and the extension are the
 # contract.
-ZIP_NAME = re.compile(r"WuwaTerm-[^\n`'\"]*?-windows-x64\.zip")
 
 
 def _workflow_text() -> str:
@@ -369,38 +368,6 @@ def test_promote_images_retags_published_manifest_digests():
     assert executable == []
 
 
-def test_the_note_template_states_the_unsigned_client():
-    template = (ROOT / ".github/workflows/client-release.yml").read_text().lower()
-    assert "unsigned" in template
-    assert "smartscreen" in template
-
-
-def test_the_client_zip_has_one_name_across_every_file_that_names_it():
-    holders = {
-        ".github/workflows/windows-client.yml": ROOT / ".github/workflows/windows-client.yml",
-        "client/build.ps1": ROOT / "client" / "build.ps1",
-        "client/README.md": ROOT / "client" / "README.md",
-        "docs/support-matrix.md": ROOT / "docs" / "support-matrix.md",
-        "docs/release-checklist.md": CHECKLIST,
-        "README.md": ROOT / "README.md",
-        "README.zh-CN.md": ROOT / "README.zh-CN.md",
-    }
-    shapes: dict[str, set[str]] = {}
-    for label, path in holders.items():
-        assert path.is_file(), f"{label} is missing"
-        found = ZIP_NAME.findall(path.read_text(encoding="utf-8"))
-        assert found, f"{label} no longer names the client zip"
-        # Normalise the version, which each file legitimately writes its own
-        # way (a literal, a placeholder, a shell variable). What must agree is
-        # the prefix, the platform suffix and the extension.
-        shapes[label] = {re.sub(r"WuwaTerm-.*?-windows", "WuwaTerm-<v>-windows", n) for n in found}
-
-    distinct = set().union(*shapes.values())
-    assert distinct == {"WuwaTerm-<v>-windows-x64.zip"}, (
-        f"the client zip is named more than one way: {shapes}"
-    )
-
-
 # Execute the actual promotion step with a stateful local registry stub.
 # No Docker daemon, credentials, socket, or upstream registry is used.
 def _promotion_script():
@@ -675,57 +642,6 @@ def test_backend_release_has_no_client_build_or_asset_dependency(tmp_path):
     assert "startsWith(github.event.release.tag_name, 'v')" in _job_block("promote-images")
 
 
-def test_client_release_is_an_independent_draft_with_immutable_source():
-    text = (ROOT / ".github/workflows/client-release.yml").read_text()
-    assert "needs: [preflight, client]" in text
-    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run == false" in text
-    assert 'git merge-base --is-ancestor "$TARGET" origin/main' in text
-    assert "^[0-9a-f]{40}$" in text
-    assert 'tag="client-v$VERSION"' in text
-    assert '--draft --latest=false --target "$SOURCE"' in text
-    assert "packages: write" not in text
-    assert "release-manifest.json" not in text
-    assert "client-manifest.json" in text
-    assert "./.github/workflows/windows-client.yml" in text
-    assert "--self-check" in (ROOT / "client/build.ps1").read_text()
-
-
-@pytest.mark.parametrize("lookup", ["absent", "existing", "error"])
-def test_client_draft_requires_confirmed_absent_tag(tmp_path, lookup):
-    workflow = (ROOT / ".github/workflows/client-release.yml").read_text()
-    script = _step_run(workflow[workflow.index("  draft:"):], "Create independent client draft")
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    (staging / "WuwaTerm-0.2.0-windows-x64.zip").write_bytes(b"synthetic zip")
-    gh = tmp_path / "gh"
-    gh.write_text("""#!/usr/bin/env python3
-import os, sys
-from pathlib import Path
-args = sys.argv[1:]
-if args[0] == 'api':
-    if os.environ['LOOKUP'] == 'existing': sys.exit(0)
-    print('HTTP 404' if os.environ['LOOKUP'] == 'absent' else 'HTTP 403', file=sys.stderr)
-    sys.exit(1)
-if args[:2] == ['release', 'create']:
-    assert args[2] == 'client-v0.2.0'
-    assert '--draft' in args and '--latest=false' in args
-    assert args[args.index('--target') + 1] == os.environ['SOURCE']
-    Path('created').touch()
-elif args[:2] == ['release', 'view']:
-    field = args[args.index('--json') + 1]
-    print({'isDraft': 'true', 'targetCommitish': os.environ['SOURCE'], 'assets': '3'}[field])
-else:
-    sys.exit(2)
-""")
-    gh.chmod(0o755)
-    result = subprocess.run(["bash", "-c", script], cwd=tmp_path,
-        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-             "GH_REPO": "example/project", "VERSION": "0.2.0", "SOURCE": "a" * 40,
-             "LOOKUP": lookup}, capture_output=True, text=True)
-    assert (result.returncode == 0) == (lookup == "absent"), result.stderr
-    assert (staging / "created").exists() == (lookup == "absent")
-
-
 def _checklist_bash(marker):
     blocks = re.findall(r"^```bash\n(.*?)^```[ \t]*$", CHECKLIST.read_text(), re.DOTALL | re.MULTILINE)
     matches = [block for block in blocks if marker in block]
@@ -906,3 +822,42 @@ print(Path('remote.json').read_text())
     result = subprocess.run(["bash", "-c", _checklist_bash("# Published release state:")],
                             cwd=tmp_path, env=env, text=True, capture_output=True)
     assert (result.returncode == 0) == (case == "valid"), result.stderr
+
+
+def test_release_resolves_epoch_from_control_before_exact_target_checkout(tmp_path):
+    steps = _workflow_config()["jobs"]["preflight"]["steps"]
+    control = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ github.workflow_sha }}")
+    admission = next(i for i, step in enumerate(steps) if step.get("name") == "Runs on main accept only main source")
+    epoch = next(i for i, step in enumerate(steps) if step.get("name") == "Resolve source epoch from workflow control")
+    target = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ inputs.target_commit }}")
+    assert control < admission < epoch < target
+    assert steps[control]["with"]["fetch-depth"] == "0"
+    assert 'test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"' in steps[admission]["run"]
+    assert 'git merge-base --is-ancestor "$TARGET" origin/main' in steps[admission]["run"]
+    assert steps[epoch]["run"] == 'python scripts/ci_source_epoch.py resolve "$TARGET" --workflow .github/workflows/ci.yml'
+    assert steps[epoch]["env"]["TARGET"] == "${{ inputs.target_commit }}"
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                    "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "fixture"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
+    step = next(item for item in steps if item.get("id") == "commit")
+    output = tmp_path / "output"
+    for target_sha, succeeds in ((sha, True), ("0" * 40, False)):
+        result = subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, capture_output=True,
+                                env={**os.environ, "TARGET": target_sha, "GITHUB_OUTPUT": str(output)}, text=True)
+        assert (result.returncode == 0) == succeeds, result.stderr
+    assert output.read_text() == f"source_commit={sha}\n"
+
+
+@pytest.mark.parametrize("version,accepted", [("0.6.1", True), ("0.7.0.dev1", False), ("v1.2.3", False)])
+def test_release_dry_run_does_not_bypass_stable_version_check(tmp_path, version, accepted):
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
+    output = tmp_path / "output"
+    steps = _workflow_config()["jobs"]["preflight"]["steps"]
+    step = next(item for item in steps if item.get("id") == "versions")
+    assert "if" not in step
+    result = subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, capture_output=True,
+                            env={**os.environ, "GITHUB_OUTPUT": str(output)}, text=True)
+    assert (result.returncode == 0) == accepted, result.stderr

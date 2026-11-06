@@ -1,5 +1,7 @@
 # ADR 0013: 桌面客户端的视觉系统与布局选型
 
+> Migration notice (2026-11-06): desktop ownership moved from the [Core source at cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client) to [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), released as [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0). The [Windows source provenance](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/provenance/client-source.json) maps the original files. This record preserves the original design rationale.
+
 > 历史决定。2026-11-06 的 [ADR 0016](0016-desktop-resonance-workbench.md) 更新了布局、图标资源与诊断位置；本页保留原先要解决的问题和当时的选择依据。2026 年 8 月的截图签收不代表新稿件工作台的视觉验收。
 
 - Status: **Accepted**(owner 于 2026-08-14 依 14 个界面状态的实机截图逐项签收)

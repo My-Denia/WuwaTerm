@@ -57,7 +57,7 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q --strict-config --strict-markers -m 'not cross_component'"
-markers = ["cross_component: requires the Web checkout and Node.js"]
+markers = ["cross_component: requires a pinned external product checkout"]
 
 [tool.ruff]
 # Ruff takes the target version from project.requires-python. Generated data,

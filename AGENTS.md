@@ -45,12 +45,10 @@ an instruction to change the pull request. Answer it in the thread.
 - The only local checkout is this WSL tree, `<LOCAL_CHECKOUT>`, on the Linux
   filesystem. Do not develop via `/mnt/c/...` and do not open a second Windows
   checkout.
-- Windows client work is paused: `client/` stays in the repo and CI still
-  builds it, but local Qt, Credential Manager and `build.ps1` are out of scope
-  until the owner resumes it.
+- Windows desktop source, build and release live in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows).
 - The server test suite is unsupported on a native Windows host (directory
   `fsync` and subprocess handle failures). Local gate:
-  `python scripts/validate.py` (optional `--client`). The server needs
+  `python scripts/validate.py`. The server needs
   Python >= 3.11; this checkout's `.venv` is POSIX (`bin/`).
 
 ## Product Decisions
@@ -89,12 +87,12 @@ an instruction to change the pull request. Answer it in the thread.
 - GitHub repo `My-Denia/WuwaTerm`. WuwaTerm is a dictionary-first official
   Wuthering Waves term service: one protocol-neutral application layer,
   Telegram and versioned HTTP API adapters, an owner-private in-process web UI
-  (off by default), and a paused Windows desktop client that consumes the API
+  (off by default), and an independent Windows desktop client that consumes the API
   with no translation logic.
 - Since 2026-11-01 the public Web lives in `My-Denia/WuwaTerm-Web`; this
   repository no longer tracks `site/`. `contracts/web-ref.txt` pins the
-  external consumer for metadata and label contract CI. Windows packaging uses
-  `client-release.yml`, independent of backend `release.yml`. This is source
+  external consumer for metadata and label contract CI. Windows packaging lives
+  in WuwaTerm-Windows, independent of backend `release.yml`. This is source
   organization, not evidence of a new release or production deployment.
 - Long-running services are `wuwaterm-bot` and `wuwaterm-api`; the builder is
   on-demand. Production uses a locally built runtime image, not GHCR. Reverify
