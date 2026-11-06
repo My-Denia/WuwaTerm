@@ -134,6 +134,9 @@ DEFAULT_LLM_MAX_CONCURRENCY = 2
 DEFAULT_LLM_CALLS_PER_MINUTE = 30
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+# Authentication probes have their own per-verified-device budget. Browser
+# page and asset loads must not consume the business request allowance.
+DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_MAX_BODY_BYTES = 32 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
 # Verifying a presented credential costs a deliberate ~16 MiB scrypt

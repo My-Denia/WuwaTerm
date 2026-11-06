@@ -79,6 +79,7 @@ The surface is versioned under `/v1`:
 | `POST /v1/translations` | `translate` | `kind` (`noop`/`exact`/`fuzzy`/`llm`), `text`, `direction`, `dictionary_miss`, `request_id` |
 | `GET /v1/terms?q=` | `meta` | Backend-ranked exact or fuzzy dictionary candidates with official strings, scores and reasons |
 | `GET /v1/meta` | `meta` | Service and data provenance: no paths, no secrets, no chat identifiers |
+| `GET /v1/auth/status` | `meta` | Verify a device credential and return an empty `204` while it is active |
 | `GET /healthz` | none | Liveness |
 | `GET /readyz` | none | Readiness: the terminology database is readable right now |
 | `GET /openapi.json` | none | The contract itself |
@@ -89,6 +90,17 @@ branches on `code` and never on prose. Where the code set cannot express a
 distinction, the HTTP status carries it: `504` for the server time budget and
 `503` for a dependency that is temporarily unavailable are both classified
 `internal`, and the status is what separates them from a genuine `500`.
+
+Authentication status responses carry `Cache-Control: no-store`. The route
+performs a full bearer verification on every request, shares the existing
+verification concurrency limit, and re-checks the device before returning.
+It has a separate per-process limit of 120 probes per verified device per
+minute; probes do not spend the business request or model budgets and do not
+update `last_used_at`. A `401` means the credential was not proven or was
+revoked, `403` means it lacks `meta`, and `429` or `503` means the caller
+should retry without treating the credential as rejected. Older API versions
+may not have this route, so clients must handle its absence rather than infer
+successful authentication from another response.
 
 Middleware, outermost first: a server-generated request id (an inbound
 `X-Request-Id` is ignored entirely, so a caller cannot route its own

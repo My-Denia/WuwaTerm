@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -321,6 +322,228 @@ def test_rate_limit_is_per_device(tmp_path, sample_db):
 
     assert blocked.status_code == 429
     assert other.status_code == 200
+
+
+def assert_status_error(response, status, code):
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["error"]["code"] == code
+    assert set(response.json()) == {"error", "request_id"}
+    assert response.headers["x-request-id"] == response.json()["request_id"]
+
+
+def test_auth_status_checks_credential_scope_revocation_and_headers(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    device, token = issue_device(store, "status owner")
+    _, no_meta = issue_device(store, "translate only", scopes=[SCOPE_TRANSLATE])
+    revoked, revoked_token = issue_device(store, "revoked owner")
+    store.revoke(revoked.device_id)
+    store.record_use(device.device_id, now="2020-01-01T00:00:00+00:00")
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+            return [
+                await client.get("/v1/auth/status", headers=headers)
+                for headers in (
+                    {},
+                    bearer("malformed"),
+                    bearer(f"wtd1.{device.device_id}.wrong-secret"),
+                    bearer(revoked_token),
+                    bearer(no_meta),
+                    bearer(token),
+                )
+            ]
+
+    missing, malformed, wrong, withdrawn, forbidden, good = run(exercise())
+    for response in (missing, malformed, wrong, withdrawn):
+        assert_status_error(response, 401, "unauthorized")
+    assert_status_error(forbidden, 403, "forbidden")
+    assert good.status_code == 204
+    assert good.content == b""
+    assert good.headers["cache-control"] == "no-store"
+    assert good.headers["x-request-id"]
+    assert next(d for d in store.list_devices() if d.device_id == device.device_id).last_used_at == "2020-01-01T00:00:00+00:00"
+    assert app.state.llm_budget.in_window() == 0
+    assert set(app.state.auth_status_rate_limiter._events) == {device.device_id}
+
+
+def test_auth_status_and_business_quotas_are_independent_at_defaults(tmp_path, sample_db):
+    settings = ApiSettings(db_path=sample_db, device_db_path=tmp_path / "devices.db")
+    assert settings.rate_limit_per_minute == 30
+    assert settings.auth_max_concurrency == 2
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    app = create_app(settings, device_store=store)
+    first, first_token = issue_device(store, "probe first")
+    _, second_token = issue_device(store, "business first")
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+            async def probe(token):
+                return await client.get("/v1/auth/status", headers=bearer(token))
+
+            async def business(token):
+                return await client.get("/v1/meta", headers=bearer(token))
+
+            probes = [await probe(first_token) for _ in range(121)]
+            last_used_after_probes = next(
+                d.last_used_at for d in store.list_devices() if d.device_id == first.device_id
+            )
+            business_after_probes = [await business(first_token) for _ in range(31)]
+            business_first = [await business(second_token) for _ in range(31)]
+            probe_after_business = await probe(second_token)
+            return probes, last_used_after_probes, business_after_probes, business_first, probe_after_business
+
+    probes, last_used, business_after, business_first, probe_after = run(exercise())
+    assert [r.status_code for r in probes] == [204] * 120 + [429]
+    assert_status_error(probes[-1], 429, "rate_limited")
+    assert last_used is None
+    assert [r.status_code for r in business_after] == [200] * 30 + [429]
+    assert [r.status_code for r in business_first] == [200] * 30 + [429]
+    assert probe_after.status_code == 204
+    assert app.state.llm_budget.in_window() == 0
+
+
+@pytest.mark.parametrize("fail_read", [1, 2])
+def test_auth_status_store_failure_is_503(tmp_path, sample_db, monkeypatch, fail_read):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner")
+    real_connect = store._connect_readonly
+    reads = 0
+
+    def connect_with_fault():
+        nonlocal reads
+        reads += 1
+        if reads == fail_read:
+            raise sqlite3.OperationalError("synthetic read failure")
+        return real_connect()
+
+    monkeypatch.setattr(store, "_connect_readonly", connect_with_fault)
+    response = run(call(app, "GET", "/v1/auth/status", headers=bearer(token)))
+    assert reads == fail_read
+    assert_status_error(response, 503, "internal")
+
+
+def test_auth_status_rechecks_revocation_during_real_verification(tmp_path, sample_db, monkeypatch):
+    import wuwaterm_api.auth as authmod
+
+    app, store = build_client_app(tmp_path, sample_db)
+    device, token = issue_device(store, "owner")
+    real_derive = authmod._derive
+    derived = threading.Event()
+    resume = threading.Event()
+
+    def gated_derive(secret, salt):
+        result = real_derive(secret, salt)
+        derived.set()
+        if not resume.wait(10):
+            raise RuntimeError("test did not release the verifier")
+        return result
+
+    monkeypatch.setattr(authmod, "_derive", gated_derive)
+
+    async def exercise():
+        task = asyncio.create_task(call(app, "GET", "/v1/auth/status", headers=bearer(token)))
+        try:
+            assert await asyncio.to_thread(derived.wait, 10)
+            await asyncio.to_thread(store.revoke, device.device_id)
+        finally:
+            resume.set()
+        return await task
+
+    response = run(exercise())
+    assert_status_error(response, 401, "unauthorized")
+
+
+def test_auth_status_shares_verifier_slots_and_recovers_from_cancellation(tmp_path, sample_db, monkeypatch):
+    import wuwaterm_api.auth as authmod
+
+    app, store = build_client_app(tmp_path, sample_db, auth_max_concurrency=2)
+    _, token = issue_device(store, "owner")
+    real_derive = authmod._derive
+    lock = threading.Lock()
+    two_started = threading.Event()
+    release = threading.Event()
+    active = 0
+    maximum = 0
+
+    def gated_derive(secret, salt):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            result = real_derive(secret, salt)
+            with lock:
+                if active == 2:
+                    two_started.set()
+            if not release.wait(10):
+                raise RuntimeError("test did not release the verifier")
+            return result
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(authmod, "_derive", gated_derive)
+
+    async def exercise():
+        status_task = asyncio.create_task(call(app, "GET", "/v1/auth/status", headers=bearer(token)))
+        business_task = asyncio.create_task(call(app, "GET", "/v1/meta", headers=bearer(token)))
+        try:
+            assert await asyncio.to_thread(two_started.wait, 10)
+            shed_status = await call(app, "GET", "/v1/auth/status", headers=bearer(token))
+            shed_business = await call(app, "GET", "/v1/meta", headers=bearer(token))
+            status_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await status_task
+            # Cancellation releases admission, but the original scrypt worker
+            # is still occupied. A replacement can queue without creating a
+            # third running derivation.
+            for _ in range(100):
+                if app.state.auth_slots.acquire(blocking=False):
+                    app.state.auth_slots.release()
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("cancelled request did not release admission")
+            replacement = asyncio.create_task(
+                call(app, "GET", "/v1/auth/status", headers=bearer(token))
+            )
+            await asyncio.sleep(0.05)
+            assert not replacement.done()
+        finally:
+            release.set()
+        admitted_business = await business_task
+        recovered = await replacement
+        return shed_status, shed_business, admitted_business, recovered
+
+    shed_status, shed_business, admitted, recovered = run(exercise())
+    assert_status_error(shed_status, 429, "rate_limited")
+    assert shed_business.status_code == 429
+    assert admitted.status_code == 200
+    assert recovered.status_code == 204
+    assert maximum == 2
+
+
+def test_auth_status_errors_from_outer_layers_are_not_cacheable(tmp_path, sample_db, monkeypatch):
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=8)
+    _, token = issue_device(store, "owner")
+    too_large = run(call(app, "GET", "/v1/auth/status", content=b"x" * 9))
+    assert_status_error(too_large, 413, "payload_too_large")
+
+    def unexpected_error():
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(store, "_connect_readonly", unexpected_error)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+            return await client.get("/v1/auth/status", headers=bearer(token))
+
+    assert_status_error(run(exercise()), 500, "internal")
 
 
 def test_oversized_body_is_refused_before_parsing(tmp_path, sample_db):
@@ -1006,11 +1229,19 @@ def test_openapi_snapshot_documents_the_versioned_surface():
     assert sorted(document["paths"]) == [
         "/healthz",
         "/readyz",
+        "/v1/auth/status",
         "/v1/meta",
         "/v1/reviews",
         "/v1/terms",
         "/v1/translations",
     ]
+    status = document["paths"]["/v1/auth/status"]["get"]
+    assert status["security"]
+    assert "content" not in status["responses"]["204"]
+    for code in ("204", "401", "403", "429", "503"):
+        assert set(status["responses"][code]["headers"]) == {
+            "Cache-Control", "X-Request-Id"
+        }
 
 
 def test_openapi_documents_conservative_client_limits():
