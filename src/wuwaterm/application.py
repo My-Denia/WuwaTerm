@@ -44,6 +44,8 @@ from typing import Deque, Hashable
 from .lookup import TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
+from .normalize import count_cjk as count_cjk
+from .normalize import count_latin as count_latin
 from .protected_text import ProtectedStructure as ProtectedStructure
 from .protected_text import ProtectedText as ProtectedText
 from .protected_text import ProtectedTextIntegrityError as ProtectedTextIntegrityError
@@ -60,6 +62,7 @@ from .sentence import (
     LLMFailureDiagnostic,  # Intentionally re-exported for adapters.
     LLMTranslationError,
     SentenceTranslator,
+    TRANSLATION_UNAVAILABLE_NOTICE as TRANSLATION_UNAVAILABLE_NOTICE,
     _safe_llm_failure_diagnostic,
     _llm_configured,
 )

@@ -165,6 +165,8 @@ jobs:
     uses: ./.github/workflows/python-package.yml
     with:
       source_commit: ${{ needs.source.outputs.source_commit }}
+      upload_package: true
+      candidate_metadata: true
 
   client:
     name: desktop client build (windows)

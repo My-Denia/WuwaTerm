@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwaterm"
-version = "0.6.1"
+version = "0.7.0.dev1"
 description = "WuwaTerm: dictionary-first Wuthering Waves Chinese-English terminology and term-locked translation service."
 readme = "README.md"
 requires-python = ">=3.11"
