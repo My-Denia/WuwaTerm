@@ -15,7 +15,7 @@ its failure means. The run stops at the first failing step and names it, and
 the exit status is that step's.
 
 This is the entry point the **server test matrix** uses: the `pytest (py3.x)`
-jobs install `.[dev,telegram]` and then run `python scripts/validate.py`, so a green run
+jobs install the source-appropriate development dependencies and then run `python scripts/validate.py`, so a green run
 here and a green matrix job are the same claim, on the same file. Before it
 existed, CI carried one list, the README a shorter one, and this page a third,
 and a gate added to one of them was invisible in the others.
@@ -136,6 +136,31 @@ four-module import allowlist into `wuwaterm` (see
 checks the pinned Windows version declaration and pure manuscript validator against
 actual Core API responses, including a nonempty review. Web and Windows product CI
 check their full file interoperability.
+
+## Historical CI sources
+
+The running workflow revision supplies the epoch policy; the exact source
+commit determines which checks apply. The supported bundled-client interval
+starts at v0.6.1 and ends at the last bundled main commit, inclusive. Its Web
+contract uses the Web revision recorded by that source and its bundled client
+labels. Sources containing manuscript support also run the original real
+Web/client file round trip. The product-owned Windows workflow builds and
+tests the historical client. Sources after the interval instead run the pure
+Core-to-Windows contract; normal Core CI does not build the Windows product.
+
+CI retains the Python matrix, locked runtime, package and container checks for
+both epochs. The earliest supported sources include Telegram in their base
+dependencies; later ones check the SDK-free core and builder. A source that is
+not connected to the trusted main ancestry or lacks its epoch's required files
+fails rather than falling back to fewer checks. Equal trees do not establish
+ancestry.
+
+A release receipt binds its exact source, control revision and policy digest to
+a completed successful CI attempt and all selected jobs. Old schema receipts
+are not accepted. For a historical source without a matching receipt, dispatch
+current CI on main for that exact SHA, wait until the whole run succeeds, and
+separately verify that attempt as described in the release checklist. A release
+dry run does not test the receipt gate.
 
 Neither the API contract gate nor consumer tests prove anything about a
 deployed service. A request answered on the service host is evidence about the

@@ -822,3 +822,42 @@ print(Path('remote.json').read_text())
     result = subprocess.run(["bash", "-c", _checklist_bash("# Published release state:")],
                             cwd=tmp_path, env=env, text=True, capture_output=True)
     assert (result.returncode == 0) == (case == "valid"), result.stderr
+
+
+def test_release_resolves_epoch_from_control_before_exact_target_checkout(tmp_path):
+    steps = _workflow_config()["jobs"]["preflight"]["steps"]
+    control = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ github.workflow_sha }}")
+    admission = next(i for i, step in enumerate(steps) if step.get("name") == "Runs on main accept only main source")
+    epoch = next(i for i, step in enumerate(steps) if step.get("name") == "Resolve source epoch from workflow control")
+    target = next(i for i, step in enumerate(steps) if step.get("with", {}).get("ref") == "${{ inputs.target_commit }}")
+    assert control < admission < epoch < target
+    assert steps[control]["with"]["fetch-depth"] == "0"
+    assert 'test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"' in steps[admission]["run"]
+    assert 'git merge-base --is-ancestor "$TARGET" origin/main' in steps[admission]["run"]
+    assert steps[epoch]["run"] == 'python scripts/ci_source_epoch.py resolve "$TARGET" --workflow .github/workflows/ci.yml'
+    assert steps[epoch]["env"]["TARGET"] == "${{ inputs.target_commit }}"
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                    "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "fixture"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
+    step = next(item for item in steps if item.get("id") == "commit")
+    output = tmp_path / "output"
+    for target_sha, succeeds in ((sha, True), ("0" * 40, False)):
+        result = subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, capture_output=True,
+                                env={**os.environ, "TARGET": target_sha, "GITHUB_OUTPUT": str(output)}, text=True)
+        assert (result.returncode == 0) == succeeds, result.stderr
+    assert output.read_text() == f"source_commit={sha}\n"
+
+
+@pytest.mark.parametrize("version,accepted", [("0.6.1", True), ("0.7.0.dev1", False), ("v1.2.3", False)])
+def test_release_dry_run_does_not_bypass_stable_version_check(tmp_path, version, accepted):
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
+    output = tmp_path / "output"
+    steps = _workflow_config()["jobs"]["preflight"]["steps"]
+    step = next(item for item in steps if item.get("id") == "versions")
+    assert "if" not in step
+    result = subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, capture_output=True,
+                            env={**os.environ, "GITHUB_OUTPUT": str(output)}, text=True)
+    assert (result.returncode == 0) == accepted, result.stderr

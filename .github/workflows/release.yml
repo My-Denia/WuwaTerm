@@ -64,10 +64,10 @@ jobs:
       resource_version: ${{ steps.datapin.outputs.resource_version }}
       changelist: ${{ steps.datapin.outputs.changelist }}
     steps:
-      # Build the requested source, while retaining the workflow control revision separately.
+      # Resolve with the workflow CONTROL even when SOURCE predates this policy.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.target_commit }}
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
       # A run on main holds the default-branch cache scope, so it may execute
       # only code already on main. Candidate branches dry-run from their own ref.
@@ -75,13 +75,23 @@ jobs:
         env:
           TARGET: ${{ inputs.target_commit }}
           CONTROL_REF: ${{ github.ref }}
+          CONTROL_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"
           [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]
           if [ "$CONTROL_REF" = refs/heads/main ]; then
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$TARGET" origin/main
           fi
+      - name: Resolve source epoch from workflow control
+        env:
+          TARGET: ${{ inputs.target_commit }}
+        run: python scripts/ci_source_epoch.py resolve "$TARGET" --workflow .github/workflows/ci.yml
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.target_commit }}
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -107,9 +117,12 @@ jobs:
 
       - name: Resolve the source commit
         id: commit
+        env:
+          TARGET: ${{ inputs.target_commit }}
         run: |
           set -euo pipefail
-          echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          test "$(git rev-parse HEAD)" = "$TARGET"
+          echo "source_commit=$TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Read and format-check the declared versions
         id: versions

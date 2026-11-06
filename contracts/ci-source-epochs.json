@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "source_floor": "13f601871566d89b372ecf31b45345f5387b601c",
+  "manuscript_milestone": "a1e8c1fc640e121f883f396350234693aee14e6c",
+  "optional_telegram_milestone": "0c7be297472c6051b7190974f803b3c6e03d7b63",
+  "public_interface_milestone": "1c4400aad98578c9abed0429ab30f39c13fed3d8",
+  "last_legacy_source": "64e293cf53ba9106a4a67639fd5c6b0857e6c384",
+  "consumers": {
+    "web_repository": "My-Denia/WuwaTerm-Web",
+    "legacy_web_revision": "6cbba41bb934d44d1dde1b94f1b50d6d845af599",
+    "split_web_revision": "2511764e65c98bc9396c48a48a684b25105a5168",
+    "windows_repository": "My-Denia/WuwaTerm-Windows",
+    "split_windows_revision": "cda93f01bf7803efe66ca695701cae678b320ef1",
+    "windows_recipe_workflow": ".github/workflows/legacy-core-validation.yml",
+    "windows_recipe_sha": "974160e74286f03463ab98c4e1b1ab1d45be2bfc"
+  },
+  "jobs": {
+    "common": [
+      "Resolve source",
+      "pytest (py3.11)",
+      "pytest (py3.12)",
+      "pytest (py3.13)",
+      "pytest (py3.14)",
+      "uv locked runtime behavior (py3.11)",
+      "API to Web contract",
+      "wheel/sdist build, audit, install / build and smoke",
+      "docker runtime/builder boundary",
+      "validated source"
+    ],
+    "split_windows": "API to Windows contract",
+    "legacy_windows": "Historical bundled Windows validation / build and test"
+  }
+}

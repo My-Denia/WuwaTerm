@@ -24,6 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
+      source_epoch: ${{ steps.epoch.outputs.source_epoch }}
+      telegram_optional: ${{ steps.epoch.outputs.telegram_optional }}
+      manuscript_interop: ${{ steps.epoch.outputs.manuscript_interop }}
+      web_revision: ${{ steps.epoch.outputs.web_revision }}
+      windows_revision: ${{ steps.epoch.outputs.windows_revision }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,10 +49,34 @@ jobs:
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             git merge-base --is-ancestor "$TARGET" origin/main
             source_commit=$(git rev-parse "$TARGET^{commit}")
+            test "$source_commit" = "$TARGET"
           else
+            [[ "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+            git cat-file -e "$EVENT_SHA^{commit}" || git fetch --no-tags origin "$EVENT_SHA"
             source_commit=$(git rev-parse "$EVENT_SHA^{commit}")
+            test "$source_commit" = "$EVENT_SHA"
           fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+      - name: Resolve source epoch from control
+        id: epoch
+        env:
+          SOURCE: ${{ steps.resolve.outputs.source_commit }}
+          CONTROL: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTROL"
+          python scripts/ci_source_epoch.py resolve "$SOURCE" --workflow .github/workflows/ci.yml > "$RUNNER_TEMP/epoch.json"
+          jq -e '
+            (.source_epoch == "legacy" or .source_epoch == "split") and
+            (.telegram_optional | type == "boolean") and
+            (.manuscript_interop | type == "boolean") and
+            (.web_revision | type == "string" and test("^[0-9a-f]{40}$")) and
+            (if .source_epoch == "legacy" then .windows_revision == null
+             else (.windows_revision | type == "string" and test("^[0-9a-f]{40}$")) end)
+          ' "$RUNNER_TEMP/epoch.json" > /dev/null
+          for key in source_epoch telegram_optional manuscript_interop web_revision windows_revision; do
+            printf '%s=%s\n' "$key" "$(jq -r --arg key "$key" 'if .[$key] == null then "" else .[$key] | tostring end' "$RUNNER_TEMP/epoch.json")" >> "$GITHUB_OUTPUT"
+          done
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve.outputs.source_commit }}
@@ -72,11 +101,20 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.source.outputs.source_commit }}
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
-      - run: python -m pip install -e ".[dev,telegram]"
+      - name: Install source dependencies
+        env:
+          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+        run: |
+          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+            python -m pip install -e ".[dev,telegram]"
+          else
+            python -m pip install -e ".[dev]"
+          fi
       # One entry point, and it is the same one a contributor is told to run:
       # hygiene, architecture, API contract, ruff, then the suite.
       # Listing the gates here as separate steps is what let CI and the
@@ -91,6 +129,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.source.outputs.source_commit }}
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -100,10 +139,16 @@ jobs:
       # The floating pytest matrix above checks compatibility. This job uses
       # the SAME locked dependency resolution and serving extras as the runtime
       # image. Bind uv explicitly to 3.11 rather than its managed default.
-      - run: uv sync --locked --python 3.11 --extra api --extra telegram --extra dev
+      - name: Install locked runtime dependencies
+        env:
+          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+        run: |
+          extras=(--extra api --extra dev)
+          if [ "$TELEGRAM_OPTIONAL" = true ]; then extras+=(--extra telegram); fi
+          uv sync --locked --python 3.11 "${extras[@]}"
       - name: Record locked runtime interpreter and dependencies
-        run: uv run --locked --python 3.11 --extra api --extra telegram --extra dev python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
-      - run: uv run --locked --python 3.11 --extra api --extra telegram --extra dev python scripts/validate.py
+        run: .venv/bin/python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
+      - run: .venv/bin/python scripts/validate.py
 
   web-contract:
     needs: source
@@ -120,6 +165,7 @@ jobs:
         run: |
           set -euo pipefail
           revision=$(cat contracts/web-ref.txt)
+          test "$revision" = "${{ needs.source.outputs.web_revision }}"
           [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "Backend source: $(git rev-parse HEAD)"
@@ -131,6 +177,7 @@ jobs:
       - name: Verify Web source
         run: test "$(git -C web rev-parse HEAD)" = "${{ steps.web.outputs.revision }}"
       - name: Read Web's immutable Windows revision
+        if: needs.source.outputs.source_epoch == 'split'
         id: web-windows
         run: |
           set -euo pipefail
@@ -138,11 +185,13 @@ jobs:
           [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
+        if: needs.source.outputs.source_epoch == 'split'
         with:
           repository: My-Denia/WuwaTerm-Windows
           ref: ${{ steps.web-windows.outputs.revision }}
           path: windows
       - name: Verify Web's Windows source
+        if: needs.source.outputs.source_epoch == 'split'
         run: test "$(git -C windows rev-parse HEAD)" = "${{ steps.web-windows.outputs.revision }}"
       - uses: actions/setup-python@v7
         with:
@@ -150,10 +199,35 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-      - run: python -m pip install -e ".[dev,telegram]"
+      - name: Install source dependencies
+        env:
+          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+        run: |
+          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+            python -m pip install -e ".[dev,telegram]"
+          else
+            python -m pip install -e ".[dev]"
+          fi
       - run: python -m pytest -m cross_component tests/test_meta_site_contract.py
         env:
           WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
+      - name: Check actual manuscript interop in both directions
+        if: needs.source.outputs.manuscript_interop == 'true'
+        env:
+          WUWATERM_WEB_ROOT: ${{ github.workspace }}/web
+          PYTHONPATH: ${{ github.workspace }}/client/src
+        run: |
+          set -euo pipefail
+          command -v node
+          test -f client/tests/test_manuscript.py
+          python -m pytest -q client/tests/test_manuscript.py::test_actual_web_and_client_read_each_others_files --junitxml="$RUNNER_TEMP/manuscript.xml"
+          python - "$RUNNER_TEMP/manuscript.xml" <<'PYMANUSCRIPT'
+          import sys, xml.etree.ElementTree as ET
+          suites = ET.parse(sys.argv[1]).getroot().iter('testsuite')
+          totals = [(int(s.attrib.get('tests', 0)), int(s.attrib.get('skipped', 0))) for s in suites]
+          if sum(t for t, _ in totals) != 1 or sum(s for _, s in totals):
+              raise SystemExit('actual manuscript interop did not run exactly once')
+          PYMANUSCRIPT
       - run: npm run test:contract
         working-directory: web
         env:
@@ -161,6 +235,7 @@ jobs:
           WUWATERM_WINDOWS_ROOT: ${{ github.workspace }}/windows
 
   windows-contract:
+    if: needs.source.outputs.source_epoch == 'split'
     needs: source
     name: API to Windows contract
     runs-on: ubuntu-latest
@@ -173,6 +248,7 @@ jobs:
         run: |
           set -euo pipefail
           revision=$(cat contracts/windows-ref.txt)
+          test "$revision" = "${{ needs.source.outputs.windows_revision }}"
           [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
@@ -198,6 +274,14 @@ jobs:
       source_commit: ${{ needs.source.outputs.source_commit }}
       upload_package: true
       candidate_metadata: true
+
+  historical-windows:
+    name: Historical bundled Windows validation
+    needs: source
+    if: needs.source.outputs.source_epoch == 'legacy'
+    uses: My-Denia/WuwaTerm-Windows/.github/workflows/legacy-core-validation.yml@974160e74286f03463ab98c4e1b1ab1d45be2bfc
+    with:
+      source_commit: ${{ needs.source.outputs.source_commit }}
 
   deploy-boundary:
     needs: source
@@ -233,22 +317,31 @@ jobs:
         run: |
           docker run --rm --entrypoint sh wuwaterm-runtime:ci -c '! command -v git && ! command -v uv && ! command -v uvx'
           docker run --rm --entrypoint sh wuwaterm-builder:ci -c 'command -v git >/dev/null'
-          docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          if [ "${{ needs.source.outputs.telegram_optional }}" = true ]; then
+            docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
+          else
+            docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is not None"
+          fi
       - name: Runtime image excludes WebSocket implementations
         run: |
           docker run --rm --entrypoint python wuwaterm-runtime:ci -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('websockets', 'wsproto'))"
 
   receipt:
     name: validated source
-    needs: [source, test, lock, web-contract, windows-contract, package, deploy-boundary]
+    needs: [source, test, lock, web-contract, windows-contract, historical-windows, package, deploy-boundary]
     if: >-
       ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.source.result == 'success' && needs.test.result == 'success'
       && needs.lock.result == 'success' && needs.web-contract.result == 'success'
-      && needs.windows-contract.result == 'success'
+      && ((needs.source.outputs.source_epoch == 'split' && needs.windows-contract.result == 'success' && needs.historical-windows.result == 'skipped')
+      || (needs.source.outputs.source_epoch == 'legacy' && needs.historical-windows.result == 'success' && needs.windows-contract.result == 'skipped'))
       && needs.package.result == 'success' && needs.deploy-boundary.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
       - name: Write source receipt
         env:
           SOURCE_COMMIT: ${{ needs.source.outputs.source_commit }}
@@ -257,18 +350,30 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT: ${{ github.event_name }}
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONTROL_COMMIT"
           python - <<'PYRECEIPT'
-          import json, os
+          import hashlib, json, os, sys
           from pathlib import Path
-          Path('validated-source.json').write_text(json.dumps({
-              'schema': 1,
+          sys.path.insert(0, 'scripts')
+          from ci_source_epoch import load_config, resolve, validate_workflow
+          raw = Path('contracts/ci-source-epochs.json').read_bytes()
+          config = load_config(raw)
+          validate_workflow(Path('.github/workflows/ci.yml').read_text(), config)
+          selection = resolve(os.environ['SOURCE_COMMIT'], config)
+          receipt = {
+              'schema': 2,
               'source_commit': os.environ['SOURCE_COMMIT'],
               'control_commit': os.environ['CONTROL_COMMIT'],
               'run_id': int(os.environ['RUN_ID']),
               'run_attempt': int(os.environ['RUN_ATTEMPT']),
               'event': os.environ['EVENT'],
               'backend_scope': 'full',
-          }) + '\n')
+              'control_config_sha256': hashlib.sha256(raw).hexdigest(),
+          }
+          for key in ('source_epoch', 'windows_recipe_sha', 'windows_recipe_workflow', 'web_repository', 'web_revision', 'windows_repository', 'windows_revision', 'required_jobs'):
+              receipt[key] = selection[key]
+          Path('validated-source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
           PYRECEIPT
       - uses: actions/upload-artifact@v7
         with:

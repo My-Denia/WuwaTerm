@@ -150,7 +150,9 @@ pass for the exact commit. Windows releases follow their own repository gates.
    or release. Read its `release-assets` artifact before the real run. A run
    dispatched on `main` accepts only a target already on `main`, dry runs
    included. To dry-run a candidate commit, dispatch from its branch with
-   `--ref`; that needs no main CI receipt.
+   `--ref`; its exact control and target must still satisfy the source epoch
+   ancestry and layout rules. Dry runs require a stable `X.Y.Z` version, skip
+   the receipt gate, and do not prove receipt verification.
 3. **Record the registry baseline** using the block below before dispatch.
 4. **The real run** creates a **draft**. It is the only mode that logs in to
    the registry, pushes images, or touches releases, and the two jobs that can
@@ -171,22 +173,28 @@ pass for the exact commit. Windows releases follow their own repository gates.
    gh run view "$release_run_id" --repo My-Denia/WuwaTerm --json status,conclusion,jobs
    ```
 
-   Before any write, the workflow verifies a CI receipt for the actual source
-   SHA, its main control revision, and all required Core jobs, including both
-   consumer contracts. The run must complete successfully. Each attempt needs
-   its own receipt: use Re-run all jobs because Re-run failed jobs leaves the
-   new attempt without a receipt. Main pushes are found automatically. For an
-   older source without a receipt, dispatch the current CI on main, wait for it
-   to finish, and pass its run ID as `validation_run_id`:
+   Before any write, the workflow verifies a schema 2 CI receipt for the exact
+   source, trusted main control revision and all common and epoch-selected
+   jobs. The complete run and selected jobs must succeed. Old receipts and
+   failed, skipped or incomplete selected jobs do not qualify. If a source has
+   no qualifying receipt, redispatch the current CI on main for that exact
+   source, wait for the entire run to complete successfully, then separately
+   verify that attempt before passing its run ID to the release:
 
    ```bash
    gh workflow run ci.yml --ref main -f target_commit="$reviewed_main_commit"
-   # Select and inspect the matching completed dispatch; do not assume latest.
+   # Select the matching dispatch; do not assume latest. Wait for completed/success.
    gh run list --repo My-Denia/WuwaTerm --workflow=ci.yml --event workflow_dispatch
-   validation_run_id=<matching-completed-ci-run-id>
+   validation_run_id=<matching-completed-successful-ci-run-id>
+   gh run view "$validation_run_id" --repo My-Denia/WuwaTerm --json status,conclusion,jobs
+   GH_REPO=My-Denia/WuwaTerm python scripts/verify_ci_source.py verify \
+     "$reviewed_main_commit" --run-id "$validation_run_id"
    gh workflow run release.yml --ref main -f target_commit="$reviewed_main_commit" \
      -f dry_run=false -f validation_run_id="$validation_run_id"
    ```
+
+   Use a current main checkout for the separate verification. Every attempt
+   needs its own receipt; re-running failed jobs alone cannot supply one.
 
    The workflow also refuses a present tag, malformed version, or source that
    is not an ancestor of `origin/main`.
