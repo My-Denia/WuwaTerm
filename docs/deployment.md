@@ -623,6 +623,19 @@ running only after its database, pointer, manifest and runtime binding are
 reverified unchanged. Partial stop failures still require rollback. A completed
 rollback journal cannot be replayed over a later full deployment.
 
+The current legacy updater and its Python write helpers refuse a component
+deployment pointer or component transaction journal, including a completed,
+malformed, or symlinked record. They also refuse an interrupted or unknown
+component build attempt. Inspect component metadata without changing it with
+`python3 scripts/component_runtime.py --root /path/to/deployment inspect`.
+Component adoption, updates, builds and recovery are not yet enabled. Do not
+delete a record or run an older raw updater to bypass this boundary.
+
+Manifest CLI write commands require the same inherited FD 9 and confine their
+write paths to the script's physical deployment checkout. Its `verify` and
+`verify-pointer` commands are lock-free and read-only; `verify` refuses a
+SQLite database with journal sidecars rather than creating or changing them.
+
 When an orchestration wrapper advances the checkout, it must acquire that same
 root's `.deployments/.deployment.lock` **before** admission, fetch or fast-forward,
 and retain it through the updater's exit. Pass the locked open-file description
@@ -675,8 +688,8 @@ state, ignored files, reflogs or unrelated refs. Preserve the capsule in trusted
 storage: its manifest is an integrity record, not authority to recover an
 arbitrary transaction. The trusted journal supplies the commit and tool hash.
 
-Keep copies of `scripts/legacy_recovery.py` and
-`scripts/package_recovery_source.py` together outside the checkout before
+Keep copies of `scripts/legacy_recovery.py`, `scripts/deployment_admission.py`
+and `scripts/package_recovery_source.py` together outside the checkout before
 retiring them from that tree. For an existing runtime schema 1 or full schema 2
 journal, run the copied dispatcher with the real deployment root and the
 matching capsule. Without `--recover` it performs read-only preflight:
@@ -698,6 +711,12 @@ commit. The original recovery still decides whether the observed images,
 database, pointers and other state permit recovery; the capsule does not waive
 any of its checks. A dirty source tree, an overwrite of an untracked or ignored
 file, an unsupported journal, or a mismatch refuses the operation.
+
+The dispatcher checks for component metadata before taking the lock, again
+under the lock and after the historical checkout. Older source retains its
+original four-file tool fingerprint; source carrying the paired v2 marker
+also fingerprints `deployment_admission.py`. Existing journals and capsules
+are never rewritten to change their original fingerprint.
 
 The return directory contains a bundle and `return.json` identifying the
 previous commit and branch. Keep it until the source transition is settled.

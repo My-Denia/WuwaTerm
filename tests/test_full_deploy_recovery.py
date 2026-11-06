@@ -58,6 +58,7 @@ def _tool_hash(root: Path) -> str:
         "deploy/docker-compose.yml",
         "scripts/deployment_manifest.py",
         "scripts/full_update.py",
+        "scripts/deployment_admission.py",
     ):
         digest.update(relative.encode("ascii"))
         digest.update((root / relative).read_bytes())

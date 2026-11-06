@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# WUWATERM-LEGACY-ADMISSION-FINGERPRINT: v2
 """Durable journal, admission gate and recovery for full-data deployments.
 
 The full-mode updater (``deploy/vps-update.sh``) replaces the live
@@ -53,7 +54,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.dont_write_bytecode = True
 
+from scripts import deployment_admission  # noqa: E402
 from scripts.deployment_manifest import (  # noqa: E402
     ManifestError,
     durable_remove,
@@ -220,20 +223,9 @@ def _run_output(command: list[str], *, timeout: float = 60.0) -> str:
 
 
 def _require_held_lock() -> None:
-    if os.name != "posix":
-        raise FullUpdateError("deployment_lock_missing")
     try:
-        lock_target = os.readlink("/proc/self/fd/9")
-    except OSError:
-        raise FullUpdateError("deployment_lock_missing") from None
-    expected_lock = str((ROOT / ".deployments" / ".deployment.lock").resolve())
-    if lock_target != expected_lock:
-        raise FullUpdateError("deployment_lock_missing")
-    try:
-        import fcntl
-
-        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (ImportError, OSError):
+        deployment_admission.require_lock(ROOT)
+    except deployment_admission.AdmissionError:
         raise FullUpdateError("deployment_lock_missing") from None
 
 
@@ -474,6 +466,7 @@ def _tool_hash() -> str:
         "deploy/docker-compose.yml",
         "scripts/deployment_manifest.py",
         "scripts/full_update.py",
+        "scripts/deployment_admission.py",
     ):
         path = ROOT / relative
         if not path.is_file() or path.is_symlink():
@@ -1381,7 +1374,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("check")
 
     args = parser.parse_args(argv)
-    _require_held_lock()
+    try:
+        deployment_admission.admit_legacy(ROOT)
+    except deployment_admission.AdmissionError as exc:
+        print(f"deployment admission refused: {exc}", file=sys.stderr)
+        return 1
     signal.signal(signal.SIGINT, _on_termination)
     signal.signal(signal.SIGTERM, _on_termination)
     if hasattr(signal, "SIGHUP"):

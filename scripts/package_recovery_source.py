@@ -32,6 +32,9 @@ ENTRYPOINTS = {
     "runtime": (b"--recover-runtime)", b"exec python3 scripts/runtime_update.py --recover-runtime"),
     "full": (b"--recover-full)", b"exec python3 scripts/full_update.py recover"),
 }
+FINGERPRINT_MARKER_PREFIX = b"# WUWATERM-LEGACY-ADMISSION-FINGERPRINT:"
+FINGERPRINT_V2_MARKER = FINGERPRINT_MARKER_PREFIX + b" v2"
+ADMISSION_TOOL = "scripts/deployment_admission.py"
 
 
 class CapsuleError(RuntimeError):
@@ -194,6 +197,26 @@ def inspect_archive(path: Path, files: dict[str, dict[str, Any]], *, extract: Pa
         raise CapsuleError("invalid source archive") from exc
     if set(contents) != set(files):
         raise CapsuleError("incomplete source archive")
+    # The journal and capsule keep their original fields and hash algorithm.
+    # A paired source marker selects the additional v2 tool; unmarked historic
+    # sources retain their exact four-file fingerprints.
+    marker_names = ("deploy/vps-update.sh", "scripts/runtime_update.py", "scripts/full_update.py")
+    marked: dict[str, bool] = {}
+    for name in marker_names:
+        lines = [line for line in contents.get(name, b"").splitlines()
+                 if line.startswith(FINGERPRINT_MARKER_PREFIX)]
+        if lines and lines != [FINGERPRINT_V2_MARKER]:
+            raise CapsuleError("unsupported or repeated tool fingerprint marker")
+        marked[name] = bool(lines)
+    v2 = marked["deploy/vps-update.sh"]
+    if any(marked.values()) and not v2:
+        raise CapsuleError("unpaired tool fingerprint marker")
+    if v2:
+        if ADMISSION_TOOL not in contents:
+            raise CapsuleError("admission tool missing from marked source")
+        if not all(marked.values()):
+            raise CapsuleError("unpaired tool fingerprint marker")
+
     fingerprints = {}
     for kind, paths in TOOLS.items():
         shell = contents.get("deploy/vps-update.sh", b"")
@@ -201,7 +224,7 @@ def inspect_archive(path: Path, files: dict[str, dict[str, Any]], *, extract: Pa
             fingerprints[kind] = None
             continue
         digest = hashlib.sha256()
-        for name in paths:
+        for name in (*paths, ADMISSION_TOOL) if v2 else paths:
             if name not in contents:
                 break
             digest.update(name.encode("ascii"))
