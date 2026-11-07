@@ -575,6 +575,75 @@ def test_hatch_wheel_packages_in_pyproject_toml(tmp_path: Path) -> None:
         fx3.seal(source_files=source_files3)
 
 
+def test_telegram_bundle_omitting_telegram_package_is_rejected_at_seal_and_verify(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path, "wuwaterm-telegram")
+    core = dist("wuwaterm", "0.7.0", fx.pkg)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in core.items()})
+    report = report_for(base, {}, [("wuwaterm", "0.7.0")], [], "telegram")
+    layers = [layer(base), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="installed Telegram version differs from the bundle"):
+        fx.seal(layers)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+    bundle_file = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_file.exists()
+    with pytest.raises(art.ArtifactError, match="installed Telegram version differs from the bundle"):
+        art.verify_bundle(bundle_file)
+
+
+def test_telegram_bundle_wrong_installed_version_is_rejected_at_seal_and_verify(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path, "wuwaterm-telegram")
+    core = dist("wuwaterm", "0.7.0", fx.pkg)
+    tg_wrong = dist("wuwaterm-telegram", "0.2.0", fx.tg_pkg)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg_wrong}.items()})
+    report = report_for(base, {}, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.2.0")], [], "telegram")
+    layers = [layer(base), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="installed Telegram version differs from the bundle"):
+        fx.seal(layers)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+    bundle_file = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_file.exists()
+    with pytest.raises(art.ArtifactError, match="installed Telegram version differs from the bundle"):
+        art.verify_bundle(bundle_file)
+
+
+def test_telegram_bundle_wrong_pyproject_version_is_rejected_at_seal_and_verify(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path / "seal", "wuwaterm-telegram")
+    source_files = fx.source_files()
+    source_files["pyproject.toml"] = b'[project]\nname = "wuwaterm-telegram"\nversion = "0.9.9"\n'
+    with pytest.raises(art.ArtifactError, match="bundle version differs from the sealed source"):
+        fx.seal(source_files=source_files)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+
+    fx2 = Fixture(tmp_path / "verify", "wuwaterm-telegram")
+    verified = fx2.seal()
+    bundle_data = json.loads(verified.path.read_bytes())
+    bundle_data["version"] = "0.9.9"
+    for w in bundle_data["wheels"]:
+        if w["role"] == "telegram":
+            w["version"] = "0.9.9"
+    verified.path.write_bytes(art.canonical(bundle_data))
+    with pytest.raises(art.ArtifactError, match="bundle version differs from the sealed source"):
+        art.verify_bundle(verified.path)
+
+
+def test_telegram_bundle_unexpected_package_is_rejected_at_seal(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path, "wuwaterm-telegram")
+    core = dist("wuwaterm", "0.7.0", fx.pkg)
+    tg = dist("wuwaterm-telegram", "0.1.0", fx.tg_pkg)
+    extra = dist("unexpected-pkg", "1.0.0", {"unexpected_pkg/__init__.py": b"U = 1\n"})
+    base = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg, **extra}.items()})
+    report = report_for(base, {}, [("unexpected-pkg", "1.0.0"), ("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers = [layer(base), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="probed packages differ from expected product distributions"):
+        fx.seal(layers)
+
+
 # ---------------------------------------------------------------- acquisition, cancellation, recovery
 
 def test_acquire_registers_exact_graph_and_verifies_receipt(fx: Fixture) -> None:

@@ -863,17 +863,22 @@ def validate_bundle_schema(bundle: Any) -> dict[str, Any]:
         _fail("core binding must be exact")
     _git(binding["core_source_commit"], "core source commit")
     cores = [w for w in bundle["wheels"] if w["role"] == "core"]
+    telegrams = [w for w in bundle["wheels"] if w["role"] == "telegram"]
     if bundle["product"] == "wuwaterm-api":
         # Core installs from its own source tree; no Core wheel exists.
-        if binding["core_wheel_sha256"] is not None or cores or binding["core_version"] != bundle["version"] \
+        if binding["core_wheel_sha256"] is not None or cores or telegrams or binding["core_version"] != bundle["version"] \
                 or binding["core_source_commit"] != source["commit"]:
             _fail("Core bundle must bind its own source as the Core")
     else:
-        if len(cores) != 1 or binding["core_wheel_sha256"] != cores[0]["sha256"] \
+        if len(cores) != 1 or cores[0]["package"] != "wuwaterm" \
+                or binding["core_wheel_sha256"] != cores[0]["sha256"] \
                 or binding["core_version"] != cores[0]["version"]:
             _fail("Telegram bundle must bind exactly one Core wheel")
-        if [w for w in bundle["wheels"] if w["role"] == "telegram"] == []:
+        if not telegrams:
             _fail("Telegram bundle has no Telegram wheel")
+        if len(telegrams) != 1 or telegrams[0]["package"] != "wuwaterm-telegram" \
+                or telegrams[0]["version"] != bundle["version"]:
+            _fail("Telegram bundle must bind exactly one Telegram wheel")
     oci = _exact(bundle["oci"], {"archive_sha256", "archive_size", "index_digest", "manifest_digest",
                                  "config_digest", "layers", "platform"}, "oci")
     _hex(oci["archive_sha256"], "archive digest")
@@ -1029,11 +1034,15 @@ def _skipped(path: str) -> bool:
 
 def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str, Any],
                       source: SourceArchive, wheels: dict[str, dict[str, str]],
-                      wheel_hashes: dict[str, str]) -> None:
+                      wheel_hashes: dict[str, str],
+                      wheel_versions: dict[str, str] | None = None) -> None:
     rootfs = image.rootfs
     names = [p["name"] for p in report["packages"]]
     if names != sorted(set(names)):
         _fail("probe packages must be unique and sorted")
+    expected_packages = set(wheels) | set(product["source_packages"])
+    if set(names) != expected_packages:
+        _fail("probed packages differ from expected product distributions")
     for package in report["packages"]:
         location = _str(package["location"], "package location")
         if not location.startswith("/") or posixpath.normpath(location) != location:
@@ -1079,6 +1088,8 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     if not _skipped(relative) and relative not in installed:
                         _fail("unrecorded file in installed package: " + relative)
         if package["name"] in wheels:
+            if wheel_versions is not None and package["version"] != wheel_versions.get(package["name"]):
+                _fail("installed distribution version differs from wheel: " + package["name"])
             members = wheels[package["name"]]
             for path, digest in members.items():
                 generated = path.split("/", 1)[0].endswith(".dist-info") and posixpath.basename(path) in _INSTALLER_FILES
@@ -1220,15 +1231,18 @@ def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
     program = source.content.get("scripts/install_probe.py")
     if program is None or _sha(program) != bundle["install_probe"]["program_sha256"]:
         _fail("probe program differs from the sealed source")
-    if bundle["product"] == "wuwaterm-api":
-        try:
-            version = tomllib.loads(source.content["pyproject.toml"].decode("utf-8"))["project"]["version"]
-        except (KeyError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-            raise ArtifactError("cannot read the source package version") from exc
-        if version != bundle["version"]:
-            _fail("bundle version differs from the sealed source")
+    pyproject_raw = source.content.get("pyproject.toml")
+    if pyproject_raw is None:
+        _fail("source archive has no pyproject.toml")
+    try:
+        source_version = tomllib.loads(pyproject_raw.decode("utf-8"))["project"]["version"]
+    except (KeyError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ArtifactError("cannot read the source package version") from exc
+    if source_version != bundle["version"]:
+        _fail("bundle version differs from the sealed source")
     wheels: dict[str, dict[str, str]] = {}
     wheel_hashes: dict[str, str] = {}
+    wheel_versions: dict[str, str] = {}
     if bundle["wheels"]:
         folder = wheel_dir or inputs / "wheels"
         for wheel in bundle["wheels"]:
@@ -1238,16 +1252,18 @@ def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
             if wheel["role"] in ("core", "telegram"):
                 wheels[wheel["package"]] = _wheel_contents(path, wheel["package"], wheel["version"])
                 wheel_hashes[wheel["package"]] = wheel["sha256"]
+                wheel_versions[wheel["package"]] = wheel["version"]
     image = read_oci_archive(directory / ARCHIVE_FILE)
     if image.facts() != bundle["oci"]:
         _fail("sealed OCI archive differs from the bundle")
-    _verify_image(image, bundle, product, source, wheels, wheel_hashes,
+    _verify_image(image, bundle, product, source, wheels, wheel_hashes, wheel_versions,
                   _read_regular(directory / REPORT_FILE, _MAX_JSON))
     return VerifiedBundle(bundle_path, raw, _sha(raw), bundle)
 
 
 def _verify_image(image: OciImage, bundle: dict[str, Any], product: dict[str, Any], source: SourceArchive,
-                  wheels: dict[str, dict[str, str]], wheel_hashes: dict[str, str], report_copy: bytes) -> None:
+                  wheels: dict[str, dict[str, str]], wheel_hashes: dict[str, str],
+                  wheel_versions: dict[str, str], report_copy: bytes) -> None:
     _check_final_layer(image)
     probe = bundle["install_probe"]
     if probe["report_layer_digest"] != image.layers[-1]["digest"]:
@@ -1266,12 +1282,15 @@ def _verify_image(image: OciImage, bundle: dict[str, Any], product: dict[str, An
     version = {p["name"]: p["version"] for p in report["packages"]}
     if bundle["product"] == "wuwaterm-api" and version.get("wuwaterm") != bundle["version"]:
         _fail("installed Core version differs from the bundle")
-    if bundle["product"] == "wuwaterm-telegram" and version.get("wuwaterm") != bundle["core_binding"]["core_version"]:
-        _fail("installed Core version differs from the Core binding")
+    if bundle["product"] == "wuwaterm-telegram":
+        if version.get("wuwaterm") != bundle["core_binding"]["core_version"]:
+            _fail("installed Core version differs from the Core binding")
+        if version.get("wuwaterm-telegram") != bundle["version"]:
+            _fail("installed Telegram version differs from the bundle")
     iid = bundle["build_result"]["iid"]
     if iid not in (image.manifest_digest, image.config_digest):
         _fail("build image ID differs from the sealed archive")
-    _verify_installed(image, report, product, source, wheels, wheel_hashes)
+    _verify_installed(image, report, product, source, wheels, wheel_hashes, wheel_versions)
 
 
 # --------------------------------------------------------------------------
@@ -1359,8 +1378,22 @@ def seal_bundle(delivery: Path, attempt_id: str, *, product: str, commit: str, t
     image = read_oci_archive(bundle_dir / ARCHIVE_FILE)
     report_raw = image.rootfs.read(REPORT_PATH)
     report = _validate_report(report_raw)
-    version = tomllib.loads(source.content["pyproject.toml"].decode("utf-8"))["project"]["version"] \
-        if product == "wuwaterm-api" else next(w["version"] for w in (wheels or []) if w["role"] == "telegram")
+    pyproject_raw = source.content.get("pyproject.toml")
+    if pyproject_raw is None:
+        _fail("source archive has no pyproject.toml")
+    try:
+        source_version = tomllib.loads(pyproject_raw.decode("utf-8"))["project"]["version"]
+    except (KeyError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ArtifactError("cannot read the source package version") from exc
+    if product == "wuwaterm-api":
+        version = source_version
+    else:
+        telegram_wheels = [w for w in (wheels or []) if w.get("role") == "telegram"]
+        if not telegram_wheels:
+            _fail("Telegram bundle has no Telegram wheel")
+        version = telegram_wheels[0]["version"]
+        if version != source_version:
+            _fail("bundle version differs from the sealed source")
     _write_new(bundle_dir / REPORT_FILE, report_raw, 0o644)
     program = source.content.get("scripts/install_probe.py")
     if program is None:
