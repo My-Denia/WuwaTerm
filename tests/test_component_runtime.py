@@ -89,6 +89,25 @@ def test_complete_legacy_preimage_parses_without_current_pointer(journal: dict) 
     assert journal["pointers"]["old"][".deploy_current"] == {"present": False, "bytes": None}
 
 
+def test_historical_wheel_image_manifest_without_receipt_parses_in_manifest_and_journal(journal: dict) -> None:
+    target_manifest = journal["target"]["manifest"]
+    telegram_target = target_manifest["components"]["telegram"]
+    provenance = telegram_target["provenance"]
+    provenance.pop("build_receipt_sha256", None)
+    assert set(provenance.keys()) == {
+        "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256", "core_producer_kind",
+    }
+    assert runtime.manifest.validate_manifest(target_manifest) is target_manifest
+
+    if journal["before"]["topology"].get("telegram") is not None:
+        journal["before"]["topology"]["telegram"]["provenance"].pop("build_receipt_sha256", None)
+
+    raw_manifest = (json.dumps(target_manifest, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode("ascii")
+    journal["manifest"]["sha256"] = hashlib.sha256(raw_manifest).hexdigest()
+
+    assert runtime.validate_journal(journal) is journal
+
+
 def test_schema_three_binds_compose_and_inspect_reports_saved_launcher(tmp_path: Path, journal: dict) -> None:
     journal["schema_version"] = 3
     digest = "a" * 64

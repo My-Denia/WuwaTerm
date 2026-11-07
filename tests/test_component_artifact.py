@@ -640,6 +640,14 @@ def test_overlapping_delivery_and_deploy_root_is_refused(fx: Fixture) -> None:
     assert not (nested / ".deployments" / "artifacts").exists()
 
 
+def test_acquire_refuses_uninitialized_deployment_root_without_deployments(fx: Fixture, tmp_path: Path) -> None:
+    verified = fx.seal()
+    uninitialized = tmp_path / "uninitialized"
+    uninitialized.mkdir()
+    with pytest.raises(art.ArtifactError, match="has no .deployments directory"):
+        art.acquire(verified.path, uninitialized, docker=FakeDocker())
+
+
 def test_mutating_entry_points_refuse_inherited_fd9(fx: Fixture) -> None:
     verified = fx.seal()
     fd = os.open(os.devnull, os.O_RDONLY)

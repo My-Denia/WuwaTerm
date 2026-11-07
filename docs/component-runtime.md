@@ -34,7 +34,23 @@ as recorded, unverified metadata. That launcher acquires or reuses FD9 itself.
 The executable deployment workflow operates on sealed delivery bundles built
 outside the deployment lock:
 
-### 1. Build a sealed delivery bundle
+### 1. Adopt existing services
+
+Adoption observes the installed Compose services and records their effective
+configuration as Schema 4 metadata without starting, stopping or replacing them,
+and initializes `.deployments/` with mode `0700` under the deployment lock:
+
+```sh
+deploy/product-update.sh --root "$PWD" adopt --project <compose-project> \
+  --compose-executable /path/to/docker-compose
+```
+
+The optional `--expected-sha <full-commit>` rejects an unexpected operations
+commit. Adoption may run an isolated, network-disabled legacy image probe to
+identify the installed Core version. The result reports polling health as
+unconfirmed.
+
+### 2. Build a sealed delivery bundle
 
 Delivery bundles are built outside the deployment lock without holding or
 inheriting FD9:
@@ -48,15 +64,16 @@ scripts/build-delivery.sh --product api --source /path/to/wuwaterm \
 python scripts/build_delivery.py build ...
 ```
 
-### 2. Acquire and verify the bundle into the deployment root
+### 3. Acquire and verify the bundle into the adopted deployment root
 
 Acquisition verifies the bundle, loads the image into Docker, and registers an
 immutable acquisition receipt under
 `.deployments/artifacts/acquisitions/<acquisition-id>.json`. This tool takes its
-own artifact lock and refuses an inherited FD9:
+own artifact lock, requires `.deployments/` to already exist (initialized by
+`deploy/product-update.sh` / `adopt`), and refuses an inherited FD9:
 
 ```sh
-# Acquire and verify an API bundle
+# Acquire and verify an API bundle into the adopted deployment root
 python scripts/component_artifact.py acquire --bundle /path/to/bundle.json --root "$PWD"
 
 # Acquire a Telegram bundle with required dependency wheels
@@ -68,21 +85,6 @@ python scripts/component_artifact.py list --root "$PWD"
 python scripts/component_artifact.py cancel --root "$PWD" --id <attempt-id>
 python scripts/component_artifact.py recover --root "$PWD" --id <attempt-id>
 ```
-
-### 3. Adopt existing services
-
-Adoption observes the installed Compose services and records their effective
-configuration as Schema 4 metadata without starting, stopping or replacing them:
-
-```sh
-deploy/product-update.sh --root "$PWD" adopt --project <compose-project> \
-  --compose-executable /path/to/docker-compose
-```
-
-The optional `--expected-sha <full-commit>` rejects an unexpected operations
-commit. Adoption may run an isolated, network-disabled legacy image probe to
-identify the installed Core version. The result reports polling health as
-unconfirmed.
 
 ### 4. Run runtime updates or full updates
 

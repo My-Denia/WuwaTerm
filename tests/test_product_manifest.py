@@ -144,14 +144,24 @@ def test_legacy_provenance_does_not_invent_wheel_evidence(payload: dict) -> None
         pm.validate_manifest(payload)
 
 
-def test_wheel_provenance_requires_a_specific_registered_receipt(payload: dict) -> None:
+def test_wheel_provenance_accepts_historical_and_receipt_forms_and_validates_receipt(payload: dict) -> None:
     provenance = payload["components"]["telegram"]["provenance"]
     assert pm.validate_manifest(payload) is payload
-    del provenance["build_receipt_sha256"]
-    with pytest.raises(pm.ManifestError, match="unexpected or missing fields"):
-        pm.validate_manifest(payload)
+    # 6-field with invalid build_receipt_sha256 is rejected
     provenance["build_receipt_sha256"] = "not-a-sha256"
     with pytest.raises(pm.ManifestError, match="invalid value"):
+        pm.validate_manifest(payload)
+    # Historical 5-field without build_receipt_sha256 is accepted
+    del provenance["build_receipt_sha256"]
+    assert pm.validate_manifest(payload) is payload
+    # Missing required field is rejected
+    del provenance["core_producer_kind"]
+    with pytest.raises(pm.ManifestError, match="unexpected or missing fields"):
+        pm.validate_manifest(payload)
+    # Unknown field is rejected
+    provenance["core_producer_kind"] = "github-actions-artifact"
+    provenance["unknown_field"] = "bad"
+    with pytest.raises(pm.ManifestError, match="unexpected or missing fields"):
         pm.validate_manifest(payload)
 
 

@@ -494,16 +494,25 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             _sha(provenance["build_recipe_sha256"], f"{where}.provenance.build_recipe_sha256")
             _sha(provenance["build_receipt_sha256"], f"{where}.provenance.build_receipt_sha256")
         elif kind == "wheel-image":
-            _object(provenance, {
-                "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
-                "core_producer_kind", "build_receipt_sha256",
-            }, f"{where}.provenance")
+            if not isinstance(provenance, dict) or set(provenance) not in (
+                {
+                    "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
+                    "core_producer_kind",
+                },
+                {
+                    "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
+                    "core_producer_kind", "build_receipt_sha256",
+                },
+            ):
+                _fail(f"{where}.provenance: unexpected or missing fields")
             if name != "telegram" or provenance["core_producer_kind"] not in (
                 "github-actions-artifact", "github-release",
             ):
                 _fail(f"{where}: invalid wheel-image provenance")
-            for key in ("telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256", "build_receipt_sha256"):
+            for key in ("telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256"):
                 _sha(provenance[key], f"{where}.provenance.{key}")
+            if "build_receipt_sha256" in provenance:
+                _sha(provenance["build_receipt_sha256"], f"{where}.provenance.build_receipt_sha256")
         elif kind == "legacy-image":
             _object(provenance, {
                 "kind", "legacy_manifest_sha256", "wheel_identity", "lock_identity",
