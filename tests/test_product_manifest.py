@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
+import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -76,7 +82,7 @@ def component(root: Path, name: str) -> dict:
         provenance = {
             "kind": "wheel-image", "telegram_wheel_sha256": J,
             "core_wheel_sha256": H, "core_lock_sha256": J,
-            "core_producer_kind": "github-actions-artifact",
+            "core_producer_kind": "github-actions-artifact", "build_receipt_sha256": H,
         }
         repository = "My-Denia/WuwaTerm-Telegram"
     snap = snapshot(service, image_id)
@@ -138,6 +144,17 @@ def test_legacy_provenance_does_not_invent_wheel_evidence(payload: dict) -> None
         pm.validate_manifest(payload)
 
 
+def test_wheel_provenance_requires_a_specific_registered_receipt(payload: dict) -> None:
+    provenance = payload["components"]["telegram"]["provenance"]
+    assert pm.validate_manifest(payload) is payload
+    del provenance["build_receipt_sha256"]
+    with pytest.raises(pm.ManifestError, match="unexpected or missing fields"):
+        pm.validate_manifest(payload)
+    provenance["build_receipt_sha256"] = "not-a-sha256"
+    with pytest.raises(pm.ManifestError, match="invalid value"):
+        pm.validate_manifest(payload)
+
+
 def test_unverified_wheel_revision_can_be_absent_without_false_attestation(payload: dict) -> None:
     telegram = payload["components"]["telegram"]
     telegram["source"]["revision_claim"] = None
@@ -185,6 +202,209 @@ def test_recipe_snapshot_is_immutable_and_refuses_secret_values(tmp_path: Path) 
         bad["environment_overrides"] = [override]
         with pytest.raises(pm.ManifestError):
             pm.write_recipe_snapshot(tmp_path, bad)
+
+
+@pytest.mark.parametrize("position", ["before-link", "after-link"])
+def test_unnamed_publication_survives_process_death_without_named_partial(tmp_path: Path, position: str) -> None:
+    code = r'''
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import product_manifest as manifest
+directory = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+real_link = os.link
+def paused_link(*args, **kwargs):
+    if sys.argv[3] == 'before-link': os.kill(os.getpid(), signal.SIGSTOP)
+    real_link(*args, **kwargs)
+    if sys.argv[3] == 'after-link': os.kill(os.getpid(), signal.SIGSTOP)
+os.link = paused_link
+manifest._publish_unnamed(directory, 'receipt.json', b'fixture receipt\n', mode=0o400)
+'''
+    scripts = Path(pm.__file__).resolve().parent
+    child = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, str(scripts), str(tmp_path), position],
+                             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stopped = False
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(child.pid, os.WNOHANG | os.WUNTRACED)
+            if pid:
+                if os.WIFSTOPPED(status):
+                    stopped = True
+                    break
+                child.returncode = os.waitstatus_to_exitcode(status)
+                raise AssertionError("publisher exited before the requested boundary")
+            time.sleep(0.01)
+        assert stopped
+        os.kill(child.pid, signal.SIGKILL)
+        assert child.wait(timeout=10) == -signal.SIGKILL
+        entries = list(tmp_path.iterdir())
+        if position == "before-link":
+            assert entries == []
+        else:
+            assert entries == [tmp_path / "receipt.json"]
+            receipt = entries[0]
+            assert receipt.read_bytes() == b"fixture receipt\n"
+            assert receipt.stat().st_nlink == 1 and receipt.stat().st_mode & 0o777 == 0o400
+            fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                pm._write_file_unnamed(fd, "receipt.json", b"fixture receipt\n", reuse=True)
+            finally:
+                os.close(fd)
+    finally:
+        if child.returncode is None:
+            child.kill()
+            child.wait(timeout=10)
+        child.communicate(timeout=10)
+
+
+def test_unnamed_publication_rejects_existing_or_untrusted_links(tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        pm._publish_unnamed(fd, "attempt.json", b"attempt", mode=0o600)
+        assert (tmp_path / "attempt.json").stat().st_nlink == 1
+        assert (tmp_path / "attempt.json").stat().st_mode & 0o777 == 0o600
+        with pytest.raises(FileExistsError):
+            pm._publish_unnamed(fd, "attempt.json", b"other", mode=0o600)
+        pm._write_file_unnamed(fd, "receipt.json", b"receipt", reuse=False)
+        with pytest.raises(pm.ManifestError, match="already exists"):
+            pm._write_file_unnamed(fd, "receipt.json", b"different", reuse=True)
+        os.link(tmp_path / "receipt.json", tmp_path / "foreign-link")
+        with pytest.raises(pm.ManifestError, match="singly-linked"):
+            pm._write_file_unnamed(fd, "receipt.json", b"receipt", reuse=True)
+        assert (tmp_path / "receipt.json").read_bytes() == b"receipt"
+        assert (tmp_path / "foreign-link").stat().st_nlink == 2
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("kind", ["recipe", "manifest"])
+@pytest.mark.parametrize("position", ["before-link", "after-link"])
+def test_public_metadata_publication_has_no_named_partial_after_process_death(
+    tmp_path: Path, payload: dict, kind: str, position: str,
+) -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J) if kind == "recipe" else payload
+    if kind == "recipe":
+        item["environment_overrides"] = [{"name": "WUWATERM_STATE_DIR", "mode": "literal", "value": "state"}]
+        raw = pm._encode(item)
+        digest = hashlib.sha256(raw).hexdigest()
+        directory, name = tmp_path / ".deployments/product-recipes", digest + ".json"
+    else:
+        directory, name = tmp_path / ".deployments/products", DEPLOYMENT_ID + ".json"
+    previous = {entry.name for entry in directory.iterdir()} if directory.exists() else set()
+    code = r'''
+import json,os,pathlib,signal,sys
+sys.path.insert(0,sys.argv[1]); import product_manifest as m
+root=pathlib.Path(sys.argv[2]); item=json.loads(sys.argv[3]); kind=sys.argv[4]; point=sys.argv[5]
+original=os.link
+def paused(*args,**kwargs):
+ if point=='before-link': os.kill(os.getpid(),signal.SIGSTOP)
+ original(*args,**kwargs)
+ if point=='after-link': os.kill(os.getpid(),signal.SIGSTOP)
+os.link=paused
+m.write_recipe_snapshot(root,item) if kind=='recipe' else m.write_manifest(root,item)
+'''
+    child = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, str(Path(pm.__file__).resolve().parent),
+                              str(tmp_path), json.dumps(item), kind, position],
+                             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            waited, status = os.waitpid(child.pid, os.WNOHANG | os.WUNTRACED)
+            if waited:
+                assert os.WIFSTOPPED(status), "metadata publisher exited before its link boundary"
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("metadata publisher did not reach its link boundary")
+        os.kill(child.pid, signal.SIGKILL)
+        assert child.wait(timeout=10) == -signal.SIGKILL
+    finally:
+        if child.returncode is None:
+            child.kill()
+            child.wait(timeout=10)
+        child.communicate(timeout=10)
+    assert {entry.name for entry in directory.iterdir()} == previous | ({name} if position == "after-link" else set())
+    target = directory / name
+    if position == "before-link":
+        assert not target.exists()
+        return
+    info = target.stat()
+    assert info.st_nlink == 1 and info.st_mode & 0o777 == 0o400
+    before = {entry.name: (entry.stat().st_ino, entry.stat().st_mtime_ns, entry.stat().st_ctime_ns)
+              for entry in directory.iterdir()}
+    if kind == "recipe":
+        assert pm.read_recipe_snapshot(tmp_path, digest) == item
+        assert pm.write_recipe_snapshot(tmp_path, item)[1] == digest
+    else:
+        assert pm.read_manifest(tmp_path, DEPLOYMENT_ID) == item
+        with pytest.raises(pm.ManifestError, match="already exists"):
+            pm.write_manifest(tmp_path, item)
+    assert {entry.name: (entry.stat().st_ino, entry.stat().st_mtime_ns, entry.stat().st_ctime_ns)
+            for entry in directory.iterdir()} == before
+
+
+def test_unnamed_publication_uses_attempt_and_receipt_size_bounds(tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        large_attempt = b"x" * (pm._LIMIT + 1)
+        pm._publish_unnamed(fd, "attempt.json", large_attempt, mode=0o600)
+        assert (tmp_path / "attempt.json").stat().st_size == len(large_attempt)
+        with pytest.raises(pm.ManifestError, match="invalid unnamed"):
+            pm._publish_unnamed(fd, "receipt.json", large_attempt, mode=0o400)
+        with pytest.raises(pm.ManifestError, match="invalid unnamed"):
+            pm._publish_unnamed(fd, "too-large.json", b"x" * (16 * 1024 * 1024 + 1), mode=0o600)
+        assert not (tmp_path / "receipt.json").exists() and not (tmp_path / "too-large.json").exists()
+    finally:
+        os.close(fd)
+
+
+def test_immutable_publisher_refuses_filesystem_without_unnamed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    original = os.open
+
+    def unsupported(path, flags, mode=0o777, *, dir_fd=None):
+        if flags & os.O_TMPFILE == os.O_TMPFILE:
+            raise OSError(errno.EOPNOTSUPP, "synthetic unsupported filesystem")
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    try:
+        monkeypatch.setattr(os, "open", unsupported)
+        with pytest.raises(pm.ManifestError, match="cannot publish unnamed"):
+            pm._write_file(fd, "claim.json", b"fixture", reuse=True)
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("value", ["/app/state", "state", "state/custom-settings.json"])
+def test_recipe_path_environment_preserves_normalized_literals(tmp_path: Path, value: str) -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["environment_overrides"] = [{"name": "WUWATERM_SETTINGS_PATH", "mode": "literal", "value": value}]
+    _, digest = pm.write_recipe_snapshot(tmp_path, item)
+    assert pm.read_recipe_snapshot(tmp_path, digest)["environment_overrides"][0]["value"] == value
+
+
+@pytest.mark.parametrize("value", [
+    "", "./state", "state/../file", "state//file", "state/", "~user/state", "state\\file",
+    " state", "state ", "state\nfile", "/app//state", "/app/../state",
+])
+def test_recipe_path_environment_rejects_non_normalized_literals(value: str) -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["environment_overrides"] = [{"name": "WUWATERM_SETTINGS_PATH", "mode": "literal", "value": value}]
+    with pytest.raises(pm.ManifestError):
+        pm.validate_recipe_snapshot(item)
+
+
+def test_relative_environment_path_does_not_relax_host_mount_paths() -> None:
+    item = snapshot("wuwaterm-telegram", "sha256:" + J)
+    item["environment_overrides"] = [{"name": "WUWATERM_STATE_DIR", "mode": "literal", "value": "state"}]
+    item["mounts"][0]["host"] = "state"
+    with pytest.raises(pm.ManifestError, match="absolute path"):
+        pm.validate_recipe_snapshot(item)
 
 
 def test_recipe_preserves_null_and_empty_command_separately(tmp_path: Path) -> None:

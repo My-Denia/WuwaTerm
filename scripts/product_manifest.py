@@ -131,6 +131,18 @@ def _path(value: Any, where: str) -> str:
     return value
 
 
+def _recipe_environment_path(value: Any, where: str) -> str:
+    """Keep a container path literal while requiring a normalized spelling."""
+    value = _text(value, where)
+    if value != value.strip() or value.startswith("~") or "\\" in value:
+        _fail(f"{where}: expected normalized container path")
+    if value.startswith("/"):
+        return _path(value, where)
+    if any(part in ("", ".", "..") for part in value.split("/")):
+        _fail(f"{where}: expected normalized container path")
+    return value
+
+
 def _name(value: Any, where: str) -> str:
     return _matches(value, _NAME, where)
 
@@ -319,7 +331,7 @@ def validate_recipe_snapshot(value: Any) -> dict[str, Any]:
                 _fail("recipe snapshot: literal environment value is not allowed")
             value = _text(item["value"], "recipe snapshot.environment_override.value")
             if name in _PATH_ENV:
-                _path(value, "recipe snapshot.environment_override.value")
+                _recipe_environment_path(value, "recipe snapshot.environment_override.value")
             elif name == "WUWATERM_API_PORT":
                 if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= 65535:
                     _fail("recipe snapshot: invalid API port")
@@ -449,13 +461,13 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         elif kind == "wheel-image":
             _object(provenance, {
                 "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
-                "core_producer_kind",
+                "core_producer_kind", "build_receipt_sha256",
             }, f"{where}.provenance")
             if name != "telegram" or provenance["core_producer_kind"] not in (
                 "github-actions-artifact", "github-release",
             ):
                 _fail(f"{where}: invalid wheel-image provenance")
-            for key in ("telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256"):
+            for key in ("telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256", "build_receipt_sha256"):
                 _sha(provenance[key], f"{where}.provenance.{key}")
         elif kind == "legacy-image":
             _object(provenance, {
@@ -590,21 +602,23 @@ def _directory(root: Path, parts: tuple[str, ...], *, create: bool) -> Iterator[
             os.close(fd)
 
 
-def _read_file(directory: int, name: str) -> bytes:
+def _read_file(directory: int, name: str, *, limit: int = _LIMIT) -> bytes:
+    if type(limit) is not int or not 0 <= limit <= 16 * 1024 * 1024:
+        _fail("immutable record read limit is invalid")
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222 or info.st_nlink != 1:
                 _fail("immutable record is not a singly-linked read-only regular file")
-            if info.st_size > _LIMIT:
+            if info.st_size > limit:
                 _fail("immutable record exceeds size limit")
             chunks = []
             size = 0
-            while chunk := os.read(fd, min(65536, _LIMIT + 1 - size)):
+            while chunk := os.read(fd, min(65536, limit + 1 - size)):
                 chunks.append(chunk)
                 size += len(chunk)
-                if size > _LIMIT:
+                if size > limit:
                     _fail("immutable record exceeds size limit")
             after = os.fstat(fd)
             named = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -618,34 +632,55 @@ def _read_file(directory: int, name: str) -> bytes:
 
 
 def _write_file(directory: int, name: str, raw: bytes, *, reuse: bool) -> None:
-    temporary = f".tmp-{secrets.token_hex(16)}"
+    # Archives may contain the full journal rather than a 4 MiB manifest.
+    _write_file_unnamed(directory, name, raw, reuse=reuse, limit=16 * 1024 * 1024)
+
+
+def _publish_unnamed(directory: int, name: str, raw: bytes, *, mode: int,
+                     limit: int | None = None) -> None:
+    """Publish one fully synced file without a named temporary or replacement."""
+    maximum = (16 * 1024 * 1024 if mode == 0o600 else _LIMIT) if limit is None else limit
+    if (type(name) is not str or name in ("", ".", "..") or "/" in name or "\x00" in name
+            or type(raw) is not bytes or type(mode) is not int or mode not in (0o400, 0o600)
+            or type(maximum) is not int or not 0 <= maximum <= 16 * 1024 * 1024 or len(raw) > maximum):
+        _fail("invalid unnamed publication request")
+    if not hasattr(os, "O_TMPFILE"):
+        _fail("unnamed publication is unavailable")
     fd = None
-    created = False
     try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     0o600, dir_fd=directory)
-        created = True
-        with os.fdopen(fd, "wb") as stream:
-            fd = None
-            stream.write(raw)
-            stream.flush()
-            os.fchmod(stream.fileno(), 0o400)
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        except FileExistsError:
-            if not reuse or _read_file(directory, name) != raw:
-                _fail("immutable record already exists")
-        os.unlink(temporary, dir_fd=directory)
-        created = False
+        if not stat.S_ISDIR(os.fstat(directory).st_mode):
+            _fail("unnamed publication directory is invalid")
+        fd = os.open(".", os.O_TMPFILE | os.O_WRONLY | os.O_CLOEXEC, 0o600, dir_fd=directory)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                _fail("unnamed publication write did not advance")
+            offset += written
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.link(f"/proc/self/fd/{fd}", name, dst_dir_fd=directory, follow_symlinks=True)
         os.fsync(directory)
+    except FileExistsError:
+        raise
     except OSError as exc:
-        raise ManifestError(f"cannot publish immutable record: {exc.strerror}") from exc
+        raise ManifestError(f"cannot publish unnamed record: {exc.strerror}") from exc
     finally:
         if fd is not None:
             os.close(fd)
-        if created:
-            os.unlink(temporary, dir_fd=directory)
+
+
+def _write_file_unnamed(directory: int, name: str, raw: bytes, *, reuse: bool, limit: int = _LIMIT) -> None:
+    """Publish or exactly reuse a singly-linked immutable record."""
+    try:
+        _publish_unnamed(directory, name, raw, mode=0o400, limit=limit)
+    except FileExistsError:
+        if not reuse or _read_file(directory, name, limit=limit) != raw:
+            _fail("immutable record already exists")
+        try:
+            os.fsync(directory)
+        except OSError as exc:
+            raise ManifestError(f"cannot sync reused immutable record: {exc.strerror}") from exc
 
 
 def _db_stat(info: os.stat_result) -> dict[str, int]:

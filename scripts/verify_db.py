@@ -18,7 +18,7 @@ from wuwaterm.constants import (  # noqa: E402
 )
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
 from wuwaterm.normalize import normalize_text  # noqa: E402
-from wuwaterm.sentence import (  # noqa: E402
+from wuwaterm.exclusion_metadata import (  # noqa: E402
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
 )
