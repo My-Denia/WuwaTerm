@@ -129,6 +129,7 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
                  "scripts/deployment_manifest.py", "scripts/deployment_admission.py",
                  "scripts/full_update.py", "scripts/runtime_update.py",
                  "scripts/component_runtime.py", "scripts/component_build.py",
+                 "scripts/component_artifact.py", "scripts/install_probe.py",
                  "scripts/component_build_isolation.py", "scripts/component_full.py", "scripts/component_full_db.py",
                  "scripts/component_prepare.py",
                  "scripts/component_recovery.py", "scripts/component_wheel_build.py",
@@ -1208,3 +1209,148 @@ print('admitted')
     else:
         assert result.returncode != 0
     assert _snapshot(root) == before
+
+
+# ------------------------------------------------- protocol-2 mutator gates
+
+def _parked_fd9():
+    try:
+        saved = os.dup(9)
+    except OSError:
+        return None
+    os.close(9)
+    return saved
+
+
+def _restore_fd9(saved) -> None:
+    if saved is not None:
+        os.dup2(saved, 9)
+        os.close(saved)
+
+
+def test_artifact_attempts_block_mutators_until_registered_or_cancelled(tmp_path: Path) -> None:
+    import test_component_artifact as artifact_tests  # noqa: PLC0415
+
+    art = artifact_tests.art
+    fx = artifact_tests.Fixture(tmp_path)
+    admission._check_artifact_attempts(fx.root)  # no store: nothing to block
+    saved = _parked_fd9()
+    try:
+        verified = fx.seal()
+        docker = artifact_tests.FakeDocker()
+        docker.fail_after_load = True
+        with pytest.raises(art.ArtifactError):
+            art.acquire(verified.path, fx.root, docker=docker)
+    finally:
+        _restore_fd9(saved)
+    attempts = fx.root / ".deployments/artifacts/attempts"
+    before = sorted((p.relative_to(fx.root), p.read_bytes()) for p in attempts.rglob("*") if p.is_file())
+    with pytest.raises(admission.AdmissionError, match="requires recover or cancel: " + fx.attempt_id):
+        admission._check_artifact_attempts(fx.root)
+    assert sorted((p.relative_to(fx.root), p.read_bytes()) for p in attempts.rglob("*") if p.is_file()) == before
+    saved = _parked_fd9()
+    try:
+        docker.fail_after_load = False
+        assert art.recover(fx.root, fx.attempt_id, docker=docker)["state"] == "registered"
+        other = artifact_tests.Fixture(tmp_path / "other")
+        other.root = fx.root
+        other.seal()
+        art.cancel(fx.root, other.attempt_id)
+    finally:
+        _restore_fd9(saved)
+    admission._check_artifact_attempts(fx.root)
+
+
+def _helper_scan(monkeypatch, root: Path, statuses: dict, containers: dict) -> None:
+    monkeypatch.setattr(admission, "_probe_statuses", lambda _root: dict(statuses))
+    monkeypatch.setattr(admission, "_labelled_containers", lambda label: list(containers.get(label, [])))
+    admission.scan_root_helpers(root)
+
+
+def test_helper_scan_refuses_unrecorded_or_terminal_containers_with_exact_ids(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    mine, foreign = admission.root_label_value(root), admission.root_label_value(other)
+    assert mine == hashlib.sha256(str(root).encode()).hexdigest() != foreign
+    probe_a, probe_b, probe_c = ("20261106T110000Z-" + c * 32 for c in "abc")
+    state, adopt = admission.STATE_PROBE_LABEL, admission.ADOPT_PROBE_LABEL
+    unrecorded = {"Id": "1" * 64, "Labels": {state: probe_a, admission.ROOT_LABEL: mine}}
+    terminal = {"Id": "2" * 64, "Labels": {adopt: probe_b}}
+    active = {"Id": "3" * 64, "Labels": {state: probe_c, admission.ROOT_LABEL: mine}}
+    cross_root = {"Id": "4" * 64, "Labels": {state: "20261106T110000Z-" + "d" * 32, admission.ROOT_LABEL: foreign}}
+    historical_foreign = {"Id": "5" * 64, "Labels": {adopt: "20261106T110000Z-" + "e" * 32}}
+    statuses = {probe_b: "completed", probe_c: "active"}
+    # Active helpers, other roots' helpers and unrelated historical helpers pass.
+    _helper_scan(monkeypatch, root, statuses, {state: [active, cross_root], adopt: [historical_foreign]})
+    with pytest.raises(admission.AdmissionError) as refused:
+        _helper_scan(monkeypatch, root, statuses,
+                     {state: [unrecorded, active, cross_root], adopt: [terminal, historical_foreign]})
+    message = str(refused.value)
+    assert "1" * 64 in message and "2" * 64 in message
+    assert "3" * 64 not in message and "4" * 64 not in message and "5" * 64 not in message
+    assert "no record" in message and "record is completed" in message
+    # The other root sees only its own leftover, never this root's.
+    with pytest.raises(admission.AdmissionError, match="4" * 64):
+        _helper_scan(monkeypatch, other, {}, {state: [unrecorded, cross_root]})
+
+
+def test_helper_scan_runs_inside_component_conflicts_before_writes(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    leftover = {"Id": "6" * 64, "Labels": {admission.STATE_PROBE_LABEL: "20261106T110000Z-" + "f" * 32,
+                                           admission.ROOT_LABEL: admission.root_label_value(root)}}
+    monkeypatch.setattr(admission, "_labelled_containers",
+                        lambda label: [leftover] if label == admission.STATE_PROBE_LABEL else [])
+    before = sorted(p.relative_to(root) for p in root.rglob("*"))
+    with pytest.raises(admission.AdmissionError, match="6" * 64):
+        admission._component_conflicts(root)
+    assert sorted(p.relative_to(root) for p in root.rglob("*")) == before
+
+
+def test_helper_scan_against_the_real_daemon_ignores_other_fixture_roots(tmp_path: Path) -> None:
+    """Read-only listing only: other fixtures' helpers on this daemon never block a fresh root."""
+    root = tmp_path / "fresh"
+    (root / ".deployments").mkdir(parents=True)
+    try:
+        for label in (admission.STATE_PROBE_LABEL, admission.ADOPT_PROBE_LABEL):
+            assert type(admission._labelled_containers(label)) is list
+    except admission.AdmissionError as exc:
+        pytest.skip(f"Docker listing unavailable here: {exc}")
+    admission.scan_root_helpers(root)
+
+
+def test_product_update_refuses_build_before_taking_fd9(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    for argv in (["--root", str(root), "build", "api"], ["--root=" + str(root), "build"]):
+        result = subprocess.run(["sh", str(ROOT / "deploy/product-update.sh"), *argv],
+                                capture_output=True, text=True, check=False)
+        assert result.returncode == 2
+        assert "build" in result.stderr and "build-delivery" in result.stderr
+    assert list(root.iterdir()) == []
+
+
+def test_schema5_runtime_canonical_is_admissible_only_as_a_read_only_helper() -> None:
+    runtime5 = {"schema_version": 5, "kind": "component-runtime", "selection": ["telegram"]}
+    full5 = {"schema_version": 5, "kind": "component-full"}
+    canonical = {"schema_version": 5, "kind": "state-canonical", "transaction_kind": "runtime"}
+    # Schema 5 reads state through its own image, so its canonical comparison is
+    # not a FULL-only endpoint claim.
+    admission.refuse_inadmissible_state_probe(runtime5, canonical, "runtime")
+    admission.refuse_inadmissible_state_probe(full5, dict(canonical, transaction_kind="full"), "full")
+    for journal, probe, kind in (
+            (runtime5, dict(canonical, kind="state-copy-stage"), "runtime"),
+            (runtime5, dict(canonical, kind="state-endpoint"), "runtime"),
+            (runtime5, dict(canonical, kind="state-canonical-v4"), "runtime"),
+            ({"schema_version": 4, "kind": "component-runtime", "selection": ["telegram"]},
+             dict(canonical, schema_version=4), "runtime"),
+            (runtime5, dict(canonical, transaction_kind="full"), "runtime"),
+            (full5, canonical, "full")):
+        with pytest.raises(admission.AdmissionError):
+            admission.refuse_inadmissible_state_probe(journal, probe, kind)
+    # A schema-5 record still admits only the helpers whose programs never write.
+    with pytest.raises(admission.AdmissionError, match="non-mutating"):
+        admission.refuse_inadmissible_state_probe(
+            runtime5, {"schema_version": 5, "kind": "state-copy-v4", "transaction_kind": "runtime"}, "runtime")

@@ -17,8 +17,15 @@ esac
 for argument in "$@"; do
   case "$argument" in -h|--help) exec python3 -I -B "$runtime" "$@" ;; esac
 done
+# Protocol 2 has no producer under the deployment lock: completed artifacts
+# are built with scripts/build-delivery.sh and acquired by component_artifact.py,
+# neither of which takes or inherits FD9. Refuse before any lock or write.
+if [ "$command" = build ]; then
+  echo "build is not a deployment command; use scripts/build-delivery.sh and component_artifact.py acquire" >&2
+  exit 2
+fi
 case "$command" in
-  adopt|build|runtime-update|update|full-update|recover|recover-probe|cancel-build) ;;
+  adopt|runtime-update|update|full-update|recover|recover-probe|cancel-build) ;;
   *) exec python3 -I -B "$runtime" "$@" ;;
 esac
 

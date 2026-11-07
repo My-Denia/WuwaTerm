@@ -2603,3 +2603,388 @@ def test_telegram_database_resolution_uses_command_precedence(
 def test_telegram_database_resolution_requires_explicit_path() -> None:
     with pytest.raises(transaction.TransactionError, match="not explicit"):
         transaction._telegram_database_path({"path_settings": {"WUWATERM_DB_PATH": None}}, {"command": []})
+
+
+def _rollback_fixture(tmp_path: Path) -> tuple[Path, dict, dict]:
+    """A schema-5 cutover journal with one recorded state kind per kind pair."""
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    data = root / "data"
+    state_dir = root / "state"
+    data.mkdir()
+    state_dir.mkdir()
+    snapshot = {
+        "schema_version": 1, "image_id": "sha256:" + "1" * 64, "project": "wuwaterm",
+        "service": "wuwaterm-telegram", "container_name": "wuwaterm-telegram",
+        "command": ["--db", "/app/data/terms.db"], "entrypoint": ["wuwaterm-telegram"],
+        "mounts": [{"host": str(data), "container": "/app/data", "read_only": False},
+                   {"host": str(state_dir), "container": "/app/state", "read_only": False}],
+        "env_files": [], "network_mode": "host", "ports": [],
+        "restart": {"name": "unless-stopped", "maximum_retry_count": 0},
+        "user": "0:0", "working_dir": "/app",
+        "environment_overrides": [{"name": "WUWATERM_DB_PATH", "mode": "literal", "value": "/app/data/terms.db"}],
+        "runtime_options": {"read_only_root": False, "privileged": False, "init": None, "pid_mode": "",
+                            "ipc_mode": "private", "cap_add": [], "cap_drop": [], "security_opt": [],
+                            "dns": [], "extra_hosts": []},
+    }
+    path, digest = manifest.write_recipe_snapshot(root, snapshot)
+    recipe = {key: snapshot[key] for key in manifest._RECIPE_FIELDS}
+    recipe.update(snapshot_path=path, sha256=digest)
+    component = {"recipe": recipe, "image": {"id": snapshot["image_id"], "revision": "2" * 40},
+                 "provenance": {"kind": "legacy-image"}}
+    journal = {"schema_version": 5, "kind": "component-runtime", "transaction_id": "20261107T120000Z-" + "3" * 32,
+               "before": {"topology": {"api": None, "telegram": component}}, "migrations": []}
+    return root, journal, {"data": data, "state": state_dir}
+
+
+def test_schema5_rollback_keeps_progressed_state_and_proves_old_readers(tmp_path: Path) -> None:
+    root, journal, paths = _rollback_fixture(tmp_path)
+    legacy = paths["data"] / "chat_settings.json"
+    target = paths["state"] / "chat_settings.json"
+    legacy.write_bytes(b'{"allowed":[1]}')
+    target.write_bytes(b'{"allowed":[1,2]}')
+    journal["migrations"] = [{
+        "kind": "chat-settings", "action": "copy-if-absent", "effective_path": "/app/state/chat_settings.json",
+        "source_path": str(legacy), "target_path": str(target),
+        "source_before": transaction._state_preimage(str(legacy)),
+        "target_before": {"present": False, "sha256": None, "stat": None}, "created": None}]
+    calls = []
+
+    class Reader:
+        StateError = type("StateError", (Exception,), {})
+
+        @staticmethod
+        def canonical(root_path: Path, **kwargs: object) -> dict:
+            calls.append(kwargs)
+            return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64}
+
+    original = transaction._state_module
+    transaction._state_module = lambda: Reader  # type: ignore[assignment]
+    try:
+        before = (legacy.stat().st_ino, legacy.read_bytes(), target.read_bytes())
+        transaction._preserved_state_rollback(root, journal)
+        # The progressed bytes are kept: nothing restores or deletes state.
+        assert (legacy.stat().st_ino, legacy.read_bytes(), target.read_bytes()) == before
+        assert len(calls) == 1 and calls[0]["host_path"] == str(target)
+        assert calls[0]["state_kind"] == "chat-settings" and calls[0]["snapshot"]["image_id"] == journal[
+            "before"]["topology"]["telegram"]["image"]["id"]
+        # A distinct legacy endpoint is not this transaction's to change.
+        legacy.write_bytes(b'{"allowed":[]}')
+        with pytest.raises(transaction.TransactionError, match="legacy Telegram state changed"):
+            transaction._preserved_state_rollback(root, journal)
+        legacy.write_bytes(b'{"allowed":[1]}')
+        journal["migrations"][0]["source_before"] = transaction._state_preimage(str(legacy))
+        # An old reader that rejects the progressed bytes stops the rollback.
+        class Rejecting(Reader):
+            @staticmethod
+            def canonical(root_path: Path, **kwargs: object) -> dict:
+                raise Reader.StateError("unreadable")
+
+        transaction._state_module = lambda: Rejecting  # type: ignore[assignment]
+        with pytest.raises(transaction.TransactionError, match="old Telegram reader cannot accept"):
+            transaction._preserved_state_rollback(root, journal)
+        # Historical schemas never read state during rollback.
+        calls.clear()
+        historical = dict(journal, schema_version=4)
+        transaction._preserved_state_rollback(root, historical)
+        assert calls == []
+        # A recorded present target may not disappear.
+        target.unlink()
+        transaction._state_module = lambda: Reader  # type: ignore[assignment]
+        journal["migrations"][0]["target_before"] = {"present": True, "sha256": "b" * 64, "stat": {
+            "device": 1, "inode": 2, "size": 1, "mtime_ns": 1, "ctime_ns": 1}}
+        with pytest.raises(transaction.TransactionError, match="Telegram state disappeared"):
+            transaction._preserved_state_rollback(root, journal)
+    finally:
+        transaction._state_module = original
+
+
+def test_schema5_rollback_skips_absent_state_and_reply_links_are_not_recreated(tmp_path: Path) -> None:
+    root, journal, paths = _rollback_fixture(tmp_path)
+    settings = paths["data"] / "chat_settings.json"
+    legacy_replies = paths["data"] / "channel_replies.jsonl"
+    entry = paths["state"] / "channel_replies.jsonl"
+    referent = paths["state"] / "replies-2026.jsonl"
+    settings.write_bytes(b'{"allowed":[7]}')
+    legacy_replies.write_bytes(b'{"channel":"c"}\n')
+    referent.write_bytes(b'{"channel":"c"}\n')
+    entry.symlink_to(referent)
+    journal["migrations"] = [
+        {"kind": "chat-settings", "action": "validate-existing", "effective_path": "/app/state/chat_settings.json",
+         "source_path": str(settings), "target_path": str(settings),
+         "source_before": transaction._state_preimage(str(settings)),
+         "target_before": transaction._state_preimage(str(settings)), "created": None},
+        {"kind": "channel-replies", "action": "copy-if-absent", "effective_path": "/app/state/channel_replies.jsonl",
+         "source_path": str(legacy_replies), "target_path": str(entry),
+         "source_before": transaction._state_preimage(str(legacy_replies)),
+         "target_before": {"present": False, "sha256": None, "stat": None}, "created": None}]
+    calls = []
+
+    class Reader:
+        StateError = type("StateError", (Exception,), {})
+
+        @staticmethod
+        def canonical(root_path: Path, **kwargs: object) -> dict:
+            calls.append(kwargs["state_kind"])
+            assert kwargs["host_path"] != str(entry), "a reply link is not a state leaf"
+            return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64}
+
+    original = transaction._state_module
+    transaction._state_module = lambda: Reader  # type: ignore[assignment]
+    try:
+        link_before = (entry.lstat().st_ino, os.readlink(entry))
+        transaction._preserved_state_rollback(root, journal)
+        # The retained writer path is verified; the stale reply link stays as it
+        # is because rollback never writes or restores state.
+        assert calls == ["chat-settings"]
+        assert (entry.lstat().st_ino, os.readlink(entry)) == link_before
+        assert referent.read_bytes() == b'{"channel":"c"}\n'
+    finally:
+        transaction._state_module = original
+
+
+def _probe_plans(migration: str = "copy-if-absent") -> list[dict]:
+    def kind(name: str, action: str, legacy: str | None) -> dict:
+        return {"effective_path": f"/app/state/{name}", "legacy_path": legacy,
+                "migration": action, "mapped_target": f"/host/state/{name}",
+                "mapped_legacy": None if legacy is None else f"/host/data/{name}"}
+
+    old = {"database_path": "/custom/terms.db",
+           "kinds": {"chat-settings": kind("chat_settings.json", migration, "chat_settings.json"),
+                     "channel-replies": kind("channel_replies.jsonl", "none", None)}}
+    return [old, copy.deepcopy(old)]
+
+
+def _probe_journal(schema: int) -> dict:
+    return {"schema_version": schema, "transaction_id": "20261107T120000Z-" + "9" * 32,
+            "before": {"topology": {"api": None, "telegram": {
+                "image": {"id": "sha256:" + "1" * 64, "revision": "2" * 40},
+                "provenance": {"kind": "legacy-image"}}}},
+            "target": {"manifest": {"components": {"telegram": {
+                "image": {"id": "sha256:" + "1" * 64, "revision": "2" * 40},
+                "provenance": {"kind": "completed-artifact"}}}}},
+            "database": {"binding": {"path": "/custom/terms.db"}}}
+
+
+def test_schema5_state_probe_accepts_native_pending_and_keeps_historical_refusals() -> None:
+    """The product copies at start; the journal records it without copying."""
+    context = {"old_snapshot": {"image_id": "sha256:" + "1" * 64}, "old_environment": {},
+               "target_snapshot": {"image_id": "sha256:" + "1" * 64}, "target_environment": {}}
+    plans = _probe_plans()
+
+    class Planner:
+        @staticmethod
+        def plan(root: Path, *, snapshot: dict, **kwargs: object) -> dict:
+            return plans[0] if snapshot is context["old_snapshot"] else plans[1]
+
+        @staticmethod
+        def preimage(root: Path, *, host_path: str, **kwargs: object) -> dict:
+            assert kwargs["image_id"] == "sha256:" + "1" * 64
+            return {"present": host_path.startswith("/host/data/"), "sha256": "a" * 64,
+                    "stat": {"device": 1, "inode": 2, "size": 1, "mtime_ns": 1, "ctime_ns": 1}}
+
+    original = transaction._state_module
+    transaction._state_module = lambda: Planner  # type: ignore[assignment]
+    try:
+        journal = _probe_journal(5)
+        migrations = transaction._probe_telegram_state(Path("/"), journal, context)
+        assert [(item["kind"], item["action"]) for item in migrations] == [
+            ("chat-settings", "copy-if-absent"), ("channel-replies", "none")]
+        assert all(item["created"] is None for item in migrations)
+        assert migrations[0]["source_path"] == "/host/data/chat_settings.json"
+        assert migrations[0]["target_path"] == "/host/state/chat_settings.json"
+        assert migrations[0]["target_before"]["present"] is False
+        assert migrations[1]["source_before"] is None
+        # Historical schemas keep refusing an unrecorded startup copy.
+        with pytest.raises(transaction.TransactionError, match="full update"):
+            transaction._probe_telegram_state(Path("/"), _probe_journal(4), context)
+        # A relocated effective path is refused before anything is recorded.
+        plans[1]["kinds"]["chat-settings"]["effective_path"] = "/app/elsewhere/chat_settings.json"
+        with pytest.raises(transaction.TransactionError, match="state relocation"):
+            transaction._probe_telegram_state(Path("/"), _probe_journal(5), context)
+        # A copy needs both legacy endpoints to agree.
+        plans[:] = _probe_plans()
+        plans[0]["kinds"]["chat-settings"]["mapped_legacy"] = None
+        with pytest.raises(transaction.TransactionError, match="legacy state is outside every bind"):
+            transaction._probe_telegram_state(Path("/"), _probe_journal(5), context)
+    finally:
+        transaction._state_module = original
+
+
+# ------------------------------------------------ schema-5 native state leaves
+
+def _leaf_recipe(data: Path, state_dir: Path) -> dict:
+    """An observed Telegram recipe whose state entry may be a retained link."""
+    return {"recipe": {"mounts": [{"host": str(data), "container": "/app/data", "read_only": True},
+                                  {"host": str(state_dir), "container": "/app/state", "read_only": False}],
+                       "working_dir": "/app", "command": ["--db", "/app/data/terms.db"]},
+            "path_settings": {"WUWATERM_DB_PATH": "/app/data/terms.db",
+                              "WUWATERM_STATE_DIR": "/app/state",
+                              "WUWATERM_SETTINGS_PATH": None,
+                              "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None}}
+
+
+def _leaf_tree(tmp_path: Path, replies_link: str) -> tuple[Path, Path, dict]:
+    data, state_dir = tmp_path / "data", tmp_path / "state"
+    data.mkdir()
+    (state_dir / "refs").mkdir(parents=True)
+    (state_dir / "refs" / "settings.json").write_bytes(b'{"allowed":[1]}')
+    (state_dir / "refs" / "replies.json").write_bytes(b'{"channel":"c"}\n')
+    (state_dir / "chat_settings.json").symlink_to("refs/settings.json")
+    (state_dir / "channel_replies.json").symlink_to(replies_link)
+    return data, state_dir, _leaf_recipe(data, state_dir)
+
+
+@pytest.mark.parametrize("replies_link", ["refs/replies.json", "/app/state/refs/replies.json"])
+def test_schema5_runtime_paths_record_the_planned_leaf(tmp_path: Path, replies_link: str) -> None:
+    data, state_dir, actual = _leaf_tree(tmp_path, replies_link)
+    paths = transaction._telegram_v5_paths(actual, actual["recipe"])
+    # A settings entry resolves to the file the product rewrites; a reply entry
+    # stays the entry the product replaces, for relative and absolute links.
+    assert paths["chat-settings"] == {"entry": str(state_dir / "chat_settings.json"),
+                                      "planned": str(state_dir / "refs" / "settings.json")}
+    assert paths["channel-replies"] == {"entry": str(state_dir / "channel_replies.json"),
+                                        "planned": str(state_dir / "channel_replies.json")}
+    assert transaction._verify_current_telegram_paths(
+        {"schema_version": 5, "kind": "component-runtime", "migrations": []}, actual, actual["recipe"]) is None
+    # A settings link may not name bytes outside the state bind.
+    (state_dir / "chat_settings.json").unlink()
+    (state_dir / "chat_settings.json").symlink_to("/etc/passwd")
+    with pytest.raises(transaction.TransactionError, match="leaves its binding"):
+        transaction._telegram_v5_paths(actual, actual["recipe"])
+    assert data.is_dir()
+
+
+@pytest.mark.parametrize("replies_link", ["refs/replies.json", "/app/state/refs/replies.json"])
+def test_schema5_preimages_and_bindings_follow_a_retained_reply_link(tmp_path: Path, replies_link: str) -> None:
+    _, state_dir, actual = _leaf_tree(tmp_path, replies_link)
+    entry = state_dir / "channel_replies.json"
+    settings = state_dir / "refs" / "settings.json"
+    referent = (state_dir / "refs" / "replies.json").resolve()
+    journal = {"schema_version": 5, "kind": "component-runtime",
+               "transaction_id": "20261106T110000Z-" + "6" * 32, "selection": ["telegram"],
+               "migrations": [
+                   {"kind": "chat-settings", "action": "validate-existing",
+                    "effective_path": "/app/state/chat_settings.json",
+                    "source_path": None, "target_path": str(settings),
+                    "source_before": None, "target_before": transaction._state_preimage(str(settings)),
+                    "created": None},
+                   {"kind": "channel-replies", "action": "validate-existing",
+                    "effective_path": "/app/state/channel_replies.json",
+                    "source_path": None, "target_path": str(entry),
+                    "source_before": None,
+                    "target_before": transaction._state_preimage(str(entry), leaf=True,
+                                                                 recipe=actual["recipe"]),
+                    "created": None}]}
+    assert journal["migrations"][1]["target_before"]["present"] is True
+    transaction._verify_probed_preimages(journal, actual["recipe"])
+    transaction._telegram_state_bindings(journal, [actual])
+    transaction._verify_current_telegram_paths(journal, actual, actual["recipe"])
+    # Progressed bytes are still the file the reply link names.
+    referent.write_bytes(b'{"channel":"d"}\n')
+    with pytest.raises(transaction.TransactionError, match="state changed"):
+        transaction._verify_probed_preimages(journal, actual["recipe"])
+    # Replacing the entry, as the product does, keeps the planned path valid.
+    entry.unlink()
+    entry.write_bytes(b'{"channel":"d"}\n')
+    transaction._telegram_state_bindings(journal, [actual])
+    (state_dir / "chat_settings.json").unlink()
+    (state_dir / "chat_settings.json").symlink_to("refs/settings.json")
+    # A state entry that is not absent, a regular file or a safe single link is
+    # refused before any service mutation.
+    entry.unlink()
+    entry.symlink_to("/app/state/refs/replies.json")
+    entry_link = state_dir / "channel_replies.json"
+    entry_link.unlink()
+    os.link(state_dir / "refs" / "replies.json", entry_link)
+    with pytest.raises(transaction.TransactionError, match="unsafe"):
+        transaction._verify_current_telegram_paths(journal, actual, actual["recipe"])
+
+
+def test_schema5_rollback_keeps_a_linked_settings_referent(tmp_path: Path) -> None:
+    root, journal, paths = _rollback_fixture(tmp_path)
+    state_dir = paths["state"]
+    (state_dir / "refs").mkdir()
+    referent = state_dir / "refs" / "settings.json"
+    referent.write_bytes(b'{"allowed":[1]}')
+    entry = state_dir / "chat_settings.json"
+    entry.symlink_to("/app/state/refs/settings.json")
+    replies = state_dir / "channel_replies.json"
+    replies.write_bytes(b'{"channel":"c"}\n')
+    journal["migrations"] = [
+        {"kind": "chat-settings", "action": "validate-existing",
+         "effective_path": "/app/state/chat_settings.json", "source_path": None,
+         "target_path": str(referent), "source_before": None,
+         "target_before": transaction._state_preimage(str(referent)), "created": None},
+        {"kind": "channel-replies", "action": "none",
+         "effective_path": "/app/state/channel_replies.json", "source_path": None,
+         "target_path": str(replies), "source_before": None,
+         "target_before": transaction._state_preimage(str(replies)), "created": None}]
+    calls = []
+
+    class Reader:
+        StateError = type("StateError", (Exception,), {})
+
+        @staticmethod
+        def canonical(root_path: Path, *, host_path: str, **kwargs: object) -> dict:
+            calls.append((host_path, kwargs["state_kind"]))
+            return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64}
+
+    original = transaction._state_module
+    transaction._state_module = lambda: Reader  # type: ignore[assignment]
+    try:
+        before = (entry.lstat().st_ino, os.readlink(entry), referent.read_bytes())
+        transaction._preserved_state_rollback(root, journal)
+        # The old reader is asked about the file the link names, and rollback
+        # neither recreates nor re-points the installed link.
+        assert calls == [(str(referent), "chat-settings"), (str(replies), "channel-replies")]
+        assert (entry.lstat().st_ino, os.readlink(entry), referent.read_bytes()) == before
+    finally:
+        transaction._state_module = original
+
+
+def test_schema5_pending_native_copy_stays_pending_until_the_product_starts(tmp_path: Path) -> None:
+    """The transaction records the startup copy and never performs it."""
+    data, state_dir = tmp_path / "data", tmp_path / "state"
+    data.mkdir()
+    state_dir.mkdir()
+    settings, replies = data / "chat_settings.json", data / "channel_replies.json"
+    settings.write_bytes(b'{"allowed":[1]}')
+    replies.write_bytes(b'{"channel":"c"}\n')
+    entries = {"chat-settings": state_dir / "chat_settings.json",
+               "channel-replies": state_dir / "channel_replies.json"}
+    actual = _leaf_recipe(data, state_dir)
+    journal = {"schema_version": 5, "kind": "component-runtime",
+               "transaction_id": "20261106T110000Z-" + "6" * 32, "selection": ["telegram"],
+               "migrations": [
+                   {"kind": kind, "action": "copy-if-absent",
+                    "effective_path": f"/app/state/{entry.name}",
+                    "source_path": str(settings if kind == "chat-settings" else replies),
+                    "target_path": str(entry),
+                    "source_before": transaction._state_preimage(
+                        str(settings if kind == "chat-settings" else replies)),
+                    "target_before": {"present": False, "sha256": None, "stat": None},
+                    "created": None}
+                   for kind, entry in entries.items()]}
+    # Nothing was copied: the legacy settings file is still the only bytes.
+    assert entries["chat-settings"].exists() is False
+    transaction._verify_probed_preimages(journal, actual["recipe"])
+    transaction._telegram_state_bindings(journal, [actual])
+    # Historical schemas keep refusing an unrecorded startup copy.
+    with pytest.raises(transaction.TransactionError, match="changed or requires relocation"):
+        transaction._verify_probed_preimages(dict(journal, schema_version=4), actual["recipe"])
+    with pytest.raises(transaction.TransactionError, match="relocation is unsupported"):
+        transaction._telegram_state_bindings(dict(journal, schema_version=4), [actual])
+    # The staged legacy replies file the plan names has to exist as well.
+    with pytest.raises(transaction.TransactionError, match="Telegram legacy state changed"):
+        transaction._verify_probed_preimages(
+            {"schema_version": 5, "kind": "component-runtime", "migrations": [
+                dict(item, source_before={"present": False, "sha256": None, "stat": None})
+                for item in journal["migrations"]]}, actual["recipe"])
+    # Once the product copies, the recorded path is a regular file it owns and
+    # the distinct legacy file must still be untouched.
+    entries["chat-settings"].write_bytes(b'{"allowed":[1]}')
+    transaction._telegram_state_bindings(journal, [actual])
+    replies.unlink()
+    with pytest.raises(transaction.TransactionError, match="legacy Telegram state disappeared"):
+        transaction._telegram_state_bindings(journal, [actual])

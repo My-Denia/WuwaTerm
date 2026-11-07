@@ -380,16 +380,58 @@ def _telegram_full4_entry_paths(actual: dict[str, Any], snapshot: dict[str, Any]
         raise TransactionError("FULL4 Telegram state entry cannot be mapped") from exc
 
 
+def _telegram_v5_paths(actual: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Map each configured state entry the way a schema-5 plan reports it.
+
+    A settings entry resolves its leaf because the product rewrites the file it
+    names; a reply entry stays an entry because the product replaces it, so a
+    retained link is the recorded path and only its referent is read.
+    """
+    state = _state_module()
+    recipe = actual["recipe"]
+    result: dict[str, dict[str, str]] = {}
+    for kind, container in _telegram_container_paths(actual, snapshot).items():
+        try:
+            entry = state.entry_path(recipe, container, writable=True)
+            planned = (state.leaf_host_path(recipe, entry) if kind == "chat-settings" else entry)
+        except state.StateError as exc:
+            raise TransactionError(str(exc) or "Telegram state entry cannot be mapped") from exc
+        result[kind] = {"entry": entry, "planned": planned}
+    return result
+
+
 def _same_container_binding(actual: dict[str, Any], recorded: dict[str, Any]) -> bool:
     return all(actual[key] == recorded[key] for key in (
         "id", "image_id", "project", "service", "name", "transaction_label",
     ))
 
 
+def _recorded_state_items(journal: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """Return recorded state items and their target-path key for either shape.
+
+    A runtime record keeps a list of migrations; a FULL4/FULL5 record keeps
+    ``{"status", "items"}`` and names the target as ``new_target_path``.
+    """
+    migrations = journal["migrations"]
+    if type(migrations) is dict:
+        return list(migrations.get("items") or []), "new_target_path"
+    return list(migrations), "target_path"
+
+
 def _verify_current_telegram_paths(journal: dict[str, Any], actual: dict[str, Any],
                                    snapshot: dict[str, Any]) -> None:
+    items, key = _recorded_state_items(journal)
+    if journal.get("schema_version") == 5:
+        # Schema 5 records the planned path, which is the referent of a
+        # settings link and the entry of a retained reply link.
+        paths = _telegram_v5_paths(actual, snapshot)
+        if items and any(paths[item["kind"]]["planned"] != item[key] for item in items):
+            raise TransactionError("terminal Telegram effective state path changed")
+        for value in paths.values():
+            _state_entry_safe(value["entry"])
+        return
     paths = _telegram_effective_paths(actual, snapshot)
-    if journal["migrations"] and any(paths[item["kind"]] != item["target_path"] for item in journal["migrations"]):
+    if items and any(paths[item["kind"]] != item[key] for item in items):
         raise TransactionError("terminal Telegram effective state path changed")
     for value in paths.values():
         target = Path(value)
@@ -401,6 +443,29 @@ def _verify_current_telegram_paths(journal: dict[str, Any], actual: dict[str, An
             continue
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise TransactionError("terminal Telegram state path is unsafe")
+
+
+def _state_entry_safe(entry: str) -> None:
+    """Require an absent, regular or single retained link state entry."""
+    target = Path(entry)
+    try:
+        parent = target.parent.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(parent.st_mode):
+        raise TransactionError("Telegram state entry parent is not a directory")
+    with manifest._directory(target.parent, (), create=False):
+        pass
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        if info.st_nlink != 1 or not 0 < info.st_size <= 4095:
+            raise TransactionError("Telegram state entry link is unsafe")
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise TransactionError("Telegram state entry is unsafe")
 
 
 def _verify_adoption_telegram_paths(actual: dict[str, Any], snapshot: dict[str, Any], *,
@@ -509,6 +574,8 @@ def _verify_live_topology(root: Path, journal: dict[str, Any], *, which: str,
                 _verify_current_telegram_paths(journal, actual, snapshot)
             elif journal["migrations"]:
                 _telegram_state_bindings(journal, [actual])
+            elif journal.get("schema_version") == 5:
+                _verify_current_telegram_paths(journal, actual, snapshot)
             else:
                 _telegram_effective_paths(actual, snapshot)
         if allow_retained and name in journal["selection"]:
@@ -551,7 +618,7 @@ def _verify_terminal_record(root: Path, journal: dict[str, Any], raw: bytes, com
                             full4_predecessor: bool = False) -> None:
     if journal["status"] not in ("committed", "rolled_back"):
         raise TransactionError("runtime transaction is not terminal")
-    if journal["schema_version"] == 4:
+    if journal["schema_version"] in (4, 5):
         import component_full as full  # noqa: PLC0415
         full.verify_predecessor(root, successor_kind="runtime", successor=journal)
     _verify_saved_source(root, journal["source"])
@@ -675,7 +742,7 @@ def _verify_initial_preimage(root: Path, journal: dict[str, Any], compose_path: 
     ):
         raise TransactionError("successor selection is absent or already activated")
     previous_kind = "full" if predecessor is not None and predecessor.get("kind") == "component-full" else "runtime"
-    if journal["schema_version"] == 4:
+    if journal["schema_version"] in (4, 5):
         expected = (None if predecessor is None or predecessor_raw is None else
                     runtime.predecessor_reference(previous_kind, predecessor["transaction_id"], predecessor_raw))
         if journal["predecessor"] != expected:
@@ -689,7 +756,7 @@ def _verify_initial_preimage(root: Path, journal: dict[str, Any], compose_path: 
                           predecessor["before"]["topology"])
         prior_containers = predecessor["target"]["containers"] if committed else predecessor["before"]["containers"]
         prior_pointers = predecessor["pointers"]["target" if committed else "old"]
-        if journal["schema_version"] == 4 and prior_manifest is None:
+        if journal["schema_version"] in (4, 5) and prior_manifest is None:
             import component_full as full  # noqa: PLC0415
             if Path(full.__file__).resolve() != CODE_ROOT / "scripts/component_full.py":
                 raise TransactionError("full handoff module belongs to another source")
@@ -1013,9 +1080,46 @@ def _actual(root: Path, journal: dict[str, Any], compose_path: Path, *,
     return old, target
 
 
+def verify_artifact_component(root: Path, component: dict[str, Any], name: str) -> dict[str, Any]:
+    """Verify a schema-3 component against its registered acquisition and the live store.
+
+    Read-only: the receipt and bundle copy are re-read, the store identity
+    and the image graph are inspected by full native ID, and the image's
+    revision label must be the sealed source commit.
+    """
+    import component_artifact as artifact  # noqa: PLC0415
+    if Path(artifact.__file__).resolve() != CODE_ROOT / "scripts/component_artifact.py":
+        raise TransactionError("artifact verifier belongs to another source")
+    provenance = component["provenance"]
+    if provenance["kind"] != "completed-artifact":
+        raise TransactionError(f"{name} target is not a completed artifact")
+    try:
+        receipt, bundle = manifest.read_artifact_records(root, provenance["bundle_sha256"],
+                                                         provenance["acquisition_sha256"])
+        manifest.verify_artifact_binding(name, component, receipt, bundle)
+        path = root / ".deployments/artifacts/acquisitions" / (receipt["acquisition_id"] + ".json")
+        verified = artifact.verify_acquisition(path)
+    except (manifest.ManifestError, artifact.ArtifactError) as exc:
+        raise TransactionError(f"{name} completed artifact cannot be verified") from exc
+    if (verified["receipt_sha256"] != provenance["acquisition_sha256"]
+            or verified["bundle_sha256"] != provenance["bundle_sha256"]):
+        raise TransactionError(f"{name} completed artifact records changed")
+    image = _docker("GET", "/images/" + component["image"]["id"] + "/json")
+    if (type(image) is not dict or image.get("Id") != component["image"]["id"]
+            or (image.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision")
+            != component["image"]["revision"]):
+        raise TransactionError(f"{name} artifact image or revision changed")
+    return {"kind": "completed-artifact", "image_id": component["image"]["id"],
+            "image_revision": component["image"]["revision"], "receipt": verified["receipt"],
+            "bundle_sha256": verified["bundle_sha256"]}
+
+
 def _verify_candidate(root: Path, journal: dict[str, Any]) -> None:
     component = journal["target"]["manifest"]["components"]["api"]
     provenance = component["provenance"]
+    if provenance["kind"] == "completed-artifact":
+        verify_artifact_component(root, component, "api")
+        return
     if provenance["kind"] != "source-image":
         raise TransactionError("API target has no registered source build")
     receipt = build.verify_registered_build(root, provenance["build_receipt_sha256"])
@@ -1162,12 +1266,19 @@ def _verify_old_topology(root: Path, journal: dict[str, Any], *, compose_path: P
     import deployment_manifest as legacy  # noqa: PLC0415
 
     versions: dict[str, str] = {}
-    for component in journal["before"]["topology"].values():
+    for name, component in journal["before"]["topology"].items():
         if component is None:
             continue
         kind = component["provenance"]["kind"]
         if kind != "legacy-image":
-            if kind == "source-image":
+            if kind == "completed-artifact":
+                try:
+                    receipt, bundle = manifest.read_artifact_records(
+                        root, component["provenance"]["bundle_sha256"], component["provenance"]["acquisition_sha256"])
+                    manifest.verify_artifact_binding(name, component, receipt, bundle)
+                except manifest.ManifestError as exc:
+                    raise TransactionError("installed completed-artifact evidence differs") from exc
+            elif kind == "source-image":
                 receipt = build.verify_registered_build(root, component["provenance"]["build_receipt_sha256"])
                 source = receipt["source"]
                 if (receipt["image_id"] != component["image"]["id"]
@@ -1242,6 +1353,8 @@ def _verify_old_topology(root: Path, journal: dict[str, Any], *, compose_path: P
 
 def _telegram_receipt(root: Path, journal: dict[str, Any]) -> dict[str, Any]:
     component = journal["target"]["manifest"]["components"]["telegram"]
+    if component is not None and component["provenance"]["kind"] == "completed-artifact":
+        return verify_artifact_component(root, component, "telegram")
     if component is None or component["provenance"]["kind"] != "wheel-image":
         raise TransactionError("Telegram target has no registered wheel build")
     provenance = component["provenance"]
@@ -1309,24 +1422,41 @@ def _state_module() -> Any:
 
 
 def _probe_telegram_state(root: Path, journal: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
-    """Use recorded actual-UID probes; a complete pair is required to advance."""
+    """Use recorded actual-UID probes; a complete pair is required to advance.
+
+    Schema 2-4 ask whether the two plans name the same state without copying.
+    Schema 5 additionally allows the product's own startup copy to be pending
+    (``copy-if-absent``): the transaction never copies, so it records the
+    stopped preimages and lets the native writer progress them.
+    """
     state = _state_module()
     component = journal["target"]["manifest"]["components"]["telegram"]
-    receipt_sha256 = component["provenance"]["build_receipt_sha256"]
     database_path = journal["database"]["binding"]["path"]
     plans = []
-    for prefix in ("old", "target"):
-        plans.append(state.plan(root, receipt_sha256=receipt_sha256, snapshot=context[prefix + "_snapshot"],
+    for prefix, recorded in (("old", journal["before"]["topology"]["telegram"]), ("target", component)):
+        # Each plan runs with its own recorded image: a completed artifact has
+        # no producer receipt and is verified through its acquisition instead.
+        plans.append(state.plan(root, receipt_sha256=recorded["provenance"].get("build_receipt_sha256"),
+                                snapshot=context[prefix + "_snapshot"],
                                 environment=context[prefix + "_environment"], database_path=database_path,
                                 transaction_id=journal["transaction_id"]))
     old_plan, target_plan = plans
+    schema5 = journal["schema_version"] == runtime.JOURNAL_SCHEMA_VERSION
+    if schema5:
+        import component_prepare as prepare  # noqa: PLC0415
+        try:
+            prepare.verify_state_plan_equivalence(old_plan, target_plan)
+        except prepare.PrepareError as exc:
+            raise TransactionError(str(exc)) from exc
     migrations = []
     for kind in ("chat-settings", "channel-replies"):
         old, new = old_plan["kinds"][kind], target_plan["kinds"][kind]
-        if (old["migration"] == "copy-if-absent" or new["migration"] == "copy-if-absent"
-                or old["mapped_target"] != new["mapped_target"]
-                or old["effective_path"] != new["effective_path"]
-                or old["mapped_legacy"] != new["mapped_legacy"]):
+        if not schema5 and (old["migration"] == "copy-if-absent" or new["migration"] == "copy-if-absent"):
+            # Schema 2-4 have no native-pending rollback contract.
+            raise TransactionError("Telegram state relocation requires a full update")
+        if (old["mapped_target"] != new["mapped_target"] or old["effective_path"] != new["effective_path"]):
+            raise TransactionError("Telegram state relocation requires a full update")
+        if not schema5 and old["mapped_legacy"] != new["mapped_legacy"]:
             raise TransactionError("Telegram state relocation requires a full update")
         snapshot = context["target_snapshot"]
         kwargs = {"image_id": component["image"]["id"], "image_revision": component["image"]["revision"],
@@ -1386,7 +1516,24 @@ def _state_plan(root: Path, receipt: dict[str, Any], receipt_sha256: str,
         raise TransactionError("Telegram product state planning failed") from None
 
 
-def _state_preimage(path: str) -> dict[str, Any]:
+def _leaf_host(recipe: dict[str, Any], path: str) -> str:
+    """Resolve one retained state link in the namespace that wrote it."""
+    try:
+        info = Path(path).lstat()
+    except FileNotFoundError:
+        return path
+    if not stat.S_ISLNK(info.st_mode):
+        return path
+    if not 0 < info.st_size <= 4095:
+        raise TransactionError("Telegram state entry link is unsafe")
+    state = _state_module()
+    try:
+        return state.leaf_host_path(recipe, path)
+    except state.StateError as exc:
+        raise TransactionError("Telegram state entry link cannot be followed") from exc
+
+
+def _state_preimage(path: str, *, leaf: bool = False, recipe: dict[str, Any] | None = None) -> dict[str, Any]:
     target = Path(path)
     # Runtime-only updates do not create state directories. Requiring an
     # existing physical parent also rejects host symlink traversal.
@@ -1396,6 +1543,21 @@ def _state_preimage(path: str) -> dict[str, Any]:
         before = target.lstat()
     except FileNotFoundError:
         return {"present": False, "sha256": None, "stat": None}
+    if leaf and recipe is None:
+        raise TransactionError("Telegram state leaf resolution requires its recipe")
+    if leaf and stat.S_ISLNK(before.st_mode):
+        # A retained reply or settings link is read through: both native readers
+        # parse the file it names, not the entry the reply writer replaces.
+        target = Path(_leaf_host(recipe, path))
+        try:
+            with manifest._directory(target.parent, (), create=False):
+                pass
+        except manifest.ManifestError:
+            return {"present": False, "sha256": None, "stat": None}
+        try:
+            before = target.lstat()
+        except FileNotFoundError:
+            return {"present": False, "sha256": None, "stat": None}
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise TransactionError("Telegram state is not a singly linked regular file")
     digest = recovery._hash(target)
@@ -1403,6 +1565,65 @@ def _state_preimage(path: str) -> dict[str, Any]:
     if manifest._db_stat(before) != manifest._db_stat(after):
         raise TransactionError("Telegram state changed during preflight")
     return {"present": True, "sha256": digest, "stat": manifest._db_stat(after)}
+
+
+def _preserved_state_rollback(root: Path, journal: dict[str, Any]) -> None:
+    """Prove the old native readers accept the state the new product progressed.
+
+    Schema-5 cutover never copies and never restores state, so rollback keeps
+    the current bytes at every effective path: an entry the new writer made a
+    regular file stays one, and nothing recreates an old reply link. What the
+    rollback owes instead is evidence that the old image can still read those
+    bytes, and that a distinct legacy file was not touched.
+    """
+    if journal["schema_version"] != runtime.JOURNAL_SCHEMA_VERSION or journal["kind"] != "component-runtime":
+        return
+    migrations = journal["migrations"]
+    if not migrations:
+        return
+    state = _state_module()
+    before = journal["before"]["topology"]["telegram"]
+    snapshot = _snapshot(root, before)
+    clock = int(time.time())
+    for item in migrations:
+        source, target = item["source_path"], item["target_path"]
+        if (source is not None and source != target and item["source_before"] is not None
+                and item["source_before"]["present"]
+                and _state_preimage(source, leaf=True, recipe=snapshot) != item["source_before"]):
+            # With an explicit StateDir the legacy file is a distinct endpoint;
+            # its inode and bytes are not this transaction's to change.
+            raise TransactionError("legacy Telegram state changed during the cutover")
+        current = _preserved_leaf(target)
+        if not current["present"]:
+            if item["target_before"]["present"]:
+                raise TransactionError("Telegram state disappeared during the cutover")
+            continue
+        if current["link"]:
+            # The product replaces a reply entry with a regular file. An entry
+            # that is still a link was not progressed, and rollback must not
+            # recreate or re-point it, so there is nothing to compare.
+            continue
+        # Present bytes still have to be readable: the old container is about
+        # to run again against whatever this transaction left.
+        try:
+            state.canonical(root, snapshot=snapshot, host_path=target,
+                            transaction_id=journal["transaction_id"], state_kind=item["kind"], clock=clock)
+        except state.StateError as exc:
+            raise TransactionError("old Telegram reader cannot accept the progressed state") from exc
+
+
+def _preserved_leaf(path: str) -> dict[str, Any]:
+    """Observe one recorded state leaf, including a retained reply link."""
+    target = Path(path)
+    with manifest._directory(target.parent, (), create=False):
+        pass
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return {"present": False, "sha256": None, "stat": None, "link": False}
+    if stat.S_ISLNK(info.st_mode):
+        return {"present": True, "sha256": None, "stat": manifest._db_stat(info), "link": True}
+    return {**_state_preimage(path), "link": False}
 
 
 def preflight_telegram(root: Path, journal: dict[str, Any], *, compose_path: Path) -> dict[str, Any]:
@@ -1590,10 +1811,12 @@ def _create_from_snapshot(journal: dict[str, Any], snapshot: dict[str, Any],
     return runtime._match(result.get("Id"), runtime._HEX64, "target ID")
 
 
-def _verify_probed_preimages(journal: dict[str, Any]) -> None:
+def _verify_probed_preimages(journal: dict[str, Any], recipe: dict[str, Any]) -> None:
     # The probe already hashed each file as the actual UID. Recheck the exact
     # inode and timestamps before service mutation without reopening private
     # state through the host account.
+    schema5 = journal.get("schema_version") == 5
+
     def matches(path: str, preimage: dict[str, Any]) -> bool:
         target = Path(path)
         with manifest._directory(target.parent, (), create=False):
@@ -1602,14 +1825,39 @@ def _verify_probed_preimages(journal: dict[str, Any]) -> None:
             info = target.lstat()
         except FileNotFoundError:
             return not preimage["present"]
+        if schema5 and stat.S_ISLNK(info.st_mode):
+            # A retained reply link records the file it names, which is what
+            # both native readers parse; the entry itself is replaced later.
+            referent = Path(_leaf_host(recipe, path))
+            try:
+                with manifest._directory(referent.parent, (), create=False):
+                    pass
+            except manifest.ManifestError:
+                # The chain already stayed inside its bind, so an unusable
+                # referent parent means the file it names is not there.
+                return not preimage["present"]
+            try:
+                info = referent.lstat()
+            except FileNotFoundError:
+                return not preimage["present"]
         return (preimage["present"] and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
                 and manifest._db_stat(info) == preimage["stat"])
 
     if {item["kind"] for item in journal["migrations"]} != {"chat-settings", "channel-replies"}:
         raise TransactionError("Telegram state preimages are incomplete")
     for item in journal["migrations"]:
-        if (item["action"] == "copy-if-absent" or item["created"] is not None
-                or not matches(item["target_path"], item["target_before"])):
+        if item["created"] is not None:
+            raise TransactionError("Telegram state changed or requires relocation")
+        if item["action"] == "copy-if-absent":
+            # Schema 5 records the copy the product performs at startup and
+            # never performs it; the target must still be absent here.
+            if (not schema5 or item["target_before"]["present"] or item["source_before"] is None
+                    or item["source_path"] is None):
+                raise TransactionError("Telegram state changed or requires relocation")
+            if not matches(item["source_path"], item["source_before"]):
+                raise TransactionError("Telegram legacy state changed")
+            continue
+        if not matches(item["target_path"], item["target_before"]):
             raise TransactionError("Telegram state changed or requires relocation")
         if (item["source_path"] is not None and
                 not matches(item["source_path"], item["source_before"])):
@@ -1618,15 +1866,28 @@ def _verify_probed_preimages(journal: dict[str, Any]) -> None:
 
 def _telegram_state_bindings(journal: dict[str, Any], observations: list[dict[str, Any]]) -> None:
     """Keep the shared effective files, including changes made by a poller."""
-    if {item["kind"] for item in journal["migrations"]} != {"chat-settings", "channel-replies"}:
+    items, _ = _recorded_state_items(journal)
+    if {item["kind"] for item in items} != {"chat-settings", "channel-replies"}:
         raise TransactionError("Telegram state bindings are incomplete")
-    for item in journal["migrations"]:
-        if item["action"] == "copy-if-absent" or item["created"] is not None:
+    full = type(journal["migrations"]) is dict
+    schema5 = journal.get("schema_version") == 5
+    recipe = observations[0]["recipe"]
+    for item in items:
+        created = item.get("created") if full else item["created"]
+        effective = item["new_effective_path"] if full else item["effective_path"]
+        target_path = item["new_target_path"] if full else item["target_path"]
+        source_path = item["new_legacy_path"] if full else item["source_path"]
+        pending = item["action"] == "copy-if-absent"
+        if created is not None or (pending and not schema5):
             raise TransactionError("Telegram state relocation is unsupported")
         for observed in observations:
-            if observe.resolve_bind_path(observed["recipe"], item["effective_path"], writable=True) != item["target_path"]:
+            if schema5:
+                if _telegram_v5_paths(observed, observed["recipe"])[item["kind"]]["planned"] != target_path:
+                    raise TransactionError("Telegram effective state path changed")
+            elif observe.resolve_bind_path(observed["recipe"], effective, writable=True) != target_path:
                 raise TransactionError("Telegram effective state path changed")
-        def present(path: str) -> bool:
+
+        def present(path: str, *, leaf: bool, recipe: dict[str, Any]) -> bool:
             target = Path(path)
             with manifest._directory(target.parent, (), create=False):
                 pass
@@ -1634,17 +1895,32 @@ def _telegram_state_bindings(journal: dict[str, Any], observations: list[dict[st
                 info = target.lstat()
             except FileNotFoundError:
                 return False
+            if leaf and stat.S_ISLNK(info.st_mode):
+                # A retained reply link is present when the file it names is.
+                referent = Path(_leaf_host(recipe, path))
+                try:
+                    with manifest._directory(referent.parent, (), create=False):
+                        pass
+                except manifest.ManifestError:
+                    return False
+                try:
+                    info = referent.lstat()
+                except FileNotFoundError:
+                    return False
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise TransactionError("Telegram state is not a singly linked regular file")
             return True
 
-        current = present(item["target_path"])
+        current = present(target_path, leaf=schema5, recipe=recipe)
         if item["target_before"]["present"] and not current:
             raise TransactionError("existing Telegram state disappeared")
-        if item["source_path"] is not None:
-            source = present(item["source_path"])
-            if source and not current and item["source_path"] != item["target_path"]:
-                raise TransactionError("Telegram state would require a copy")
+        source_present = source_path is not None and present(source_path, leaf=schema5, recipe=recipe)
+        if pending and source_path is not None and source_path != target_path and not source_present:
+            # The product reads this file once at startup; losing it before
+            # then would start the product on empty state.
+            raise TransactionError("legacy Telegram state disappeared")
+        if source_present and not current and source_path != target_path and not pending:
+            raise TransactionError("Telegram state would require a copy")
 
 
 def _refresh_telegram_state(root: Path, journal: dict[str, Any], compose_path: Path) -> None:
@@ -1778,7 +2054,7 @@ def _actual_telegram(root: Path, journal: dict[str, Any], compose_path: Path, *,
                 or target["container"]["running"] != before["running"]):
             raise TransactionError("ready Telegram topology changed before publication")
     if initial:
-        _verify_probed_preimages(journal)
+        _verify_probed_preimages(journal, old["recipe"])
     _telegram_state_bindings(journal, [old] + ([] if target is None else [target]))
     for observed, snapshot in [(old, old_snap)] + ([] if target is None else [(target, target_snap)]):
         path = _telegram_database_path(observed, snapshot)
@@ -2357,7 +2633,7 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
     if "compose" in journal["source"] and recovery._verify_bound_compose(root, journal["source"]) != compose_path:
         raise TransactionError("Compose executable differs from the recorded recovery source")
     _sync_recovered_journal(root, journal)
-    if journal["schema_version"] == 4:
+    if journal["schema_version"] in (4, 5):
         import component_full as full  # noqa: PLC0415
         full.finish_handoff(root, successor_kind="runtime", successor=journal)
     if journal["status"] == "committed":
@@ -2492,6 +2768,7 @@ def _recover_both(root: Path, journal: dict[str, Any], compose_path: Path) -> di
     _, tg = _actual_telegram(root, journal, compose_path)
     if any(item is not None and item["container"]["running"] for item in (api, tg)):
         raise TransactionError("selected targets did not stop")
+    _preserved_state_rollback(root, journal)
     _step(root, journal, "rollback-restore")
     for target in (tg, api):
         if target is not None:
@@ -2558,6 +2835,7 @@ def _recover_telegram(root: Path, journal: dict[str, Any], compose_path: Path) -
     _, target = _actual_telegram(root, journal, compose_path)
     if target is not None and target["container"]["running"]:
         raise TransactionError("Telegram target did not stop")
+    _preserved_state_rollback(root, journal)
     _step(root, journal, "rollback-restore")
     if target is not None:
         _docker("DELETE", "/containers/" + target["container"]["id"] + "?v=0&force=0", accepted=(204,))

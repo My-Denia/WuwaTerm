@@ -29,11 +29,177 @@ WHEEL_BUILD_STAGING = "component-wheel-build-staging"
 ADOPT_PROBES = "component-adopt-probes"
 ADOPT_PROBE_STAGING = "component-adopt-probe-staging"
 ISOLATED_BUILD_EXECUTION_READY = False
+ARTIFACTS = "artifacts"
+STATE_PROBE_LABEL = "org.wuwaterm.component-state-probe"
+ADOPT_PROBE_LABEL = "org.wuwaterm.component-adopt-probe"
+ROOT_LABEL = "org.wuwaterm.deploy-root-sha256"
+_DOCKER_SOCKET = "/run/docker.sock"
+_MAX_DOCKER_RESPONSE = 8 * 1024 * 1024
 _DEPLOYMENT_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\Z")
 
 
 class AdmissionError(RuntimeError):
     """The deployment state cannot safely admit this operation."""
+
+
+def root_label_value(root: Path) -> str:
+    """The one definition of a deployment root's helper scope label value."""
+    return hashlib.sha256(os.path.realpath(os.fspath(root)).encode("utf-8")).hexdigest()
+
+
+def _labelled_containers(label: str) -> list[dict]:
+    """List every container on the local daemon carrying ``label``.
+
+    A missing socket means no helper can have been created through it, so
+    the list is empty; any other failure refuses admission.
+    """
+    import http.client  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+    from urllib.parse import urlencode  # noqa: PLC0415
+
+    try:
+        info = os.stat(_DOCKER_SOCKET, follow_symlinks=False)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise AdmissionError("Docker endpoint cannot be inspected for helper containers") from exc
+    if not stat.S_ISSOCK(info.st_mode):
+        raise AdmissionError("Docker endpoint is not a Unix socket")
+
+    class Connection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(self.timeout)
+            self.sock.connect(_DOCKER_SOCKET)
+
+    query = urlencode({"all": "1", "filters": json.dumps({"label": [label]})})
+    connection = Connection("localhost", timeout=15)
+    try:
+        connection.request("GET", "/containers/json?" + query)
+        response = connection.getresponse()
+        raw = response.read(_MAX_DOCKER_RESPONSE + 1)
+        if response.status != 200 or len(raw) > _MAX_DOCKER_RESPONSE:
+            raise AdmissionError("Docker did not list helper containers")
+        value = json.loads(raw)
+    except AdmissionError:
+        raise
+    except (OSError, ValueError, http.client.HTTPException, UnicodeError):
+        raise AdmissionError("Docker helper container listing failed") from None
+    finally:
+        connection.close()
+    if type(value) is not list or any(type(item) is not dict for item in value):
+        raise AdmissionError("Docker helper container listing is invalid")
+    return value
+
+
+def _probe_statuses(root: Path) -> dict[str, str]:
+    """Return {probe_id: status} for every recorded probe in this root."""
+    directory = _deployments(root, required=False) / ADOPT_PROBES
+    if not _present(directory):
+        return {}
+    try:
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise AdmissionError("probe record directory is not a directory")
+        sys.path.insert(0, str(CODE_ROOT / "scripts"))
+        import component_runtime  # noqa: PLC0415
+        if Path(component_runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py":
+            raise AdmissionError("helper scan imported a foreign source module")
+        result = {}
+        for entry in sorted(directory.iterdir()):
+            record = component_runtime._read_adopt_probe(root, entry.name)
+            result[record["probe_id"]] = record["status"]
+        return result
+    except AdmissionError:
+        raise
+    except Exception as exc:
+        raise AdmissionError("probe records cannot be read for the helper scan") from exc
+
+
+def scan_root_helpers(root: Path) -> None:
+    """Refuse a write while this root has an unrecorded or terminal helper container.
+
+    A container belongs to this root when it carries this root's
+    ``deploy-root-sha256`` label, or when its probe label names a probe
+    recorded under this root (historical helpers have no root label). An
+    active record's container is ordinary in-progress or crash-recovery state
+    and is left to the existing reconciliation. A labelled container without
+    a record, or a terminal record whose container still exists, needs the
+    operator: every such full container ID is printed and nothing is written.
+    """
+    root = _physical_root(root)
+    statuses = _probe_statuses(root)
+    scope = root_label_value(root)
+    findings = []
+    for label in (STATE_PROBE_LABEL, ADOPT_PROBE_LABEL):
+        for container in _labelled_containers(label):
+            labels = container.get("Labels") or {}
+            identifier = container.get("Id")
+            if type(labels) is not dict or type(identifier) is not str:
+                raise AdmissionError("Docker helper container listing is invalid")
+            probe_id = labels.get(label)
+            owned_by_root = labels.get(ROOT_LABEL) == scope
+            status = statuses.get(probe_id) if type(probe_id) is str else None
+            if status is None and not owned_by_root:
+                continue
+            if status == "active":
+                continue
+            reason = "no record" if status is None else f"record is {status}"
+            findings.append(f"{identifier} ({label}={probe_id}; {reason})")
+    if findings:
+        raise AdmissionError(
+            "helper containers for this deployment root require operator reconciliation "
+            "before any write: " + ", ".join(sorted(findings))
+        )
+
+
+def _full_only_state_probe(kind: str) -> bool:
+    """Helpers that compare or move state through FULL endpoints and copies."""
+    return kind in ("state-legacy-plan", "state-canonical", "state-canonical-v4", "state-endpoint",
+                    "state-copy-v4", "state-copy-stage", "state-copy-publish", "state-copy-clean",
+                    "state-copy-discard")
+
+
+def refuse_inadmissible_state_probe(journal: dict, probe: dict, transaction_kind: str) -> None:
+    """Refuse a helper whose kind cannot run in this transaction kind.
+
+    Schema 5 reads state directly through its own recorded image, so its
+    read-only native plan and canonical comparison also run in a runtime
+    transaction; every FULL4 endpoint or copy helper still requires a full one.
+    """
+    if journal["schema_version"] == 5 and probe["kind"] not in (
+            "state-plan", "state-legacy-plan", "state-preimage", "state-canonical"):
+        raise AdmissionError("schema-5 transactions permit only non-mutating state helpers")
+    if probe["schema_version"] in (2, 3, 4, 5) and probe["transaction_kind"] != transaction_kind:
+        raise AdmissionError("state probe transaction kind differs")
+    if _full_only_state_probe(probe["kind"]) and transaction_kind != "full":
+        if not (journal["schema_version"] == 5
+                and probe["kind"] in ("state-legacy-plan", "state-canonical")):
+            raise AdmissionError("full-only state probe cannot run in a runtime transaction")
+
+
+def _check_artifact_attempts(root: Path) -> None:
+    """Refuse mutator entry while a completed-artifact acquisition is unresolved.
+
+    Registered and cancelled attempts are terminal. Lock order is FD9 then
+    the short artifact-record lock; no Docker call is made under either.
+    """
+    store = _deployments(root, required=False) / ARTIFACTS
+    if not _present(store / "attempts"):
+        return
+    try:
+        sys.path.insert(0, str(CODE_ROOT / "scripts"))
+        import component_artifact as artifact  # noqa: PLC0415
+        if Path(artifact.__file__).resolve() != CODE_ROOT / "scripts/component_artifact.py":
+            raise AdmissionError("artifact admission imported a foreign source module")
+        with artifact.artifact_lock(root) as locked:
+            pending = sorted(attempt for attempt in os.listdir(locked / "attempts")
+                             if artifact.read_attempt_state(locked, attempt)["state"] not in ("registered", "cancelled"))
+    except AdmissionError:
+        raise
+    except Exception as exc:
+        raise AdmissionError("completed-artifact attempt records are unknown") from exc
+    if pending:
+        raise AdmissionError("completed-artifact acquisition requires recover or cancel: " + ", ".join(pending))
 
 
 def _physical_root(root: Path) -> Path:
@@ -314,6 +480,7 @@ def _component_conflicts(root: Path, *, allowed_probe_id: str | None = None,
             raise AdmissionError("component full transaction requires recovery") from exc
     _attempts_clear(root, allowed_probe_id=allowed_probe_id, allowed_state=allowed_state,
                     allowed_builder=allowed_builder, sync_registered=True)
+    scan_root_helpers(root)
     return directory
 
 
@@ -329,13 +496,15 @@ def _require_execution_readiness(operation: str) -> None:
                 or Path(runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py"):
             raise AdmissionError("component readiness imported a foreign source module")
         full = operation == "full-update"
-        ready = (recovery.FULL_RECOVERY_EXECUTION_READY if full else recovery.RECOVERY_EXECUTION_READY)
         protocol = getattr(runtime, "CAPSULE_FULL_RECOVERY_PROTOCOL" if full else "CAPSULE_RECOVERY_PROTOCOL", None)
+        # Protocol 1 keeps its original flags; protocol 2 has its own. Any
+        # other declaration is refused.
+        ready = recovery.protocol_ready(protocol, full=full)
     except AdmissionError:
         raise
     except Exception as exc:
         raise AdmissionError("component recovery readiness cannot be verified") from exc
-    if ready is not True or type(protocol) is not int or protocol != 1:
+    if ready is not True:
         kind = "full" if full else "runtime"
         raise AdmissionError(f"{kind} saved-source recovery is not ready")
 
@@ -355,6 +524,7 @@ def admit_component(root: Path, *, operation: str, code_root: Path,
         # implemented and verified, including direct Python callers.
         raise AdmissionError("component builds are unavailable until cancellation is supported")
     _require_execution_readiness(operation)
+    _check_artifact_attempts(root)
     directory = _component_conflicts(root)
     current = directory / COMPONENT_RUNTIME
     if _present(current):
@@ -459,7 +629,7 @@ def admit_component_recovery(root: Path, *, transaction_id: str,
                 or source["source_tool_sha256"] != source_tool_sha256):
             raise AdmissionError("component recovery identity does not match the active transaction")
         _verify_recovery_extraction(root, source, code_root)
-        if journal["schema_version"] == 4:
+        if journal["schema_version"] in (4, 5):
             import component_full as full  # noqa: PLC0415
             if Path(full.__file__).resolve() != code_root / "scripts/component_full.py":
                 raise AdmissionError("component recovery imported a foreign full module")
@@ -677,10 +847,7 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
                     or probe["transaction_id"] != transaction_id
                     or probe["source_tool_sha256"] != source_tool_sha256):
                 raise AdmissionError("state probe does not match its transaction")
-            if probe["kind"] in ("state-legacy-plan", "state-canonical", "state-canonical-v4", "state-endpoint", "state-copy-v4", "state-copy-stage", "state-copy-publish", "state-copy-clean", "state-copy-discard") and transaction_kind != "full":
-                raise AdmissionError("full-only state probe cannot run in a runtime transaction")
-            if probe["schema_version"] in (2, 3, 4) and probe["transaction_kind"] != transaction_kind:
-                raise AdmissionError("state probe transaction kind differs")
+            refuse_inadmissible_state_probe(journal, probe, transaction_kind)
             if probe["schema_version"] == 4:
                 import component_state as state  # noqa: PLC0415
                 if Path(state.__file__).resolve() != code_root / "scripts/component_state.py":
@@ -693,6 +860,11 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
                     state.verify_copy_probe_binding(root, journal, probe)
                 else:
                     state.verify_canonical_probe_binding(root, journal, probe)
+            elif probe["schema_version"] == 5:
+                import component_state as state  # noqa: PLC0415
+                if Path(state.__file__).resolve() != code_root / "scripts/component_state.py":
+                    raise AdmissionError("state probe imported a foreign verifier")
+                state.verify_schema5_probe_binding(journal, probe)
         return journal
     except AdmissionError:
         raise

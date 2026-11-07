@@ -34,12 +34,21 @@ import product_manifest as manifest  # noqa: E402
 
 
 JOURNAL_NAME = ".component-runtime-transaction.json"
-JOURNAL_SCHEMA_VERSION = 4
+# Schema 5 is the protocol-2 (completed-artifact, no copy) runtime update.
+# Schemas 2/3/4 keep their exact historical meaning; adoption still writes 4.
+JOURNAL_SCHEMA_VERSION = 5
+RUNTIME4_SCHEMA_VERSION = 4
 PRODUCER_EXECUTION_READY = False
+# This source's saved-source recovery protocol. Protocol 2 means completed-
+# artifact inputs and no producer; protocol-1 capsules keep being interpreted
+# by their own saved source and its own (closed) readiness flags.
+CAPSULE_RECOVERY_PROTOCOL = 2
+CAPSULE_FULL_RECOVERY_PROTOCOL = 2
 TOOL_PATHS = (
     "deploy/product-update.sh",
     "scripts/deployment_admission.py",
     "scripts/deployment_manifest.py",
+    "scripts/component_artifact.py",
     "scripts/component_build.py",
     "scripts/component_build_isolation.py",
     "scripts/component_full.py",
@@ -53,6 +62,7 @@ TOOL_PATHS = (
     "scripts/component_state_endpoint.py",
     "scripts/component_transaction.py",
     "scripts/component_wheel_build.py",
+    "scripts/install_probe.py",
     "scripts/package_recovery_source.py",
     "scripts/product_manifest.py",
 )
@@ -84,6 +94,16 @@ class JournalError(ValueError):
 
 def _fail(message: str) -> None:
     raise JournalError(message)
+
+
+def _capsule_protocol(*, full: bool) -> object:
+    return globals().get("CAPSULE_FULL_RECOVERY_PROTOCOL" if full else "CAPSULE_RECOVERY_PROTOCOL")
+
+
+def capsule_execution_ready(*, full: bool) -> bool:
+    """This source's own readiness for the protocol it declares."""
+    import component_recovery as recovery  # noqa: PLC0415
+    return recovery.protocol_ready(_capsule_protocol(full=full), full=full)
 
 
 def _object(value: Any, keys: set[str], where: str) -> dict[str, Any]:
@@ -331,10 +351,11 @@ def validate_journal(value: Any) -> dict[str, Any]:
         "source", "selection", "before", "target", "database", "api_identity",
         "migrations", "pointers", "manifest",
     }
-    if version == JOURNAL_SCHEMA_VERSION and type(version) is int:
+    if type(version) is int and version in (RUNTIME4_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION):
         keys.add("predecessor")
     journal = _object(value, keys, "journal")
-    if type(journal["schema_version"]) is not int or journal["schema_version"] not in (2, 3, JOURNAL_SCHEMA_VERSION):
+    if type(journal["schema_version"]) is not int or journal["schema_version"] not in (
+            2, 3, RUNTIME4_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION):
         _fail("journal: unsupported schema version")
     if journal["kind"] != "component-runtime":
         _fail("journal: unsupported kind")
@@ -342,8 +363,10 @@ def validate_journal(value: Any) -> dict[str, Any]:
     action = journal["action"]
     if action not in ("adopt", "update"):
         _fail("journal: unsupported action")
-    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION:
+    if journal["schema_version"] >= RUNTIME4_SCHEMA_VERSION:
         validate_predecessor(journal["predecessor"], successor_id=transaction_id, required=action == "update")
+    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION and action != "update":
+        _fail("journal: schema-5 records only completed-artifact updates")
     status, phase = journal["status"], journal["phase"]
     if (status not in ("active", "unresolved", "rolled_back", "committed")
             or type(phase) is not str or phase not in PHASES):
@@ -388,9 +411,18 @@ def validate_journal(value: Any) -> dict[str, Any]:
         _fail("journal.selection: action and selection disagree")
     before = _object(journal["before"], {"manifest", "topology", "containers"}, "journal.before")
     target = _object(journal["target"], {"manifest", "containers"}, "journal.target")
-    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION and action == "update" and before["manifest"] is None:
+    if journal["schema_version"] >= RUNTIME4_SCHEMA_VERSION and action == "update" and before["manifest"] is None:
         _fail("journal.before: runtime update requires an adopted manifest")
     target_manifest = _manifest(target["manifest"], "journal.target.manifest")
+    # Historical schemas embed only schema-2 manifests; schema 5 writes 3.
+    manifest_versions = ((manifest.PREVIOUS_MANIFEST_SCHEMA_VERSION, manifest.MANIFEST_SCHEMA_VERSION)
+                         if journal["schema_version"] == JOURNAL_SCHEMA_VERSION
+                         else (manifest.PREVIOUS_MANIFEST_SCHEMA_VERSION,))
+    if before["manifest"] is not None and (type(before["manifest"]) is not dict
+                                           or before["manifest"].get("schema_version") not in manifest_versions):
+        _fail("journal.before.manifest: schema differs from the journal schema")
+    if target_manifest["schema_version"] != manifest_versions[-1]:
+        _fail("journal.target.manifest: schema differs from the journal schema")
     if target_manifest["deployment_id"] != transaction_id:
         _fail("journal.target: deployment ID mismatch")
     ops = target_manifest["operations"]
@@ -450,6 +482,15 @@ def validate_journal(value: Any) -> dict[str, Any]:
     if action == "adopt" and before_topology != target_manifest["components"]:
         _fail("journal: adoption changed topology")
     _migrations(journal["migrations"], permitted="telegram" in selection)
+    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION:
+        for name in selection:
+            if target_manifest["components"][name]["provenance"]["kind"] != "completed-artifact":
+                _fail("journal: schema-5 selected component is not a completed artifact")
+        # The transaction never copies state: a native-pending copy is made
+        # by the product itself, so no migration may claim a created file. The
+        # plan's own copy-if-absent action stays recorded as native-pending.
+        if any(item["created"] is not None for item in journal["migrations"]):
+            _fail("journal: schema-5 transactions do not copy state")
 
     pointers = _object(journal["pointers"], {"old", "target"}, "journal.pointers")
     for which in ("old", "target"):
@@ -1359,7 +1400,7 @@ def _remove_owned_adopt_probe(root: Path, record: dict[str, Any]) -> None:
         os.fsync(directory)
 
 
-def _adopt_probe_argv(record: dict[str, Any], action: str) -> list[str]:
+def _adopt_probe_argv(record: dict[str, Any], action: str, root_label: str | None = None) -> list[str]:
     """Construct only the two Docker operations owned by a version probe."""
     identifier = _match(record.get("probe_id"), _DEPLOYMENT_ID, "adoption probe ID")
     image_id = _image_id(record.get("image_id"), "adoption probe image")
@@ -1367,9 +1408,13 @@ def _adopt_probe_argv(record: dict[str, Any], action: str) -> list[str]:
             or record.get("container_name") != "wuwaterm-adopt-probe-" + identifier):
         _fail("adoption probe operation has an invalid binding")
     if action == "create" and record.get("phase") == "create" and record.get("container_id") is None:
+        # The root label scopes the pre-mutator helper scan to this root; the
+        # ownership check still matches only the probe label.
+        scope = [] if root_label is None else ["--label", admission.ROOT_LABEL + "=" + _match(
+            root_label, _HEX64, "deployment root label")]
         return ["create", "--name", record["container_name"], "--network", "none",
                 "--read-only", "--no-healthcheck", "--label",
-                "org.wuwaterm.component-adopt-probe=" + identifier,
+                "org.wuwaterm.component-adopt-probe=" + identifier, *scope,
                 "--entrypoint", "python", image_id, "-I", "-S", "-B", "-c", _LEGACY_VERSION_CODE]
     if action == "start" and record.get("phase") == "start":
         return ["start", "--attach", _match(record.get("container_id"), _HEX64, "adoption probe container")]
@@ -1382,7 +1427,7 @@ def _run_adopt_probe(root: Path, record: dict[str, Any], lock: Any, action: str)
 
     root = admission._physical_root(root)
     admission.require_lock(root)
-    command = _adopt_probe_argv(record, action)
+    command = _adopt_probe_argv(record, action, admission.root_label_value(root))
     if _read_adopt_probe(root, record["probe_id"] + ".json") != record:
         _fail("adoption probe record changed before execution")
     owned = _owned_adopt_probe(record)
@@ -1812,7 +1857,7 @@ def adopt(root: Path, *, projects: list[str], compose_executable: Path,
         target_pointers = {".deploy_commit": {"present": True, "bytes": commit + "\n"},
                            ".deploy_current": {"present": True, "bytes": deployment_id + "\n"}}
         product_raw = manifest._encode(product)
-        journal = {"schema_version": JOURNAL_SCHEMA_VERSION, "kind": "component-runtime", "transaction_id": deployment_id,
+        journal = {"schema_version": RUNTIME4_SCHEMA_VERSION, "kind": "component-runtime", "transaction_id": deployment_id,
                    "action": "adopt", "status": "active", "phase": "prepared", "source": source,
                    "predecessor": (None if predecessor is None else
                                    predecessor_reference("runtime", predecessor[1]["transaction_id"], predecessor[0])),
@@ -1912,15 +1957,19 @@ def main(argv: list[str] | None = None) -> int:
     probe_recovery.add_argument("--compose-executable", type=Path, required=True)
     update = commands.add_parser("runtime-update", aliases=["update"])
     update.add_argument("--components", choices=("api", "telegram", "both"), required=True)
-    update.add_argument("--api-receipt")
-    update.add_argument("--telegram-receipt")
+    update.add_argument("--api-receipt", help=argparse.SUPPRESS)
+    update.add_argument("--telegram-receipt", help=argparse.SUPPRESS)
+    update.add_argument("--api-artifact", type=Path, help="registered completed-artifact acquisition receipt")
+    update.add_argument("--telegram-artifact", type=Path, help="registered completed-artifact acquisition receipt")
     update.add_argument("--compose-executable", type=Path, required=True)
     update.add_argument("--expected-sha")
     full_update = commands.add_parser("full-update")
     full_update.add_argument("--candidate-db", type=Path, required=True)
     full_update.add_argument("--components", choices=("none", "api", "telegram", "both"), default="none")
-    full_update.add_argument("--api-receipt")
-    full_update.add_argument("--telegram-receipt")
+    full_update.add_argument("--api-receipt", help=argparse.SUPPRESS)
+    full_update.add_argument("--telegram-receipt", help=argparse.SUPPRESS)
+    full_update.add_argument("--api-artifact", type=Path, help="registered completed-artifact acquisition receipt")
+    full_update.add_argument("--telegram-artifact", type=Path, help="registered completed-artifact acquisition receipt")
     full_update.add_argument("--compose-executable", type=Path, required=True)
     full_update.add_argument("--expected-sha")
     for command in (update, full_update):
@@ -2009,7 +2058,8 @@ def main(argv: list[str] | None = None) -> int:
         root = Path(os.path.abspath(os.fspath(args.root)))
         if args.command == "capsule-cancel-build":
             import component_recovery as recovery  # noqa: PLC0415
-            if not recovery.RECOVERY_EXECUTION_READY or globals().get("CAPSULE_RECOVERY_PROTOCOL") != 1:
+            # Producer attempts are protocol-1 only.
+            if _capsule_protocol(full=False) != 1 or not capsule_execution_ready(full=False):
                 _fail("saved-source builder cancellation is not yet enabled")
             try:
                 root = admission._physical_root(root)
@@ -2056,7 +2106,8 @@ def main(argv: list[str] | None = None) -> int:
                 _fail("standalone recovery is limited to a version probe")
             return 0
         if args.command == "capsule-recover-probe":
-            if globals().get("CAPSULE_RECOVERY_PROTOCOL") != 1:
+            # The declared protocol must be supported AND its own flag open.
+            if not capsule_execution_ready(full=False):
                 _fail("capsule recovery execution is not yet available")
             recover_adopt_probe(root, args.probe_id, compose_path=args.compose_executable,
                                 capsule_source_tool=args.capsule_source_tool)
@@ -2066,7 +2117,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "capsule-recover":
             import component_transaction as transaction  # noqa: PLC0415
-            if globals().get("CAPSULE_RECOVERY_PROTOCOL") != 1:
+            if not capsule_execution_ready(full=False):
                 _fail("capsule recovery execution is not yet available")
             try:
                 result = transaction.recover(root, args.transaction_id, args.capsule_source_tool,
@@ -2076,7 +2127,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
         if args.command == "capsule-recover-full":
-            if globals().get("CAPSULE_FULL_RECOVERY_PROTOCOL") != 1:
+            if not capsule_execution_ready(full=True):
                 _fail("full capsule recovery execution is not yet available")
             import component_full as full  # noqa: PLC0415
             try:
@@ -2108,7 +2159,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "adopt":
             import component_recovery as recovery  # noqa: PLC0415
             admission.admit_component(root, operation="adopt", code_root=CODE_ROOT)
-            if not recovery.RECOVERY_EXECUTION_READY:
+            if not capsule_execution_ready(full=False):
                 _fail("adoption is unavailable until saved-source recovery is enabled")
             deployment_id = adopt(args.root, projects=args.project, compose_executable=args.compose_executable,
                                   api_receipt=args.api_receipt, telegram_receipt=args.telegram_receipt,
@@ -2203,9 +2254,9 @@ def main(argv: list[str] | None = None) -> int:
             import package_recovery_source as capsule  # noqa: PLC0415
             is_full = args.command == "full-update"
             admission.admit_component(root, operation="full-update" if is_full else "update", code_root=CODE_ROOT)
-            if is_full and not recovery.FULL_RECOVERY_EXECUTION_READY:
+            if is_full and not capsule_execution_ready(full=True):
                 _fail("full update is unavailable until full saved-source recovery is enabled")
-            if not is_full and not recovery.RECOVERY_EXECUTION_READY:
+            if not is_full and not capsule_execution_ready(full=False):
                 _fail("runtime update is unavailable until saved-source recovery is enabled")
             if args.expected_sha is not None:
                 expected = _match(args.expected_sha, _HEX40, "expected source commit")
@@ -2230,8 +2281,13 @@ def main(argv: list[str] | None = None) -> int:
                                      "interpolation_env_files": interpolation}
             receipts = {name: value for name, value in (("api", args.api_receipt),
                         ("telegram", args.telegram_receipt)) if value is not None}
+            artifacts = {name: str(value) for name, value in (("api", args.api_artifact),
+                         ("telegram", args.telegram_artifact)) if value is not None}
+            if receipts and artifacts:
+                _fail("producer receipts and completed artifacts cannot be combined")
             try:
-                request = {"selection": args.components, "receipts": receipts, "recipes": recipes}
+                request = ({"selection": args.components, "receipts": receipts, "recipes": recipes} if receipts else
+                           {"selection": args.components, "artifacts": artifacts, "recipes": recipes})
                 journal = (full.prepare(root, args.candidate_db, request, compose_path=args.compose_executable,
                                         expected_sha=args.expected_sha) if is_full else
                            prepare.prepare_update(root, request, args.compose_executable))

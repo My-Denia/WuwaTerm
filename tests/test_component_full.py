@@ -17,6 +17,7 @@ import pytest
 from scripts import component_full as full
 from scripts import component_runtime as runtime
 from scripts import component_state as state
+from scripts import product_manifest as manifest
 from test_component_runtime import journal as runtime_fixture
 
 
@@ -945,3 +946,256 @@ def test_null_handoff_refuses_runtime_update_and_full_successors(tmp_path: Path,
     with pytest.raises(full.FullError):
         full.verify_handoff(tmp_path, successor_kind="full", successor=full_journal,
                             predecessor=previous, predecessor_raw=raw)
+
+
+def _v5_preimage(sha: str | None = "a" * 64) -> dict:
+    return ({"present": False, "sha256": None, "stat": None} if sha is None else
+            {"present": True, "sha256": sha, "stat": {"device": 1, "inode": 2, "size": 1,
+                                                      "mtime_ns": 3, "ctime_ns": 4}})
+
+
+def _v5_compatibility(raw: str = "a" * 64) -> dict:
+    return {"raw_sha256": raw, "old_canonical_sha256": "b" * 64, "new_canonical_sha256": "b" * 64,
+            "old_writeable": True, "clock": 7}
+
+
+def _v5_item(kind: str = "chat-settings", action: str = "copy-if-absent", **changes) -> dict:
+    copy_pending = action == "copy-if-absent"
+    item = {
+        "kind": kind, "action": action,
+        "old_effective_path": f"/app/data/{kind}", "new_effective_path": f"/app/data/{kind}",
+        "old_target_path": f"/srv/w/data/{kind}", "new_target_path": f"/srv/w/data/{kind}",
+        "old_legacy_path": f"/srv/w/data/legacy-{kind}" if copy_pending else None,
+        "new_legacy_path": f"/srv/w/data/legacy-{kind}" if copy_pending else None,
+        "old_preimage": None, "new_preimage": None, "legacy_preimage": None,
+        "compatibility": None, "rollback_compatibility": None,
+    }
+    item.update(changes)
+    return item
+
+
+def _legacy_component(component: dict) -> dict:
+    """Restate a schema-2 fixture component as the legacy image schema 3 allows."""
+    restated = copy.deepcopy(component)
+    revision = restated["source"]["revision_claim"]
+    restated["image"]["revision"] = revision
+    restated["core"] = {**restated["core"], "revision_claim": revision}
+    restated["provenance"] = {"kind": "legacy-image", "legacy_manifest_sha256": "e" * 64,
+                              "wheel_identity": "unavailable", "lock_identity": "unavailable"}
+    return restated
+
+
+def _schema5_journal(full_journal: dict, *, status: str = "active", phase: str = "prepared",
+                     migrations: dict | None = None) -> dict:
+    journal = copy.deepcopy(full_journal)
+    journal["schema_version"] = 5
+    journal["status"] = status
+    journal["phase"] = phase
+    for name in ("before", "target"):
+        if journal[name]["manifest"] is not None:
+            journal[name]["manifest"]["schema_version"] = 3
+            journal[name]["manifest"]["components"] = {
+                key: None if value is None else _legacy_component(value)
+                for key, value in journal[name]["manifest"]["components"].items()}
+    journal["before"]["topology"] = copy.deepcopy(journal["before"]["manifest"]["components"])
+    journal["manifest"]["sha256"] = hashlib.sha256(manifest._encode(journal["target"]["manifest"])).hexdigest()
+    journal["migrations"] = migrations or {"status": "pending", "items": []}
+    return journal
+
+
+def test_full_schemas_three_four_five_stay_readable_and_six_is_refused(full_journal: dict) -> None:
+    assert full.validate_journal(copy.deepcopy(full_journal))["schema_version"] == 3
+    four = copy.deepcopy(full_journal)
+    four["schema_version"] = 4
+    assert full.validate_journal(four)["schema_version"] == 4
+    five = _schema5_journal(full_journal)
+    assert full.validate_journal(five)["schema_version"] == 5
+    assert full.SCHEMA_VERSION == 5 and full.FULL4_SCHEMA_VERSION == 4 and full.PREVIOUS_SCHEMA_VERSION == 3
+    for bad in (2, 6):
+        altered = copy.deepcopy(full_journal)
+        altered["schema_version"] = bad
+        with pytest.raises(full.FullError):
+            full.validate_journal(altered)
+
+
+def test_schema5_migrations_record_preimages_without_any_copy_claim(full_journal: dict) -> None:
+    applied = {"status": "applied", "items": [
+        _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(None),
+                 legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+    assert full.validate_journal(_schema5_journal(full_journal, migrations=applied))["migrations"]["status"] == "applied"
+    # Every staging, created-target and copy-back field is outside schema 5.
+    for field, value in (("forward_stage", "/srv/w/data/.stage"), ("forward_stage_preimage", _v5_preimage()),
+                         ("created", {"sha256": "c" * 64, "stat": {"device": 1, "inode": 2, "size": 1,
+                                                                   "mtime_ns": 3, "ctime_ns": 4}}),
+                         ("copyback", {"phase": "intent"})):
+        stamped = {"status": "applied", "items": [
+            _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(None),
+                     legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility(), **{field: value}),
+            _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                     new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+        with pytest.raises(full.FullError):
+            full.validate_journal(_schema5_journal(full_journal, migrations=stamped))
+    # A changed effective or target path is relocation, not a preserved state.
+    for key, value in (("new_target_path", "/srv/w/state/chat-settings"),
+                       ("new_effective_path", "/app/state/chat-settings")):
+        relocated = {"status": "planned", "items": [
+            _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
+                     compatibility=_v5_compatibility(), **{key: value}),
+            _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                     new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+        with pytest.raises(full.FullError, match="relocation"):
+            full.validate_journal(_schema5_journal(full_journal, migrations=relocated))
+    # Applied state needs the stopped preimages and the reader comparison.
+    incomplete = {"status": "applied", "items": [
+        _v5_item("chat-settings", action="none", old_preimage=_v5_preimage(), new_preimage=_v5_preimage()),
+        _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+    with pytest.raises(full.FullError):
+        full.validate_journal(_schema5_journal(full_journal, migrations=incomplete))
+    # A pending native copy needs an absent target and a present legacy file.
+    restated = {"status": "applied", "items": [
+        _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
+                 legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+    with pytest.raises(full.FullError):
+        full.validate_journal(_schema5_journal(full_journal, migrations=restated))
+
+
+def test_schema5_rollback_keeps_progressed_state_with_native_evidence(full_journal: dict) -> None:
+    restored = {"status": "restored", "items": [
+        _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(None),
+                 legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility(),
+                 rollback_compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", action="validate-existing", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility(),
+                 rollback_compatibility=_v5_compatibility())]}
+    journal = _schema5_journal(full_journal, status="rolled_back", phase="rolled-back", migrations=restored)
+    assert full.validate_journal(journal)["migrations"]["status"] == "restored"
+    # A rollback that kept bytes must prove the old reader accepts them.
+    missing = copy.deepcopy(restored)
+    missing["items"][1]["rollback_compatibility"] = None
+    with pytest.raises(full.FullError, match="no native evidence"):
+        full.validate_journal(_schema5_journal(full_journal, status="rolled_back", phase="rolled-back",
+                                               migrations=missing))
+    # A native-pending copy that never happened has no bytes to compare.
+    nothing = {"status": "restored", "items": [
+        _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(None),
+                 legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility(),
+                 rollback_compatibility=_v5_compatibility())]}
+    assert full.validate_journal(_schema5_journal(full_journal, status="rolled_back", phase="rolled-back",
+                                                  migrations=nothing))["status"] == "rolled_back"
+    # Copy-back is a FULL4 phase and cannot be claimed by schema 5.
+    with pytest.raises(full.FullError):
+        full.validate_journal(_schema5_journal(full_journal, status="rolled_back", phase="rolled-back",
+                                               migrations={"status": "copyback", "items": restored["items"]}))
+    # A committed schema-5 record needs the reader comparison, not a copy ledger.
+    committed = {"status": "applied", "items": [
+        _v5_item("chat-settings", old_preimage=_v5_preimage(), new_preimage=_v5_preimage(None),
+                 legacy_preimage=_v5_preimage(), compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", action="none", old_preimage=_v5_preimage(),
+                 new_preimage=_v5_preimage(), compatibility=_v5_compatibility())]}
+    record = _schema5_journal(full_journal, status="committed", phase="committed", migrations=committed)
+    record["database"]["backup"]["stat"] = record["database"]["old"]["stat"]
+    record["database"]["stage"]["stat"] = record["database"]["old"]["stat"]
+    record["database"]["promoted_stat"] = record["database"]["old"]["stat"]
+    assert full.validate_journal(record)["status"] == "committed"
+
+
+def test_schema5_journal_observations_only_grow(full_journal: dict) -> None:
+    # The first plan may fill an empty pending record; after that only evidence
+    # appears.
+    full._advance_migrations_v5({"status": "pending", "items": []},
+                                {"status": "planned", "items": [
+                                    _v5_item("chat-settings"), _v5_item("channel-replies", action="none")]})
+    planned = {"status": "planned", "items": [
+        _v5_item("chat-settings", new_preimage=_v5_preimage(None)),
+        _v5_item("channel-replies", action="none")]}
+    applied = copy.deepcopy(planned)
+    applied["status"] = "applied"
+    for item in applied["items"]:
+        item["old_preimage"] = _v5_preimage()
+        item["new_preimage"] = _v5_preimage(None) if item["action"] == "copy-if-absent" else _v5_preimage()
+        item["compatibility"] = _v5_compatibility()
+        if item["action"] == "copy-if-absent":
+            item["legacy_preimage"] = _v5_preimage()
+    full._advance_migrations_v5(planned, applied)
+    # A path, action or recorded observation may not change afterwards.
+    for change in (lambda value: value["items"][0].update(new_target_path="/srv/w/state/x"),
+                   lambda value: value["items"][0].update(old_preimage=_v5_preimage("c" * 64)),
+                   lambda value: value["items"][0].update(legacy_preimage=None)):
+        altered = copy.deepcopy(applied)
+        change(altered)
+        with pytest.raises(full.FullError):
+            full._advance_migrations_v5(applied, altered)
+
+
+def test_full_request_requires_one_artifact_per_selected_component() -> None:
+    assert full._prepare_request({"selection": "both", "artifacts": {"api": "/a.json", "telegram": "/b.json"},
+                                  "recipes": {}})[0] == ["api", "telegram"]
+    assert full._prepare_request({"selection": "none", "artifacts": {}, "recipes": {}})[0] == []
+    for bad in ({"selection": "api", "artifacts": {}, "recipes": {}},
+                {"selection": "api", "artifacts": {"api": "/a.json", "telegram": "/b.json"}, "recipes": {}},
+                {"selection": "api", "artifacts": {"api": "/a.json"}, "recipes": {"telegram": {}}},
+                {"selection": "none", "artifacts": {"api": "/a.json"}, "recipes": {}},
+                {"selection": "telegram", "receipts": {"telegram": "a" * 64}, "artifacts": {}, "recipes": {}}):
+        with pytest.raises(full.FullError):
+            full._prepare_request(bad)
+
+
+def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, full_journal: dict,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rollback compares the file a link names and never re-points the entry."""
+    state_dir = tmp_path / "state"
+    (state_dir / "refs").mkdir(parents=True)
+    (state_dir / "refs" / "settings.json").write_bytes(b'{"allowed":[1]}')
+    (state_dir / "refs" / "replies.json").write_bytes(b'{"channel":"c"}\n')
+    settings = state_dir / "refs" / "settings.json"
+    entry = state_dir / "channel_replies.json"
+    entry.symlink_to("/app/state/refs/replies.json")
+    recipe = {"mounts": [{"host": str(state_dir), "container": "/app/state", "read_only": False}]}
+    journal = _schema5_journal(full_journal, phase="rollback-stop-readers")
+    journal["migrations"] = {"status": "planned", "items": [
+        _v5_item("chat-settings", "validate-existing", old_target_path=str(settings),
+                 new_target_path=str(settings), old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
+                 compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", "validate-existing", old_target_path=str(entry),
+                 new_target_path=str(entry), old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
+                 compatibility=_v5_compatibility())]}
+    plans = tuple({"kinds": {item["kind"]: {"mapped_target": item["new_target_path"],
+                                            "mapped_legacy": None, "migration": item["action"]}
+                             for item in journal["migrations"]["items"]}} for _ in range(2))
+    calls = []
+
+    def canonical(root_path: Path, *, host_path: str, state_kind: str, **kwargs: object) -> dict:
+        calls.append((host_path, state_kind))
+        return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64, "writer_can_replace": True}
+
+    # component_full imports its siblings through sys.path, so the top-level
+    # module objects are the ones the verifier calls.
+    import component_state as plain_state  # noqa: PLC0415
+    import component_transaction as plain_transaction  # noqa: PLC0415
+
+    monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
+    monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
+    monkeypatch.setattr(full, "_write_journal", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    monkeypatch.setattr(plain_state, "canonical", canonical)
+    before = (entry.lstat().st_ino, os.readlink(entry), entry.lstat().st_mtime_ns)
+    full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+    # Both native readers are compared on the settings referent; the retained
+    # reply link is skipped instead of being read or re-pointed.
+    assert calls == [(str(settings), "chat-settings"), (str(settings), "chat-settings")]
+    assert (entry.lstat().st_ino, os.readlink(entry), entry.lstat().st_mtime_ns) == before
+    assert journal["migrations"]["items"][0]["rollback_compatibility"] == {
+        "raw_sha256": "a" * 64, "old_canonical_sha256": "a" * 64, "new_canonical_sha256": "a" * 64,
+        "old_writeable": True, "clock": journal["migrations"]["items"][0]["rollback_compatibility"]["clock"]}
+    assert journal["migrations"]["items"][1]["rollback_compatibility"] is None
+    # A progressed target that disappeared is refused.
+    (state_dir / "refs" / "settings.json").unlink()
+    with pytest.raises(full.FullError, match="missing"):
+        full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")

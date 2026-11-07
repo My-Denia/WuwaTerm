@@ -24,8 +24,10 @@ import product_manifest as manifest  # noqa: E402
 
 
 JOURNAL_NAME = ".component-full-transaction.json"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+FULL4_SCHEMA_VERSION = 4
 PREVIOUS_SCHEMA_VERSION = 3
+SCHEMA_VERSIONS = (PREVIOUS_SCHEMA_VERSION, FULL4_SCHEMA_VERSION, SCHEMA_VERSION)
 PHASES = frozenset({
     "prepared", "state-plan", "backup", "retain-rollback", "stop-readers",
     "state-snapshot", "state-migrate", "stage-db", "promote-db", "activate-readers",
@@ -180,6 +182,117 @@ def _migrations(value: Any, *, telegram_present: bool, transaction_id: str) -> N
         if (item["compatibility"] is not None and item["old_preimage"] is not None
                 and item["compatibility"]["raw_sha256"] != item["old_preimage"]["sha256"]):
             _fail("full migration: initial compatibility differs from its state preimage")
+
+
+_V5_ITEM_KEYS = frozenset({
+    "kind", "action", "old_effective_path", "new_effective_path", "old_target_path", "new_target_path",
+    "old_legacy_path", "new_legacy_path", "old_preimage", "new_preimage", "legacy_preimage",
+    "compatibility", "rollback_compatibility",
+})
+
+
+def _compatibility_v5(value: Any, where: str) -> dict[str, Any]:
+    """Validate one native-reader comparison recorded by the state helpers."""
+    evidence = runtime._object(value, {"raw_sha256", "old_canonical_sha256", "new_canonical_sha256",
+                                       "old_writeable", "clock"}, where)
+    raw = evidence["raw_sha256"]
+    if raw is None:
+        if evidence["old_canonical_sha256"] is not None or evidence["new_canonical_sha256"] is not None:
+            _fail(f"{where}: absent state has canonical content")
+    else:
+        runtime._match(raw, runtime._HEX64, where)
+        for name in ("old_canonical_sha256", "new_canonical_sha256"):
+            if evidence[name] is None:
+                raise FullError(f"{where}: absent canonical hash for present state")
+            runtime._match(evidence[name], runtime._HEX64, f"{where}.{name}")
+        if evidence["old_canonical_sha256"] != evidence["new_canonical_sha256"]:
+            _fail(f"{where}: native reader semantics differ")
+    if runtime._boolean(evidence["old_writeable"], where) is not True:
+        _fail(f"{where}: old writer is not writable")
+    runtime._integer(evidence["clock"], where)
+    return evidence
+
+
+def _v5_rollback_evidence(item: dict[str, Any]) -> bool:
+    """A rollback needs native-reader evidence unless nothing was progressed.
+
+    A native-pending copy that never happened leaves an absent target, so there
+    are no bytes for the old reader to accept and nothing to keep.
+    """
+    if item["rollback_compatibility"] is not None:
+        return True
+    return (item["action"] == "copy-if-absent" and item["new_preimage"] is not None
+            and item["new_preimage"]["present"] is False)
+
+
+def _migrations_v5(value: Any, *, before: dict[str, Any], target: dict[str, Any]) -> None:
+    """Validate the schema-5 preserved-state record: preimages, never copy claims.
+
+    The new product performs its own startup copy, so a record may name a
+    pending copy but may not carry forward staging, created targets, copy-backs
+    or claim any write. Both plans must name one effective location; changing it
+    is relocation and is refused before this record can exist.
+    """
+    record = runtime._object(value, {"status", "items"}, "full.migrations")
+    status = record["status"]
+    if status not in ("not-applicable", "pending", "planned", "applied", "restored"):
+        _fail("full migrations: invalid status")
+    items = record["items"]
+    if type(items) is not list or len(items) > 2:
+        _fail("full migrations: invalid items")
+    old_component, new_component = before["telegram"], target["telegram"]
+    if old_component is not None and new_component is None:
+        _fail("full migrations: Telegram target disappeared")
+    if old_component is None:
+        if status != "not-applicable" or items:
+            _fail("full migrations: Telegram is absent")
+        return
+    if status == "not-applicable" or status == "pending" and items or status != "pending" and len(items) != 2:
+        _fail("full migrations: inconsistent state")
+    if not items:
+        return
+    seen: set[str] = set()
+    for item in items:
+        runtime._object(item, set(_V5_ITEM_KEYS), "full migration")
+        kind = item["kind"]
+        if kind not in ("chat-settings", "channel-replies") or kind in seen:
+            _fail("full migration: invalid or duplicate kind")
+        seen.add(kind)
+        if item["action"] not in ("none", "validate-existing", "copy-if-absent"):
+            _fail("full migration: invalid action")
+        for key in ("old_effective_path", "new_effective_path", "old_target_path", "new_target_path"):
+            runtime._absolute(item[key], f"full migration.{key}")
+        for key in ("old_legacy_path", "new_legacy_path"):
+            if item[key] is not None:
+                runtime._absolute(item[key], f"full migration.{key}")
+        if (item["old_effective_path"] != item["new_effective_path"]
+                or item["old_target_path"] != item["new_target_path"]):
+            _fail("full migration: schema-5 state relocation is unsupported")
+        _optional_preimage(item["old_preimage"], "full migration.old_preimage")
+        _optional_preimage(item["new_preimage"], "full migration.new_preimage")
+        _optional_preimage(item["legacy_preimage"], "full migration.legacy_preimage")
+        for name in ("compatibility", "rollback_compatibility"):
+            if item[name] is not None:
+                _compatibility_v5(item[name], f"full migration.{name}")
+        if (item["compatibility"] is not None and item["old_preimage"] is not None
+                and item["compatibility"]["raw_sha256"] != item["old_preimage"]["sha256"]):
+            _fail("full migration: initial compatibility differs from its state preimage")
+        if item["rollback_compatibility"] is not None and item["rollback_compatibility"]["raw_sha256"] is None:
+            _fail("full migration: rollback evidence has no progressed bytes")
+        if status == "applied":
+            for key in ("old_preimage", "new_preimage", "compatibility"):
+                if item[key] is None:
+                    _fail("full migration: applied state evidence is incomplete")
+            if item["rollback_compatibility"] is not None:
+                _fail("full migration: applied state already claims a rollback comparison")
+            if item["action"] == "copy-if-absent":
+                if (item["new_preimage"]["present"] or item["legacy_preimage"] is None
+                        or not item["legacy_preimage"]["present"]):
+                    _fail("full migration: pending native copy has no absent target or present legacy file")
+                if item["new_legacy_path"] is None:
+                    _fail("full migration: pending native copy has no legacy path")
+        if status == "restored" and not _v5_rollback_evidence(item):
+            _fail("full migration: reconciled rollback has no native evidence")
 
 
 def _endpoint_hash(value: dict[str, Any]) -> str:
@@ -435,6 +548,8 @@ def _migrations_v4(value: Any, *, journal_id: str, before: dict[str, Any], targe
     if type(items) is not list or len(items) > 2:
         _fail("full migrations: invalid items")
     old_component, new_component = before["telegram"], target["telegram"]
+    if old_component is not None and new_component is None:
+        _fail("full migrations: Telegram target disappeared")
     if old_component is None:
         if status != "not-applicable" or items:
             _fail("full migrations: Telegram is absent")
@@ -568,7 +683,7 @@ def validate_journal(value: Any) -> dict[str, Any]:
             "migrations", "pointers", "manifest",
         }, "full journal")
         if (type(journal["schema_version"]) is not int
-                or journal["schema_version"] not in (PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION)):
+                or journal["schema_version"] not in SCHEMA_VERSIONS):
             _fail("full journal: unsupported schema")
         if journal["kind"] != "component-full" or journal["action"] != "update":
             _fail("full journal: unsupported kind or action")
@@ -680,9 +795,11 @@ def validate_journal(value: Any) -> dict[str, Any]:
         if journal["schema_version"] == PREVIOUS_SCHEMA_VERSION:
             _migrations(journal["migrations"], telegram_present=topology["telegram"] is not None,
                         transaction_id=identifier)
-        else:
+        elif journal["schema_version"] == FULL4_SCHEMA_VERSION:
             _migrations_v4(journal["migrations"], journal_id=identifier, before=topology,
                            target=proposed["components"])
+        else:
+            _migrations_v5(journal["migrations"], before=topology, target=proposed["components"])
         if status == "committed":
             if backup["stat"] is None or stage["stat"] is None or database["promoted_stat"] is None:
                 _fail("full journal: committed database has incomplete durable evidence")
@@ -695,29 +812,42 @@ def validate_journal(value: Any) -> dict[str, Any]:
                     if (item["action"] == "copy-if-absent"
                             and (item["forward_stage_preimage"] is None or item["created"] is None)):
                         _fail("full journal: committed Telegram copy evidence is incomplete")
-                else:
+                elif journal["schema_version"] == FULL4_SCHEMA_VERSION:
                     if (item["quiescent_old_endpoint"] is None or item["quiescent_new_endpoint"] is None
                             or item["compatibility"] is None or item["compatibility"]["status"] != "complete"):
                         _fail("full journal: committed Telegram endpoint evidence is incomplete")
                     if (item["action"] == "copy-if-absent"
                             and (item["forward"] is None or item["forward"]["phase"] != "published")):
                         _fail("full journal: committed Telegram endpoint copy is incomplete")
+                elif (item["compatibility"] is None
+                      or item["legacy_preimage"] is not None and not item["legacy_preimage"]["present"]
+                      and item["action"] == "copy-if-absent"):
+                    # The product copied at start; a committed record keeps the
+                    # stopped preimage evidence and the native reader comparison.
+                    _fail("full journal: committed preserved-state evidence is incomplete")
             for name in ("api", "telegram"):
                 if new_containers[name] is not None:
                     runtime._container(new_containers[name], f"full.target.{name}", observed=True)
         if status == "rolled_back":
+            if (journal["schema_version"] == SCHEMA_VERSION
+                    and journal["migrations"]["status"] not in ("not-applicable", "pending", "planned", "restored")):
+                _fail("full journal: schema-5 Telegram state was not reconciled")
             for item in journal["migrations"]["items"]:
                 if journal["schema_version"] == PREVIOUS_SCHEMA_VERSION:
                     if (item["action"] == "copy-if-absent" and item["created"] is not None
                             and (item["copyback"] is None or item["copyback"]["phase"] != "cleaned")):
                         _fail("full journal: relocated Telegram state has not been reconciled")
-                elif (item["forward"] is not None and item["forward"]["phase"] == "published"
-                      and (item["cleanup"] is None or item["cleanup"]["phase"] != "removed")):
-                    _fail("full journal: relocated Telegram endpoint has not been reconciled")
-                elif (item["forward"] is not None and item["forward"]["reservation"] is not None
-                      and item["forward"]["phase"] != "published"
-                      and (item["forward"]["discard"] is None or item["forward"]["discard"]["phase"] != "removed")):
-                    _fail("full journal: unpublished Telegram stage has not been removed")
+                elif journal["schema_version"] == FULL4_SCHEMA_VERSION:
+                    if (item["forward"] is not None and item["forward"]["phase"] == "published"
+                            and (item["cleanup"] is None or item["cleanup"]["phase"] != "removed")):
+                        _fail("full journal: relocated Telegram endpoint has not been reconciled")
+                    elif (item["forward"] is not None and item["forward"]["reservation"] is not None
+                          and item["forward"]["phase"] != "published"
+                          and (item["forward"]["discard"] is None or item["forward"]["discard"]["phase"] != "removed")):
+                        _fail("full journal: unpublished Telegram stage has not been removed")
+                elif (journal["migrations"]["status"] == "restored"
+                      and not _v5_rollback_evidence(item)):
+                    _fail("full journal: kept Telegram state has no native reader evidence")
         pointers = runtime._object(journal["pointers"], {"old", "target"}, "full.pointers")
         for which in ("old", "target"):
             pair = runtime._object(pointers[which], {".deploy_commit", ".deploy_current"}, f"full.pointers.{which}")
@@ -828,7 +958,7 @@ def verify_predecessor(root: Path, *, successor_kind: str, successor: dict[str, 
     """Require the immutable predecessor archive after successor publication."""
     reference = successor.get("predecessor")
     if reference is None:
-        if successor_kind == "full" or successor.get("schema_version") == 4 and successor.get("action") == "update":
+        if successor_kind == "full" or successor.get("schema_version") in (4, 5) and successor.get("action") == "update":
             _fail("handoff: published successor has no predecessor")
         return
     runtime.validate_predecessor(reference, successor_id=successor["transaction_id"], required=True)
@@ -922,6 +1052,37 @@ def finish_handoff(root: Path, *, successor_kind: str, successor: dict[str, Any]
         raise FullError("handoff: predecessor removal could not be reconciled") from exc
 
 
+def _prepare_request(request: Any) -> tuple[list[str], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Validate one FULL request: completed artifacts, never producer receipts.
+
+    A selection of ``none`` is a database-only transaction and must carry no
+    artifact. Every selected component names exactly one registered acquisition;
+    the recipe set stays a subset of the selection.
+    """
+    if type(request) is dict and set(request) == {"selection", "receipts", "recipes"}:
+        request = {**request, "artifacts": {}}
+    elif type(request) is dict and set(request) == {"selection", "artifacts", "recipes"}:
+        request = {"selection": request["selection"], "receipts": {},
+                   "artifacts": request["artifacts"], "recipes": request["recipes"]}
+    if type(request) is not dict or set(request) != {"selection", "receipts", "artifacts", "recipes"}:
+        _fail("full request is invalid")
+    if request["receipts"] != {}:
+        _fail("producer build receipts are protocol-1 inputs and cannot be used by this source")
+    selections = {"none": [], "api": ["api"], "telegram": ["telegram"], "both": ["api", "telegram"]}
+    selection = selections.get(request["selection"]) if type(request["selection"]) is str else None
+    artifacts, recipes = request["artifacts"], request["recipes"]
+    if selection is None or type(artifacts) is not dict or set(artifacts) != set(selection):
+        _fail("one completed artifact is required for each selected component")
+    if type(recipes) is not dict or not set(recipes).issubset(selection):
+        _fail("recipes must refer only to selected images")
+    if "api" in recipes:
+        _fail("API target recipe changes are unsupported")
+    for receipt_path in artifacts.values():
+        if not isinstance(receipt_path, (str, Path)) or not os.fspath(receipt_path):
+            _fail("artifact input must be an acquisition receipt path")
+    return selection, artifacts, recipes
+
+
 def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_path: Path,
             expected_sha: str | None = None) -> dict[str, Any]:
     """Construct a FULL3 journal from the adopted deployment and real DB input."""
@@ -937,17 +1098,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
     try:
         root = admission._physical_root(root)
         admission.admit_component(root, operation="full-update", code_root=CODE_ROOT)
-        if type(request) is not dict or set(request) != {"selection", "receipts", "recipes"}:
-            _fail("full request is invalid")
-        selections = {"none": [], "api": ["api"], "telegram": ["telegram"], "both": ["api", "telegram"]}
-        selection = selections.get(request["selection"]) if type(request["selection"]) is str else None
-        receipts, recipes = request["receipts"], request["recipes"]
-        if selection is None or type(receipts) is not dict or set(receipts) != set(selection):
-            _fail("one receipt is required for each selected image")
-        if type(recipes) is not dict or not set(recipes).issubset(selection):
-            _fail("recipes must refer only to selected images")
-        for digest in receipts.values():
-            runtime._match(digest, runtime._HEX64, "full build receipt")
+        selection, artifacts, recipes = _prepare_request(request)
         compose_path = transaction._compose_binary(compose_path)
         terminal = transaction.verify_terminal_for_full4(root, compose_path=compose_path)
         if terminal is None:
@@ -963,11 +1114,11 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
         current = runtime.inspect_deployment(root)
         if old is None or current["binding"] != "recorded" or current["manifest"] != old:
             _fail("current manifest differs from the adopted terminal deployment")
+        if old["schema_version"] not in (manifest.PREVIOUS_MANIFEST_SCHEMA_VERSION,
+                                         manifest.MANIFEST_SCHEMA_VERSION):
+            _fail("full update requires a schema-2 or schema-3 deployment")
         if any(old["components"][name] is None for name in selection):
             _fail("selected image belongs to an absent component")
-        if ("telegram" in selection and old["components"]["telegram"]["provenance"]["kind"] == "legacy-image"
-                and "telegram" not in recipes):
-            _fail("legacy Telegram requires an explicit target Compose recipe")
         commit = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{commit}", lock_root=root).decode("ascii").strip()
         tree = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{tree}", lock_root=root).decode("ascii").strip()
         if expected_sha is not None and runtime._match(expected_sha, runtime._HEX40, "expected source commit") != commit:
@@ -1009,28 +1160,44 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
                       database={**candidate["binding"], "path": old["database"]["path"]})
         target_containers = copy.deepcopy(before)
         references: dict[str, tuple[Any, ...]] = {}
+        for name in ("api", "telegram"):
+            component = target["components"][name]
+            if (component is not None and name not in selection
+                    and component["provenance"]["kind"] not in manifest.PROVENANCE_KINDS[3]):
+                _fail(f"unselected {name} provenance cannot be recorded in a schema-3 manifest")
+        target["schema_version"] = manifest.MANIFEST_SCHEMA_VERSION
         for name in selection:
-            receipt = (build.verify_registered_build(root, receipts[name]) if name == "api" else
-                       wheel.verify_registered_wheel_build(root, receipts[name]))
-            if receipt["recovery_source"] != {key: value for key, value in source.items() if key != "compose"}:
-                _fail("receipt belongs to a different operations source")
-            image = transaction._image(receipt["image_id"])
+            facts, image, receipt, bundle = prepare_runtime.artifact_input(root, name, artifacts[name])
+            image_id = facts["image"]["id"]
             if name in recipes:
-                snapshot, inputs = prepare_runtime._render_recipe(root, recipes[name], image, compose_path)
+                requested, inputs = prepare_runtime._render_recipe(root, recipes[name], image, compose_path)
                 for path, identity in inputs.items():
                     if path in references and references[path] != identity:
                         _fail("Compose input changed between selected recipes")
                     references[path] = identity
+            if name == "api":
+                if name in recipes:
+                    _fail("API target recipe changes are unsupported")
+                snapshot = {**copy.deepcopy(snapshots[name]), "image_id": image_id}
+            elif old["components"]["telegram"]["provenance"]["kind"] == "legacy-image":
+                # Counterexample 1: the legacy wrapper's effective DB path and
+                # state bindings are translated, never re-derived.
+                snapshot = prepare_runtime.translate_preserved_recipe(
+                    copy.deepcopy(snapshots[name]), observe._inspect(before[name]["id"]), image)
             else:
-                snapshot = copy.deepcopy(snapshots[name])
-                snapshot["image_id"] = receipt["image_id"]
-            if name == "api" and any(snapshot[key] != snapshots[name][key] for key in snapshot if key != "image_id"):
-                _fail("API target recipe changes are unsupported")
+                snapshot = {**copy.deepcopy(snapshots[name]), "image_id": image_id}
+                manifest.validate_recipe_snapshot(snapshot)
+                manifest.verify_poll_health_mount(
+                    snapshot, effective_uid=int((snapshot["user"] or "0").split(":", 1)[0]))
+            if name in recipes:
+                prepare_runtime.refuse_target_recipe_change(snapshot, requested)
             path, digest = manifest.write_recipe_snapshot(root, snapshot)
             recipe = {key: snapshot[key] for key in manifest._RECIPE_FIELDS}
             recipe.update(snapshot_path=path, sha256=digest)
-            target["components"][name] = prepare_runtime._candidate(name, receipts[name], receipt, recipe)
-            target_containers[name].update(id=None, image_id=receipt["image_id"], project=snapshot["project"],
+            built = {**facts, "recipe": recipe}
+            manifest.verify_artifact_binding(name, built, receipt, bundle)
+            target["components"][name] = built
+            target_containers[name].update(id=None, image_id=image_id, project=snapshot["project"],
                                            service=snapshot["service"], name=None, started_at=None,
                                            restart_count=None, transaction_label=identifier)
         manifest.validate_manifest(target)
@@ -1141,7 +1308,7 @@ def _verify_initial_preimage(root: Path, journal: dict[str, Any], predecessor: d
     context["database"] = {"binding": old_db["binding"], "stat": old_db["stat"]}
     context["migrations"] = []
     transaction._verify_live_topology(root, context, which="before", compose_path=compose_path,
-                                      full4_endpoints=journal["schema_version"] == SCHEMA_VERSION)
+                                      full4_endpoints=journal["schema_version"] == FULL4_SCHEMA_VERSION)
 
 
 def _publish_initial_full_journal(directory: int, raw: bytes) -> None:
@@ -1162,7 +1329,8 @@ def write_initial_journal(root: Path, successor: dict[str, Any], *, predecessor_
         admission.require_lock(root)
         journal = validate_journal(copy.deepcopy(successor))
         admission._component_conflicts(root)
-        terminal_verify = (transaction.verify_terminal_for_full4 if journal["schema_version"] == SCHEMA_VERSION
+        terminal_verify = (transaction.verify_terminal_for_full4
+                           if journal["schema_version"] in (FULL4_SCHEMA_VERSION, SCHEMA_VERSION)
                            else transaction.verify_terminal)
         terminal = terminal_verify(root, compose_path=compose_path)
         if terminal is None or terminal[0] != predecessor_raw:
@@ -1324,6 +1492,24 @@ def _advance_migrations_v4(previous: dict[str, Any], current: dict[str, Any]) ->
                 _fail("full cleanup progress regressed")
 
 
+def _advance_migrations_v5(previous: dict[str, Any], current: dict[str, Any]) -> None:
+    """Allow only evidence to appear; never a path, action or copy claim."""
+    if not previous["items"]:
+        return
+    previous_items = {item["kind"]: item for item in previous["items"]}
+    if set(previous_items) != {item["kind"] for item in current["items"]}:
+        _fail("full journal migration kinds changed")
+    for item in current["items"]:
+        old_item = previous_items[item["kind"]]
+        for key in ("kind", "action", "old_effective_path", "new_effective_path", "old_target_path",
+                    "new_target_path", "old_legacy_path", "new_legacy_path"):
+            if old_item[key] != item[key]:
+                _fail("full journal migration path binding changed")
+        for key in ("old_preimage", "new_preimage", "legacy_preimage", "compatibility", "rollback_compatibility"):
+            if old_item[key] is not None and old_item[key] != item[key]:
+                _fail("full journal migration observation changed")
+
+
 def _write_journal(root: Path, value: dict[str, Any]) -> None:
     """Durably advance only one bound full journal under its existing FD9."""
     root = Path(root)
@@ -1379,8 +1565,12 @@ def _write_journal(root: Path, value: dict[str, Any]) -> None:
     }
     if new_migrations["status"] not in allowed_migration_status[old_migrations["status"]]:
         _fail("full journal migration transition is invalid")
-    if journal["schema_version"] == SCHEMA_VERSION:
+    if journal["schema_version"] == FULL4_SCHEMA_VERSION:
         _advance_migrations_v4(old_migrations, new_migrations)
+    elif journal["schema_version"] == SCHEMA_VERSION:
+        if new_migrations["status"] == "copyback":
+            _fail("full journal: schema-5 transactions never copy state back")
+        _advance_migrations_v5(old_migrations, new_migrations)
     elif old_migrations["items"]:
         previous_items = {item["kind"]: item for item in old_migrations["items"]}
         if set(previous_items) != {item["kind"] for item in new_migrations["items"]}:
@@ -1706,8 +1896,11 @@ def _state_plans(root: Path, journal: dict[str, Any], *, compose_path: Path) -> 
 
 
 def _plan_state(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
-    if journal["schema_version"] == SCHEMA_VERSION:
+    if journal["schema_version"] == FULL4_SCHEMA_VERSION:
         _plan_state_v4(root, journal, compose_path=compose_path)
+        return
+    if journal["schema_version"] == SCHEMA_VERSION:
+        _plan_state_v5(root, journal, compose_path=compose_path)
         return
     plans = _state_plans(root, journal, compose_path=compose_path)
     if plans is None:
@@ -1776,9 +1969,44 @@ def _plan_state_v4(root: Path, journal: dict[str, Any], *, compose_path: Path) -
     _write_journal(root, journal)
 
 
+def _plan_state_v5(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
+    """Record the stopped preimages the product itself may progress.
+
+    Schema 5 never moves state: both plans must name one effective location and
+    the product's own startup copy is only classified, never staged here.
+    """
+    import component_prepare as prepare_runtime  # noqa: PLC0415
+
+    plans = _state_plans(root, journal, compose_path=compose_path)
+    if plans is None:
+        return
+    old_plan, new_plan = plans
+    try:
+        prepare_runtime.verify_state_plan_equivalence(old_plan, new_plan)
+    except prepare_runtime.PrepareError as exc:
+        raise FullError(str(exc)) from exc
+    items = []
+    for kind in ("chat-settings", "channel-replies"):
+        old, new = old_plan["kinds"][kind], new_plan["kinds"][kind]
+        if old["mapped_target"] != new["mapped_target"] or old["effective_path"] != new["effective_path"]:
+            _fail("Telegram state relocation is unsupported in schema-5 cutover")
+        items.append({
+            "kind": kind, "action": new["migration"], "old_effective_path": old["effective_path"],
+            "new_effective_path": new["effective_path"], "old_target_path": old["mapped_target"],
+            "new_target_path": new["mapped_target"], "old_legacy_path": old["mapped_legacy"],
+            "new_legacy_path": new["mapped_legacy"], "old_preimage": None, "new_preimage": None,
+            "legacy_preimage": None, "compatibility": None, "rollback_compatibility": None,
+        })
+    journal["migrations"] = {"status": "planned", "items": items}
+    _write_journal(root, journal)
+
+
 def _snapshot_state(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
-    if journal["schema_version"] == SCHEMA_VERSION:
+    if journal["schema_version"] == FULL4_SCHEMA_VERSION:
         _snapshot_state_v4(root, journal, compose_path=compose_path)
+        return
+    if journal["schema_version"] == SCHEMA_VERSION:
+        _snapshot_state_v5(root, journal, compose_path=compose_path)
         return
     import component_state as state  # noqa: PLC0415
     import component_transaction as transaction  # noqa: PLC0415
@@ -1828,6 +2056,70 @@ def _snapshot_state(root: Path, journal: dict[str, Any], *, compose_path: Path) 
                                  "old_writeable": True, "clock": clock}
         _guard_readers(root, journal, compose_path=compose_path, allowed_database_states={"old"})
     _write_journal(root, journal)
+
+
+def _snapshot_state_v5(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
+    """Hash every stopped state leaf and prove both native readers agree."""
+    import component_state as state  # noqa: PLC0415
+    import component_transaction as transaction  # noqa: PLC0415
+
+    _guard_readers(root, journal, compose_path=compose_path, allowed_database_states={"old"})
+    plans = _state_plans(root, journal, compose_path=compose_path)
+    if plans is None:
+        return
+    old_plan, new_plan = plans
+    before = journal["before"]["topology"]["telegram"]
+    target = journal["target"]["manifest"]["components"]["telegram"]
+    old_snapshot = transaction._snapshot(root, before)
+    target_snapshot = transaction._snapshot(root, target)
+    clock = int(time.time())
+    identifier = journal["transaction_id"]
+    for item in journal["migrations"]["items"]:
+        old, new = old_plan["kinds"][item["kind"]], new_plan["kinds"][item["kind"]]
+        if (old["mapped_target"] != item["old_target_path"] or new["mapped_target"] != item["new_target_path"]
+                or old["effective_path"] != item["old_effective_path"]
+                or new["effective_path"] != item["new_effective_path"]
+                or old["mapped_legacy"] != item["old_legacy_path"]
+                or new["mapped_legacy"] != item["new_legacy_path"]
+                or new["migration"] != item["action"]):
+            _fail("Telegram state plan changed while stopping readers")
+        if item["old_target_path"] != item["new_target_path"]:
+            _fail("Telegram state relocation is unsupported in schema-5 cutover")
+        item["old_preimage"] = state.preimage(root, image_id=before["image"]["id"],
+                                               image_revision=before["image"]["revision"], snapshot=old_snapshot,
+                                               host_path=item["old_target_path"], transaction_id=identifier)
+        item["new_preimage"] = state.preimage(root, image_id=target["image"]["id"],
+                                               image_revision=target["image"]["revision"], snapshot=target_snapshot,
+                                               host_path=item["new_target_path"], transaction_id=identifier)
+        if item["old_preimage"] != item["new_preimage"]:
+            _fail("Telegram state differs across the retained binding")
+        if item["action"] == "copy-if-absent":
+            if item["new_preimage"]["present"] or item["new_legacy_path"] is None:
+                _fail("Telegram state copy has a target file or no legacy path")
+            item["legacy_preimage"] = state.preimage(
+                root, image_id=before["image"]["id"], image_revision=before["image"]["revision"],
+                snapshot=old_snapshot, host_path=item["new_legacy_path"], transaction_id=identifier)
+            if not item["legacy_preimage"]["present"]:
+                _fail("Telegram state copy has no legacy file to read")
+        elif item["new_legacy_path"] is not None and item["new_legacy_path"] != item["new_target_path"]:
+            item["legacy_preimage"] = state.preimage(
+                root, image_id=before["image"]["id"], image_revision=before["image"]["revision"],
+                snapshot=old_snapshot, host_path=item["new_legacy_path"], transaction_id=identifier)
+        old_semantics = state.canonical(root, snapshot=old_snapshot, host_path=item["old_target_path"],
+                                        transaction_id=identifier, state_kind=item["kind"], clock=clock)
+        new_semantics = state.canonical(root, snapshot=target_snapshot, host_path=item["old_target_path"],
+                                        transaction_id=identifier, state_kind=item["kind"], clock=clock)
+        if (old_semantics["raw_sha256"] != item["old_preimage"]["sha256"]
+                or new_semantics["raw_sha256"] != item["old_preimage"]["sha256"]
+                or old_semantics["canonical_sha256"] != new_semantics["canonical_sha256"]
+                or not old_semantics["writer_can_replace"]):
+            _fail("Telegram native readers or old writer are incompatible")
+        item["compatibility"] = {"raw_sha256": old_semantics["raw_sha256"],
+                                 "old_canonical_sha256": old_semantics["canonical_sha256"],
+                                 "new_canonical_sha256": new_semantics["canonical_sha256"],
+                                 "old_writeable": True, "clock": clock}
+        _write_journal(root, journal)
+        _guard_readers(root, journal, compose_path=compose_path, allowed_database_states={"old"})
 
 
 def _snapshot_state_v4(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
@@ -1967,19 +2259,43 @@ def _verify_progressed_state(root: Path, journal: dict[str, Any], *, compose_pat
     target_component = journal["target"]["manifest"]["components"]["telegram"]
     old_snapshot = transaction._snapshot(root, old_component)
     target_snapshot = transaction._snapshot(root, target_component)
+    schema5 = journal["schema_version"] == SCHEMA_VERSION
     for item in journal["migrations"]["items"]:
         old, new = old_plan["kinds"][item["kind"]], new_plan["kinds"][item["kind"]]
         if (old["mapped_target"] != item["old_target_path"]
                 or new["mapped_target"] != item["new_target_path"]
                 or old["mapped_legacy"] != item["old_legacy_path"]
                 or new["mapped_legacy"] != item["new_legacy_path"]
-                or old["migration"] == "copy-if-absent"):
+                or (not schema5 and old["migration"] == "copy-if-absent")):
             _fail("progressed Telegram state is outside the retained binding")
         if item["old_target_path"] != item["new_target_path"] and item["action"] != "copy-if-absent":
             _fail("progressed Telegram relocation was not authorized")
-        if item["copyback"] is not None and item["copyback"]["phase"] == "cleaned":
+        if schema5:
+            if item["old_target_path"] != item["new_target_path"]:
+                _fail("progressed Telegram relocation was not authorized")
+            if item["old_preimage"] is None and item["new_preimage"] is None:
+                # The forward state snapshot never ran, so this transaction
+                # made no state claim and the rollback has nothing to compare.
+                continue
+            # A distinct legacy file is not the transaction's to change, even
+            # though the product may have read it at startup.
+            if (item["legacy_preimage"] is not None and item["new_legacy_path"] is not None
+                    and item["new_legacy_path"] != item["new_target_path"]
+                    and transaction._state_preimage(item["new_legacy_path"], leaf=True,
+                                                    recipe=old_snapshot) != item["legacy_preimage"]):
+                _fail("legacy Telegram state changed during the cutover")
+            leaf = transaction._preserved_leaf(item["new_target_path"])
+            if not leaf["present"]:
+                if item["new_preimage"]["present"]:
+                    _fail("recorded Telegram state is missing")
+                continue
+            if leaf["link"]:
+                # A reply entry the product never replaced stays a link; the
+                # rollback neither recreates nor re-points it.
+                continue
+        elif item["copyback"] is not None and item["copyback"]["phase"] == "cleaned":
             continue
-        if item["old_target_path"] != item["new_target_path"]:
+        elif item["old_target_path"] != item["new_target_path"]:
             target_preimage = state.preimage(root, image_id=target_component["image"]["id"],
                                              image_revision=target_component["image"]["revision"], snapshot=target_snapshot,
                                              host_path=item["new_target_path"], transaction_id=journal["transaction_id"])
@@ -2011,6 +2327,11 @@ def _verify_progressed_state(root: Path, journal: dict[str, Any], *, compose_pat
         _write_journal(root, journal)
         _guard_readers(root, journal, compose_path=compose_path,
                        allowed_database_states={"old", "new", "restored", "absent"})
+    if schema5 and all(_v5_rollback_evidence(item) for item in journal["migrations"]["items"]):
+        # The bytes stay where the product wrote them; only the native reader
+        # evidence above is recorded, and no state is restored or deleted.
+        journal["migrations"]["status"] = "restored"
+        _write_journal(root, journal)
 
 
 def _reconcile_forward_v4(root: Path, journal: dict[str, Any], item: dict[str, Any], *,
@@ -2425,6 +2746,9 @@ def _migrate_state(root: Path, journal: dict[str, Any], *, compose_path: Path) -
     if journal["migrations"]["status"] == "not-applicable":
         return
     if journal["schema_version"] == SCHEMA_VERSION:
+        _migrate_state_v5(root, journal, compose_path=compose_path)
+        return
+    if journal["schema_version"] == FULL4_SCHEMA_VERSION:
         import component_state_endpoint as endpoint_module  # noqa: PLC0415
         import component_transaction as transaction  # noqa: PLC0415
 
@@ -2470,6 +2794,39 @@ def _migrate_state(root: Path, journal: dict[str, Any], *, compose_path: Path) -
             _fail("migrated Telegram state changed")
         item["created"] = {"sha256": result["sha256"], "stat": result["stat"]}
         _write_journal(root, journal)
+    journal["migrations"]["status"] = "applied"
+    _write_journal(root, journal)
+
+
+def _migrate_state_v5(root: Path, journal: dict[str, Any], *, compose_path: Path) -> None:
+    """Verify the stopped leaves; the product performs any pending copy itself."""
+    import component_state as state  # noqa: PLC0415
+    import component_transaction as transaction  # noqa: PLC0415
+
+    before = journal["before"]["topology"]["telegram"]
+    target = journal["target"]["manifest"]["components"]["telegram"]
+    old_snapshot = transaction._snapshot(root, before)
+    target_snapshot = transaction._snapshot(root, target)
+    for item in journal["migrations"]["items"]:
+        _all_readers_stopped(root, journal, compose_path=compose_path)
+        if classify_database(journal)[0] != "old":
+            _fail("database changed before Telegram state migration")
+        _verify_backup(root, journal)
+        if item["compatibility"]["old_canonical_sha256"] != item["compatibility"]["new_canonical_sha256"]:
+            _fail("FULL5 native state comparison is incomplete")
+        current = state.preimage(root, image_id=target["image"]["id"], image_revision=target["image"]["revision"],
+                                 snapshot=target_snapshot, host_path=item["new_target_path"],
+                                 transaction_id=journal["transaction_id"])
+        if current != item["new_preimage"]:
+            _fail("Telegram state changed while readers were stopped")
+        if item["legacy_preimage"] is not None:
+            legacy = state.preimage(root, image_id=before["image"]["id"],
+                                    image_revision=before["image"]["revision"], snapshot=old_snapshot,
+                                    host_path=item["new_legacy_path"], transaction_id=journal["transaction_id"])
+            if legacy != item["legacy_preimage"]:
+                _fail("Telegram legacy state changed while readers were stopped")
+        if item["action"] == "copy-if-absent" and current["present"]:
+            _fail("Telegram state copied before the product started")
     journal["migrations"]["status"] = "applied"
     _write_journal(root, journal)
 
@@ -2733,14 +3090,15 @@ def update(root: Path, prepared: dict[str, Any], *, compose_path: Path) -> dict[
     import component_transaction as transaction  # noqa: PLC0415
     import deployment_admission as admission  # noqa: PLC0415
 
-    if not recovery.FULL_RECOVERY_EXECUTION_READY or getattr(runtime, "CAPSULE_FULL_RECOVERY_PROTOCOL", None) != 1:
+    if not runtime.capsule_execution_ready(full=True):
         _fail("full transaction execution is not yet enabled")
     root = admission._physical_root(root)
     journal = validate_journal(copy.deepcopy(prepared))
     if journal["status"] != "active" or journal["phase"] != "prepared":
         _fail("full transaction is not prepared")
     admission.admit_component(root, operation="full-update", code_root=CODE_ROOT)
-    terminal_verify = (transaction.verify_terminal_for_full4 if journal["schema_version"] == SCHEMA_VERSION
+    terminal_verify = (transaction.verify_terminal_for_full4
+                       if journal["schema_version"] in (FULL4_SCHEMA_VERSION, SCHEMA_VERSION)
                        else transaction.verify_terminal)
     terminal = terminal_verify(root, compose_path=compose_path)
     if terminal is None:
@@ -2853,9 +3211,9 @@ def _verify_untouched_recovery(root: Path, journal: dict[str, Any], *, compose_p
     """Verify an early interruption without stopping or changing any reader."""
     import component_transaction as transaction  # noqa: PLC0415
 
-    if (journal["schema_version"] != SCHEMA_VERSION or classify_database(journal)[0] != "old"
+    if (journal["schema_version"] < FULL4_SCHEMA_VERSION or classify_database(journal)[0] != "old"
             or journal["database"]["stage"]["stat"] is not None or journal["database"]["promoted_stat"] is not None
-            or any(item["forward"] is not None for item in journal["migrations"]["items"])):
+            or any(item.get("forward") is not None for item in journal["migrations"]["items"])):
         _fail("early recovery has a recorded service or data mutation")
     readers = _guard_readers(root, journal, compose_path=compose_path, allowed_database_states={"old"})
     for name, entry in readers.items():
@@ -2947,7 +3305,7 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
             return {"status": "rolled_back", "transaction_id": transaction_id, "already_restored": True}
         if journal["before"]["topology"]["telegram"] is not None:
             state.reconcile_transaction(root, transaction_id, source_tool_sha256, transaction_kind="full")
-        if journal["schema_version"] == SCHEMA_VERSION and journal["phase"] in (
+        if journal["schema_version"] >= FULL4_SCHEMA_VERSION and journal["phase"] in (
                 "prepared", "state-plan", "backup", "rollback-untouched"):
             _verify_untouched_recovery(root, journal, compose_path=compose_path)
             if journal["phase"] != "rollback-untouched":
@@ -2973,13 +3331,17 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
             entries = _readers(root, journal, compose_path=compose_path)
             target = entries.get("telegram", {}).get("target")
             target_started = (target is not None and target["container"]["started_at"] != "0001-01-01T00:00:00Z")
-            if journal["schema_version"] == SCHEMA_VERSION:
+            if journal["schema_version"] == FULL4_SCHEMA_VERSION:
                 old_reader = entries.get("telegram", {}).get("old")
                 before = journal["before"]["containers"]["telegram"]
                 old_restarted = (old_reader is not None and before is not None
                                  and old_reader["container"]["started_at"] != before["started_at"])
                 _reconcile_state_v4(root, journal, compose_path=compose_path,
                                     reader_started=target_started or old_restarted)
+            elif journal["schema_version"] == SCHEMA_VERSION:
+                # Schema 5 never copies back: keep the progressed bytes, prove
+                # the old native readers accept them, and never recreate links.
+                _verify_progressed_state(root, journal, compose_path=compose_path)
             else:
                 relocating = any(item["old_target_path"] != item["new_target_path"]
                                  for item in journal["migrations"]["items"])
@@ -3075,7 +3437,7 @@ def verify_terminal(root: Path, *, compose_path: Path, strict_runtime: bool = Fa
         current["migrations"] = []
         transaction._verify_live_topology(root, current, which=which, compose_path=compose_path,
                                           allow_retained=committed, allow_runtime_drift=True,
-                                          full4_endpoints=journal["schema_version"] == SCHEMA_VERSION)
+                                          full4_endpoints=journal["schema_version"] == FULL4_SCHEMA_VERSION)
         topology = winning["components"]
         records = journal[which]["containers"]
         for name in ("api", "telegram"):
@@ -3095,6 +3457,27 @@ def verify_terminal(root: Path, *, compose_path: Path, strict_runtime: bool = Fa
                     key = "new_target_path" if committed else "old_target_path"
                     if any(paths[item["kind"]] != item[key] for item in journal["migrations"]["items"]):
                         _fail("full terminal Telegram state path changed")
+                elif journal["schema_version"] == SCHEMA_VERSION:
+                    # Schema 5 keeps one effective location; a native-pending
+                    # copy may be absent or progressed, and a retained reply
+                    # entry may still be the product's own link.
+                    paths = transaction._telegram_v5_paths(actual, snapshot)
+                    if any(paths[item["kind"]]["planned"] != item["new_target_path"]
+                           for item in journal["migrations"]["items"]):
+                        _fail("full terminal Telegram state path changed")
+                    import stat as stat_module  # noqa: PLC0415
+
+                    for item in journal["migrations"]["items"]:
+                        transaction._state_entry_safe(paths[item["kind"]]["entry"])
+                        leaf = transaction._preserved_leaf(item["new_target_path"])
+                        if not leaf["present"]:
+                            continue
+                        if leaf["link"]:
+                            size = Path(item["new_target_path"]).lstat().st_size
+                            if not 0 < size <= 4095:
+                                _fail("full terminal Telegram state link is unsafe")
+                        elif not stat_module.S_ISREG(Path(item["new_target_path"]).lstat().st_mode):
+                            _fail("full terminal Telegram state is unsafe")
                 else:
                     import component_state_endpoint as endpoint  # noqa: PLC0415
                     for item in journal["migrations"]["items"]:

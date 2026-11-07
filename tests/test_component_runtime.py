@@ -780,3 +780,94 @@ def test_inspect_untrusted_probe_staging_is_read_only_and_blocks_admission(
         if case == "inaccessible":
             staging.chmod(0o700)
             assert sentinel is not None and sentinel.read_bytes() == b"untouched"
+
+
+# ---------------------------------------------------------------- schema 5
+
+PRIOR_ID = "20261106T100000Z-" + "9" * 32
+
+
+def _schema5(journal: dict) -> dict:
+    """An API-only completed-artifact runtime update over an adopted schema-2 manifest."""
+    value = copy.deepcopy(journal)
+    target = value["target"]["manifest"]
+    target["components"]["telegram"] = None
+    for side in ("before", "target"):
+        value[side]["containers"]["telegram"] = None
+    prior = copy.deepcopy(target)
+    prior["deployment_id"] = PRIOR_ID
+    value["before"].update(manifest=prior, topology=copy.deepcopy(prior["components"]))
+    value["pointers"]["old"] = {".deploy_commit": {"present": True, "bytes": A + "\n"},
+                                ".deploy_current": {"present": True, "bytes": PRIOR_ID + "\n"}}
+    api = target["components"]["api"]
+    api["image"]["digest"] = api["image"]["id"]
+    api["provenance"] = {"kind": "completed-artifact", "bundle_sha256": H, "acquisition_sha256": J,
+                         "authority": "local-source", "native_image_id": api["image"]["id"]}
+    target["schema_version"] = 3
+    value["source"]["compose"] = {"path": ".deployments/component-compose-" + H, "sha256": H}
+    value.update(schema_version=5,
+                 predecessor=runtime.predecessor_reference("runtime", PRIOR_ID, b"prior journal\n"))
+    raw = (json.dumps(target, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode("ascii")
+    value["manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    return value
+
+
+def test_schema5_journal_is_a_completed_artifact_update(journal: dict) -> None:
+    assert runtime.JOURNAL_SCHEMA_VERSION == 5 and runtime.RUNTIME4_SCHEMA_VERSION == 4
+    value = _schema5(journal)
+    assert runtime.validate_journal(value) is value
+    # Historical schemas still parse with their own rules.
+    assert runtime.validate_journal(journal) is journal
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda j: j.update(schema_version=4), "schema differs from the journal schema"),
+    (lambda j: j.update(action="adopt", selection=[]), "schema-5 records only completed-artifact updates"),
+    (lambda j: j.pop("predecessor"), "unexpected or missing fields"),
+])
+def test_schema5_journal_refusals(journal: dict, change, message: str) -> None:
+    value = _schema5(journal)
+    change(value)
+    with pytest.raises(runtime.JournalError, match=message):
+        runtime.validate_journal(value)
+
+
+def test_schema4_journal_cannot_embed_a_schema3_manifest(journal: dict) -> None:
+    value = _schema5(journal)
+    value["schema_version"] = 4
+    with pytest.raises(runtime.JournalError, match="schema differs"):
+        runtime.validate_journal(value)
+
+
+def test_adopt_probe_create_carries_the_root_scope_label() -> None:
+    record = {"kind": "legacy-core-version", "status": "active", "phase": "create",
+              "probe_id": DEPLOYMENT_ID, "container_name": "wuwaterm-adopt-probe-" + DEPLOYMENT_ID,
+              "container_id": None, "image_id": "sha256:" + "1" * 64}
+    scope = runtime.admission.root_label_value(Path("/srv/example-root"))
+    create = runtime._adopt_probe_argv(record, "create", scope)
+    labels = [create[i + 1] for i, item in enumerate(create) if item == "--label"]
+    assert labels == ["org.wuwaterm.component-adopt-probe=" + DEPLOYMENT_ID,
+                      runtime.admission.ROOT_LABEL + "=" + scope]
+    with pytest.raises(runtime.JournalError):
+        runtime._adopt_probe_argv(record, "create", "not-a-digest")
+
+
+@pytest.mark.parametrize("command", [
+    ["capsule-recover", "--transaction-id", DEPLOYMENT_ID],
+    ["capsule-recover-full", "--transaction-id", DEPLOYMENT_ID],
+    ["capsule-recover-probe", "--probe-id", DEPLOYMENT_ID],
+])
+def test_capsule_recovery_entries_stay_closed_under_protocol2(tmp_path: Path, command: list[str]) -> None:
+    """Protocol 2 is declared but its readiness flags are closed: nothing runs."""
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    before = sorted((p.relative_to(root), p.stat().st_mtime_ns) for p in root.rglob("*"))
+    script = Path(runtime.__file__).resolve()
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(script), "--root", str(root), *command,
+         "--capsule-source-tool", H, "--compose-executable", "/bin/false"],
+        capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "not yet available" in result.stderr
+    assert sorted((p.relative_to(root), p.stat().st_mtime_ns) for p in root.rglob("*")) == before
+    assert runtime.CAPSULE_RECOVERY_PROTOCOL == runtime.CAPSULE_FULL_RECOVERY_PROTOCOL == 2

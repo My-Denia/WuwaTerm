@@ -26,7 +26,19 @@ from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 
-MANIFEST_SCHEMA_VERSION = 2
+# Schema 3 is written by protocol-2 (completed-artifact) updates. Schema 2
+# remains readable: historical journals embed schema-2 manifests and their
+# source-image / wheel-image provenance is interpreted only by schema 2.
+MANIFEST_SCHEMA_VERSION = 3
+PREVIOUS_MANIFEST_SCHEMA_VERSION = 2
+SCHEMA_VERSION = MANIFEST_SCHEMA_VERSION
+PREVIOUS_SCHEMA_VERSION = PREVIOUS_MANIFEST_SCHEMA_VERSION
+PROVENANCE_KINDS = {
+    PREVIOUS_MANIFEST_SCHEMA_VERSION: frozenset({"source-image", "wheel-image", "legacy-image"}),
+    MANIFEST_SCHEMA_VERSION: frozenset({"completed-artifact", "legacy-image"}),
+}
+ARTIFACT_REPOSITORIES = {"api": "My-Denia/WuwaTerm", "telegram": "My-Denia/WuwaTerm-Telegram"}
+ARTIFACT_PRODUCTS = {"api": "wuwaterm-api", "telegram": "wuwaterm-telegram"}
 RECIPE_SCHEMA_VERSION = 1
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _GIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -411,12 +423,22 @@ def verify_poll_health_mount(snapshot: dict[str, Any], *, effective_uid: int) ->
         _fail("poll health tmpfs owner lacks explicit read/write/search mode")
 
 
+def validate_manifest_v2(value: Any) -> dict[str, Any]:
+    """Validate a historical schema-2 manifest only."""
+    manifest = validate_manifest(value)
+    if manifest["schema_version"] != PREVIOUS_MANIFEST_SCHEMA_VERSION:
+        _fail("manifest: expected schema version 2")
+    return manifest
+
+
 def validate_manifest(value: Any) -> dict[str, Any]:
+    """Validate a schema-2 or schema-3 manifest by its own declared version."""
     manifest = _object(value, {
         "schema_version", "deployment_id", "deployment_utc", "operations",
         "components", "database", "api_identity",
     }, "manifest")
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != MANIFEST_SCHEMA_VERSION:
+    version = manifest["schema_version"]
+    if type(version) is not int or version not in PROVENANCE_KINDS:
         _fail("manifest: unsupported schema version")
     deployment_id = _matches(manifest["deployment_id"], _ID, "manifest.deployment_id")
     try:
@@ -450,7 +472,20 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         if not isinstance(provenance, dict):
             _fail(f"{where}.provenance: expected object")
         kind = provenance.get("kind")
-        if kind == "source-image":
+        if kind not in PROVENANCE_KINDS[version]:
+            _fail(f"{where}: unsupported provenance")
+        if kind == "completed-artifact":
+            _object(provenance, {
+                "kind", "bundle_sha256", "acquisition_sha256", "authority", "native_image_id",
+            }, f"{where}.provenance")
+            _sha(provenance["bundle_sha256"], f"{where}.provenance.bundle_sha256")
+            _sha(provenance["acquisition_sha256"], f"{where}.provenance.acquisition_sha256")
+            _image_id(provenance["native_image_id"], f"{where}.provenance.native_image_id")
+            if provenance["authority"] not in ("official-ci", "local-source"):
+                _fail(f"{where}: invalid completed-artifact authority")
+            if component["repository"] != ARTIFACT_REPOSITORIES[name]:
+                _fail(f"{where}: completed-artifact repository differs from component")
+        elif kind == "source-image":
             _object(provenance, {
                 "kind", "build_recipe_sha256", "build_receipt_sha256", "wheel_identity",
             }, f"{where}.provenance")
@@ -479,6 +514,9 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         else:
             _fail(f"{where}: unsupported provenance")
         source = _identity(component["source"], f"{where}.source", claim_required=kind != "wheel-image")
+        if kind == "completed-artifact":
+            if source["verified_commit"] is None:
+                _fail(f"{where}: completed artifact requires a verified source")
         core = _object(component["core"], {
             "version", "revision_claim", "verified_commit", "verified_tree",
         }, f"{where}.core")
@@ -497,7 +535,12 @@ def validate_manifest(value: Any) -> dict[str, Any]:
                 _fail(f"{where}.image.digest: immutable digest required")
         if image["revision"] != source["revision_claim"]:
             _fail(f"{where}: image revision and source claim differ")
-        if kind == "source-image":
+        if kind == "completed-artifact" and (image["id"] != provenance["native_image_id"]
+                                             or image["digest"] != provenance["native_image_id"]):
+            # A nameless acquisition has no registry digest; the store's
+            # native ID is the only immutable reference.
+            _fail(f"{where}: image differs from the registered native image")
+        if kind == "source-image" or (kind == "completed-artifact" and name == "api"):
             if source["verified_commit"] is None or source["verified_commit"] != core["verified_commit"] \
                     or source["verified_tree"] != core["verified_tree"] \
                     or component["version"] != core["version"]:
@@ -801,10 +844,98 @@ def _verify_snapshots(root: Path, manifest: dict[str, Any]) -> None:
             _fail("recipe snapshot does not match installed component")
 
 
+def _artifact_module() -> Any:
+    import component_artifact  # noqa: PLC0415
+    if Path(component_artifact.__file__).resolve() != Path(__file__).resolve().parent / "component_artifact.py":
+        _fail("artifact verifier is not this source's module")
+    return component_artifact
+
+
+def read_artifact_records(root: Path, bundle_sha256: str, acquisition_sha256: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read one registered acquisition receipt and its bundle copy, without writing.
+
+    The receipt is located by content digest among the root's immutable
+    registered receipts; no record is created and no lock file is opened.
+    """
+    _sha(bundle_sha256, "bundle digest")
+    _sha(acquisition_sha256, "acquisition digest")
+    artifact = _artifact_module()
+    store = Path(root) / ".deployments" / "artifacts"
+    try:
+        for part in (Path(root) / ".deployments", store, store / "acquisitions", store / "bundles"):
+            if not stat.S_ISDIR(os.lstat(part).st_mode):
+                _fail("artifact store path is not a directory")
+        names = sorted(os.listdir(store / "acquisitions"))
+    except OSError as exc:
+        raise ManifestError("registered artifact store is unavailable") from exc
+    found = []
+    try:
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            raw = artifact._read_regular(store / "acquisitions" / name, _LIMIT)
+            if hashlib.sha256(raw).hexdigest() == acquisition_sha256:
+                found.append((name, raw))
+        if len(found) != 1:
+            _fail("registered acquisition receipt is missing or duplicated")
+        name, raw = found[0]
+        receipt = artifact.validate_receipt(artifact.decode_canonical(raw))
+        if name != receipt["acquisition_id"] + ".json" or receipt["bundle_sha256"] != bundle_sha256:
+            _fail("acquisition receipt differs from its manifest binding")
+        bundle_raw = artifact._read_regular(store / "bundles" / (bundle_sha256 + ".json"), _LIMIT)
+        if hashlib.sha256(bundle_raw).hexdigest() != bundle_sha256:
+            _fail("registered bundle copy differs")
+        bundle = artifact.validate_bundle_schema(artifact.decode_canonical(bundle_raw))
+        if bundle["attempt_id"] != receipt["attempt_id"]:
+            _fail("acquisition receipt and bundle attempts differ")
+        if receipt["native_image_id"] != artifact.native_image_candidate(
+                bundle["oci"], receipt["store"]["containerd_snapshotter"]):
+            _fail("acquisition receipt image differs from the sealed bundle")
+    except artifact.ArtifactError as exc:
+        raise ManifestError("registered artifact records cannot be verified") from exc
+    return receipt, bundle
+
+
+def verify_artifact_binding(name: str, component: dict[str, Any], receipt: dict[str, Any],
+                            bundle: dict[str, Any]) -> None:
+    """Require a schema-3 component to state exactly its registered bundle's facts."""
+    provenance = component["provenance"]
+    where = f"manifest.components.{name}"
+    if (bundle["product"] != ARTIFACT_PRODUCTS[name] or bundle["repository"] != component["repository"]
+            or bundle["version"] != component["version"]
+            or bundle["build_result"]["authority"] != provenance["authority"]
+            or receipt["native_image_id"] != provenance["native_image_id"]):
+        _fail(f"{where}: completed-artifact facts differ from the registered bundle")
+    source = component["source"]
+    if (source["revision_claim"] != bundle["source"]["commit"]
+            or source["verified_commit"] != bundle["source"]["commit"]
+            or source["verified_tree"] != bundle["source"]["tree"]):
+        _fail(f"{where}: completed-artifact source differs from the registered bundle")
+    core = component["core"]
+    binding = bundle["core_binding"]
+    if core["version"] != binding["core_version"] or core["revision_claim"] != binding["core_source_commit"]:
+        _fail(f"{where}: completed-artifact Core binding differs from the registered bundle")
+    if name == "api":
+        if core["verified_commit"] != bundle["source"]["commit"] or core["verified_tree"] != bundle["source"]["tree"]:
+            _fail(f"{where}: Core bundle must bind its own source as the Core")
+    elif core["verified_commit"] is not None and core["verified_commit"] != binding["core_source_commit"]:
+        _fail(f"{where}: Telegram Core binding differs from the registered bundle")
+
+
+def _verify_artifacts(root: Path, manifest: dict[str, Any]) -> None:
+    for name, component in manifest["components"].items():
+        if component is None or component["provenance"]["kind"] != "completed-artifact":
+            continue
+        provenance = component["provenance"]
+        receipt, bundle = read_artifact_records(root, provenance["bundle_sha256"], provenance["acquisition_sha256"])
+        verify_artifact_binding(name, component, receipt, bundle)
+
+
 def write_manifest(root: Path, payload: dict[str, Any]) -> Path:
     raw = _encode(validate_manifest(payload))
     manifest = validate_manifest(_decode(raw))
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     verify_database_binding(manifest["database"])
     name = f"{manifest['deployment_id']}.json"
     with _directory(root, (".deployments", "products"), create=True) as directory:
@@ -820,6 +951,7 @@ def read_manifest(root: Path, deployment_id: str) -> dict[str, Any]:
     if manifest["deployment_id"] != deployment_id:
         _fail("manifest ID and filename differ")
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     return manifest
 
 
@@ -831,4 +963,5 @@ def manifest_sha256(root: Path, deployment_id: str) -> str:
     if manifest["deployment_id"] != deployment_id:
         _fail("manifest ID and filename differ")
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     return hashlib.sha256(raw).hexdigest()

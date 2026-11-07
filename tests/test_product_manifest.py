@@ -548,3 +548,109 @@ def test_database_actual_provenance_schema_and_sidecars_are_verified(tmp_path: P
     (tmp_path / "second.db-wal").symlink_to(tmp_path / "missing")
     with pytest.raises(pm.ManifestError, match="sidecar"):
         pm.read_database_snapshot(second)
+
+
+# ---------------------------------------------------------------- schema 3
+
+def _acquired_api(tmp_path: Path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import test_component_artifact as artifact_tests  # noqa: PLC0415
+
+    fx = artifact_tests.Fixture(tmp_path / "artifact")
+    verified = fx.seal()
+    result = artifact_tests.art.acquire(verified.path, fx.root, docker=artifact_tests.FakeDocker())
+    receipt = result["receipt"]
+    path = fx.root / ".deployments/artifacts/acquisitions" / (receipt["acquisition_id"] + ".json")
+    return fx, verified, receipt, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def artifact_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Acquisition refuses an inherited FD9; park a runner-inherited one.
+    try:
+        saved = os.dup(9)
+    except OSError:
+        saved = None
+    else:
+        os.close(9)
+    try:
+        fx, verified, receipt, acquisition_sha = _acquired_api(tmp_path)
+    finally:
+        if saved is not None:
+            os.dup2(saved, 9)
+            os.close(saved)
+    root = fx.root
+    bundle = verified.bundle
+    native = receipt["native_image_id"]
+    api = component(root, "api")
+    source = {"revision_claim": bundle["source"]["commit"], "verified_commit": bundle["source"]["commit"],
+              "verified_tree": bundle["source"]["tree"]}
+    snap = snapshot("wuwaterm-api", native)
+    snapshot_path, digest = pm.write_recipe_snapshot(root, snap)
+    recipe = {key: snap[key] for key in pm._RECIPE_FIELDS}
+    recipe.update({"snapshot_path": snapshot_path, "sha256": digest})
+    api.update(version=bundle["version"], source=source, core={"version": bundle["version"], **source},
+               image={"ref": native, "id": native, "digest": native, "revision": bundle["source"]["commit"]},
+               recipe=recipe,
+               provenance={"kind": "completed-artifact", "bundle_sha256": verified.sha256,
+                           "acquisition_sha256": acquisition_sha, "authority": "local-source",
+                           "native_image_id": native})
+    payload = {
+        "schema_version": 3, "deployment_id": DEPLOYMENT_ID, "deployment_utc": "2026-11-06T11:00:00Z",
+        "operations": {"repository": "My-Denia/WuwaTerm", "source_commit": A,
+                       "source_tree": B, "source_tool_sha256": H},
+        "components": {"api": api, "telegram": None},
+        "database": make_database(tmp_path / "terms.db"), "api_identity": None,
+    }
+    return root, payload
+
+
+def test_schema3_completed_artifact_is_bound_to_registered_records(tmp_path: Path, monkeypatch) -> None:
+    root, payload = artifact_payload(tmp_path, monkeypatch)
+    pm.write_manifest(root, payload)
+    assert pm.read_manifest(root, DEPLOYMENT_ID) == payload
+    assert pm.SCHEMA_VERSION == pm.MANIFEST_SCHEMA_VERSION == 3 and pm.PREVIOUS_SCHEMA_VERSION == 2
+    # The registered receipt is required at every read, not only at write.
+    receipts = root / ".deployments/artifacts/acquisitions"
+    for item in receipts.iterdir():
+        item.rename(item.with_suffix(".moved"))
+    with pytest.raises(pm.ManifestError, match="receipt is missing"):
+        pm.read_manifest(root, DEPLOYMENT_ID)
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda p: p["components"]["api"]["provenance"].update(native_image_id="sha256:" + H), "native image"),
+    (lambda p: p["components"]["api"]["provenance"].update(authority="official-ci"), "registered bundle"),
+    (lambda p: p["components"]["api"].update(version="9.9.9"), "differ"),
+    (lambda p: p["components"]["api"]["provenance"].update(acquisition_sha256=J), "receipt is missing"),
+    (lambda p: p["components"]["api"]["provenance"].update(authority="github"), "authority"),
+    (lambda p: p["components"]["api"].update(repository="My-Denia/WuwaTerm-Telegram"), "repository"),
+    (lambda p: p.update(schema_version=2), "unsupported provenance"),
+])
+def test_schema3_artifact_binding_refusals(tmp_path: Path, monkeypatch, mutate, message: str) -> None:
+    root, payload = artifact_payload(tmp_path, monkeypatch)
+    mutate(payload)
+    with pytest.raises(pm.ManifestError, match=message):
+        pm.write_manifest(root, payload)
+    assert not (root / ".deployments/products").exists()
+
+
+def test_schema3_refuses_producer_provenance_and_schema2_stays_readable(tmp_path: Path, payload: dict) -> None:
+    assert pm.validate_manifest_v2(copy.deepcopy(payload)) == payload
+    for name in ("api", "telegram"):
+        upgraded = copy.deepcopy(payload)
+        upgraded["schema_version"] = 3
+        upgraded["components"]["telegram" if name == "api" else "api"] = None
+        with pytest.raises(pm.ManifestError, match="unsupported provenance"):
+            pm.validate_manifest(upgraded)
+    legacy = copy.deepcopy(payload)
+    legacy["schema_version"] = 3
+    legacy["components"]["api"] = None
+    legacy["api_identity"] = None
+    legacy["components"]["telegram"]["provenance"] = {
+        "kind": "legacy-image", "legacy_manifest_sha256": H, "wheel_identity": "unavailable",
+        "lock_identity": "unavailable"}
+    legacy["components"]["telegram"]["source"] = {"revision_claim": C, "verified_commit": None, "verified_tree": None}
+    legacy["components"]["telegram"]["core"]["revision_claim"] = C
+    assert pm.validate_manifest(legacy)["schema_version"] == 3
+    with pytest.raises(pm.ManifestError, match="expected schema version 2"):
+        pm.validate_manifest_v2(legacy)

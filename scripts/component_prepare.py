@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(CODE_ROOT / "scripts"))
+import component_artifact as artifact  # noqa: E402
 import component_build as build  # noqa: E402
 import component_observe as observe  # noqa: E402
 import component_recovery as recovery  # noqa: E402
@@ -31,6 +33,215 @@ import product_manifest as manifest  # noqa: E402
 
 class PrepareError(RuntimeError):
     """A runtime update cannot be safely prepared from the given inputs."""
+
+
+RELOCATION_REFUSAL = ("state relocation is not supported in protocol-2 cutover; "
+                      "preserve the existing state mount and paths")
+_LEGACY_DB_DEFAULT = "/app/data/terms.db"
+_POLL_HEALTH_TARGET = "/run/wuwaterm-telegram"
+_POLL_HEALTH_OPTIONS = ("rw", "noexec", "nosuid", "nodev", "size=1048576", "mode=0700")
+_NUMERIC_USER = re.compile(r"([0-9]+):([0-9]+)\Z")
+_STATE_FIELDS = ("command", "entrypoint", "mounts", "env_files", "environment_overrides", "user", "working_dir")
+_STATE_KINDS = ("chat-settings", "channel-replies")
+_PLAN_KEYS = {"effective_path", "legacy_path", "migration", "mapped_target", "mapped_legacy"}
+_PLAN_COMPARED = ("effective_path", "legacy_path", "mapped_target")
+_PLAN_CLASS = {"none": "none", "validate-existing": "validate-existing", "copy-if-absent": "native-pending"}
+
+
+def _observation_limit(what: str) -> PrepareError:
+    # These are limits of what the transaction can observe and reproduce,
+    # not limits of the native product.
+    return PrepareError(f"{what} (a transaction observation limit, not a product limit)")
+
+
+def translate_preserved_recipe(old_snapshot: dict[str, Any], old_inspect: dict[str, Any],
+                               target_image_inspect: dict[str, Any]) -> dict[str, Any]:
+    """Translate an adopted Telegram recipe to the Telegram product image, in place.
+
+    Pure: the result keeps every state-bearing input of the old container
+    (effective DB argument, working directory, numeric user, binds, env files
+    and overrides) and changes only the image and the product command form.
+    """
+    old_snapshot = manifest.validate_recipe_snapshot(copy.deepcopy(old_snapshot))
+    config = old_inspect.get("Config") if type(old_inspect) is dict else None
+    host = old_inspect.get("HostConfig") if type(old_inspect) is dict else None
+    if type(config) is not dict or type(host) is not dict:
+        raise PrepareError("old Telegram container inspection is incomplete")
+    target_id = target_image_inspect.get("Id") if type(target_image_inspect) is dict else None
+    manifest._image_id(target_id, "target Telegram image")
+    entrypoint, command = config.get("Entrypoint"), config.get("Cmd")
+    environment = transaction._env_map(config.get("Env"))
+    if entrypoint == ["/entrypoint.sh"] and command == ["bot"]:
+        database = environment.get("WUWATERM_DB_PATH") or _LEGACY_DB_DEFAULT
+    elif entrypoint == ["wuwaterm-telegram"] and type(command) is list and len(command) == 2 and command[0] == "--db":
+        database = command[1]
+    else:
+        raise PrepareError("old Telegram command form is not a known product invocation")
+    if (type(database) is not str or database != database.strip() or database.startswith("~")
+            or not database.startswith("/")):
+        raise _observation_limit("old Telegram database path is relative, home-relative or padded")
+    try:
+        manifest._path(database, "old Telegram database path")
+    except manifest.ManifestError:
+        raise _observation_limit("old Telegram database path is not normalized") from None
+    working_dir = old_snapshot["working_dir"] or config.get("WorkingDir") or None
+    if type(working_dir) is not str:
+        raise _observation_limit("old Telegram working directory is not explicit")
+    try:
+        manifest._path(working_dir, "old Telegram working directory")
+    except manifest.ManifestError:
+        raise _observation_limit("old Telegram working directory is not normalized") from None
+    user = old_snapshot["user"] if old_snapshot["user"] is not None else (config.get("User") or "")
+    if user in ("", "0"):
+        user = "0:0"
+    if type(user) is not str or not _NUMERIC_USER.fullmatch(user):
+        raise _observation_limit("old Telegram user is named or lacks an explicit numeric group")
+    if host.get("GroupAdd") not in (None, []) or host.get("UsernsMode") not in (None, ""):
+        raise _observation_limit("old Telegram user has supplementary groups or a user-namespace mode")
+    translated = copy.deepcopy(old_snapshot)
+    translated.update(image_id=target_id, entrypoint=["wuwaterm-telegram"], command=["--db", database],
+                      working_dir=working_dir, user=user)
+    _preserve_poll_health(translated, legacy=entrypoint == ["/entrypoint.sh"], user=user)
+    translated = manifest.validate_recipe_snapshot(translated)
+    try:
+        manifest.verify_poll_health_mount(translated, effective_uid=int(user.split(":", 1)[0]))
+    except manifest.ManifestError as exc:
+        raise PrepareError(
+            "translated Telegram recipe cannot satisfy the standalone poll health requirement") from exc
+    return translated
+
+
+def _preserve_poll_health(translated: dict[str, Any], *, legacy: bool, user: str) -> None:
+    """Keep a standalone Telegram recipe's poll-health inputs satisfiable.
+
+    The legacy Core image never needed a health tmpfs or a health flag; the
+    standalone product does. A recipe that is already cut over is preserved and
+    only verified, so a caller cannot silently gain or lose a health mount.
+    An explicit ``WUWATERM_POLL_HEALTH=0`` cannot be honoured here: appending a
+    second override is invalid and rewriting it to ``1`` would silently change
+    the caller's stated intent, so both are refused.
+    """
+    overrides = translated["environment_overrides"]
+    flag = [item for item in overrides if item["name"] == "WUWATERM_POLL_HEALTH"]
+    mounts = translated["mounts"]
+    if not legacy:
+        return
+    if flag and (flag[0]["mode"] != "literal" or flag[0]["value"] != "1"):
+        raise PrepareError("explicit Telegram poll health override conflicts with the standalone product")
+    if not any(mount["container"] == _POLL_HEALTH_TARGET for mount in mounts):
+        uid, gid = user.split(":", 1)
+        mounts.append({"type": "tmpfs", "container": _POLL_HEALTH_TARGET,
+                       "options": [*_POLL_HEALTH_OPTIONS, "uid=" + uid, "gid=" + gid]})
+    if not flag:
+        overrides.append({"name": "WUWATERM_POLL_HEALTH", "mode": "literal", "value": "1"})
+
+
+def refuse_target_recipe_change(translated: dict[str, Any], requested: dict[str, Any]) -> None:
+    """Protocol 2 accepts no caller recipe that differs from the translation."""
+    if any(requested[key] != translated[key] for key in _STATE_FIELDS):
+        raise PrepareError(RELOCATION_REFUSAL)
+    if any(requested[key] != translated[key] for key in translated if key != "image_id"):
+        raise PrepareError("Telegram target recipe changes are unsupported in protocol-2 cutover")
+
+
+def verify_state_plan_equivalence(old_plan: dict[str, Any], target_plan: dict[str, Any]) -> dict[str, str]:
+    """Require the old and translated state plans to name exactly the same state.
+
+    Both plans are native product plans already mapped to host paths. A path
+    outside every bind maps to ``None``; two such paths are not equivalent.
+    Returns the per-kind classification: none, validate-existing or
+    native-pending (the product itself copies at start; the transaction never does).
+    """
+    result = {}
+    for plan in (old_plan, target_plan):
+        if type(plan) is not dict or type(plan.get("kinds")) is not dict or set(plan["kinds"]) != set(_STATE_KINDS):
+            raise PrepareError("Telegram state plan is invalid")
+    for kind in _STATE_KINDS:
+        old, new = old_plan["kinds"][kind], target_plan["kinds"][kind]
+        for item in (old, new):
+            if type(item) is not dict or set(item) != _PLAN_KEYS or item["migration"] not in _PLAN_CLASS:
+                raise PrepareError("Telegram state plan is invalid")
+            if item["mapped_target"] is None:
+                raise PrepareError(f"{kind} state is outside every writable bind")
+        if old["migration"] != new["migration"]:
+            raise PrepareError(f"{kind} old and target state plans disagree on the migration action")
+        if any(old[key] != new[key] for key in _PLAN_COMPARED):
+            raise PrepareError(RELOCATION_REFUSAL)
+        if new["migration"] == "copy-if-absent":
+            # Both planners name the retained legacy endpoint, but only the
+            # copy case decides what the transaction may do with it, so only
+            # that case has to agree exactly.
+            for item in (old, new):
+                if item["mapped_legacy"] is None:
+                    raise PrepareError(f"{kind} legacy state is outside every bind")
+            if old["mapped_legacy"] != new["mapped_legacy"]:
+                raise PrepareError(RELOCATION_REFUSAL)
+        result[kind] = _PLAN_CLASS[new["migration"]]
+    return result
+
+
+def artifact_input(root: Path, name: str, receipt_path: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Verify one registered acquisition and return its recipe-free component facts.
+
+    Returns (facts, target image, receipt, bundle). The caller attaches the
+    recipe it will actually run, so a translated Telegram recipe and an
+    unchanged API recipe share the same verified artifact facts.
+    """
+    if type(receipt_path) is not str and not isinstance(receipt_path, Path):
+        raise PrepareError("artifact input must be an acquisition receipt path")
+    path = Path(os.path.abspath(os.fspath(receipt_path)))
+    if path.parent != root / ".deployments" / "artifacts" / "acquisitions":
+        raise PrepareError("acquisition receipt is not registered in this deployment root")
+    verified = artifact.verify_acquisition(path)
+    receipt, bundle = verified["receipt"], verified["bundle"]
+    if bundle["product"] != manifest.ARTIFACT_PRODUCTS[name]:
+        raise PrepareError(f"{name} artifact is a different product")
+    if bundle["compatibility"]["db_schema"] != 2 or (name == "api" and bundle["compatibility"]["api"] != "v1"):
+        raise PrepareError(f"{name} artifact is not compatible with this deployment")
+    native = receipt["native_image_id"]
+    image = transaction._image(native)
+    commit = bundle["source"]["commit"]
+    if (image.get("Id") != native
+            or (image.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision") != commit):
+        raise PrepareError(f"{name} artifact image revision differs from its sealed source")
+    source = {"revision_claim": commit, "verified_commit": commit, "verified_tree": bundle["source"]["tree"]}
+    binding = bundle["core_binding"]
+    core = ({"version": binding["core_version"], **source} if name == "api" else
+            {"version": binding["core_version"], "revision_claim": binding["core_source_commit"],
+             "verified_commit": None, "verified_tree": None})
+    facts = {"repository": bundle["repository"], "version": bundle["version"], "source": source, "core": core,
+             "image": {"ref": native, "id": native, "digest": native, "revision": commit},
+             "provenance": {"kind": "completed-artifact", "bundle_sha256": verified["bundle_sha256"],
+                            "acquisition_sha256": verified["receipt_sha256"],
+                            "authority": bundle["build_result"]["authority"], "native_image_id": native}}
+    return facts, image, receipt, bundle
+
+
+def _artifact_candidate(root: Path, name: str, receipt_path: Any, recipe: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (manifest component, target image) from one registered acquisition."""
+    facts, image, receipt, bundle = artifact_input(root, name, receipt_path)
+    component = {**facts, "recipe": recipe}
+    manifest.verify_artifact_binding(name, component, receipt, bundle)
+    return component, image
+
+
+def _artifact_request(value: Any) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]]]:
+    """Validate a protocol-2 request: one acquisition receipt per selected component."""
+    if type(value) is not dict or set(value) != {"selection", "artifacts", "recipes"}:
+        raise PrepareError("invalid update request")
+    selections = {"api": ["api"], "telegram": ["telegram"], "both": ["api", "telegram"]}
+    selection = selections.get(value["selection"]) if type(value["selection"]) is str else None
+    artifacts, recipes = value["artifacts"], value["recipes"]
+    if selection is None or type(artifacts) is not dict or set(artifacts) != set(selection):
+        raise PrepareError("one completed artifact is required for each selected component")
+    if type(recipes) is not dict or not set(recipes).issubset(selection):
+        raise PrepareError("recipes must refer only to selected components")
+    if "api" in recipes:
+        raise PrepareError("API target recipe changes are unsupported")
+    for receipt in artifacts.values():
+        if not isinstance(receipt, (str, Path)) or not os.fspath(receipt):
+            raise PrepareError("artifact input must be an acquisition receipt path")
+    return selection, artifacts, recipes
 
 
 def _request(value: Any) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]]]:
@@ -233,7 +444,13 @@ def _candidate(name: str, digest: str, receipt: dict[str, Any], recipe: dict[str
 def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> dict[str, Any]:
     """Return a strictly validated prepared journal under the caller's FD9."""
     try:
-        selection, receipts, recipes = _request(request)
+        if type(request) is dict and "receipts" in request:
+            # Producer receipts are protocol-1 records; this source has no
+            # producer and writes only schema-3 completed-artifact manifests.
+            _request(request)
+            raise PrepareError("producer build receipts are protocol-1 inputs; "
+                               "use --api-artifact / --telegram-artifact acquisition receipts")
+        selection, artifacts, recipes = _artifact_request(request)
         root = admission._physical_root(root)
         admission.admit_component(root, operation="update", code_root=CODE_ROOT)
         compose_path = transaction._compose_binary(compose_path)
@@ -249,9 +466,10 @@ def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> d
             raise PrepareError("current manifest differs from terminal deployment")
         if any(old["components"][name] is None for name in selection):
             raise PrepareError("selected component is not installed")
-        if ("telegram" in selection and old["components"]["telegram"]["provenance"]["kind"] == "legacy-image"
-                and "telegram" not in recipes):
-            raise PrepareError("legacy Telegram requires an explicit target Compose recipe")
+        for name, component in old["components"].items():
+            if (name not in selection and component is not None
+                    and component["provenance"]["kind"] not in manifest.PROVENANCE_KINDS[manifest.MANIFEST_SCHEMA_VERSION]):
+                raise PrepareError(f"unselected {name} has producer provenance that a schema-3 manifest cannot carry")
 
         commit = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{commit}", lock_root=root).decode("ascii").strip()
         tree = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{tree}", lock_root=root).decode("ascii").strip()
@@ -283,35 +501,33 @@ def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> d
 
         transaction_id = manifest.new_deployment_id()
         target = copy.deepcopy(old)
-        target.update(deployment_id=transaction_id,
+        target.update(schema_version=manifest.MANIFEST_SCHEMA_VERSION, deployment_id=transaction_id,
                       deployment_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                       operations={"repository": "My-Denia/WuwaTerm", "source_commit": commit,
                                   "source_tree": tree, "source_tool_sha256": source["source_tool_sha256"]})
         target_containers = copy.deepcopy(before)
         references: dict[str, tuple[Any, ...]] = {}
         for name in selection:
-            receipt = (build.verify_registered_build(root, receipts[name]) if name == "api" else
-                       wheel.verify_registered_wheel_build(root, receipts[name]))
-            base_source = {key: value for key, value in source.items() if key != "compose"}
-            if receipt["recovery_source"] != base_source:
-                raise PrepareError("receipt was produced by a different operations source")
-            image = transaction._image(receipt["image_id"])
-            if name in recipes:
-                snapshot, inputs = _render_recipe(root, recipes[name], image, compose_path)
-                for path, identity in inputs.items():
-                    if path in references and references[path] != identity:
-                        raise PrepareError("Compose input changed between target recipes")
-                    references[path] = identity
+            candidate, image = _artifact_candidate(root, name, artifacts[name], {})
+            native = candidate["image"]["id"]
+            if name == "telegram":
+                snapshot = translate_preserved_recipe(snapshots[name], observe._inspect(before[name]["id"]), image)
+                if name in recipes:
+                    rendered, inputs = _render_recipe(root, recipes[name], image, compose_path)
+                    refuse_target_recipe_change(snapshot, rendered)
+                    for path, identity in inputs.items():
+                        if path in references and references[path] != identity:
+                            raise PrepareError("Compose input changed between target recipes")
+                        references[path] = identity
             else:
                 snapshot = copy.deepcopy(snapshots[name])
-                snapshot["image_id"] = receipt["image_id"]
-            if name == "api" and any(snapshot[key] != snapshots[name][key] for key in snapshot if key != "image_id"):
-                raise PrepareError("API target recipe changes are unsupported")
+                snapshot["image_id"] = native
             path, digest = manifest.write_recipe_snapshot(root, snapshot)
             recipe = {key: snapshot[key] for key in manifest._RECIPE_FIELDS}
             recipe.update(snapshot_path=path, sha256=digest)
-            target["components"][name] = _candidate(name, receipts[name], receipt, recipe)
-            target_containers[name].update(id=None, image_id=receipt["image_id"],
+            candidate["recipe"] = recipe
+            target["components"][name] = candidate
+            target_containers[name].update(id=None, image_id=native,
                                            project=snapshot["project"], service=snapshot["service"],
                                            name=None, started_at=None, restart_count=None,
                                            transaction_label=transaction_id)
@@ -358,7 +574,7 @@ def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> d
         return journal
     except PrepareError:
         raise
-    except (admission.AdmissionError, build.BuildError, wheel.WheelBuildError,
+    except (admission.AdmissionError, artifact.ArtifactError, build.BuildError, wheel.WheelBuildError,
             capsule.CapsuleError, recovery.RecoveryError, runtime.JournalError,
             transaction.TransactionError, observe.ObservationError, manifest.ManifestError,
             OSError, subprocess.SubprocessError, UnicodeError, KeyError, TypeError, ValueError) as exc:

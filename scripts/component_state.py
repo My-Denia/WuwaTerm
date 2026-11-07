@@ -24,6 +24,7 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(CODE_ROOT / "scripts"))
 import component_observe as observe  # noqa: E402
+import component_state_endpoint as endpoint_module  # noqa: E402
 import component_runtime as runtime  # noqa: E402
 import component_wheel_build as wheel  # noqa: E402
 import deployment_admission as admission  # noqa: E402
@@ -31,6 +32,9 @@ import product_manifest as manifest  # noqa: E402
 
 _PATH_KEYS = ("WUWATERM_STATE_DIR", "WUWATERM_SETTINGS_PATH", "WUWATERM_CHANNEL_REPLY_INDEX_PATH")
 _LABEL = "org.wuwaterm.component-state-probe"
+# Schema-5 journals use only helpers whose programs do not write state; the
+# copy, endpoint and FULL4 canonical helpers stay schema-3/4-only.
+SCHEMA5_HELPER_KINDS = frozenset({"state-plan", "state-legacy-plan", "state-preimage", "state-canonical"})
 _MAX_OUTPUT = 1024 * 1024
 _PROTECTED = tuple(PurePosixPath(p) for p in (
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc", "/sys", "/dev", "/app/.venv",
@@ -46,10 +50,11 @@ for path,device,inode in json.loads(sys.argv[4]):
 from wuwaterm_telegram.operations import state_plan
 print(json.dumps(state_plan(pathlib.Path(sys.argv[1]),json.loads(sys.argv[2])),sort_keys=True))
 """
-# An unselected legacy image has no modern state_plan. Run its own path
-# resolver with all persistent binds read-only: any implicit migration fails
-# before it can change the actual state. Preserve settings referent versus
-# reply-index directory-entry semantics when reporting the resulting paths.
+# An unselected legacy image has no modern state_plan. Resolve its own state
+# paths with all persistent binds read-only, and report the copy it would make
+# at startup instead of attempting it: its resolver writes the legacy file into
+# an empty StateDir, which these mounts refuse. Preserve settings referent
+# versus reply-index directory-entry semantics when reporting the paths.
 _LEGACY_PLAN_CODE = """import json,os,pathlib,stat,sys,sysconfig
 uid,gid=map(int,sys.argv[3].split(':'))
 if (os.geteuid(),os.getegid()) != (uid,gid): raise RuntimeError('identity differs')
@@ -58,18 +63,28 @@ for path,device,inode in json.loads(sys.argv[4]):
  if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)) or (info.st_dev,info.st_ino)!=(device,inode): raise RuntimeError('bind differs')
 from wuwaterm.bot import _state_file_path, _same_state_path
 db=pathlib.Path(sys.argv[1]); plans={}
+state_dir=os.getenv('WUWATERM_STATE_DIR','').strip()
 for kind,filename,variable,label in [('chat-settings','chat_settings.json','WUWATERM_SETTINGS_PATH','chat settings'),
  ('channel-replies','channel_replies.json','WUWATERM_CHANNEL_REPLY_INDEX_PATH','channel reply index')]:
  explicit=os.getenv(variable,'').strip() or None
- effective=_state_file_path(db,filename=filename,explicit_path=explicit,label=label)
- entry=pathlib.Path(os.path.abspath(os.fspath(effective)))
+ chosen=pathlib.Path(explicit).expanduser() if explicit else None
  legacy=db.resolve(strict=False).parent/filename
- state_dir=os.getenv('WUWATERM_STATE_DIR','').strip()
  target=pathlib.Path(state_dir).expanduser()/filename if state_dir else None
- migrated=target is not None and _same_state_path(entry,target) and legacy.exists() and target.exists()
+ retained=(target is not None and (chosen is None or _same_state_path(chosen,legacy)
+  or _same_state_path(chosen,target)))
+ pending=(retained and legacy.exists() and not target.exists()
+  and not _same_state_path(legacy,target))
+ if pending:
+  entry=target
+ else:
+  effective=_state_file_path(db,filename=filename,explicit_path=explicit,label=label)
+  entry=pathlib.Path(os.path.abspath(os.fspath(effective)))
+ migrated=retained and legacy.exists() and target.exists()
  output=entry.resolve(strict=False) if kind=='chat-settings' else entry
  plans[kind]={'effective_path':str(entry),'legacy_path':str(legacy),
-  'migration':'validate-existing' if migrated else 'none','mapped_target':str(output),'mapped_legacy':None}
+  'migration':'validate-existing' if migrated else 'copy-if-absent' if pending else 'none',
+  'mapped_target':str(output),
+  'mapped_legacy':str(legacy.resolve(strict=False)) if retained else None}
 print(json.dumps({'database_path':str(db),'kinds':plans},sort_keys=True))
 """
 _CANONICAL_CODE = """import errno,hashlib,json,os,pathlib,stat,sys,sysconfig
@@ -396,7 +411,10 @@ def _command(record: dict[str, Any]) -> list[str]:
         return ["-I", "-B", "-c", _LEGACY_PLAN_CODE, record["input_path"],
                 json.dumps(_namespace_mounts(record), sort_keys=True), record["user"], binds]
     if record["kind"] in ("state-canonical", "state-canonical-v4"):
-        extra = ([] if record["kind"] == "state-canonical" else
+        # Schema 5 reads the file a leaf names and hands the entry the native
+        # writer replaces separately; FULL4 already records both endpoints.
+        extra = (([record["canonical_writer"]] if record.get("canonical_writer") is not None else [])
+                 if record["kind"] == "state-canonical" else
                  [record["canonical_request"]["writer_path"],
                   json.dumps(record["canonical_request"]["source_preimage"], sort_keys=True)])
         return ["-I", "-B", "-c", _CANONICAL_CODE, record["input_path"], record["user"], binds,
@@ -504,10 +522,12 @@ def read_state_probe(root: Path, name: str) -> dict[str, Any]:
                 "source_tool_sha256", "daemon_id", "image_id", "image_revision", "container_name",
                 "container_id", "user", "working_dir", "mounts", "path_settings", "input_path",
                 "command", "output_sha256", "result", "failure"}
-        if type(value) is dict and type(value.get("schema_version")) is int and value["schema_version"] in (2, 3, 4):
+        if type(value) is dict and type(value.get("schema_version")) is int and value["schema_version"] in (2, 3, 4, 5):
             keys |= {"transaction_kind", "flavor", "state_kind", "clock"}
             if value["schema_version"] == 3:
                 keys.add("copy")
+            if value["schema_version"] == 5:
+                keys.add("canonical_writer")
             if value["schema_version"] == 4:
                 keys.add("extra_read_binds")
                 if value.get("kind") == "state-endpoint":
@@ -519,8 +539,23 @@ def read_state_probe(root: Path, name: str) -> dict[str, Any]:
                 else:
                     keys.add("canonical_request")
         runtime._object(value, keys, "state probe")
-        if type(value["schema_version"]) is not int or value["schema_version"] not in (1, 2, 3, 4):
+        if type(value["schema_version"]) is not int or value["schema_version"] not in (1, 2, 3, 4, 5):
             _fail("unsupported state probe schema")
+        if value["schema_version"] == 5:
+            # Schema-5 probes belong to schema-5 runtime or FULL journals and
+            # are limited to the helpers whose programs do not write state.
+            if value["kind"] not in SCHEMA5_HELPER_KINDS or value["transaction_kind"] not in ("runtime", "full"):
+                _fail("schema-5 state probe kind or transaction is invalid")
+            if value["kind"] == "state-canonical":
+                if (value["flavor"] not in ("legacy", "wheel")
+                        or value["state_kind"] not in ("chat-settings", "channel-replies")
+                        or type(value["clock"]) is not int or not 0 <= value["clock"] <= 2**63 - 1):
+                    _fail("schema-5 canonical probe context is invalid")
+                if value["canonical_writer"] is not None:
+                    manifest._path(value["canonical_writer"], "schema-5 canonical writer path")
+            elif value["canonical_writer"] is not None or any(
+                    value[key] is not None for key in ("flavor", "state_kind", "clock")):
+                _fail("schema-5 state probe has unexpected context")
         if value["kind"] not in ("state-plan", "state-legacy-plan", "state-preimage", "state-canonical", "state-canonical-v4", "state-endpoint", "state-copy-v4",
                                   "state-copy-stage", "state-copy-publish", "state-copy-clean", "state-copy-discard"):
             _fail("unsupported state probe kind")
@@ -920,16 +955,23 @@ def _execute(root: Path, journal: dict[str, Any], *, kind: str, image_id: str, r
              state_kind: str | None = None, clock: int | None = None,
              copy_request: dict[str, Any] | None = None, endpoint_request: dict[str, Any] | None = None,
              endpoint_purpose: str | None = None, canonical_request: dict[str, Any] | None = None,
+             canonical_writer: str | None = None,
              extra_read_binds: list[dict[str, Any]] | None = None, plan_request: dict[str, Any] | None = None,
              copy_v4_request: dict[str, Any] | None = None) -> Any:
     transaction_id = journal["transaction_id"]
     source = journal["source"]["source_tool_sha256"]
     transaction_kind = "full" if journal["kind"] == "component-full" else "runtime"
+    if journal["schema_version"] == 5 and kind not in SCHEMA5_HELPER_KINDS:
+        _fail("schema-5 transactions permit only non-mutating state helpers")
     _admit(root, transaction_id, source, transaction_kind=transaction_kind)
     image = _image(image_id, revision)
     ident = manifest.new_deployment_id()
+    schema5 = journal["schema_version"] == 5
     if kind in ("state-canonical", "state-canonical-v4"):
-        if transaction_kind != "full" or flavor not in ("legacy", "wheel") or state_kind not in (
+        # A schema-5 runtime record may read state through its selected
+        # Telegram image; FULL4 keeps its own endpoint-owned comparison.
+        runtime_reader = schema5 and kind == "state-canonical" and transaction_kind == "runtime"
+        if (transaction_kind != "full" and not runtime_reader) or flavor not in ("legacy", "wheel") or state_kind not in (
             "chat-settings", "channel-replies",
         ) or type(clock) is not int or not 0 <= clock <= 2**63 - 1:
             _fail("canonical state probe context is invalid")
@@ -963,15 +1005,17 @@ def _execute(root: Path, journal: dict[str, Any], *, kind: str, image_id: str, r
     if copy_kind_v4 and (transaction_kind != "full" or journal["schema_version"] != 4
                          or copy_v4_request is None or extra_read_binds is None):
         _fail("FULL4 state copy probe context is invalid")
-    record = {"schema_version": 4 if endpoint_kind or canonical_kind or plan_kind_v4 or copy_kind_v4 else 3 if copy_kind else 2 if transaction_kind == "full" else 1,
+    record = {"schema_version": 5 if schema5 else 4 if endpoint_kind or canonical_kind or plan_kind_v4 or copy_kind_v4 else 3 if copy_kind else 2 if transaction_kind == "full" else 1,
               "kind": kind, "probe_id": ident, "status": "active", "phase": "prepared",
               "transaction_id": transaction_id, "source_tool_sha256": source, "daemon_id": _daemon(),
               "image_id": image_id, "image_revision": revision, "container_name": "wuwaterm-state-probe-" + ident,
               "container_id": None, "user": user, "working_dir": working_dir, "mounts": mounts,
               "path_settings": settings, "input_path": input_path, "command": None,
               "output_sha256": None, "result": None, "failure": None}
-    if transaction_kind == "full":
-        record.update(transaction_kind="full", flavor=flavor, state_kind=state_kind, clock=clock)
+    if transaction_kind == "full" or schema5:
+        record.update(transaction_kind=transaction_kind, flavor=flavor, state_kind=state_kind, clock=clock)
+    if schema5:
+        record["canonical_writer"] = canonical_writer
     if copy_kind:
         record["copy"] = copy_request
     if endpoint_kind:
@@ -994,7 +1038,8 @@ def _execute(root: Path, journal: dict[str, Any], *, kind: str, image_id: str, r
         tmpfs = {m["container"]: ",".join(m["options"]) for m in mounts if m.get("type") == "tmpfs"}
         body = {"Image": image_id, "User": user, "WorkingDir": working_dir, "Entrypoint": ["python"],
                 "Cmd": record["command"], "Env": [k + "=" + v for k, v in _environment(image, record).items()],
-                "Labels": {_LABEL: ident}, "Healthcheck": {"Test": ["NONE"]},
+                "Labels": {_LABEL: ident, admission.ROOT_LABEL: admission.root_label_value(root)},
+                "Healthcheck": {"Test": ["NONE"]},
                 "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "Mounts": binds, "Tmpfs": tmpfs}}
         created = _request("POST", "/containers/create?" + urlencode({"name": record["container_name"]}), body,
                            allowed=(201,))
@@ -1116,6 +1161,40 @@ def verify_plan_probe_binding(root: Path, journal: dict[str, Any], probe: dict[s
             or probe["path_settings"] != {key: settings[key] for key in _PATH_KEYS} or probe["input_path"] != db_path
             or observe.resolve_bind_path(snapshot, db_path, writable=False) != journal["database"]["old"]["binding"]["path"]):
         _fail("native plan identity, mounts or environment differs")
+
+
+def verify_schema5_probe_binding(journal: dict[str, Any], probe: dict[str, Any]) -> None:
+    """Bind a schema-5 read-only helper to the journal's own recorded reader.
+
+    Schema 5 makes no endpoint or copy claim, so a helper may only run through
+    an image the transaction already recorded; a canonical comparison must also
+    name that image's own reader flavor. A runtime record only re-reads state
+    through its old container's image, never through the image it is installing.
+    """
+    if journal["schema_version"] != 5 or probe["schema_version"] != 5:
+        _fail("schema-5 state probe requires a schema-5 journal")
+    if probe["kind"] not in SCHEMA5_HELPER_KINDS:
+        _fail("schema-5 state probe kind is not a read-only helper")
+    if probe["transaction_kind"] == "runtime":
+        if journal["kind"] != "component-runtime" or "telegram" not in journal["selection"]:
+            _fail("schema-5 runtime state probe has no selected Telegram component")
+    elif journal["kind"] != "component-full":
+        _fail("schema-5 full state probe requires a full journal")
+    components = (journal["before"]["topology"]["telegram"],
+                  journal["target"]["manifest"]["components"]["telegram"])
+    owner = components if probe["kind"] != "state-canonical" or probe["transaction_kind"] == "full" else components[:1]
+    matches = [component for component in owner if component is not None
+               and component["image"]["id"] == probe["image_id"]
+               and component["image"]["revision"] == probe["image_revision"]]
+    if not matches:
+        _fail("schema-5 state probe image is not recorded")
+    if probe["kind"] != "state-canonical":
+        return
+    provenance = matches[0]["provenance"]["kind"]
+    if provenance not in ("legacy-image", "wheel-image", "completed-artifact"):
+        _fail("schema-5 canonical probe has no supported native reader")
+    if probe["flavor"] != ("legacy" if provenance == "legacy-image" else "wheel"):
+        _fail("schema-5 canonical probe reader flavor differs")
 
 
 def verify_endpoint_probe_binding(root: Path, journal: dict[str, Any], probe: dict[str, Any]) -> None:
@@ -1593,10 +1672,25 @@ def plan(root: Path, *, receipt_sha256: str | None, snapshot: dict[str, Any], en
             _fail("state planner database binding differs")
         target = journal["target"]["manifest"]["components"]["telegram"]
         endpoint_protocol = is_full and journal["schema_version"] == 4
-        planned_component = component if endpoint_protocol else target
-        legacy = is_full and planned_component["provenance"]["kind"] == "legacy-image"
-        if legacy:
-            if receipt_sha256 is not None or (not endpoint_protocol and "telegram" in journal["selection"]):
+        schema5 = journal["schema_version"] == 5
+        # Schema 5 plans each recipe with its own image: the old legacy Core
+        # image through the read-only legacy planner, the product image
+        # through the product's native planner.
+        planned_component = component if endpoint_protocol or schema5 else target
+        provenance = planned_component["provenance"]["kind"]
+        legacy = (is_full or schema5) and provenance == "legacy-image"
+        if schema5 and provenance == "completed-artifact":
+            if receipt_sha256 is not None:
+                _fail("schema-5 state planning requires a completed artifact without a producer receipt")
+            import component_transaction as transaction  # noqa: PLC0415
+            try:
+                verified = transaction.verify_artifact_component(root, planned_component, "telegram")
+            except transaction.TransactionError:
+                _fail("state planner completed artifact cannot be verified")
+            receipt = None
+            image_id, revision = verified["image_id"], verified["image_revision"]
+        elif legacy:
+            if receipt_sha256 is not None or (not endpoint_protocol and not schema5 and "telegram" in journal["selection"]):
                 _fail("legacy state planning has an unexpected receipt or selection")
             receipt = None
             image_id, revision = planned_component["image"]["id"], planned_component["image"]["revision"]
@@ -1628,10 +1722,20 @@ def plan(root: Path, *, receipt_sha256: str | None, snapshot: dict[str, Any], en
                           settings=path_settings, input_path=db_path,
                           plan_request={"recipe_sha256": component["recipe"]["sha256"]} if endpoint_protocol else None)
         _validate_result("state-plan", result, db_path)
+        if legacy and not schema5 and any(item["migration"] == "copy-if-absent"
+                                          for item in result["kinds"].values()):
+            # The old image's own startup copy is a schema-5 native-pending
+            # action; older FULL records never planned it.
+            _fail("legacy state copy requires a schema-5 cutover")
         if endpoint_protocol:
             import component_state_endpoint as endpoint  # noqa: PLC0415
         for item in result["kinds"].values():
-            mapper = endpoint.map_entry if endpoint_protocol else observe.resolve_bind_path
+            if schema5 and (item.get("mapped_target") is None
+                            or item.get("legacy_path") is not None and item.get("mapped_legacy") is None):
+                # A path outside every bind is never equivalent to another.
+                _fail("state path is outside every bind")
+            mapper = (entry_path if schema5 else
+                      endpoint.map_entry if endpoint_protocol else observe.resolve_bind_path)
             item["mapped_target"] = mapper(snapshot, item["mapped_target"], writable=True)
             if item["mapped_legacy"] is not None:
                 item["mapped_legacy"] = mapper(snapshot, item["mapped_legacy"], writable=False)
@@ -1662,30 +1766,175 @@ def _container_path(snapshot: dict[str, Any], host_path: str) -> str:
     return choices[0]
 
 
+def _entry_mount(snapshot: dict[str, Any], container_path: str) -> dict[str, Any]:
+    path = PurePosixPath(container_path)
+    candidates = [mount for mount in snapshot["mounts"] if "host" in mount
+                  and (path == PurePosixPath(mount["container"])
+                       or path.is_relative_to(PurePosixPath(mount["container"])))]
+    if not candidates:
+        _fail("state entry has no visible bind")
+    return max(candidates, key=lambda item: len(PurePosixPath(item["container"]).parts))
+
+
+def entry_path(snapshot: dict[str, Any], container_path: str, *, writable: bool) -> str:
+    """Map one state entry through its parent without following its leaf.
+
+    Schema 5 admits the two native leaf forms: a settings entry may be a link
+    to the file the product rewrites, and a reply entry may still be the link
+    the product replaces in place.  Only the parent has to be a physical
+    directory inside the entry's own persistent bind.
+    """
+    try:
+        mount = _entry_mount(snapshot, container_path)
+        path = PurePosixPath(manifest._path(container_path, "state entry path"))
+        relative = path.relative_to(PurePosixPath(mount["container"]))
+        if not relative.parts:
+            _fail("state entry is a bind root")
+        if writable and mount["read_only"]:
+            _fail("state entry is not on a writable persistent bind")
+        source = Path(manifest._path(mount["host"], "state entry bind"))
+        host = source.joinpath(*relative.parts)
+        parent = PurePosixPath(mount["container"]).joinpath(*relative.parts[:-1])
+        if observe.resolve_bind_path(snapshot, str(parent), writable=writable) != str(host.parent):
+            # resolve_bind_path rejects a symlinked component and tolerates a
+            # missing final path, which is exactly the entry-parent rule here.
+            _fail("state entry parent does not map to its own binding")
+        return str(host)
+    except (manifest.ManifestError, observe.ObservationError) as exc:
+        raise StateError("state entry cannot be mapped through its parent") from exc
+
+
+def _entry_container(snapshot: dict[str, Any], host_path: str, *, writable: bool) -> str:
+    """Map a state entry host path back to the container path it was planned from."""
+    host = PurePosixPath(manifest._path(host_path, "state entry host path"))
+    choices = []
+    for mount in snapshot["mounts"]:
+        if "host" not in mount:
+            continue
+        source = PurePosixPath(mount["host"])
+        if host == source or host.is_relative_to(source):
+            candidate = str(PurePosixPath(mount["container"]) / host.relative_to(source))
+            try:
+                if entry_path(snapshot, candidate, writable=writable) == host_path:
+                    choices.append(candidate)
+            except StateError:
+                continue
+    if len(set(choices)) != 1:
+        _fail("state entry has no unique visible bind")
+    return choices[0]
+
+
+def _leaf_container_path(snapshot: dict[str, Any], container_path: str) -> str:
+    """Follow only leaf links of one state entry, inside the entry's own bind."""
+    mount = _entry_mount(snapshot, container_path)
+    current = container_path
+    for _ in range(41):
+        # The leaf itself may be the link under inspection, so only its parent
+        # is mapped strictly.
+        host = entry_path(snapshot, current, writable=False)
+        try:
+            info = Path(host).lstat()
+        except FileNotFoundError:
+            return current
+        if not stat.S_ISLNK(info.st_mode):
+            return current
+        if not 0 < info.st_size <= 4095:
+            _fail("state entry link is unsafe")
+        try:
+            current = endpoint_module._next_link(current, os.readlink(host), {"container": mount["container"]})
+        except endpoint_module.EndpointError as exc:
+            raise StateError("state entry link leaves its binding") from exc
+    _fail("state entry link chain is too long")
+    raise StateError("state entry link chain is too long")
+
+
+def _planned_components(journal: dict[str, Any], component: dict[str, Any]) -> list[dict[str, Any]]:
+    """Components whose recipe may own a completed plan probe.
+
+    A schema-5 cutover plans the old legacy image through the read-only legacy
+    planner and the product image through the product planner, so both recipes
+    can legitimately own a completed probe of this transaction.
+    """
+    components = [component]
+    if journal["schema_version"] != 5:
+        return components
+    others = (journal["before"]["topology"]["telegram"],
+              journal["target"]["manifest"]["components"]["telegram"])
+    for item in others:
+        if item is None or item["recipe"]["sha256"] in {known["recipe"]["sha256"] for known in components}:
+            continue
+        components.append(item)
+    return components
+
+
 def _completed_plan_paths(root: Path, journal: dict[str, Any], transaction_id: str,
                           snapshot: dict[str, Any], component: dict[str, Any]) -> set[str]:
     image = _image(snapshot["image_id"], component["image"]["revision"])
-    user = _effective_user(snapshot, image)
-    expected_mounts = _mounts(snapshot)
+    _effective_user(snapshot, image)
     daemon = _daemon()
     allowed: set[str] = set()
     directory = root / ".deployments/component-adopt-probes"
     for entry in directory.iterdir():
         probe = runtime._read_adopt_probe(root, entry.name)
-        mounts = ([{**mount, "read_only": True} if "host" in mount else mount for mount in expected_mounts]
-                  if probe["kind"] == "state-legacy-plan" else expected_mounts)
         if (probe["kind"] not in ("state-plan", "state-legacy-plan") or probe["status"] != "completed"
                 or probe["transaction_id"] != transaction_id
                 or probe["source_tool_sha256"] != journal["source"]["source_tool_sha256"]
-                or probe["daemon_id"] != daemon or probe["user"] != user
-                or probe["working_dir"] != (snapshot["working_dir"] or "/") or probe["mounts"] != mounts
-                or probe["image_id"] != journal["target"]["manifest"]["components"]["telegram"]["image"]["id"]):
+                or probe["daemon_id"] != daemon):
             continue
-        for item in probe["result"]["kinds"].values():
-            allowed.add(observe.resolve_bind_path(snapshot, item["mapped_target"], writable=True))
-            if item["mapped_legacy"] is not None:
-                allowed.add(observe.resolve_bind_path(snapshot, item["mapped_legacy"], writable=False))
+        for owner in _planned_components(journal, component):
+            if (probe["image_id"] != owner["image"]["id"]
+                    or probe["image_revision"] != owner["image"]["revision"]):
+                continue
+            owner_snapshot = (snapshot if owner["recipe"]["sha256"] == component["recipe"]["sha256"]
+                              else manifest.read_recipe_snapshot(root, owner["recipe"]["sha256"]))
+            owner_image = _image(owner_snapshot["image_id"], owner["image"]["revision"])
+            expected_mounts = _mounts(owner_snapshot)
+            mounts = ([{**mount, "read_only": True} if "host" in mount else mount for mount in expected_mounts]
+                      if probe["kind"] == "state-legacy-plan" else expected_mounts)
+            if (probe["user"] != _effective_user(owner_snapshot, owner_image)
+                    or probe["working_dir"] != (owner_snapshot["working_dir"] or "/")
+                    or probe["mounts"] != mounts):
+                continue
+            for item in probe["result"]["kinds"].values():
+                mapper = entry_path if journal["schema_version"] == 5 else observe.resolve_bind_path
+                allowed.add(mapper(owner_snapshot, item["mapped_target"], writable=True))
+                if item["mapped_legacy"] is not None:
+                    allowed.add(mapper(owner_snapshot, item["mapped_legacy"], writable=False))
     return allowed
+
+
+def leaf_host_path(snapshot: dict[str, Any], host_path: str) -> str:
+    """Follow a state entry's leaf links inside the bind that holds it.
+
+    An entry may name a relative referent or a container-absolute one, so the
+    chain is walked in the container namespace the product itself would use and
+    mapped back through the same persistent bind.
+    """
+    try:
+        entry = _entry_container(snapshot, host_path, writable=False)
+        read = _leaf_container_path(snapshot, entry)
+        return host_path if read == entry else entry_path(snapshot, read, writable=False)
+    except (manifest.ManifestError, observe.ObservationError) as exc:
+        raise StateError("state entry link cannot be followed") from exc
+
+
+def _state_probe_paths(journal: dict[str, Any], snapshot: dict[str, Any], host_path: str,
+                       *, writable: bool = False) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """Return the file a probe reads, a separate writer entry, and its mounts.
+
+    Schema 5 reads the file a leaf link names and replaces the entry itself, so
+    a retained reply link needs both container paths; older schemas keep their
+    strict single-path mapping and the FULL3 rollback source fallback.
+    """
+    if journal["schema_version"] != 5:
+        path, mounts = _probe_path(journal, snapshot, host_path, writable=writable)
+        return path, None, mounts
+    try:
+        entry = _entry_container(snapshot, host_path, writable=writable)
+        read = _leaf_container_path(snapshot, entry)
+        return read, (None if read == entry else entry), _mounts(snapshot)
+    except (manifest.ManifestError, observe.ObservationError) as exc:
+        raise StateError("state path cannot be mapped through its binding") from exc
 
 
 def _probe_path(journal: dict[str, Any], snapshot: dict[str, Any], host_path: str,
@@ -1738,14 +1987,18 @@ def preimage(root: Path, *, image_id: str, image_revision: str, snapshot: dict[s
                     other = manifest.read_recipe_snapshot(root, candidate["recipe"]["sha256"])
                     allowed.update(_completed_plan_paths(root, journal, transaction_id, other, candidate))
             for item in journal["migrations"]["items"]:
-                if item["forward_stage"] is not None and item["new_target_path"] in allowed:
-                    allowed.add(item["forward_stage"])
-                if item["copyback"] is not None and item["old_target_path"] in allowed:
-                    allowed.add(item["copyback"]["stage"])
+                # Schema 5 has no staging or copy-back fields; only the FULL3
+                # and FULL4 records they belong to may widen this set.
+                stage = item.get("forward_stage")
+                copyback = item.get("copyback")
+                if stage is not None and item["new_target_path"] in allowed:
+                    allowed.add(stage)
+                if copyback is not None and item["old_target_path"] in allowed:
+                    allowed.add(copyback["stage"])
         if (host_path not in allowed or image_id != snapshot["image_id"]
                 or image_id != component["image"]["id"] or image_revision != component["image"]["revision"]):
             _fail("state preimage is outside the recorded binding")
-        input_path, probe_mounts = _probe_path(journal, snapshot, host_path)
+        input_path, _, probe_mounts = _state_probe_paths(journal, snapshot, host_path)
         result = _execute(root, journal, kind="state-preimage", image_id=image_id, revision=image_revision,
                           user=user, working_dir=snapshot["working_dir"] or "/", mounts=probe_mounts,
                           settings=dict.fromkeys(_PATH_KEYS), input_path=input_path)
@@ -1756,29 +2009,61 @@ def preimage(root: Path, *, image_id: str, image_revision: str, snapshot: dict[s
         raise StateError("state preimage could not establish the recorded binding") from None
 
 
+def _canonical_binding(journal: dict[str, Any], component: dict[str, Any], state_kind: str,
+                       clock: int) -> tuple[str, str, str]:
+    """Decide which native reader may compare state bytes for this journal.
+
+    Schema 4 used endpoint claims; schema 5 keeps the same read-only helper for
+    a cutover rollback, where the old image must accept what the new product
+    wrote. A schema-5 runtime record may therefore read state, but only for its
+    selected Telegram component.
+    """
+    schema5_runtime = (journal["schema_version"] == 5 and journal["kind"] == "component-runtime"
+                       and "telegram" in journal["selection"])
+    if journal["kind"] != "component-full" and not schema5_runtime:
+        _fail("canonical state comparison requires a full transaction")
+    if state_kind not in ("chat-settings", "channel-replies"):
+        _fail("canonical state comparison requires a full transaction")
+    if type(clock) is not int or not 0 <= clock <= 2**63 - 1:
+        _fail("canonical state clock is invalid")
+    provenance = component["provenance"]["kind"]
+    if provenance not in ("legacy-image", "wheel-image", "completed-artifact"):
+        _fail("state image has no supported native reader")
+    return (component["image"]["id"], component["image"]["revision"],
+            "legacy" if provenance == "legacy-image" else "wheel")
+
+
 def canonical(root: Path, *, snapshot: dict[str, Any], host_path: str, transaction_id: str,
               state_kind: str, clock: int) -> dict[str, Any]:
-    """Compare native reader semantics on a private copy under the actual UID."""
+    """Compare native reader semantics on a private copy under the actual UID.
+
+    The reader is the component that owns ``snapshot``. A schema-5 journal may
+    hold either the legacy Core image or an already cut-over product artifact,
+    and its rollback must prove the old reader accepts the bytes the new product
+    left behind, so a runtime schema-5 Telegram update may run this helper
+    without any copy or endpoint helper.
+    """
     try:
         journal, component = _journal_snapshot(root, transaction_id, snapshot)
-        if journal["kind"] != "component-full" or state_kind not in ("chat-settings", "channel-replies"):
-            _fail("canonical state comparison requires a full transaction")
-        if type(clock) is not int or not 0 <= clock <= 2**63 - 1:
-            _fail("canonical state clock is invalid")
         provenance = component["provenance"]["kind"]
-        if provenance not in ("legacy-image", "wheel-image"):
-            _fail("state image has no supported native reader")
-        image_id, revision = component["image"]["id"], component["image"]["revision"]
+        image_id, revision, flavor = _canonical_binding(journal, component, state_kind, clock)
+        if provenance == "completed-artifact":
+            import component_transaction as transaction  # noqa: PLC0415
+            try:
+                transaction.verify_artifact_component(root, component, "telegram")
+            except transaction.TransactionError:
+                _fail("state image has no supported native reader")
+        else:
+            _image(image_id, revision)
         before = preimage(root, image_id=image_id, image_revision=revision, snapshot=snapshot,
                           host_path=host_path, transaction_id=transaction_id)
         image = _image(image_id, revision)
         user = _effective_user(snapshot, image)
-        input_path, probe_mounts = _probe_path(journal, snapshot, host_path)
+        input_path, writer_path, probe_mounts = _state_probe_paths(journal, snapshot, host_path)
         result = _execute(root, journal, kind="state-canonical", image_id=image_id, revision=revision,
                           user=user, working_dir=snapshot["working_dir"] or "/", mounts=probe_mounts,
-                          settings=dict.fromkeys(_PATH_KEYS), input_path=input_path,
-                          flavor="legacy" if provenance == "legacy-image" else "wheel",
-                          state_kind=state_kind, clock=clock)
+                          settings=dict.fromkeys(_PATH_KEYS), input_path=input_path, canonical_writer=writer_path,
+                          flavor=flavor, state_kind=state_kind, clock=clock)
         if result["raw_sha256"] != before["sha256"]:
             _fail("canonical state source differs from its preimage")
         after = preimage(root, image_id=image_id, image_revision=revision, snapshot=snapshot,

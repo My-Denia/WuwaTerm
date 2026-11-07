@@ -42,7 +42,8 @@ def git(root: Path, *arguments: str) -> str:
 
 
 def create_source(root: Path, *, dispatcher_probe: bool = False,
-                  enable_fixture_dispatch: bool = False) -> tuple[Path, str, str]:
+                  enable_fixture_dispatch: bool = False,
+                  declared_protocol: object = "current") -> tuple[Path, str, str]:
     """Make a new, isolated Git fixture; do not fetch or export other refs."""
     root.mkdir()
     git(root, "init", "--quiet")
@@ -58,6 +59,15 @@ def create_source(root: Path, *, dispatcher_probe: bool = False,
             target.write_text("#!/bin/sh\nexit 1\n", encoding="ascii")
         else:
             raise AssertionError(f"missing fixture source {name}")
+    if declared_protocol != "current":
+        # Model a saved source with another (or no) protocol declaration.
+        path = root / "scripts" / "component_runtime.py"
+        text = path.read_text(encoding="utf-8")
+        for name in ("CAPSULE_RECOVERY_PROTOCOL", "CAPSULE_FULL_RECOVERY_PROTOCOL"):
+            line = f"\n{name} = {component_runtime.CAPSULE_RECOVERY_PROTOCOL}\n"
+            assert line in text
+            text = text.replace(line, "\n" if declared_protocol is None else f"\n{name} = {declared_protocol!r}\n", 1)
+        path.write_text(text, encoding="utf-8")
     if dispatcher_probe:
         # This only probes which verified source runs and how it was invoked.
         # It does not emulate or claim service recovery.
@@ -714,7 +724,7 @@ r._write_adopt_probe(pathlib.Path(sys.argv[2]),json.loads(pathlib.Path(sys.argv[
 
 
 def test_recovery_refuses_until_source_enables_protocol(tmp_path: Path, journal: dict) -> None:
-    root, commit, tree = create_source(tmp_path / "source")
+    root, commit, tree = create_source(tmp_path / "source", declared_protocol=None)
     result = prepare(root, commit, tree)
     assert result.returncode == 0, result.stderr
     source = json.loads(result.stdout)
@@ -753,3 +763,86 @@ def test_capsule_corruption_is_refused(tmp_path: Path, filename: str, journal: d
     invoked = invoke(root, source)
     assert invoked.returncode != 0
     assert "digest differs" in invoked.stderr
+
+
+@pytest.mark.parametrize("protocol, message", [
+    (2, "component recovery execution is not yet enabled"),
+    (3, "no enabled capsule recovery protocol"),
+])
+def test_recovery_dispatches_by_the_saved_source_protocol(tmp_path: Path, journal: dict,
+                                                          protocol: int, message: str) -> None:
+    """Protocol 2 is gated by its own closed flag; unknown protocols are refused."""
+    root, commit, tree = create_source(tmp_path / "source", declared_protocol=protocol)
+    result = prepare(root, commit, tree)
+    assert result.returncode == 0, result.stderr
+    source = json.loads(result.stdout)
+    saved_before = saved_hashes(root, source)
+    add_journal(root, source, journal)
+    invoked = invoke(root, source)
+    assert invoked.returncode != 0
+    assert message in invoked.stderr
+    assert saved_hashes(root, source) == saved_before
+
+
+def test_artifact_flags_never_enable_a_protocol1_capsule(monkeypatch: pytest.MonkeyPatch) -> None:
+    recovery = component_recovery
+    monkeypatch.setattr(recovery, "ARTIFACT_RECOVERY_EXECUTION_READY", True)
+    monkeypatch.setattr(recovery, "ARTIFACT_FULL_RECOVERY_EXECUTION_READY", True)
+    assert recovery.protocol_ready(2, full=False) and recovery.protocol_ready(2, full=True)
+    assert not recovery.protocol_ready(1, full=False) and not recovery.protocol_ready(1, full=True)
+    for invalid in (None, 0, 3, True, "2"):
+        assert not recovery.protocol_ready(invalid, full=False)
+    assert recovery.RECOVERY_EXECUTION_READY is False and recovery.FULL_RECOVERY_EXECUTION_READY is False
+
+
+def _recovery_source(tmp_path: Path) -> dict:
+    commit, tree, tool = "a" * 40, "b" * 40, "c" * 64
+    identity = component_runtime.source_tool_identity(commit, tree, tool)
+    bootstrap_files = {"component_recovery.py": "d" * 64, "package_recovery_source.py": "e" * 64}
+    return {"commit": commit, "tree": tree, "tool_bytes_sha256": tool, "source_tool_sha256": identity,
+            "capsule": {"path": f".deployments/component-source-{identity}", "manifest_sha256": "1" * 64,
+                        "archive_sha256": "2" * 64, "bundle_sha256": "3" * 64},
+            "bootstrap": {"path": f".deployments/component-bootstrap-{identity}", "files_sha256": bootstrap_files,
+                          "sha256": component_recovery._bootstrap_id(bootstrap_files)},
+            "compose": {"path": ".deployments/component-compose-" + "4" * 64, "sha256": "4" * 64}}
+
+
+def test_schema5_journals_are_dispatchable_without_touching_protocol1(tmp_path: Path) -> None:
+    """Recovery selects a record by its own schema, never by the caller's."""
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    source = _recovery_source(tmp_path)
+    identifier = "20261107T120000Z-" + "5" * 32
+    assert set(component_recovery.RUNTIME_SCHEMA_VERSIONS) == {2, 3, 4, 5}
+    assert set(component_recovery.FULL_SCHEMA_VERSIONS) == {3, 4, 5}
+    for schema in (2, 3, 4, 5):
+        journal = {"schema_version": schema, "kind": "component-runtime", "transaction_id": identifier,
+                   "status": "active", "source": source}
+        path = root / ".deployments" / component_recovery.JOURNAL_NAME
+        path.write_text(json.dumps(journal), encoding="utf-8")
+        raw, loaded = component_recovery._journal(root, identifier)
+        assert loaded["schema_version"] == schema and raw == path.read_bytes()
+    for schema in (3, 4, 5):
+        journal = {"schema_version": schema, "kind": "component-full", "transaction_id": identifier,
+                   "status": "active", "source": source}
+        path = root / ".deployments" / component_recovery.FULL_JOURNAL_NAME
+        path.write_text(json.dumps(journal), encoding="utf-8")
+        raw, loaded = component_recovery._full_journal(root, identifier)
+        assert loaded["schema_version"] == schema and raw == path.read_bytes()
+    # Unknown versions and foreign kinds stay refused.
+    for path, loader, kind, bad in ((root / ".deployments" / component_recovery.JOURNAL_NAME,
+                                     component_recovery._journal, "component-runtime", 6),
+                                    (root / ".deployments" / component_recovery.FULL_JOURNAL_NAME,
+                                     component_recovery._full_journal, "component-full", 2)):
+        path.write_text(json.dumps({"schema_version": bad, "kind": kind, "transaction_id": identifier,
+                                    "status": "active", "source": source}), encoding="utf-8")
+        with pytest.raises(component_recovery.RecoveryError):
+            loader(root, identifier)
+    # Openness to schema 5 does not enable execution or protocol 1.
+    assert component_recovery.RECOVERY_EXECUTION_READY is False
+    assert component_recovery.FULL_RECOVERY_EXECUTION_READY is False
+    assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is False
+    assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is False
+    assert component_recovery.protocol_ready(1, full=False) is False
+    assert component_recovery.protocol_ready(2, full=False) is False
+    assert component_recovery.protocol_ready(3, full=True) is False

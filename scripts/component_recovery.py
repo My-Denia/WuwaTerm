@@ -39,6 +39,26 @@ DEPLOYMENT_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\Z")
 # coordinator and its real interruption tests exist.
 RECOVERY_EXECUTION_READY = False
 FULL_RECOVERY_EXECUTION_READY = False
+# Protocol-2 (completed-artifact) capsules have their own readiness. Opening
+# protocol 2 never makes a protocol-1 capsule executable: each saved source is
+# dispatched by the protocol its own extracted module declares.
+ARTIFACT_RECOVERY_EXECUTION_READY = False
+ARTIFACT_FULL_RECOVERY_EXECUTION_READY = False
+SUPPORTED_PROTOCOLS = frozenset({1, 2})
+# Historical journals stay readable by their own validators. Schema 5 records
+# only completed-artifact updates, and the FULL5 journal is the preserved-state
+# form of the FULL4 record: no copy claims or staging fields.
+RUNTIME_SCHEMA_VERSIONS = (2, 3, 4, 5)
+FULL_SCHEMA_VERSIONS = (3, 4, 5)
+
+
+def protocol_ready(protocol: object, *, full: bool) -> bool:
+    """Return this bootstrap's readiness for one declared capsule protocol."""
+    if type(protocol) is not int or protocol not in SUPPORTED_PROTOCOLS:
+        return False
+    if protocol == 1:
+        return (FULL_RECOVERY_EXECUTION_READY if full else RECOVERY_EXECUTION_READY) is True
+    return (ARTIFACT_FULL_RECOVERY_EXECUTION_READY if full else ARTIFACT_RECOVERY_EXECUTION_READY) is True
 
 
 class RecoveryError(RuntimeError):
@@ -375,7 +395,9 @@ def safe_git(repo: Path, *args: str, lock_root: Path | None = None) -> bytes:
 
 
 def _verify_tools(extracted: Path, source: dict[str, Any], lock: _Lock | None,
-                  *, require_recovery_protocol: bool = False, require_full_protocol: bool = False) -> None:
+                  *, require_recovery_protocol: bool = False, require_full_protocol: bool = False,
+                  protocols: frozenset[int] = SUPPORTED_PROTOCOLS) -> int | None:
+    """Verify A's tool bytes and return the protocol A itself declares."""
     # Import only the verified, extracted A tree, in isolated mode. B's current
     # Python source and any inherited PYTHON*/GIT_* settings are never used.
     code = ("import json,pathlib,sys; r=pathlib.Path(sys.argv[1]); "
@@ -392,10 +414,11 @@ def _verify_tools(extracted: Path, source: dict[str, Any], lock: _Lock | None,
     if (result.returncode or type(observed) is not list or len(observed) != 3
             or observed[0] != source["tool_bytes_sha256"]):
         raise RecoveryError("saved tool bytes do not match source identity")
-    if require_recovery_protocol and (type(observed[1]) is not int or observed[1] != 1):
+    if require_recovery_protocol and (type(observed[1]) is not int or observed[1] not in protocols):
         raise RecoveryError("saved source has no enabled capsule recovery protocol")
-    if require_full_protocol and (type(observed[2]) is not int or observed[2] != 1):
+    if require_full_protocol and (type(observed[2]) is not int or observed[2] not in protocols):
         raise RecoveryError("saved source has no enabled full recovery protocol")
+    return observed[2] if require_full_protocol else observed[1]
 
 
 def _verify_journal(root: Path, extracted: Path, lock: _Lock) -> None:
@@ -660,7 +683,7 @@ def _journal(root: Path, transaction_id: str) -> tuple[bytes, dict[str, Any]]:
                              parse_constant=lambda _: (_ for _ in ()).throw(RecoveryError("invalid JSON number")))
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise RecoveryError("invalid journal") from exc
-    if (type(journal) is not dict or journal.get("schema_version") not in (2, 3, 4)
+    if (type(journal) is not dict or journal.get("schema_version") not in RUNTIME_SCHEMA_VERSIONS
             or type(journal.get("schema_version")) is not int or journal.get("kind") != "component-runtime"
             or journal.get("transaction_id") != transaction_id
             or journal.get("status") not in ("active", "unresolved", "committed", "rolled_back")):
@@ -686,7 +709,7 @@ def _full_journal(root: Path, transaction_id: str) -> tuple[bytes, dict[str, Any
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise RecoveryError("invalid full journal") from exc
     if (type(journal) is not dict or type(journal.get("schema_version")) is not int
-            or journal["schema_version"] not in (3, 4) or journal.get("kind") != "component-full"
+            or journal["schema_version"] not in FULL_SCHEMA_VERSIONS or journal.get("kind") != "component-full"
             or journal.get("transaction_id") != transaction_id
             or journal.get("status") not in ("active", "unresolved", "committed", "rolled_back")):
         raise RecoveryError("full journal does not match the requested transaction")
@@ -764,12 +787,15 @@ def run_build_recovery(root: Path, kind: str, build_id: str) -> int:
         )
         if result.returncode:
             raise RecoveryError("saved source rejected the complete build attempt")
-        _verify_tools(extracted, source, None, require_recovery_protocol=True)
+        # Producer attempts exist only under protocol 1; protocol 2 has no
+        # producer and must not interpret them.
+        protocol = _verify_tools(extracted, source, None, require_recovery_protocol=True,
+                                 protocols=frozenset({1}))
         _verify_capsule(root, source)
         if _build_attempt(root, kind, build_id)[0] != raw:
             raise RecoveryError("build attempt changed during recovery preflight")
         _verify_bootstrap(root, source)
-        if not RECOVERY_EXECUTION_READY:
+        if not protocol_ready(protocol, full=False):
             raise RecoveryError("component recovery execution is not yet enabled")
         process = subprocess.run(
             [sys.executable, "-I", "-B", str(extracted / "scripts" / "component_runtime.py"),
@@ -801,12 +827,12 @@ def run_probe_recovery(root: Path, probe_id: str, *, compose_path: Path) -> int:
         )
         if result.returncode:
             raise RecoveryError("saved source rejected the complete probe")
-        _verify_tools(extracted, source, lock, require_recovery_protocol=True)
+        protocol = _verify_tools(extracted, source, lock, require_recovery_protocol=True)
         _verify_capsule(root, source)
         if _probe(root, probe_id)[0] != raw:
             raise RecoveryError("probe changed during recovery preflight")
         _verify_bootstrap(root, source)
-        if not RECOVERY_EXECUTION_READY:
+        if not protocol_ready(protocol, full=False):
             raise RecoveryError("component recovery execution is not yet enabled")
         saved_compose = _requested_compose(root, source, compose_path)
         if _probe(root, probe_id)[0] != raw:
@@ -846,12 +872,12 @@ def run_recovery(root: Path, transaction_id: str, *, kind: str = "runtime",
         extracted = Path(temporary)
         _verify_capsule(root, source, extracted)
         _verify_journal(root, extracted, lock)
-        _verify_tools(extracted, source, lock, require_recovery_protocol=True)
+        protocol = _verify_tools(extracted, source, lock, require_recovery_protocol=True)
         _verify_capsule(root, source)
         if _journal(root, transaction_id)[0] != raw:
             raise RecoveryError("journal changed during recovery preflight")
         _verify_bootstrap(root, source)
-        if not RECOVERY_EXECUTION_READY:
+        if not protocol_ready(protocol, full=False):
             raise RecoveryError("component recovery execution is not yet enabled")
         if compose_path is None:
             raise RecoveryError("a matching Compose executable is required")
@@ -893,12 +919,12 @@ def run_full_recovery(root: Path, transaction_id: str, *, compose_path: Path) ->
         )
         if parsed.returncode:
             raise RecoveryError("saved source rejected the complete full journal")
-        _verify_tools(extracted, source, lock, require_full_protocol=True)
+        protocol = _verify_tools(extracted, source, lock, require_full_protocol=True)
         _verify_capsule(root, source)
         if _full_journal(root, transaction_id)[0] != raw:
             raise RecoveryError("full journal changed during recovery preflight")
         _verify_bootstrap(root, source)
-        if not FULL_RECOVERY_EXECUTION_READY:
+        if not protocol_ready(protocol, full=True):
             raise RecoveryError("full recovery execution is not yet enabled")
         saved_compose = _requested_compose(root, source, compose_path)
         if _full_journal(root, transaction_id)[0] != raw:
