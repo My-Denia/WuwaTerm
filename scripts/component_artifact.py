@@ -1092,14 +1092,53 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                 _fail("installed distribution came from a different wheel: " + package["name"])
         elif package["name"] in product["source_packages"]:
             root = product["source_packages"][package["name"]]
-            for top in sorted(t for t in tops if not t.endswith(".dist-info")):
+            pyproject_raw = source.content.get("pyproject.toml")
+            pyproject: dict[str, Any] = {}
+            if pyproject_raw is not None:
+                try:
+                    pyproject = tomllib.loads(pyproject_raw.decode("utf-8"))
+                except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+                    raise ArtifactError("cannot parse pyproject.toml") from exc
+            tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
+            hatch = tool.get("hatch") if isinstance(tool.get("hatch"), dict) else {}
+            build = hatch.get("build") if isinstance(hatch.get("build"), dict) else {}
+            targets = build.get("targets") if isinstance(build.get("targets"), dict) else {}
+            wheel_cfg = targets.get("wheel") if isinstance(targets.get("wheel"), dict) else {}
+            wheel_packages = wheel_cfg.get("packages")
+            if wheel_packages is not None:
+                if not isinstance(wheel_packages, list):
+                    _fail("wheel packages in pyproject.toml must be a list")
+                expected_source_tops: set[str] = set()
+                for entry in wheel_packages:
+                    if not isinstance(entry, str):
+                        _fail("wheel package entry in pyproject.toml must be a string")
+                    norm = posixpath.normpath(entry)
+                    if not (norm == root or norm.startswith(root + "/")):
+                        _fail("wheel package in pyproject.toml is outside the source root: " + entry)
+                    rel_entry = norm[len(root) + 1:].strip("/") if norm.startswith(root + "/") else ""
+                    if rel_entry:
+                        expected_source_tops.add(rel_entry.split("/", 1)[0])
+                    else:
+                        expected_source_tops.update(
+                            p[len(root) + 1:].split("/", 1)[0]
+                            for p in source.files
+                            if p.startswith(root + "/") and "/" in p[len(root) + 1:] and not _skipped(p)
+                        )
+            else:
+                expected_source_tops = {
+                    p[len(root) + 1:].split("/", 1)[0]
+                    for p in source.files
+                    if p.startswith(root + "/") and "/" in p[len(root) + 1:] and not _skipped(p)
+                }
+            all_tops = expected_source_tops | {t for t in tops if not t.endswith(".dist-info")}
+            for top in sorted(all_tops):
                 prefix = root + "/" + top + "/"
                 from_source = {p[len(root) + 1:]: v[1] for p, v in source.files.items()
                                if p.startswith(prefix) and not _skipped(p)}
                 from_image = {p: d for p, d in installed.items() if p.startswith(top + "/")}
                 if from_source != from_image:
                     _fail("installed package differs from the sealed source archive: " + top)
-            if not tops - {t for t in tops if t.endswith(".dist-info")}:
+            if not all_tops or not (tops - {t for t in tops if t.endswith(".dist-info")}):
                 _fail("installed source package is empty")
         else:
             _fail("no verified source or wheel for probed package: " + package["name"])

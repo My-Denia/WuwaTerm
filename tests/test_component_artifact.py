@@ -528,6 +528,53 @@ def test_report_copy_and_payload_tamper_is_rejected(fx: Fixture) -> None:
         art.verify_bundle(verified.path)
 
 
+def test_missing_source_package_is_rejected_at_seal_and_verify(fx: Fixture) -> None:
+    source_files = fx.source_files()
+    source_files["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
+    source_files["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_api"):
+        fx.seal(source_files=source_files)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+    bundle_file = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_file.exists()
+    with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_api"):
+        art.verify_bundle(bundle_file)
+
+
+def test_hatch_wheel_packages_in_pyproject_toml(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path / "restricted")
+    source_files = fx.source_files()
+    source_files["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n\n'
+        b'[tool.hatch.build.targets.wheel]\npackages = ["src/wuwaterm"]\n'
+    )
+    source_files["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
+    source_files["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    verified = fx.seal(source_files=source_files)
+    assert verified.bundle["product"] == "wuwaterm-api"
+
+    fx2 = Fixture(tmp_path / "both")
+    source_files2 = fx2.source_files()
+    source_files2["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n\n'
+        b'[tool.hatch.build.targets.wheel]\npackages = ["src/wuwaterm", "src/wuwaterm_api"]\n'
+    )
+    source_files2["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
+    source_files2["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_api"):
+        fx2.seal(source_files=source_files2)
+
+    fx3 = Fixture(tmp_path / "outside")
+    source_files3 = fx3.source_files()
+    source_files3["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n\n'
+        b'[tool.hatch.build.targets.wheel]\npackages = ["outside/pkg"]\n'
+    )
+    with pytest.raises(art.ArtifactError, match="wheel package in pyproject.toml is outside the source root"):
+        fx3.seal(source_files=source_files3)
+
+
 # ---------------------------------------------------------------- acquisition, cancellation, recovery
 
 def test_acquire_registers_exact_graph_and_verifies_receipt(fx: Fixture) -> None:
