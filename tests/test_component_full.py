@@ -1150,8 +1150,10 @@ def test_full_request_requires_one_artifact_per_selected_component() -> None:
             full._prepare_request(bad)
 
 
+@pytest.mark.parametrize("status", ["applied", "planned"])
 def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, full_journal: dict,
-                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+                                                                monkeypatch: pytest.MonkeyPatch,
+                                                                status: str) -> None:
     """A rollback compares the file a link names and never re-points the entry."""
     state_dir = tmp_path / "state"
     (state_dir / "refs").mkdir(parents=True)
@@ -1161,8 +1163,13 @@ def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, 
     entry = state_dir / "channel_replies.json"
     entry.symlink_to("/app/state/refs/replies.json")
     recipe = {"mounts": [{"host": str(state_dir), "container": "/app/state", "read_only": False}]}
+    # component_full imports its siblings through sys.path, so the top-level
+    # module objects are the ones the verifier calls.
+    import component_state as plain_state  # noqa: PLC0415
+    import component_transaction as plain_transaction  # noqa: PLC0415
+
     journal = _schema5_journal(full_journal, phase="rollback-stop-readers")
-    journal["migrations"] = {"status": "planned", "items": [
+    journal["migrations"] = {"status": status, "items": [
         _v5_item("chat-settings", "validate-existing", old_target_path=str(settings),
                  new_target_path=str(settings), old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
                  compatibility=_v5_compatibility()),
@@ -1178,11 +1185,6 @@ def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, 
         calls.append((host_path, state_kind))
         return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64, "writer_can_replace": True}
 
-    # component_full imports its siblings through sys.path, so the top-level
-    # module objects are the ones the verifier calls.
-    import component_state as plain_state  # noqa: PLC0415
-    import component_transaction as plain_transaction  # noqa: PLC0415
-
     monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
     monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
     monkeypatch.setattr(full, "_write_journal", lambda *args, **kwargs: None)
@@ -1190,18 +1192,264 @@ def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, 
     monkeypatch.setattr(plain_state, "canonical", canonical)
     before = (entry.lstat().st_ino, os.readlink(entry), entry.lstat().st_mtime_ns)
     full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
-    # Both native readers are compared on the settings referent; the retained
-    # reply link is skipped instead of being read or re-pointed.
-    assert calls == [(str(settings), "chat-settings"), (str(settings), "chat-settings")]
+    # Both native readers parse the file the reply link names, so the entry is
+    # handed to them exactly as planned and the rollback never re-points it.
+    assert calls == [(str(settings), "chat-settings"), (str(settings), "chat-settings"),
+                     (str(entry), "channel-replies"), (str(entry), "channel-replies")]
     assert (entry.lstat().st_ino, os.readlink(entry), entry.lstat().st_mtime_ns) == before
-    assert journal["migrations"]["items"][0]["rollback_compatibility"] == {
-        "raw_sha256": "a" * 64, "old_canonical_sha256": "a" * 64, "new_canonical_sha256": "a" * 64,
-        "old_writeable": True, "clock": journal["migrations"]["items"][0]["rollback_compatibility"]["clock"]}
-    assert journal["migrations"]["items"][1]["rollback_compatibility"] is None
+    assert journal["migrations"]["status"] == "restored"
+    for item in journal["migrations"]["items"]:
+        evidence = item["rollback_compatibility"]
+        assert {key: value for key, value in evidence.items() if key != "clock"} == {
+            "raw_sha256": "a" * 64, "old_canonical_sha256": "a" * 64, "new_canonical_sha256": "a" * 64,
+            "old_writeable": True}
+        assert type(evidence["clock"]) is int
+
+    # A settings target that became a symlink is a shape the cutover never planned.
+    settings.unlink()
+    settings.symlink_to("/app/state/refs/other.json")
+    with pytest.raises(full.FullError, match="settings target is a symlink"):
+        full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+
     # A progressed target that disappeared is refused.
-    (state_dir / "refs" / "settings.json").unlink()
+    settings.unlink()
     with pytest.raises(full.FullError, match="missing"):
         full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+
+
+def test_schema5_full_retained_reply_symlink_resolves_and_progresses_end_to_end(
+        tmp_path: Path, full_journal: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A schema-5 FULL journal with a retained reply symlink resolves through to the referent.
+
+    ``state._state_probe_paths`` must resolve ``input_path`` to the referent
+    regular file (``/app/state/refs/replies.json``) while leaving the writer as
+    the symlink entry (``/app/state/channel_replies.json``).
+    ``_snapshot_state_v5`` -> ``_migrate_state_v5`` -> ``_verify_progressed_state``
+    all succeed end-to-end on the retained link without re-pointing or deleting it.
+    """
+    import component_state as plain_state  # noqa: PLC0415
+    import component_transaction as plain_transaction  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    (state_dir / "refs").mkdir(parents=True)
+    settings = state_dir / "refs" / "settings.json"
+    settings.write_bytes(b'{"allowed":[1]}')
+    replies = state_dir / "channel_replies.json"
+    referent = state_dir / "refs" / "replies.json"
+    referent.write_bytes(b'{"channel":"c"}\n')
+    replies.symlink_to("/app/state/refs/replies.json")
+
+    journal = _schema5_journal(full_journal, phase="state-snapshot")
+    telegram = journal["before"]["topology"]["telegram"]
+    recipe = {"mounts": [{"host": str(state_dir), "container": "/app/state", "read_only": False}],
+              "image_id": telegram["image"]["id"], "working_dir": "/app"}
+
+    journal["migrations"] = {"status": "planned", "items": [
+        _v5_item("chat-settings", "validate-existing", old_target_path=str(settings),
+                 new_target_path=str(settings)),
+        _v5_item("channel-replies", "validate-existing", old_target_path=str(replies),
+                 new_target_path=str(replies)),
+    ]}
+
+    # Direct check 1: _state_probe_paths resolves input_path to the referent, not the symlink
+    read_path, writer_path, _ = plain_state._state_probe_paths(journal, recipe, str(replies))
+    assert read_path == "/app/state/refs/replies.json"
+    assert writer_path == "/app/state/channel_replies.json"
+
+    # Direct check 2: end-to-end execution of snapshot -> migrate -> verify_progressed
+    plans = tuple({"kinds": {
+        item["kind"]: {
+            "mapped_target": item["new_target_path"],
+            "effective_path": item["new_effective_path"],
+            "mapped_legacy": item["new_legacy_path"],
+            "migration": item["action"],
+        } for item in journal["migrations"]["items"]
+    }} for _ in range(2))
+
+    calls: list[dict] = []
+    preimage_data = {"present": True, "sha256": "a" * 64,
+                     "stat": {"device": 1, "inode": 2, "size": 1, "mtime_ns": 3, "ctime_ns": 4}}
+
+    def probe(root_path: Path, journal_val: dict, **kwargs) -> dict:
+        calls.append(kwargs)
+        if kwargs["kind"] == "state-preimage":
+            return preimage_data
+        return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64, "writer_can_replace": True}
+
+    writes: list[dict] = []
+
+    def write(root_path: Path, value: dict) -> None:
+        writes.append(full.validate_journal(copy.deepcopy(value)))
+
+    monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
+    monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
+    monkeypatch.setattr(full, "_write_journal", write)
+    monkeypatch.setattr(full, "_all_readers_stopped", lambda *args, **kwargs: None)
+    monkeypatch.setattr(full, "classify_database", lambda *args, **kwargs: ("old", None))
+    monkeypatch.setattr(full, "_verify_backup", lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    monkeypatch.setattr(plain_transaction, "verify_artifact_component", lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(plain_state, "_journal_snapshot", lambda *args: (journal, telegram))
+    monkeypatch.setattr(plain_state, "_image", lambda *args: {"Config": {"User": ""}})
+    monkeypatch.setattr(plain_state, "_effective_user", lambda *args: "0:0")
+    monkeypatch.setattr(plain_state, "_completed_plan_paths", lambda *args: {str(settings), str(replies)})
+    monkeypatch.setattr(plain_state.manifest, "read_recipe_snapshot", lambda *args: recipe)
+    monkeypatch.setattr(plain_state, "_execute", probe)
+
+    before_stat = (replies.lstat().st_ino, os.readlink(replies), replies.lstat().st_mtime_ns)
+
+    # 1. Snapshot
+    full._snapshot_state_v5(tmp_path, journal, compose_path=tmp_path / "compose")
+    assert all(item["compatibility"] is not None for item in journal["migrations"]["items"])
+    assert journal["migrations"]["status"] == "planned"
+
+    # 2. Migrate
+    full._migrate_state_v5(tmp_path, journal, compose_path=tmp_path / "compose")
+    assert journal["migrations"]["status"] == "applied"
+
+    # 3. Rollback / verify progressed state
+    journal["phase"] = "rollback-stop-readers"
+    full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+    assert journal["migrations"]["status"] == "restored"
+    assert all(item["rollback_compatibility"] is not None for item in journal["migrations"]["items"])
+
+    # Retained symlink on host was never replaced, re-pointed, or deleted
+    assert (replies.lstat().st_ino, os.readlink(replies), replies.lstat().st_mtime_ns) == before_stat
+
+    reply_calls = [c for c in calls if c.get("state_kind") == "channel-replies" or
+                   c.get("input_path") == "/app/state/refs/replies.json"]
+    assert len(reply_calls) > 0
+    assert all(c["input_path"] == "/app/state/refs/replies.json" for c in reply_calls)
+    canonical_reply_calls = [c for c in reply_calls if c["kind"] == "state-canonical"]
+    assert all(c["canonical_writer"] == "/app/state/channel_replies.json" for c in canonical_reply_calls)
+
+
+def _schema5_rollback_context(tmp_path: Path, full_journal: dict, monkeypatch: pytest.MonkeyPatch,
+                              status: str, *, link_replies: bool = False) -> tuple[dict, list[dict]]:
+    """Bind a stopped schema-5 rollback to real leaves and a validating writer.
+
+    ``_write_journal`` is replaced only where it would admit a journal under
+    FD9; the record itself still goes through ``validate_journal``, so any
+    comparison persisted under a status that forbids it fails here.
+    """
+    state_dir = tmp_path / "state"
+    (state_dir / "refs").mkdir(parents=True)
+    settings = state_dir / "refs" / "settings.json"
+    settings.write_bytes(b'{"allowed":[1]}')
+    replies = state_dir / "channel_replies.json"
+    (state_dir / "refs" / "replies.json").write_bytes(b'{"channel":"c"}\n')
+    if link_replies:
+        # A schema-5 reply entry the product never replaced stays a link, and
+        # its preimage is still the referent's bytes both native readers parse.
+        replies.symlink_to("/app/state/refs/replies.json")
+    else:
+        replies.write_bytes(b'{"channel":"c"}\n')
+    recipe = {"mounts": [{"host": str(state_dir), "container": "/app/state", "read_only": False}]}
+    journal = _schema5_journal(full_journal, phase="rollback-copyback")
+    journal["migrations"] = {"status": status, "items": [
+        _v5_item("chat-settings", "validate-existing", old_target_path=str(settings), new_target_path=str(settings),
+                 old_preimage=_v5_preimage(), new_preimage=_v5_preimage(), compatibility=_v5_compatibility()),
+        _v5_item("channel-replies", "validate-existing", old_target_path=str(replies), new_target_path=str(replies),
+                 old_preimage=_v5_preimage(), new_preimage=_v5_preimage(),
+                 compatibility=_v5_compatibility())]}
+    plans = tuple({"kinds": {item["kind"]: {"mapped_target": item["new_target_path"], "mapped_legacy": None,
+                                            "migration": item["action"]}
+                            for item in journal["migrations"]["items"]}} for _ in range(2))
+
+    def canonical(root_path: Path, *, host_path: str, state_kind: str, **kwargs: object) -> dict:
+        # A retained reply entry is still a link on the host; only the container
+        # namespace resolves the referent it names.
+        assert Path(host_path).is_file() or Path(host_path).is_symlink()
+        return {"raw_sha256": "a" * 64, "canonical_sha256": "a" * 64, "writer_can_replace": True}
+
+    # component_full imports its siblings through sys.path, so the top-level
+    # module objects are the ones the verifier calls.
+    import component_state as plain_state  # noqa: PLC0415
+    import component_transaction as plain_transaction  # noqa: PLC0415
+
+    writes: list[dict] = []
+
+    def write(root_path: Path, value: dict) -> None:
+        writes.append(full.validate_journal(copy.deepcopy(value)))
+
+    monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
+    monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
+    monkeypatch.setattr(full, "_write_journal", write)
+    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    monkeypatch.setattr(plain_state, "canonical", canonical)
+    return journal, writes
+
+
+def _v5_evidence() -> dict:
+    return {"raw_sha256": "a" * 64, "old_canonical_sha256": "a" * 64, "new_canonical_sha256": "a" * 64,
+            "old_writeable": True}
+
+
+@pytest.mark.parametrize("link_replies", [False, True])
+@pytest.mark.parametrize("status", ["applied", "planned"])
+def test_schema5_rollback_persists_evidence_only_with_its_status(
+        tmp_path: Path, full_journal: dict, monkeypatch: pytest.MonkeyPatch, status: str,
+        link_replies: bool) -> None:
+    """An applied or planned schema-5 record reconciles into a valid restored one.
+
+    ``validate_journal`` refuses a rollback comparison while the record still
+    says the state migration was applied, and the transition map has no way
+    back from ``applied`` to ``planned``. The comparison therefore has to reach
+    the journal in the same write as the ``restored`` status that permits it.
+    """
+    journal, writes = _schema5_rollback_context(tmp_path, full_journal, monkeypatch, status,
+                                                link_replies=link_replies)
+    replies = Path(journal["migrations"]["items"][1]["new_target_path"])
+    before = (replies.lstat().st_ino, os.readlink(replies), replies.lstat().st_mtime_ns) if link_replies else None
+    full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+    assert journal["migrations"]["status"] == "restored"
+    for item in journal["migrations"]["items"]:
+        evidence = item["rollback_compatibility"]
+        assert {key: value for key, value in evidence.items() if key != "clock"} == _v5_evidence()
+        assert type(evidence["clock"]) is int
+    if link_replies:
+        # The retained reply link is compared through its referent, not re-pointed.
+        assert (replies.lstat().st_ino, os.readlink(replies), replies.lstat().st_mtime_ns) == before
+    # Every write this rollback makes is one its own validator accepts, and the
+    # final one carries the transition that makes the comparison legal.
+    assert writes and writes[-1]["migrations"]["status"] == "restored"
+    assert all(item["rollback_compatibility"] is not None for item in writes[-1]["migrations"]["items"])
+    for entry in writes:
+        compared = any(item["rollback_compatibility"] is not None for item in entry["migrations"]["items"])
+        assert not compared or entry["migrations"]["status"] in ("planned", "restored")
+    if status == "applied":
+        # Nothing may be journaled while the record forbids a comparison.
+        assert len(writes) == 1
+    else:
+        # Each comparison is durable as it is made, and the status follows it.
+        assert [entry["migrations"]["status"] for entry in writes] == ["planned", "planned", "restored"]
+        assert writes[0]["migrations"]["items"][1]["rollback_compatibility"] is None
+
+
+def test_schema5_applied_rollback_refuses_without_a_comparison_for_every_kind(
+        tmp_path: Path, full_journal: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An applied record without evidence for every progressed kind refuses, never writes."""
+    journal, writes = _schema5_rollback_context(tmp_path, full_journal, monkeypatch, "applied")
+    monkeypatch.setattr(full, "_v5_rollback_evidence", lambda item: item["kind"] == "channel-replies")
+    with pytest.raises(full.FullError, match="every retained state kind"):
+        full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+    assert writes == []
+
+
+def test_schema5_rollback_evidence_accepts_a_stopped_absent_leaf() -> None:
+    """An absent stopped leaf carries no bytes for either native reader to accept."""
+    assert full._v5_rollback_evidence(
+        _v5_item("chat-settings", "validate-existing", new_preimage=_v5_preimage(None)))
+    # A migration that found no state file at all is reconciled the same way.
+    assert full._v5_rollback_evidence(_v5_item("chat-settings", "none", new_preimage=_v5_preimage(None)))
+    assert full._v5_rollback_evidence(_v5_item("chat-settings", rollback_compatibility=_v5_compatibility()))
+    assert not full._v5_rollback_evidence(_v5_item("chat-settings", "validate-existing"))
+    assert not full._v5_rollback_evidence(_v5_item("chat-settings", "validate-existing",
+                                                   new_preimage=_v5_preimage()))
+    assert not full._v5_rollback_evidence(_v5_item("channel-replies", "validate-existing",
+                                                  new_preimage=_v5_preimage()))
 
 
 # ------------------------------------- protocol-2 FULL route and refusal cleanup

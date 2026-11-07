@@ -227,13 +227,15 @@ def _compatibility_v5(value: Any, where: str) -> dict[str, Any]:
 def _v5_rollback_evidence(item: dict[str, Any]) -> bool:
     """A rollback needs native-reader evidence unless nothing was progressed.
 
-    A native-pending copy that never happened leaves an absent target, so there
-    are no bytes for the old reader to accept and nothing to keep.
+    A stopped leaf the snapshot recorded as absent carries no bytes for either
+    reader to accept, so a target that is still absent is already reconciled.
+    Every other kept state needs the comparison ``_verify_progressed_state``
+    records, including a retained reply link, which both native readers parse
+    through to the file it names.
     """
     if item["rollback_compatibility"] is not None:
         return True
-    return (item["action"] == "copy-if-absent" and item["new_preimage"] is not None
-            and item["new_preimage"]["present"] is False)
+    return item["new_preimage"] is not None and item["new_preimage"]["present"] is False
 
 
 def _migrations_v5(value: Any, *, before: dict[str, Any], target: dict[str, Any]) -> None:
@@ -2324,9 +2326,14 @@ def _verify_progressed_state(root: Path, journal: dict[str, Any], *, compose_pat
                     _fail("recorded Telegram state is missing")
                 continue
             if leaf["link"]:
+                if item["kind"] != "channel-replies":
+                    # Schema 5 names the settings referent, so a link here is a
+                    # state shape the cutover never planned.
+                    _fail("progressed Telegram settings target is a symlink")
                 # A reply entry the product never replaced stays a link; the
-                # rollback neither recreates nor re-points it.
-                continue
+                # rollback neither recreates nor re-points it. Both native
+                # readers parse the file it names, so the retained referent is
+                # compared through the same state probe as any other kept file.
         elif item["copyback"] is not None and item["copyback"]["phase"] == "cleaned":
             continue
         elif item["old_target_path"] != item["new_target_path"]:
@@ -2358,14 +2365,28 @@ def _verify_progressed_state(root: Path, journal: dict[str, Any], *, compose_pat
         if prior is not None and prior != evidence:
             _fail("progressed Telegram state changed after recorded compatibility")
         item["rollback_compatibility"] = evidence
-        _write_journal(root, journal)
+        if not (schema5 and journal["migrations"]["status"] == "applied"):
+            # Schema 5 refuses a recorded comparison while the state migration
+            # still claims to be applied, and the transition map has no way
+            # back from applied to planned. That comparison is journaled
+            # together with the restored status below instead.
+            _write_journal(root, journal)
         _guard_readers(root, journal, compose_path=compose_path,
                        allowed_database_states={"old", "new", "restored", "absent"})
-    if schema5 and all(_v5_rollback_evidence(item) for item in journal["migrations"]["items"]):
-        # The bytes stay where the product wrote them; only the native reader
-        # evidence above is recorded, and no state is restored or deleted.
-        journal["migrations"]["status"] = "restored"
-        _write_journal(root, journal)
+    if schema5 and journal["migrations"]["items"]:
+        if all(_v5_rollback_evidence(item) for item in journal["migrations"]["items"]):
+            # The bytes stay where the product wrote them; only the native
+            # reader evidence above is recorded, and no state is restored or
+            # deleted. The comparison and the status that permits it become
+            # durable in one write.
+            journal["migrations"]["status"] = "restored"
+            _write_journal(root, journal)
+        elif journal["migrations"]["status"] == "applied":
+            # Applied may only stay applied, and a rolled-back record must not
+            # keep that claim, so every kind needs a comparison before this
+            # can be journaled at all. Refuse instead of writing a comparison
+            # the record cannot keep.
+            _fail("progressed rollback cannot record a comparison for every retained state kind")
 
 
 def _reconcile_forward_v4(root: Path, journal: dict[str, Any], item: dict[str, Any], *,
