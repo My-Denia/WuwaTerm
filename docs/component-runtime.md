@@ -1,10 +1,17 @@
 # Component runtime transactions
 
-This interface is under development. Inspection is available. Adoption and
-runtime and full updates refuse until their saved-source recovery has passed
-its execution gates. Both image builders and their cancellation commands refuse
-until their interrupted-build cleanup is implemented and verified. Do not
-create journals, receipts or deployment pointers by hand.
+This interface supports inspection, adoption, Protocol-2 completed-artifact
+updates, and saved-source recovery. Protocol-2 recovery and updates
+(`ARTIFACT_RECOVERY_EXECUTION_READY = True`,
+`ARTIFACT_FULL_RECOVERY_EXECUTION_READY = True`) are enabled for completed
+delivery bundles. Legacy Protocol-1 recovery (`RECOVERY_EXECUTION_READY = False`,
+`FULL_RECOVERY_EXECUTION_READY = False`), in-deployment `build`, and legacy
+builder cancellation (`cancel-build`) remain closed (`deploy/product-update.sh`
+unconditionally rejects `build` as not a deployment command and directs
+operators to `scripts/build-delivery.sh` and `scripts/component_artifact.py`).
+Interrupted Protocol-2 artifact acquisitions are cancelled or recovered via
+`python scripts/component_artifact.py cancel|recover --root "$PWD" --id <attempt-id>`.
+Do not create journals, receipts, bundles or deployment pointers by hand.
 
 The wrapper acquires the deployment lock and preserves a valid inherited FD9.
 Use the physical, absolute checkout path for `--root`. Direct Python mutators
@@ -22,64 +29,132 @@ This observation does not establish env-file provenance or service health.
 If a runtime journal is present, inspection reports the saved launcher's argv
 as recorded, unverified metadata. That launcher acquires or reuses FD9 itself.
 
-When the execution gates are enabled, the normal operations are:
+## Completed-artifact deployment workflow
+
+The executable deployment workflow operates on sealed delivery bundles built
+outside the deployment lock:
+
+### 1. Build a sealed delivery bundle
+
+Delivery bundles are built outside the deployment lock without holding or
+inheriting FD9:
 
 ```sh
-deploy/product-update.sh --root "$PWD" build api
-deploy/product-update.sh --root "$PWD" build telegram \
-  --telegram-repo /path/to/telegram --telegram-commit <full-commit> \
-  --core-wheel /path/to/core.whl --core-artifact /path/to/core-artifact \
-  --dependencies /path/to/dependency-wheelhouse \
-  --build-tool-wheelhouse /path/to/build-tool-wheelhouse
+# Build a sealed Core/API delivery bundle
+scripts/build-delivery.sh --product api --source /path/to/wuwaterm \
+  --out /path/to/delivery-dir [--commit <rev>] [--tag <name>]
 
+# Or build a Telegram delivery bundle in WuwaTerm-Telegram
+python scripts/build_delivery.py build ...
+```
+
+### 2. Acquire and verify the bundle into the deployment root
+
+Acquisition verifies the bundle, loads the image into Docker, and registers an
+immutable acquisition receipt under
+`.deployments/artifacts/acquisitions/<acquisition-id>.json`. This tool takes its
+own artifact lock and refuses an inherited FD9:
+
+```sh
+# Acquire and verify an API bundle
+python scripts/component_artifact.py acquire --bundle /path/to/bundle.json --root "$PWD"
+
+# Acquire a Telegram bundle with required dependency wheels
+python scripts/component_artifact.py acquire --bundle /path/to/bundle.json --root "$PWD" \
+  --wheel-dir /path/to/wheels
+
+# List acquired attempts or manage interrupted acquisitions
+python scripts/component_artifact.py list --root "$PWD"
+python scripts/component_artifact.py cancel --root "$PWD" --id <attempt-id>
+python scripts/component_artifact.py recover --root "$PWD" --id <attempt-id>
+```
+
+### 3. Adopt existing services
+
+Adoption observes the installed Compose services and records their effective
+configuration as Schema 4 metadata without starting, stopping or replacing them:
+
+```sh
 deploy/product-update.sh --root "$PWD" adopt --project <compose-project> \
-  --compose-executable /path/to/docker-compose \
-  --api-receipt <source-receipt-sha256> --telegram-receipt <wheel-receipt-sha256>
+  --compose-executable /path/to/docker-compose
+```
 
+The optional `--expected-sha <full-commit>` rejects an unexpected operations
+commit. Adoption may run an isolated, network-disabled legacy image probe to
+identify the installed Core version. The result reports polling health as
+unconfirmed.
+
+### 4. Run runtime updates or full updates
+
+Pass the path to a registered acquisition receipt under
+`.deployments/artifacts/acquisitions/<acquisition-id>.json` to `--api-artifact`
+and `--telegram-artifact` for each selected component (a bare acquisition ID is
+rejected by `artifact_input`):
+
+```sh
+# Update the API component image
 deploy/product-update.sh --root "$PWD" runtime-update --components api \
-  --api-receipt <source-receipt-sha256> --compose-executable /path/to/docker-compose
-deploy/product-update.sh --root "$PWD" runtime-update --components telegram \
-  --telegram-receipt <wheel-receipt-sha256> --compose-executable /path/to/docker-compose
-deploy/product-update.sh --root "$PWD" runtime-update --components both \
-  --api-receipt <source-receipt-sha256> --telegram-receipt <wheel-receipt-sha256> \
+  --api-artifact .deployments/artifacts/acquisitions/<acquisition-id>.json \
   --compose-executable /path/to/docker-compose
 
+# Update the Telegram component image
+deploy/product-update.sh --root "$PWD" runtime-update --components telegram \
+  --telegram-artifact .deployments/artifacts/acquisitions/<acquisition-id>.json \
+  --compose-executable /path/to/docker-compose
+
+# Update both components (update is an alias for runtime-update)
+deploy/product-update.sh --root "$PWD" update --components both \
+  --api-artifact .deployments/artifacts/acquisitions/<api-acquisition-id>.json \
+  --telegram-artifact .deployments/artifacts/acquisitions/<telegram-acquisition-id>.json \
+  --compose-executable /path/to/docker-compose
+
+# Full database update without changing component images
 deploy/product-update.sh --root "$PWD" full-update --candidate-db /path/to/candidate.db \
   --components none --compose-executable /path/to/docker-compose
 
+# Full database update with component image updates
+deploy/product-update.sh --root "$PWD" full-update --candidate-db /path/to/candidate.db \
+  --components api \
+  --api-artifact .deployments/artifacts/acquisitions/<api-acquisition-id>.json \
+  --compose-executable /path/to/docker-compose
+```
+
+### 5. Recovery
+
+If a transaction or probe is interrupted, run the matching recovery command:
+
+```sh
 deploy/product-update.sh --root "$PWD" recover --transaction-id <transaction-id> \
   --compose-executable /path/to/docker-compose
 deploy/product-update.sh --root "$PWD" recover --kind full --transaction-id <transaction-id> \
   --compose-executable /path/to/docker-compose
 deploy/product-update.sh --root "$PWD" recover-probe --probe-id <probe-id> \
   --compose-executable /path/to/docker-compose
-deploy/product-update.sh --root "$PWD" cancel-build --kind source --build-id <build-id>
-deploy/product-update.sh --root "$PWD" cancel-build --kind wheel --build-id <build-id>
 ```
 
-The optional `--expected-sha <full-commit>` rejects an unexpected operations
-commit. The CLI derives the operations tree itself. Telegram builds also
-accept `--core-source-repo` and `--core-checksums` when needed by the selected
-Core artifact. Receipts belong to the deployment root; image labels and
-caller-supplied JSON are not receipts. Supply exactly the receipts for the
-selected installed components.
+## Preserved-state cutover and metadata schemas
 
-Adoption observes the installed Compose services and records their effective
-configuration without starting or replacing them. It may run an isolated,
-network-disabled legacy image probe to identify the installed Core version.
-The result reports polling health as unconfirmed. Runtime updates preserve the
-database and current component running states. API updates only substitute the
-image; they do not migrate API configuration. Full database promotion and
-state-file relocation require a separate full update. A full update validates
-the candidate database with the existing complete database checks before it
-stops readers or promotes the file. `--components none` keeps the installed
-images; `api`, `telegram`, or `both` also require the corresponding receipts.
-API recipe changes beyond the image are not supported by either update.
-Schema 4 metadata adoption can record a Telegram state path whose final entry
-is an existing bounded, singly linked symlink, provided its parent and writable
-directory bind pass entry validation. Adoption does not resolve or change the
-link. A full update must independently validate the target and writer before
-changing state; ordinary runtime updates still refuse these links.
+Runtime updates preserve the database and current component running states. API
+updates only substitute the image; they do not migrate API configuration. Schema
+5 translates the retained recipe in place and preserves existing state bindings
+and leaf symlinks without cross-path state relocation, while Schema 4 / Protocol
+1 records remain readable for inspection.
+
+Schema 4 metadata adoption records installed Compose service configurations and
+admits a Telegram state path whose final entry is an existing bounded, singly
+linked symlink, provided its parent and writable directory bind pass entry
+validation. Adoption does not resolve or change the link.
+
+Protocol-2 Schema 5 updates translate the retained recipe in place. They admit
+native leaf forms directly through the image without staging copy-back or
+cross-path state relocations: a settings entry may be a link to the file the
+product rewrites, and a reply entry may be the link the product replaces in
+place. A full update validates the candidate database with the existing
+complete database checks before it stops readers or promotes the file.
+`--components none` keeps the installed images; `api`, `telegram`, or `both`
+require the corresponding acquisition receipts. API recipe changes beyond the
+image are not supported by either update.
+
 To build a candidate from existing local input without refreshing upstream data:
 
 ```sh
@@ -90,41 +165,22 @@ python -m wuwaterm.cli build-db --data-dir /path/to/existing-input \
 Pass that candidate to `full-update`; preparation copies and verifies it before
 the running database is changed.
 
-An independent Telegram image replacing a legacy combined service needs an
-explicit target Compose recipe. For example, after replacing the placeholder
-host paths with the existing database, state directory and env file, use a file
-such as:
+When an independent `wuwaterm-telegram` artifact replaces an adopted legacy
+combined service (`/entrypoint.sh` + `bot`), `translate_preserved_recipe`
+automatically translates the retained recipe in place (`entrypoint: ["wuwaterm-telegram"]`,
+`command: ["--db", <effective-db-path>]`, `WUWATERM_POLL_HEALTH=1`, and a
+`tmpfs` mount at `/run/wuwaterm-telegram` with
+`rw,noexec,nosuid,nodev,size=1048576,mode=0700,uid=<uid>,gid=<gid>`) while
+keeping the existing working directory, numeric `uid:gid`, mounts, env files,
+and environment overrides unchanged.
 
-```yaml
-services:
-  telegram:
-    image: placeholder
-    container_name: wuwaterm-telegram
-    network_mode: host
-    restart: unless-stopped
-    entrypoint: [wuwaterm-telegram]
-    command: [--db, /app/data/terms.db]
-    env_file: [/existing/absolute/telegram.env]
-    environment:
-      WUWATERM_DB_PATH: /app/data/terms.db
-      WUWATERM_STATE_DIR: /app/state
-      WUWATERM_POLL_HEALTH: "1"
-    volumes:
-      - /existing/absolute/data:/app/data:ro
-      - /existing/absolute/state:/app/state:rw
-    tmpfs:
-      - /run/wuwaterm-telegram:rw,noexec,nosuid,nodev,mode=0700
-```
-
-Pass this file with `--telegram-compose-file /absolute/path/telegram.yml`,
-`--telegram-project-directory /absolute/path`, `--telegram-project <project>`
-and `--telegram-service telegram`. Add `--telegram-interpolation-env-file`
-for each required Compose interpolation file. The receipt supplies the actual
-target image. Runtime updates require the same effective database and state
-bindings as the adopted service. A full update can perform an admitted state
-relocation when the target image's native migration plan identifies the old
-writer as its source. The renderer refuses unsupported settings and environment
-values that cannot be reproduced from retained file references.
+No `--telegram-compose-file` flag is needed for cutover or subsequent updates;
+if a caller passes `--telegram-compose-file`, `refuse_target_recipe_change`
+rejects any recipe that differs from the translated retained recipe. The
+acquired artifact receipt supplies the actual target image and verified
+metadata. Runtime updates require the same effective database and state
+bindings as the adopted service. The renderer refuses unsupported settings and
+environment values that cannot be reproduced from retained file references.
 
 Preparation preserves the full clean source, a separate bootstrap and the
 verified Compose executable under the deployment root before a journal is
