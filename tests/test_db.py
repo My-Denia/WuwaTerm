@@ -66,9 +66,9 @@ def verified_db(tmp_path):
     return path
 
 
-def _verify(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _verify(path: Path, *args: str, interpreter_flags: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "verify_db.py"), str(path), *args],
+        [sys.executable, *interpreter_flags, str(ROOT / "scripts" / "verify_db.py"), str(path), *args],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -83,10 +83,11 @@ def _copy_db(source: Path, tmp_path: Path, name: str) -> Path:
     return target
 
 
-def test_strong_verifier_accepts_complete_candidate_read_only(verified_db):
+@pytest.mark.parametrize("interpreter_flags", [(), ("-I", "-S")])
+def test_strong_verifier_accepts_complete_candidate_read_only(verified_db, interpreter_flags):
     before = hashlib.sha256(verified_db.read_bytes()).hexdigest()
 
-    result = _verify(verified_db)
+    result = _verify(verified_db, interpreter_flags=interpreter_flags)
 
     assert result.returncode == 0, result.stderr
     profile = get_source_profile("arikatsu")

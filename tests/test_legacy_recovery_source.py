@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import component_runtime
 from test_deploy_scripts import OLD_COMMIT, _make_deploy_harness
 from test_full_deploy_recovery import (
     API_ROLLBACK_REF,
@@ -715,7 +716,7 @@ os.execv("/usr/bin/git", ["git", *args])
             while True:
                 try:
                     state = Path(f"/proc/{child}/stat").read_text().split()[2]
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     break
                 if state == "Z":
                     break
@@ -736,15 +737,33 @@ def test_repeated_git_interruption_blocks_current_writer_until_legacy_recovery(t
     root, env, _payload = deployment(tmp_path, capsule, "full")
     # Install the actual current entrypoints in this isolated Git fixture. The
     # dispatcher must still restore the historical journal's original source.
-    paths = (
+    paths = tuple(dict.fromkeys((
         "deploy/vps-update.sh", "scripts/deployment_admission.py", "scripts/deployment_manifest.py",
         "scripts/runtime_update.py", "scripts/full_update.py", "scripts/component_runtime.py",
         "scripts/component_build.py", "scripts/product_manifest.py", "scripts/package_recovery_source.py",
-    )
+        *component_runtime.TOOL_PATHS,
+    )))
     for name in paths:
         destination = root / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, destination)
+    # This test isolates legacy-journal admission after the lock is released.
+    # Enable the copied current writer's legitimate recovery capability so an
+    # unrelated development gate cannot mask that refusal. The historical
+    # capsule and production defaults remain untouched.
+    recovery_path = root / "scripts/component_recovery.py"
+    recovery_text = recovery_path.read_text(encoding="utf-8")
+    disabled_recovery = "\nRECOVERY_EXECUTION_READY = False\n"
+    assert disabled_recovery in recovery_text or "\nRECOVERY_EXECUTION_READY = True\n" in recovery_text
+    recovery_path.write_text(recovery_text.replace(disabled_recovery, "\nRECOVERY_EXECUTION_READY = True\n"),
+                             encoding="utf-8")
+    runtime_path = root / "scripts/component_runtime.py"
+    runtime_text = runtime_path.read_text(encoding="utf-8")
+    entrypoint = 'if __name__ == "__main__":\n'
+    assert runtime_text.count(entrypoint) == 1
+    if "\nCAPSULE_RECOVERY_PROTOCOL = 1\n" not in runtime_text:
+        runtime_text = runtime_text.replace(entrypoint, "CAPSULE_RECOVERY_PROTOCOL = 1\n\n" + entrypoint)
+    runtime_path.write_text(runtime_text, encoding="utf-8")
     with (root / "README.md").open("a", encoding="utf-8") as stream:
         stream.write("\ncurrent admission fixture\n")
     git(root, "add", "--", *paths, "README.md")
@@ -772,7 +791,8 @@ os.execv("/usr/bin/git", ["git", *args])
         command = ('exec 9>>"$1"; shift; exec "$@"')
         return subprocess.run(
             ["sh", "-c", command, "fixture", str(lock), sys.executable, "-I", "-B",
-             str(root / "scripts/component_runtime.py"), "--root", str(root), "adopt"],
+             str(root / "scripts/component_runtime.py"), "--root", str(root), "adopt",
+             "--project", "fixture", "--compose-executable", "/bin/false"],
             cwd=root, env=env, capture_output=True, text=True, timeout=30, check=False,
         )
 
@@ -817,7 +837,7 @@ os.execv("/usr/bin/git", ["git", *args])
         while True:
             try:
                 state = Path(f"/proc/{child}/stat").read_text().split()[2]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 break
             if state == "Z":
                 break

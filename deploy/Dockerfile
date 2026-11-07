@@ -33,6 +33,12 @@ RUN apt-get update \
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# The installed-file probe must stay the last filesystem-changing step: its
+# layer may add only the report below. Acquisition rebuilds the image
+# filesystem offline and recomputes every value instead of trusting it.
+RUN python -I -B /app/scripts/install_probe.py --product core --dist wuwaterm \
+    --extra-file /entrypoint.sh --out /usr/local/share/wuwaterm/install-probe.json
+
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bot"]
 

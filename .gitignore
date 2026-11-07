@@ -15,6 +15,7 @@ state-api/
 goal-runs/
 .deployments/
 .deploy_commit
+.deploy_current
 *.db
 *.sqlite
 *.sqlite3

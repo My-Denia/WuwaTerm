@@ -1,0 +1,196 @@
+{
+  "schema": 1,
+  "observed_on": "2026-11-06",
+  "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence.",
+  "coordination": {
+    "github_project": "https://github.com/users/My-Denia/projects/1",
+    "work_tracking": "The existing Linear WuwaTerm project remains authoritative for work tracking."
+  },
+  "contracts": {
+    "api": {
+      "version": "v1",
+      "producer": "core",
+      "consumers": ["windows", "web"],
+      "reference": "docs/api/openapi.json",
+      "note": "API v1 alone does not establish review-v2 or private Web auth-status capability."
+    },
+    "review": {
+      "versions": ["review-v1", "review-v2"],
+      "default": "review-v1",
+      "windows_and_web_request": "review-v2"
+    },
+    "manuscript": {
+      "format": "wuwaterm-manuscript-v1",
+      "consumers": ["windows", "web"],
+      "note": "Interchange of saved manuscripts does not certify historical reports against the current dictionary."
+    },
+    "terms_database": {
+      "schema_version": "2",
+      "producer": "core",
+      "consumers": ["core", "telegram"],
+      "note": "Build or obtain the terms database separately; it is not included in the products."
+    },
+    "telegram_state": {
+      "chat_settings": "Unversioned JSON with public and allowed fields.",
+      "channel_replies_version": 1,
+      "note": "Follow Telegram's state and recovery instructions when moving or upgrading."
+    },
+    "api_device_store": {
+      "format": "SQLite devices table, separate from the terms database",
+      "schema_version": null,
+      "note": "The observed implementation does not declare a numbered schema; preserve the device store and its SQLite state."
+    },
+    "web_selfhost_admission": {
+      "format": "SQLite",
+      "schema_version": 1,
+      "note": "This stores aggregate admission counters, not manuscripts, and is separate from Core's databases."
+    }
+  },
+  "products": [
+    {
+      "id": "core",
+      "repository": "https://github.com/My-Denia/WuwaTerm",
+      "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
+      "main": {
+        "commit": "be6029df0a5096853e9f436fb3efcb8be7554027",
+        "tree": "b61d34d3b958b44c888e9b8ca1074d50f3dd53c6",
+        "status": "merged"
+      },
+      "source_version": "0.7.0.dev1",
+      "release": {
+        "target_version": "0.7.0",
+        "status": "not_released"
+      },
+      "candidate_wheel": {
+        "version": "0.7.0.dev1",
+        "filename": "wuwaterm-0.7.0.dev1-py3-none-any.whl",
+        "sha256": "95f9012154f5883f8414d6d32daf574e2e5d4de8f09b765a3678d0ae4e332853",
+        "checkout_commit": "9607f797258ad03c435547a5a377610e1d936530",
+        "checkout_tree": "682cb97d121463846e111e40a24e84db114bac62",
+        "workflow_run": "https://github.com/My-Denia/WuwaTerm/actions/runs/42138202733",
+        "status": "ci_artifact_not_stable_release"
+      },
+      "adoption": "unknown",
+      "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm/blob/be6029df0a5096853e9f436fb3efcb8be7554027/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/be6029df0a5096853e9f436fb3efcb8be7554027/docs/data-refresh.md"
+      ]
+    },
+    {
+      "id": "telegram",
+      "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
+      "responsibility": "Standalone Telegram bot and its installation, operation and state.",
+      "main": {
+        "commit": "6ef554f5d840cf8757b56f6592c64d0914489015",
+        "tree": "a4ea6e034361530cacefc762b27f7f7bb3ac2b33",
+        "status": "merged"
+      },
+      "source_version": "0.1.0.dev1",
+      "release": {
+        "target_version": "0.1.0",
+        "status": "not_released"
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "core_package_version": "0.7.0.dev1",
+        "core_wheel_sha256": "95f9012154f5883f8414d6d32daf574e2e5d4de8f09b765a3678d0ae4e332853",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6ef554f5d840cf8757b56f6592c64d0914489015/core-lock.json",
+        "terms_database_schema_version": "2",
+        "http_api_required": false
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6ef554f5d840cf8757b56f6592c64d0914489015/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6ef554f5d840cf8757b56f6592c64d0914489015/docs/artifact-verification.md"
+      ]
+    },
+    {
+      "id": "windows",
+      "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
+      "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
+      "main": {
+        "commit": "974160e74286f03463ab98c4e1b1ab1d45be2bfc",
+        "tree": "ff27d0efa8f7e6f571197f43c49cd038a27bf41e",
+        "status": "merged",
+        "note": "The advance after the release source adds a historical Core validation recipe."
+      },
+      "release": {
+        "version": "0.3.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0",
+        "source_commit": "cda93f01bf7803efe66ca695701cae678b320ef1",
+        "source_tree": "fe2eabbe6e31d2029de37a164653970d9f512ae3",
+        "assets": ["WuwaTerm-0.3.0-windows-x64.zip", "SHA256SUMS", "manifest.json"],
+        "zip_sha256": "b876c6f22ceecd48723e086369d0c7dafa1fa7a0f58c4ece489b4ff64dee108a",
+        "signed": false
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v1",
+        "note": "Local manuscript editing works offline; online features require a configured API and device credential."
+      },
+      "validation": "Partial native QA; owner aesthetic and full UX acceptance remain unverified.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/README.md"
+      ]
+    },
+    {
+      "id": "web",
+      "repository": "https://github.com/My-Denia/WuwaTerm-Web",
+      "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
+      "main": {
+        "commit": "0607c7e87c5263c20534013cace1a2c926d22aee",
+        "tree": "8c6cc8c8db4d92b05733f0b25526232ed05cbe46",
+        "status": "merged"
+      },
+      "source_version": "0.1.0",
+      "release": {
+        "target_version": "0.1.0",
+        "status": "not_released"
+      },
+      "candidate_source": {
+        "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
+        "tree": "73bd7d05746b0e74d1cc4152abfb2361bb218352"
+      },
+      "candidates": [
+        {
+          "base_path": "",
+          "workflow_run": "https://github.com/My-Denia/WuwaTerm-Web/actions/runs/42210869041",
+          "archive_sha256": "d540a0567e3d1203b4ae0d24c668297433977571efd0989f01f8fd2e1249aed2"
+        },
+        {
+          "base_path": "/private",
+          "workflow_run": "https://github.com/My-Denia/WuwaTerm-Web/actions/runs/42210872354",
+          "archive_sha256": "5695f1149e4fed94e886e42692277f21a2dc8e7b09a3bf61c95cc96baeb22d96"
+        }
+      ],
+      "candidate_note": "The two Actions artifacts from candidate_source are not releases; four recorded root/prefix smoke and Core replay commands exited 0. The later main adds publication without changing those archive bytes.",
+      "publication_validation": {
+        "workflow_run": "https://github.com/My-Denia/WuwaTerm-Web/actions/runs/42297334636",
+        "control_commit": "0607c7e87c5263c20534013cace1a2c926d22aee",
+        "read_validation": "passed_with_job_scoped_token",
+        "release_write": "not_executed"
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v1",
+        "selfhost_requires": "A compatible Core API with GET /v1/auth/status and an issued device credential, plus an authenticated HTTPS reverse proxy.",
+        "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/c9dde012cf88b934a70aac18c12778e8057ffc63/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/c9dde012cf88b934a70aac18c12778e8057ffc63/docs/self-hosting.md"
+      ]
+    }
+  ],
+  "ci_pins": {
+    "core_tests_web": "2511764e65c98bc9396c48a48a684b25105a5168",
+    "core_tests_windows": "cda93f01bf7803efe66ca695701cae678b320ef1",
+    "web_tests_core": "3c51ca340f0e5c1dc0c0cf4e32ff6703af9ba841",
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs."
+  }
+}
