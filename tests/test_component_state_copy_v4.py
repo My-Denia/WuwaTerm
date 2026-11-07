@@ -15,7 +15,7 @@ from scripts import component_state_endpoint as endpoint
 
 
 TXN = "20261107T000000Z-" + "a" * 32
-SECRET = b'{"public":{"101":true},"allowed":[]}'
+SETTINGS_BYTES = b'{"public":{"101":true},"allowed":[]}'
 REPLIES = b'{"version":1,"entries":[]}'
 
 
@@ -64,7 +64,7 @@ atexit.register(lambda: sys.stderr.write('events:'+','.join(events)+'\n'))
 def accepted(request: dict, *, trace: bool = False) -> tuple[dict, str]:
     proc = execute(request, trace=trace)
     assert proc.returncode == 0, proc.stderr
-    assert SECRET.decode() not in proc.stdout + proc.stderr
+    assert SETTINGS_BYTES.decode() not in proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     assert set(result) == {"schema_version", "action", "binding_sha256", "reconciled", "endpoint"}
     assert result["schema_version"] == 1 and result["binding_sha256"] == request["binding_sha256"]
@@ -86,7 +86,7 @@ def setup_copy(tmp_path: Path, *, kind: str = "chat-settings", direction: str = 
     source_root.mkdir()
     dest_root.mkdir()
     source = source_root / "source.json"
-    source.write_bytes(data if data is not None else SECRET if kind == "chat-settings" else REPLIES)
+    source.write_bytes(data if data is not None else SETTINGS_BYTES if kind == "chat-settings" else REPLIES)
     target = dest_root / "state.json"
     old_referent = dest_root / "old.json"
     if direction == "rollback":
@@ -141,11 +141,11 @@ def test_reservation_crash_partial_write_retry_publish_and_cleanup(tmp_path: Pat
     req.update(action="write", phase="writing", reservation=reservation["endpoint"])
     result, events = accepted(req, trace=True)
     assert events == "events:truncate,file,file,dir\n"
-    assert stage.stat().st_ino == inode and stage.read_bytes() == SECRET
+    assert stage.stat().st_ino == inode and stage.read_bytes() == SETTINGS_BYTES
     publish_request(req, result["endpoint"])
     published, _ = accepted(req)
     assert published["reconciled"] is False
-    assert target.read_bytes() == SECRET and not stage.exists()
+    assert target.read_bytes() == SETTINGS_BYTES and not stage.exists()
     assert target.stat().st_ino == inode
     req.update(action="cleanup", phase="intent", reservation=None, staged=None,
                cleanup={"created_entry_claim_sha256": req["binding_sha256"],
@@ -229,16 +229,16 @@ def test_discard_refuses_unknown_inode_with_identical_bytes(tmp_path: Path, copy
     else:
         reserved, _ = accepted(req)
         reservation, staged = reserved["endpoint"], None
-        stage.write_bytes(SECRET)
+        stage.write_bytes(SETTINGS_BYTES)
     discard_request(req, reservation, copy_phase, staged)
     held = stage.open("rb")
     try:
         stage.unlink()
-        stage.write_bytes(SECRET)
+        stage.write_bytes(SETTINGS_BYTES)
         stage.chmod(0o600)
         replacement = stage.stat().st_ino
         refused(req)
-        assert stage.stat().st_ino == replacement and stage.read_bytes() == SECRET and not target.exists()
+        assert stage.stat().st_ino == replacement and stage.read_bytes() == SETTINGS_BYTES and not target.exists()
     finally:
         held.close()
 
@@ -258,15 +258,15 @@ def test_discard_refuses_changed_destination_and_published_result(tmp_path: Path
     reservation, staged = reserve_and_write(req)
     discarded = copy.deepcopy(req)
     discard_request(discarded, reservation, "publish-intent", staged)
-    target.write_bytes(SECRET)
+    target.write_bytes(SETTINGS_BYTES)
     target.chmod(0o600)
     refused(discarded)
-    assert target.read_bytes() == SECRET and stage.read_bytes() == SECRET
+    assert target.read_bytes() == SETTINGS_BYTES and stage.read_bytes() == SETTINGS_BYTES
     target.unlink()
     publish_request(req, staged)
     accepted(req)
     refused(discarded)
-    assert target.read_bytes() == SECRET and not stage.exists()
+    assert target.read_bytes() == SETTINGS_BYTES and not stage.exists()
 
 
 def test_discard_requires_exact_durable_intent_and_source(tmp_path: Path) -> None:
@@ -319,14 +319,14 @@ def test_rename_before_record_requires_recorded_stage_inode(tmp_path: Path) -> N
     publish_request(req, staged)
     stage.rename(target)
     reconciled, _ = accepted(req)
-    assert reconciled["reconciled"] is True and target.read_bytes() == SECRET
+    assert reconciled["reconciled"] is True and target.read_bytes() == SETTINGS_BYTES
     held = target.open("rb")
     try:
         target.unlink()
-        target.write_bytes(SECRET)
+        target.write_bytes(SETTINGS_BYTES)
         target.chmod(0o600)
         refused(req)
-        assert target.read_bytes() == SECRET
+        assert target.read_bytes() == SETTINGS_BYTES
     finally:
         held.close()
 
@@ -339,7 +339,7 @@ def test_rollback_preserves_settings_link_or_reply_old_referent(tmp_path: Path, 
     _, staged = reserve_and_write(req)
     publish_request(req, staged)
     result, _ = accepted(req)
-    expected = SECRET if kind == "chat-settings" else REPLIES
+    expected = SETTINGS_BYTES if kind == "chat-settings" else REPLIES
     assert target.read_bytes() == expected and not stage.exists()
     if kind == "chat-settings":
         assert target.is_symlink() and os.readlink(target) == old_link
@@ -393,11 +393,11 @@ def test_destination_appearing_before_publish_is_never_replaced(tmp_path: Path) 
     req, stage, target, _ = setup_copy(tmp_path)
     _, staged = reserve_and_write(req)
     publish_request(req, staged)
-    target.write_bytes(SECRET)
+    target.write_bytes(SETTINGS_BYTES)
     target.chmod(0o600)
     inode = target.stat().st_ino
     refused(req)
-    assert target.stat().st_ino == inode and target.read_bytes() == SECRET
+    assert target.stat().st_ino == inode and target.read_bytes() == SETTINGS_BYTES
     assert stage.exists() and stage.stat().st_ino == staged["referent"]["stat"]["inode"]
 
 
@@ -441,9 +441,9 @@ def test_same_content_source_replacement_is_not_authority(tmp_path: Path) -> Non
     held = source.open("rb")
     try:
         source.unlink()
-        source.write_bytes(SECRET)
+        source.write_bytes(SETTINGS_BYTES)
         refused(req)
-        assert source.read_bytes() == SECRET and not stage.exists() and not target.exists()
+        assert source.read_bytes() == SETTINGS_BYTES and not stage.exists() and not target.exists()
     finally:
         held.close()
 
@@ -492,7 +492,7 @@ def test_rename_reconciliation_checks_settings_link(tmp_path: Path) -> None:
         middle.unlink()
         middle.symlink_to(old_referent.name)
         refused(req)
-        assert target.read_bytes() == SECRET and stage.exists() is False
+        assert target.read_bytes() == SETTINGS_BYTES and stage.exists() is False
     finally:
         os.close(held)
 
@@ -521,15 +521,15 @@ def test_cleanup_requires_exact_old_proof_latest_entry_and_absent_stage(tmp_path
                         "old_published_endpoint": req["source_endpoint"]})
     stage.write_bytes(b"unknown")
     refused(req)
-    assert target.read_bytes() == SECRET and stage.read_bytes() == b"unknown"
+    assert target.read_bytes() == SETTINGS_BYTES and stage.read_bytes() == b"unknown"
     stage.unlink()
     source = Path(req["read_path"])
     held = source.open("rb")
     try:
         source.unlink()
-        source.write_bytes(SECRET)
+        source.write_bytes(SETTINGS_BYTES)
         refused(req)
-        assert target.read_bytes() == SECRET and source.read_bytes() == SECRET
+        assert target.read_bytes() == SETTINGS_BYTES and source.read_bytes() == SETTINGS_BYTES
     finally:
         held.close()
 
@@ -560,7 +560,7 @@ def test_source_from_recorded_read_only_parent_alias(tmp_path: Path) -> None:
     _, staged = reserve_and_write(req)
     publish_request(req, staged)
     published, _ = accepted(req)
-    assert target.read_bytes() == SECRET
+    assert target.read_bytes() == SETTINGS_BYTES
     req.update(action="cleanup", phase="intent", reservation=None, staged=None,
                cleanup={"created_entry_claim_sha256": req["binding_sha256"],
                         "post_stop_new_endpoint": published["endpoint"],
