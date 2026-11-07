@@ -42,8 +42,8 @@ FULL_RECOVERY_EXECUTION_READY = False
 # Protocol-2 (completed-artifact) capsules have their own readiness. Opening
 # protocol 2 never makes a protocol-1 capsule executable: each saved source is
 # dispatched by the protocol its own extracted module declares.
-ARTIFACT_RECOVERY_EXECUTION_READY = False
-ARTIFACT_FULL_RECOVERY_EXECUTION_READY = False
+ARTIFACT_RECOVERY_EXECUTION_READY = True
+ARTIFACT_FULL_RECOVERY_EXECUTION_READY = True
 SUPPORTED_PROTOCOLS = frozenset({1, 2})
 # Historical journals stay readable by their own validators. Schema 5 records
 # only completed-artifact updates, and the FULL5 journal is the preserved-state

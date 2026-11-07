@@ -593,6 +593,92 @@ def test_legacy_plan_reports_the_native_pending_copy_without_writing(tmp_path: P
     assert plain["kinds"]["chat-settings"]["mapped_legacy"] is None
 
 
+def test_schema5_plan_binding_rule_follows_the_plan_action() -> None:
+    """Only the product's own pending copy has to name a legacy endpoint."""
+    plain = {"effective_path": "/custom/chat_settings.json", "legacy_path": "/custom/chat_settings.json",
+             "migration": "none", "mapped_target": "/custom/chat_settings.json", "mapped_legacy": None}
+    state._plan_binding_paths(plain)
+    state._plan_binding_paths({**plain, "migration": "copy-if-absent",
+                               "mapped_legacy": "/custom/chat_settings.json"})
+    with pytest.raises(state.StateError, match="outside every bind"):
+        state._plan_binding_paths({**plain, "migration": "copy-if-absent"})
+    with pytest.raises(state.StateError, match="outside every bind"):
+        state._plan_binding_paths({**plain, "mapped_target": None})
+
+
+def _counterexample_snapshot(custom: Path) -> dict:
+    """The legacy wrapper's own recipe: one custom directory and no StateDir."""
+    return {
+        "schema_version": 1, "image_id": "sha256:" + "1" * 64, "project": "project",
+        "service": "wuwaterm-telegram", "container_name": "wuwaterm-telegram-legacy",
+        "command": ["--db", "/custom/terms.db"], "entrypoint": ["wuwaterm-telegram"],
+        "mounts": [{"host": str(custom), "container": "/custom", "read_only": False}],
+        "env_files": [], "network_mode": "none", "ports": [],
+        "restart": {"name": "no", "maximum_retry_count": 0}, "user": "0:0", "working_dir": "/app",
+        "environment_overrides": [{
+            "name": "WUWATERM_DB_PATH", "mode": "literal", "value": "/custom/terms.db"}],
+        "runtime_options": {"read_only_root": False, "privileged": False, "init": None, "pid_mode": "",
+                            "ipc_mode": "private", "cap_add": [], "cap_drop": [], "security_opt": [],
+                            "dns": [], "extra_hosts": []},
+    }
+
+
+def _counterexample_plan(custom: Path) -> dict:
+    """The container-space plan the legacy image reports for that recipe."""
+    reported = _legacy_plan(custom / "terms.db", None)
+    return {"database_path": "/custom/terms.db",
+            "kinds": {kind: {key: None if value is None else value.replace(str(custom), "/custom")
+                             for key, value in item.items()}
+                      for kind, item in reported["kinds"].items()}}
+
+
+def test_schema5_plan_accepts_no_action_without_a_legacy_binding(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counterexample 1: the old wrapper's own path needs no legacy endpoint."""
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "terms.db").write_bytes(b"database")
+    (custom / "chat_settings.json").write_bytes(b'{"public":{},"allowed":[1]}')
+    (custom / "channel_replies.json").write_bytes(b'{"channel":"c"}\n')
+    snapshot = _counterexample_snapshot(custom)
+    image, revision = snapshot["image_id"], "2" * 40
+    component = {"image": {"id": image, "revision": revision},
+                 "provenance": {"kind": "legacy-image"}, "recipe": snapshot}
+    identifier = "20261106T110000Z-" + "5" * 32
+    journal = {"schema_version": 5, "kind": "component-full", "transaction_id": identifier,
+               "database": {"old": {"binding": {"path": str(custom / "terms.db")}}},
+               "before": {"topology": {"api": None, "telegram": component}},
+               "target": {"manifest": {"components": {"api": None, "telegram": component}}}}
+    planned = _counterexample_plan(custom)
+    assert {kind: (item["migration"], item["mapped_legacy"]) for kind, item in planned["kinds"].items()} == {
+        "chat-settings": ("none", None), "channel-replies": ("none", None)}
+    monkeypatch.setattr(state, "_journal_snapshot", lambda *args: (journal, component))
+    monkeypatch.setattr(state, "_image", lambda *args: {"Config": {"User": ""}})
+    monkeypatch.setattr(state, "_effective_user", lambda *args: "0:0")
+    monkeypatch.setattr(state, "_execute", lambda *args, **kwargs: copy.deepcopy(planned))
+    observed = state.plan(tmp_path, receipt_sha256=None, snapshot=snapshot,
+                          environment={"WUWATERM_DB_PATH": "/custom/terms.db"},
+                          database_path=str(custom / "terms.db"), transaction_id=identifier)
+    # Both leaves map through the one writable bind, and the absent legacy
+    # endpoint stays absent instead of failing the whole plan.
+    assert {kind: (item["mapped_target"], item["mapped_legacy"])
+            for kind, item in observed["kinds"].items()} == {
+        kind: (str(custom / filename), None)
+        for kind, filename in (("chat-settings", "chat_settings.json"),
+                               ("channel-replies", "channel_replies.json"))}
+    assert prepare.verify_state_plan_equivalence(observed, observed) == {
+        "chat-settings": "none", "channel-replies": "none"}
+    # A plan that claims the product's own pending copy must still bind the
+    # legacy file it reads, so that refusal stays.
+    pending = copy.deepcopy(planned)
+    pending["kinds"]["chat-settings"]["migration"] = "copy-if-absent"
+    monkeypatch.setattr(state, "_execute", lambda *args, **kwargs: copy.deepcopy(pending))
+    with pytest.raises(state.StateError):
+        state.plan(tmp_path, receipt_sha256=None, snapshot=snapshot,
+                   environment={"WUWATERM_DB_PATH": "/custom/terms.db"},
+                   database_path=str(custom / "terms.db"), transaction_id=identifier)
+
+
 def test_legacy_plan_keeps_an_explicit_path_outside_the_state_dir(tmp_path: Path) -> None:
     data, state_dir, custom = tmp_path / "data", tmp_path / "state", tmp_path / "custom"
     for directory in (data, state_dir, custom):

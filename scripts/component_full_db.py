@@ -28,6 +28,15 @@ class FullDatabaseError(RuntimeError):
     """A DB preimage or owned copy could not be safely established."""
 
 
+# One owned copy is staged under this prefix and published by rename, so a
+# refused preparation can name exactly its own leftovers.
+_COPY_PREFIX = ".component-full-copy-"
+_CANDIDATES = "component-full-candidates"
+_CLAIMS = "component-full-db-claims"
+# component_full.JOURNAL_NAME, restated here so a discard never imports it.
+_FULL_JOURNAL = ".component-full-transaction.json"
+
+
 VERIFICATION = {
     "profile": "arikatsu",
     "exact_hit_sample_size": 500,
@@ -125,7 +134,7 @@ def _claim(root: Path, identifier: str, kind: str, value: dict[str, Any], *, fin
     name = f"{identifier}-{kind}.json"
     raw = manifest._encode(value)
     try:
-        with manifest._directory(root, (".deployments", "component-full-db-claims"), create=True) as directory:
+        with manifest._directory(root, (".deployments", _CLAIMS), create=True) as directory:
             exists = _exists(directory, name)
             if final_exists and not exists:
                 raise FullDatabaseError("existing database copy has no owned claim")
@@ -254,7 +263,7 @@ def _copy_owned(root: Path, identifier: str, kind: str, source: Path, source_bin
                         or _snapshot(source) != (source_binding, source_stat, source_permissions)):
                     raise FullDatabaseError("database changed while syncing its publication")
                 return current, current_stat
-            temporary = f".component-full-copy-{identifier}-{kind}-" + secrets.token_hex(16) + ".db"
+            temporary = f"{_COPY_PREFIX}{identifier}-{kind}-" + secrets.token_hex(16) + ".db"
             with manifest._directory(source.parent, (), create=False) as source_directory:
                 manifest._reject_sidecars(source_directory, source.name)
                 source_fd = os.open(source.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -318,9 +327,9 @@ def prepare_candidate(root: Path, input_path: Path, transaction_id: str) -> dict
     root, identifier = _root(root), _identifier(transaction_id)
     source = _absolute(input_path)
     binding, db_stat, source_permissions = _snapshot(source)
-    relative = f".deployments/component-full-candidates/{identifier}.db"
+    relative = f".deployments/{_CANDIDATES}/{identifier}.db"
     try:
-        with manifest._directory(root, (".deployments", "component-full-candidates"), create=True):
+        with manifest._directory(root, (".deployments", _CANDIDATES), create=True):
             pass
         destination = root / relative
         owned, owned_stat = _copy_owned(root, identifier, "candidate", source, binding, db_stat,
@@ -332,10 +341,126 @@ def prepare_candidate(root: Path, input_path: Path, transaction_id: str) -> dict
         raise FullDatabaseError("candidate database could not be prepared") from exc
 
 
+def _open_metadata(directory: int, name: str) -> int | None:
+    """Open one deployment metadata directory, reporting absence as ``None``."""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return None
+
+
+def _published_transaction(root: Path, identifier: str) -> bool:
+    """Report whether a published FULL journal already names this candidate."""
+    import component_runtime as runtime  # noqa: PLC0415
+
+    path = root / ".deployments" / _FULL_JOURNAL
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    try:
+        record = manifest._decode(runtime._read_regular(path))
+    except (runtime.JournalError, ValueError) as exc:
+        raise FullDatabaseError("published full journal cannot be inspected") from exc
+    if type(record) is not dict:
+        raise FullDatabaseError("published full journal is not an object")
+    return record.get("transaction_id") == identifier
+
+
+def _claim_record(directory: int, name: str, identifier: str, destination: str) -> dict[str, Any] | None:
+    """Read the ownership claim an interrupted preparation left behind."""
+    if not _exists(directory, name):
+        return None
+    claim = manifest._decode(manifest._read_file(directory, name))
+    if (type(claim) is not dict
+            or set(claim) != {"schema_version", "kind", "transaction_id", "source", "source_stat",
+                              "source_permissions", "destination", "destination_permissions"}
+            or type(claim["schema_version"]) is not int or claim["schema_version"] != 1
+            or claim["kind"] != "candidate" or claim["transaction_id"] != identifier
+            or claim["destination"] != destination):
+        raise FullDatabaseError("candidate ownership claim differs")
+    return claim
+
+
+def _discard_claimed_copy(directory: int, claim: dict[str, Any]) -> None:
+    """Remove the one copy its claim authorizes, while it still matches it."""
+    name = Path(claim["destination"]).name
+    if not _exists(directory, name):
+        return
+    binding, _stat, permissions = _snapshot(Path(claim["destination"]))
+    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or not _same_contents(binding, claim["source"])
+                or permissions != claim["destination_permissions"]):
+            raise FullDatabaseError("existing candidate copy differs from its claim")
+    finally:
+        os.close(fd)
+    os.unlink(name, dir_fd=directory)
+    os.fsync(directory)
+
+
+def _discard_copy_temporaries(directory: int, identifier: str) -> None:
+    """Remove only the copy temporaries named for this refused transaction."""
+    prefix, suffix = f"{_COPY_PREFIX}{identifier}-candidate-", ".db"
+    removed = False
+    for name in os.listdir(directory):
+        if not (type(name) is str and name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise FullDatabaseError("candidate copy temporary is not owned")
+        os.unlink(name, dir_fd=directory)
+        removed = True
+    if removed:
+        os.fsync(directory)
+
+
+def discard_candidate(root: Path, transaction_id: str) -> None:
+    """Remove a refused preparation's own, unreferenced candidate copy.
+
+    The ownership claim is written before the copy, so it is the only proof an
+    interrupted attempt leaves behind: a copy that still matches its claim goes,
+    together with that claim and this transaction's own copy temporaries. A copy
+    without a matching claim, or one a published journal still names, is kept
+    for inspection.
+    """
+    root, identifier = _root(root), _identifier(transaction_id)
+    try:
+        if _published_transaction(root, identifier):
+            raise FullDatabaseError("published transaction still references its candidate copy")
+        destination = str(root / ".deployments" / _CANDIDATES / f"{identifier}.db")
+        with manifest._directory(root, (".deployments",), create=False) as deployments:
+            directory = _open_metadata(deployments, _CANDIDATES)
+            claims = _open_metadata(deployments, _CLAIMS)
+            try:
+                claim_name = f"{identifier}-candidate.json"
+                claim = (None if claims is None else
+                         _claim_record(claims, claim_name, identifier, destination))
+                if directory is not None:
+                    if claim is None and _exists(directory, f"{identifier}.db"):
+                        raise FullDatabaseError("existing candidate copy has no owned claim")
+                    if claim is not None:
+                        _discard_claimed_copy(directory, claim)
+                    _discard_copy_temporaries(directory, identifier)
+                if claims is not None and claim is not None:
+                    os.unlink(claim_name, dir_fd=claims)
+                    os.fsync(claims)
+            finally:
+                for handle in (directory, claims):
+                    if handle is not None:
+                        os.close(handle)
+    except FullDatabaseError:
+        raise
+    except (manifest.ManifestError, admission.AdmissionError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise FullDatabaseError("candidate copy cannot be discarded") from exc
+
+
 def _candidate_record(root: Path, candidate: Any, identifier: str) -> tuple[Path, dict[str, Any], dict[str, int]]:
     if type(candidate) is not dict or set(candidate) != {"path", "binding", "stat", "verification"}:
         raise FullDatabaseError("candidate record is invalid")
-    relative = f".deployments/component-full-candidates/{identifier}.db"
+    relative = f".deployments/{_CANDIDATES}/{identifier}.db"
     verification = candidate["verification"]
     if (candidate["path"] != relative or type(verification) is not dict or verification != VERIFICATION
             or any(type(verification[key]) is not type(value) for key, value in VERIFICATION.items())):
@@ -351,7 +476,7 @@ def _candidate_record(root: Path, candidate: Any, identifier: str) -> tuple[Path
     if binding != candidate["binding"] or source_stat != recorded_stat:
         raise FullDatabaseError("owned candidate changed")
     try:
-        with manifest._directory(root, (".deployments", "component-full-db-claims"), create=False) as directory:
+        with manifest._directory(root, (".deployments", _CLAIMS), create=False) as directory:
             raw = manifest._read_file(directory, f"{identifier}-candidate.json")
         claim = manifest._decode(raw)
         if (type(claim) is not dict or set(claim) != {"schema_version", "kind", "transaction_id", "source",

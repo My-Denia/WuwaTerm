@@ -77,6 +77,7 @@ def invoke(root: Path, action: str, *values: object, lock: bool = True) -> subpr
         "m.prepare_backup(r,x[0],x[1],x[2]) if a=='backup' else "
         "m.prepare_stage(r,x[0],pathlib.Path(x[1]),x[2]) if a=='stage' else "
         "{'verified':m.verify_candidate(r,x[0],x[1]) is None} if a=='verify' else "
+        "m.discard_candidate(r,x[0]) if a=='discard' else "
         "m.permissions(pathlib.Path(x[0]))); print(json.dumps(v,sort_keys=True))"
     )
     command = [PYTHON, "-I", "-B", "-c", code, str(SOURCE / "scripts"), str(root), action,
@@ -479,3 +480,40 @@ def test_permissions_refuse_symlink_and_match_live(tmp_path: Path) -> None:
     link = tmp_path / "live-link"
     link.symlink_to(live)
     assert invoke(root, "permissions", str(link)).returncode != 0
+
+
+def test_refused_preparation_discards_only_its_own_unreferenced_candidate(tmp_path: Path) -> None:
+    """A refused full preparation leaves no owned copy, claim or temporary."""
+    root, live, input_path = setup_root(tmp_path)
+    other = "20261106T120000Z-" + "f" * 32
+    candidates = root / ".deployments/component-full-candidates"
+    claims = root / ".deployments/component-full-db-claims"
+    journal = root / ".deployments/.component-full-transaction.json"
+    live_before = manifest.read_database_snapshot(live)
+    candidate = verify_result(invoke(root, "candidate", str(input_path), TRANSACTION))
+    other_candidate = verify_result(invoke(root, "candidate", str(input_path), other))
+    assert (root / candidate["path"]).exists() and (root / other_candidate["path"]).exists()
+    temporary = candidates / (".component-full-copy-" + TRANSACTION + "-candidate-" + "a" * 32 + ".db")
+    temporary.write_bytes(b"interrupted copy")
+    # A journal that already names the transaction keeps the copy: the record
+    # is the only proof the candidate is still referenced.
+    journal.write_text(json.dumps({"transaction_id": TRANSACTION}), encoding="ascii")
+    refused = invoke(root, "discard", TRANSACTION)
+    assert refused.returncode != 0 and "still references its candidate" in refused.stderr
+    assert (root / candidate["path"]).exists() and temporary.exists()
+    journal.unlink()
+    # The refused preparation's own copy, claim and temporary all go, and no
+    # other transaction's owned copy is touched.
+    assert verify_result(invoke(root, "discard", TRANSACTION)) is None
+    assert not (root / candidate["path"]).exists() and not temporary.exists()
+    assert not (claims / (TRANSACTION + "-candidate.json")).exists()
+    assert (root / other_candidate["path"]).exists()
+    assert (claims / (other + "-candidate.json")).exists()
+    assert verify_result(invoke(root, "discard", TRANSACTION)) is None
+    # An unclaimed copy is never deleted, and neither is the live database.
+    orphan = candidates / ("20261106T130000Z-" + "e" * 32 + ".db")
+    orphan.write_bytes(b"unknown copy")
+    unclaimed = invoke(root, "discard", "20261106T130000Z-" + "e" * 32)
+    assert unclaimed.returncode != 0 and "has no owned claim" in unclaimed.stderr
+    assert orphan.exists()
+    assert manifest.read_database_snapshot(live) == live_before

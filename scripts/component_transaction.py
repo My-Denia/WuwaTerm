@@ -614,6 +614,19 @@ def _verify_live_topology(root: Path, journal: dict[str, Any], *, which: str,
                 raise TransactionError("terminal rollback still has a target container")
 
 
+def _full4_record_route(journal: dict[str, Any], *, for_full4: bool) -> bool:
+    """Decide whether a terminal record is read through FULL4's entry mapper.
+
+    FULL4 admitted that separate mapper for the schema-2..4 records it could
+    inherit, whose Telegram entries may still be the product's own leaf links.
+    A schema-5 record carries its own native leaf checks, so asking for the
+    FULL4 route there would demand an admission the record never recorded.
+    """
+    if type(for_full4) is not bool:
+        raise TransactionError("invalid FULL4 route selection")
+    return for_full4 and journal.get("schema_version") != runtime.JOURNAL_SCHEMA_VERSION
+
+
 def _verify_terminal_record(root: Path, journal: dict[str, Any], raw: bytes, compose_path: Path, *,
                             full4_predecessor: bool = False) -> None:
     if journal["status"] not in ("committed", "rolled_back"):
@@ -632,10 +645,11 @@ def _verify_terminal_record(root: Path, journal: dict[str, Any], raw: bytes, com
         if manifest.read_manifest(root, previous["deployment_id"]) != previous:
             raise TransactionError("terminal prior manifest differs")
     _verify_manifest_if_present(root, journal, required=committed)
+    endpoints = _full4_record_route(journal, for_full4=full4_predecessor)
     _verify_live_topology(root, journal, which=which, compose_path=compose_path,
                           allow_selected_restart=not committed and journal["action"] == "update",
                           allow_retained=committed and journal["action"] == "update", allow_runtime_drift=True,
-                          full4_endpoints=full4_predecessor, _full4_runtime_predecessor=full4_predecessor)
+                          full4_endpoints=endpoints, _full4_runtime_predecessor=endpoints)
     if committed and journal["action"] == "update":
         if "api" in journal["selection"]:
             _verify_candidate(root, journal)
@@ -689,11 +703,13 @@ def verify_terminal(root: Path, *, compose_path: Path) -> tuple[bytes, dict[str,
 
 
 def verify_terminal_for_full4(root: Path, *, compose_path: Path) -> tuple[bytes, dict[str, Any]] | None:
-    """Admit a predecessor to FULL4's separate native endpoint checks.
+    """Admit a predecessor to a FULL successor's terminal verification.
 
     Runtime records themselves retain their original schema and strict default
-    verifier. This opt-in only changes the leaf mapper for a FULL4 successor;
-    FULL4 must still verify complete endpoints before state mutation.
+    verifier. This opt-in only changes the leaf mapper a FULL successor needs
+    for a schema-2..4 record; a schema-5 record keeps its own native leaf
+    checks, and either kind must still verify complete endpoints before state
+    mutation.
     """
     return _verify_terminal(root, compose_path=compose_path, full4_predecessor=True)
 
@@ -2316,20 +2332,21 @@ def _retire_committed(root: Path, journal: dict[str, Any], *, for_full4: bool = 
     admission.require_lock(root)
     if journal["status"] != "committed":
         raise TransactionError("terminal retirement is unsupported")
+    endpoints = _full4_record_route(journal, for_full4=for_full4)
     if journal["selection"] == ["api"]:
         return _retire_api(root, journal)
     if journal["selection"] == ["telegram"]:
-        return _retire_telegram(root, journal, for_full4=for_full4)
+        return _retire_telegram(root, journal, for_full4=endpoints)
     if journal["selection"] != ["api", "telegram"]:
         raise TransactionError("terminal retirement is unsupported")
     api_pending = _retire_api(root, journal, remove=False)
-    tg_pending = _retire_telegram(root, journal, remove=False, for_full4=for_full4)
+    tg_pending = _retire_telegram(root, journal, remove=False, for_full4=endpoints)
     if api_pending:
-        _retire_telegram(root, journal, remove=False, for_full4=for_full4)
+        _retire_telegram(root, journal, remove=False, for_full4=endpoints)
         _retire_api(root, journal)
     if tg_pending:
         _retire_api(root, journal, remove=False)
-        _retire_telegram(root, journal, for_full4=for_full4)
+        _retire_telegram(root, journal, for_full4=endpoints)
     return api_pending or tg_pending
 
 

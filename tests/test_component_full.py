@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import errno
 import hashlib
+import importlib
 import os
 from pathlib import Path
 import signal
@@ -17,8 +18,10 @@ import pytest
 from scripts import component_full as full
 from scripts import component_runtime as runtime
 from scripts import component_state as state
+from scripts import component_transaction as transaction
 from scripts import product_manifest as manifest
 from test_component_runtime import journal as runtime_fixture
+from test_product_manifest import make_database
 
 
 @pytest.fixture
@@ -1199,3 +1202,144 @@ def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, 
     (state_dir / "refs" / "settings.json").unlink()
     with pytest.raises(full.FullError, match="missing"):
         full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
+
+
+# ------------------------------------- protocol-2 FULL route and refusal cleanup
+
+def test_full4_endpoint_route_follows_the_record_schema(full_journal: dict) -> None:
+    """Only the schema-4 cutover recorded FULL4's separate endpoint probes."""
+    five = _schema5_journal(full_journal)
+    four = _schema5_journal(full_journal)
+    four["schema_version"] = full.FULL4_SCHEMA_VERSION
+    three = copy.deepcopy(full_journal)
+    assert (three["schema_version"], five["schema_version"]) == (
+        full.PREVIOUS_SCHEMA_VERSION, full.SCHEMA_VERSION)
+    assert (full._full4_endpoint_route(three), full._full4_endpoint_route(four),
+            full._full4_endpoint_route(five)) == (False, True, False)
+
+
+@pytest.fixture
+def schema5_topology(tmp_path: Path, full_journal: dict,
+                     monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict]:
+    """A schema-5 preparation context with one real Telegram binding and no API."""
+    journal = _schema5_journal(full_journal)
+    data, state_dir = tmp_path / "data", tmp_path / "state"
+    data.mkdir()
+    state_dir.mkdir()
+    database = make_database(data / "terms.db")
+    component = journal["before"]["topology"]["telegram"]
+    snapshot = manifest.read_recipe_snapshot(tmp_path, component["recipe"]["sha256"])
+    snapshot["mounts"] = [{"host": str(data), "container": "/app/data", "read_only": True},
+                          {"host": str(state_dir), "container": "/app/state", "read_only": False}]
+    snapshot["environment_overrides"] = [
+        {"name": "WUWATERM_DB_PATH", "mode": "literal", "value": "/app/data/terms.db"},
+        {"name": "WUWATERM_STATE_DIR", "mode": "literal", "value": "/app/state"}]
+    path, digest = manifest.write_recipe_snapshot(tmp_path, snapshot)
+    component["recipe"] = {key: snapshot[key] for key in manifest._RECIPE_FIELDS}
+    component["recipe"].update(snapshot_path=path, sha256=digest)
+    journal["target"]["manifest"]["components"]["telegram"] = copy.deepcopy(component)
+    for where in (journal["before"]["topology"], journal["before"]["containers"],
+                  journal["target"]["manifest"]["components"], journal["target"]["containers"]):
+        where["api"] = None
+    journal.update(api_identity=None, selection=[])
+    journal["target"]["manifest"]["api_identity"] = None
+    record = journal["before"]["containers"]["telegram"]
+    record.update(id="b" * 64, image_id=component["image"]["id"], running=True,
+                  started_at="2026-11-06T11:00:00.123456789Z", restart_count=0,
+                  project=snapshot["project"], service=snapshot["service"],
+                  name="wuwaterm-telegram", transaction_label=None)
+    journal["target"]["containers"]["telegram"] = copy.deepcopy(record)
+    journal["database"]["old"]["binding"] = database
+    journal["database"]["old"]["stat"] = manifest.verify_database_binding(database)
+    context = copy.deepcopy(journal)
+    # ``prepare`` verifies the installed topology from this reduced context.
+    context["database"] = {"binding": database, "stat": manifest.verify_database_binding(database)}
+    context["migrations"] = []
+    actual = {"recipe": copy.deepcopy(snapshot), "container": copy.deepcopy(record),
+              "path_settings": {"WUWATERM_DB_PATH": "/app/data/terms.db",
+                                "WUWATERM_STATE_DIR": "/app/state",
+                                "WUWATERM_SETTINGS_PATH": None,
+                                "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None}}
+    monkeypatch.setattr(transaction, "_observed", lambda *args: copy.deepcopy(actual))
+    monkeypatch.setattr(transaction, "_image", lambda *args: {"Config": {"Labels": {
+        "org.opencontainers.image.revision": component["image"]["revision"]}}})
+    monkeypatch.setattr(transaction, "_effective_environment", lambda *args: {})
+    monkeypatch.setattr(transaction.observe, "_inspect", lambda *args: {"Config": {"Env": []}})
+    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": record["id"]}])
+    return tmp_path, context
+
+
+def test_schema5_full_preparation_uses_its_native_leaf_checks(
+        schema5_topology: tuple[Path, dict]) -> None:
+    """The schema-5 context never needs the FULL4 admission it never recorded."""
+    root, context = schema5_topology
+    with pytest.raises(transaction.TransactionError, match="requires an admitted FULL4 context"):
+        transaction._verify_live_topology(root, context, which="before", compose_path=Path("/unused"),
+                                          full4_endpoints=True)
+    assert full._full4_endpoint_route(context) is False
+    transaction._verify_live_topology(root, context, which="before", compose_path=Path("/unused"),
+                                      full4_endpoints=full._full4_endpoint_route(context))
+    # A schema-4 record keeps the FULL4 route it was admitted with.
+    four = copy.deepcopy(context)
+    four["schema_version"] = full.FULL4_SCHEMA_VERSION
+    assert full._full4_endpoint_route(four) is True
+    transaction._verify_live_topology(root, four, which="before", compose_path=Path("/unused"),
+                                      full4_endpoints=full._full4_endpoint_route(four))
+
+
+def test_schema5_runtime_predecessor_keeps_its_native_route(
+        schema5_topology: tuple[Path, dict]) -> None:
+    """A schema-5 runtime predecessor is read by its own leaf checks."""
+    root, context = schema5_topology
+    record = copy.deepcopy(context)
+    record.update(kind="component-runtime", migrations=[])
+    with pytest.raises(transaction.TransactionError, match="requires an admitted FULL4 context"):
+        transaction._verify_live_topology(root, record, which="before", compose_path=Path("/unused"),
+                                          allow_runtime_drift=True, full4_endpoints=True,
+                                          _full4_runtime_predecessor=True)
+    endpoints = transaction._full4_record_route(record, for_full4=True)
+    assert endpoints is False
+    transaction._verify_live_topology(root, record, which="before", compose_path=Path("/unused"),
+                                      allow_runtime_drift=True, full4_endpoints=endpoints,
+                                      _full4_runtime_predecessor=endpoints)
+    for version in (2, 3, full.FULL4_SCHEMA_VERSION):
+        assert transaction._full4_record_route({"schema_version": version}, for_full4=True) is True
+    assert transaction._full4_record_route({"schema_version": full.SCHEMA_VERSION},
+                                          for_full4=False) is False
+    with pytest.raises(transaction.TransactionError, match="invalid FULL4 route selection"):
+        transaction._full4_record_route({"schema_version": full.SCHEMA_VERSION}, for_full4=1)
+
+
+def test_refused_preparation_never_keeps_an_undiscardable_candidate(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal before any copy is silent, and a failed discard is never hidden."""
+    # ``prepare`` imports the toolset by module name, so patch that module.
+    running = importlib.import_module("component_full_db")
+    full._discard_prepared_candidate(None)
+    calls: list[tuple[Path, str]] = []
+    monkeypatch.setattr(running, "discard_candidate", lambda root, identifier: calls.append((root, identifier)))
+    identifier = "20261106T110000Z-" + "5" * 32
+    full._discard_prepared_candidate((tmp_path, identifier))
+    assert calls == [(tmp_path, identifier)]
+
+    def refuse(*args: object) -> None:
+        raise running.FullDatabaseError("candidate copy differs from its claim")
+
+    monkeypatch.setattr(running, "discard_candidate", refuse)
+    with pytest.raises(full.FullError, match="candidate copy could not be discarded"):
+        full._discard_prepared_candidate((tmp_path, identifier))
+
+
+@pytest.mark.parametrize("schema,for_full4,expected", [
+    (full.SCHEMA_VERSION, True, False), (full.FULL4_SCHEMA_VERSION, True, True),
+    (full.PREVIOUS_SCHEMA_VERSION, True, True), (full.SCHEMA_VERSION, False, False)])
+def test_terminal_retirement_follows_the_record_schema(
+        monkeypatch: pytest.MonkeyPatch, schema: int, for_full4: bool, expected: bool) -> None:
+    """A FULL successor retires a schema-5 record through its own leaf checks."""
+    monkeypatch.setattr(transaction.admission, "require_lock", lambda root: None)
+    retired: list[bool] = []
+    monkeypatch.setattr(transaction, "_retire_telegram",
+                        lambda root, journal, *, for_full4=False: retired.append(for_full4) or False)
+    journal = {"status": "committed", "selection": ["telegram"], "schema_version": schema}
+    assert transaction._retire_committed(Path("/unused"), journal, for_full4=for_full4) is False
+    assert retired == [expected]

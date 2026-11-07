@@ -58,6 +58,17 @@ def _fail(message: str) -> None:
     raise FullError(message)
 
 
+def _full4_endpoint_route(journal: dict[str, Any]) -> bool:
+    """Report whether this record's Telegram state is read through FULL4 probes.
+
+    FULL4's separate ``state-endpoint`` probes exist only for the schema-4
+    cutover. A schema-5 record verifies the same leaves through the product's
+    own plans, so asking for the FULL4 route there would demand an admission
+    the record never recorded.
+    """
+    return journal["schema_version"] == FULL4_SCHEMA_VERSION
+
+
 def _optional_stat(value: Any, where: str) -> None:
     if value is not None:
         runtime._stat(value, where)
@@ -1083,6 +1094,25 @@ def _prepare_request(request: Any) -> tuple[list[str], dict[str, Any], dict[str,
     return selection, artifacts, recipes
 
 
+def _discard_prepared_candidate(prepared: tuple[Path, str] | None) -> None:
+    """Remove the refused preparation's own unreferenced candidate copy.
+
+    A refused ``full-update`` must leave no owned database copy behind: nothing
+    references the candidate because the journal is published only after
+    preparation succeeds.
+    """
+    if prepared is None:
+        return
+    root, identifier = prepared
+    import component_full_db as full_db  # noqa: PLC0415
+
+    try:
+        full_db.discard_candidate(root, identifier)
+    except full_db.FullDatabaseError as exc:
+        raise FullError("full transaction preparation was refused and its candidate copy could not be "
+                        "discarded") from exc
+
+
 def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_path: Path,
             expected_sha: str | None = None) -> dict[str, Any]:
     """Construct a FULL3 journal from the adopted deployment and real DB input."""
@@ -1095,6 +1125,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
     import deployment_admission as admission  # noqa: PLC0415
     import package_recovery_source as capsule  # noqa: PLC0415
 
+    prepared: tuple[Path, str] | None = None
     try:
         root = admission._physical_root(root)
         admission.admit_component(root, operation="full-update", code_root=CODE_ROOT)
@@ -1150,6 +1181,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
                 _fail("installed environment cannot be reproduced")
             before[name], snapshots[name] = actual["container"], snapshot
         identifier = manifest.new_deployment_id()
+        prepared = (root, identifier)
         candidate_path = Path(os.path.abspath(os.fspath(candidate_db)))
         candidate = full_db.prepare_candidate(root, candidate_path, identifier)
         target = copy.deepcopy(old)
@@ -1237,7 +1269,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
         context["database"] = {"binding": old["database"], "stat": old_stat}
         context["migrations"] = []
         transaction._verify_live_topology(root, context, which="before", compose_path=compose_path,
-                                          full4_endpoints=True)
+                                          full4_endpoints=_full4_endpoint_route(journal))
         if any(runtime._compose_input(Path(path)) != identity for path, identity in references.items()):
             _fail("Compose input changed during preparation")
         latest = transaction.verify_terminal_for_full4(root, compose_path=compose_path)
@@ -1245,10 +1277,12 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
             _fail("terminal deployment changed during full preparation")
         return journal
     except FullError:
+        _discard_prepared_candidate(prepared)
         raise
     except (admission.AdmissionError, build.BuildError, wheel.WheelBuildError, capsule.CapsuleError,
             recovery.RecoveryError, runtime.JournalError, transaction.TransactionError, observe.ObservationError,
             manifest.ManifestError, full_db.FullDatabaseError, OSError, ValueError, TypeError, KeyError) as exc:
+        _discard_prepared_candidate(prepared)
         raise FullError("full transaction preparation was refused") from exc
 
 
@@ -1308,7 +1342,7 @@ def _verify_initial_preimage(root: Path, journal: dict[str, Any], predecessor: d
     context["database"] = {"binding": old_db["binding"], "stat": old_db["stat"]}
     context["migrations"] = []
     transaction._verify_live_topology(root, context, which="before", compose_path=compose_path,
-                                      full4_endpoints=journal["schema_version"] == FULL4_SCHEMA_VERSION)
+                                      full4_endpoints=_full4_endpoint_route(journal))
 
 
 def _publish_initial_full_journal(directory: int, raw: bytes) -> None:
@@ -3437,7 +3471,7 @@ def verify_terminal(root: Path, *, compose_path: Path, strict_runtime: bool = Fa
         current["migrations"] = []
         transaction._verify_live_topology(root, current, which=which, compose_path=compose_path,
                                           allow_retained=committed, allow_runtime_drift=True,
-                                          full4_endpoints=journal["schema_version"] == FULL4_SCHEMA_VERSION)
+                                          full4_endpoints=_full4_endpoint_route(journal))
         topology = winning["components"]
         records = journal[which]["containers"]
         for name in ("api", "telegram"):

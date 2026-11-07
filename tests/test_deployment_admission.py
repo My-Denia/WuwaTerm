@@ -21,6 +21,7 @@ import sys
 
 import pytest
 
+from scripts import component_recovery
 from scripts import component_runtime
 from scripts import component_state
 from scripts import deployment_admission as admission
@@ -102,18 +103,22 @@ def _snapshot(root: Path) -> dict[str, tuple]:
 def _set_recovery_capability(root: Path, *, kind: str, ready: bool, protocol: object = 1) -> None:
     """Change only the copied checkout for tests of ordinary admission."""
     flag = "FULL_RECOVERY_EXECUTION_READY" if kind == "full" else "RECOVERY_EXECUTION_READY"
+    artifact_flag = "ARTIFACT_FULL_RECOVERY_EXECUTION_READY" if kind == "full" else "ARTIFACT_RECOVERY_EXECUTION_READY"
     name = "CAPSULE_FULL_RECOVERY_PROTOCOL" if kind == "full" else "CAPSULE_RECOVERY_PROTOCOL"
     recovery = root / "scripts/component_recovery.py"
     text = recovery.read_text(encoding="utf-8")
     original = f"\n{flag} = False\n"
     assert original in text
-    recovery.write_text(text.replace(original, f"\n{flag} = {ready!r}\n", 1), encoding="utf-8")
-    if protocol is not None:
-        runtime = root / "scripts/component_runtime.py"
-        text = runtime.read_text(encoding="utf-8")
-        marker = 'if __name__ == "__main__":\n'
-        assert marker in text
-        runtime.write_text(text.replace(marker, f"{name} = {protocol!r}\n\n" + marker, 1), encoding="utf-8")
+    text = text.replace(original, f"\n{flag} = {ready!r}\n", 1)
+    if protocol == 2:
+        assert f"\n{artifact_flag} = True\n" in text
+        text = text.replace(f"\n{artifact_flag} = True\n", f"\n{artifact_flag} = False\n", 1)
+    recovery.write_text(text, encoding="utf-8")
+    runtime = root / "scripts/component_runtime.py"
+    text = runtime.read_text(encoding="utf-8")
+    marker = 'if __name__ == "__main__":\n'
+    assert marker in text
+    runtime.write_text(text.replace(marker, f"{name} = {protocol!r}\n\n" + marker, 1), encoding="utf-8")
 
 
 @pytest.fixture()
@@ -928,6 +933,7 @@ import component_recovery as recovery
 import component_runtime as runtime
 import component_transaction as transaction
 import deployment_admission as admission
+recovery.ARTIFACT_RECOVERY_EXECUTION_READY = False
 previous = json.loads(sys.argv[3]); events = []; saved = []
 admission.admit_component(r, operation='full-update', code_root=r)
 try:
@@ -1354,3 +1360,9 @@ def test_schema5_runtime_canonical_is_admissible_only_as_a_read_only_helper() ->
     with pytest.raises(admission.AdmissionError, match="non-mutating"):
         admission.refuse_inadmissible_state_probe(
             runtime5, {"schema_version": 5, "kind": "state-copy-v4", "transaction_kind": "runtime"}, "runtime")
+
+
+def test_artifact_recovery_flags_are_ready_by_default() -> None:
+    assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is True
+    assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True
+

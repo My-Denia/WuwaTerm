@@ -1661,6 +1661,20 @@ def copy_v4(root: Path, transaction_id: str, state_kind: str, *, direction: str,
         raise StateError("FULL4 state copy could not be verified") from None
 
 
+def _plan_binding_paths(item: dict[str, Any]) -> None:
+    """Require the bindings one schema-5 native plan has to name.
+
+    Every plan names one effective path, so a path outside every bind is never
+    equivalent to another. Only the product's own pending copy also names the
+    retained legacy file; the other actions carry no legacy endpoint to map and
+    report ``mapped_legacy`` as ``None`` even inside a complete binding.
+    """
+    if item.get("mapped_target") is None:
+        _fail("state path is outside every bind")
+    if item.get("migration") == "copy-if-absent" and item.get("mapped_legacy") is None:
+        _fail("state path is outside every bind")
+
+
 def plan(root: Path, *, receipt_sha256: str | None, snapshot: dict[str, Any], environment: dict[str, str],
          database_path: str, transaction_id: str) -> dict[str, Any]:
     """Run the verified installed product planner with actual bind permissions."""
@@ -1730,10 +1744,8 @@ def plan(root: Path, *, receipt_sha256: str | None, snapshot: dict[str, Any], en
         if endpoint_protocol:
             import component_state_endpoint as endpoint  # noqa: PLC0415
         for item in result["kinds"].values():
-            if schema5 and (item.get("mapped_target") is None
-                            or item.get("legacy_path") is not None and item.get("mapped_legacy") is None):
-                # A path outside every bind is never equivalent to another.
-                _fail("state path is outside every bind")
+            if schema5:
+                _plan_binding_paths(item)
             mapper = (entry_path if schema5 else
                       endpoint.map_entry if endpoint_protocol else observe.resolve_bind_path)
             item["mapped_target"] = mapper(snapshot, item["mapped_target"], writable=True)

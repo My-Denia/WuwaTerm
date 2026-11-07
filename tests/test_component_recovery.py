@@ -178,13 +178,22 @@ def test_clean_tracked_source_is_packaged_durably_and_reused(tmp_path: Path) -> 
     before = saved_hashes(root, source)
     code = (
         "import pathlib,sys; r=pathlib.Path(sys.argv[1]); "
-        "sys.path.insert(0,str(r/'scripts')); import deployment_admission as a; "
+        "sys.path.insert(0,str(r/'scripts')); import component_recovery as cr; "
+        "cr.ARTIFACT_RECOVERY_EXECUTION_READY = False; import deployment_admission as a; "
         "a.admit_component(r,operation='adopt',code_root=r)"
     )
     refused = locked(root, sys.executable, "-I", "-B", "-c", code, str(root))
     assert refused.returncode != 0
     assert "runtime saved-source recovery is not ready" in refused.stderr
     assert saved_hashes(root, source) == before
+    code_ready = (
+        "import pathlib,sys; r=pathlib.Path(sys.argv[1]); "
+        "sys.path.insert(0,str(r/'scripts')); import component_recovery as cr; "
+        "assert cr.ARTIFACT_RECOVERY_EXECUTION_READY is True; "
+        "assert cr.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True"
+    )
+    check_ready = locked(root, sys.executable, "-I", "-B", "-c", code_ready, str(root))
+    assert check_ready.returncode == 0, check_ready.stderr
 
 
 def test_interrupted_source_staging_does_not_block_retry(tmp_path: Path) -> None:
@@ -773,6 +782,17 @@ def test_recovery_dispatches_by_the_saved_source_protocol(tmp_path: Path, journa
                                                           protocol: int, message: str) -> None:
     """Protocol 2 is gated by its own closed flag; unknown protocols are refused."""
     root, commit, tree = create_source(tmp_path / "source", declared_protocol=protocol)
+    if protocol == 2:
+        path = root / "scripts" / "component_recovery.py"
+        text = path.read_text(encoding="utf-8")
+        assert "\nARTIFACT_RECOVERY_EXECUTION_READY = True\n" in text
+        path.write_text(text.replace("\nARTIFACT_RECOVERY_EXECUTION_READY = True\n",
+                                     "\nARTIFACT_RECOVERY_EXECUTION_READY = False\n", 1),
+                        encoding="utf-8")
+        git(root, "add", "scripts/component_recovery.py")
+        git(root, "commit", "--quiet", "--amend", "--no-edit")
+        commit = git(root, "rev-parse", "HEAD")
+        tree = git(root, "rev-parse", "HEAD^{tree}")
     result = prepare(root, commit, tree)
     assert result.returncode == 0, result.stderr
     source = json.loads(result.stdout)
@@ -786,13 +806,16 @@ def test_recovery_dispatches_by_the_saved_source_protocol(tmp_path: Path, journa
 
 def test_artifact_flags_never_enable_a_protocol1_capsule(monkeypatch: pytest.MonkeyPatch) -> None:
     recovery = component_recovery
-    monkeypatch.setattr(recovery, "ARTIFACT_RECOVERY_EXECUTION_READY", True)
-    monkeypatch.setattr(recovery, "ARTIFACT_FULL_RECOVERY_EXECUTION_READY", True)
+    assert recovery.ARTIFACT_RECOVERY_EXECUTION_READY is True
+    assert recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True
     assert recovery.protocol_ready(2, full=False) and recovery.protocol_ready(2, full=True)
     assert not recovery.protocol_ready(1, full=False) and not recovery.protocol_ready(1, full=True)
     for invalid in (None, 0, 3, True, "2"):
         assert not recovery.protocol_ready(invalid, full=False)
     assert recovery.RECOVERY_EXECUTION_READY is False and recovery.FULL_RECOVERY_EXECUTION_READY is False
+    monkeypatch.setattr(recovery, "ARTIFACT_RECOVERY_EXECUTION_READY", False)
+    monkeypatch.setattr(recovery, "ARTIFACT_FULL_RECOVERY_EXECUTION_READY", False)
+    assert not recovery.protocol_ready(2, full=False) and not recovery.protocol_ready(2, full=True)
 
 
 def _recovery_source(tmp_path: Path) -> dict:
@@ -841,8 +864,10 @@ def test_schema5_journals_are_dispatchable_without_touching_protocol1(tmp_path: 
     # Openness to schema 5 does not enable execution or protocol 1.
     assert component_recovery.RECOVERY_EXECUTION_READY is False
     assert component_recovery.FULL_RECOVERY_EXECUTION_READY is False
-    assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is False
-    assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is False
+    assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is True
+    assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True
     assert component_recovery.protocol_ready(1, full=False) is False
-    assert component_recovery.protocol_ready(2, full=False) is False
+    assert component_recovery.protocol_ready(1, full=True) is False
+    assert component_recovery.protocol_ready(2, full=False) is True
+    assert component_recovery.protocol_ready(2, full=True) is True
     assert component_recovery.protocol_ready(3, full=True) is False
