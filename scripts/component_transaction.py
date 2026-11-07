@@ -951,10 +951,11 @@ def _actual(root: Path, journal: dict[str, Any], compose_path: Path, *,
     expected_revision = journal["before"]["topology"]["api"]["image"]["revision"]
     if (old_image.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision") != expected_revision:
         raise TransactionError("retained API image revision differs")
-    actual_env = _env_map(old_raw["Config"].get("Env"))
-    if (_effective_environment(old_snap, old_image, compose_path, root) != actual_env or
-            _effective_environment(new_snap, new_image, compose_path, root) != actual_env):
+    old_env = old_raw["Config"].get("Env")
+    if (_effective_environment(old_snap, old_image, compose_path, root) != _env_map(old_env) or
+            observe._environment(old_env, old_snap["working_dir"], key)[1] != old["environment_fingerprint"]):
         raise TransactionError("recorded environment no longer reproduces the original container")
+    target_env = _effective_environment(new_snap, new_image, compose_path, root)
 
     found = _inventory(old_snap["project"], old_snap["service"])
     candidates = []
@@ -988,7 +989,10 @@ def _actual(root: Path, journal: dict[str, Any], compose_path: Path, *,
                 and (record["started_at"] != recorded["started_at"]
                      or record["restart_count"] != recorded["restart_count"])):
             raise TransactionError("API target restarted")
-        if target["environment_fingerprint"] != old["environment_fingerprint"]:
+        actual_target_env = observe._inspect(record["id"])["Config"].get("Env")
+        if (_env_map(actual_target_env) != target_env or
+                observe._environment(actual_target_env, new_snap["working_dir"], key)[1]
+                != target["environment_fingerprint"]):
             raise TransactionError("API target effective environment differs")
     if old_record["running"] and target is not None and target["container"]["running"]:
         raise TransactionError("both API containers are running")
@@ -1952,15 +1956,18 @@ def _update_telegram(root: Path, journal: dict[str, Any], compose_path: Path) ->
         raise TransactionError("update interrupted; recover the recorded transaction") from exc
 
 
-def _create_target(journal: dict[str, Any], snapshot: dict[str, Any]) -> str:
+def _create_target(journal: dict[str, Any], snapshot: dict[str, Any], *,
+                   root: Path, compose_path: Path) -> str:
     original = observe._inspect(journal["before"]["containers"]["api"]["id"])
     config = original["Config"]
     # Only supported settings were accepted by _observed before copying these
     # actual Docker values. Environment bytes stay in memory and in Docker.
-    fields = ("User", "Env", "Cmd", "Entrypoint", "WorkingDir", "Volumes", "ExposedPorts",
+    fields = ("User", "Cmd", "Entrypoint", "WorkingDir", "Volumes", "ExposedPorts",
               "AttachStdin", "AttachStdout", "AttachStderr", "OpenStdin", "StdinOnce", "Tty")
     body = {key: copy.deepcopy(config.get(key)) for key in fields}
     body["Image"] = snapshot["image_id"]
+    environment = _effective_environment(snapshot, _image(snapshot["image_id"]), compose_path, root)
+    body["Env"] = [name + "=" + value for name, value in sorted(environment.items())]
     body["Labels"] = copy.deepcopy(config.get("Labels") or {})
     body["Labels"][observe.TRANSACTION_LABEL] = journal["transaction_id"]
     body["HostConfig"] = copy.deepcopy(original["HostConfig"])
@@ -2118,7 +2125,7 @@ def _update_both(root: Path, journal: dict[str, Any], compose_path: Path) -> dic
         _step(root, journal, "selected-activate")
         api_snap = _snapshot(root, journal["target"]["manifest"]["components"]["api"])
         tg_snap = _snapshot(root, journal["target"]["manifest"]["components"]["telegram"])
-        api_id = _create_target(journal, api_snap)
+        api_id = _create_target(journal, api_snap, root=root, compose_path=compose_path)
         journal["target"]["containers"]["api"]["id"] = api_id
         _write_journal(root, journal)
         _actual(root, journal, compose_path)
@@ -2244,7 +2251,7 @@ def update(root: Path, journal: dict[str, Any], *, compose_path: Path) -> dict[s
         _step(root, journal, "selected-activate")
         _actual(root, journal, compose_path)
         snap = _snapshot(root, journal["target"]["manifest"]["components"]["api"])
-        target_id = _create_target(journal, snap)
+        target_id = _create_target(journal, snap, root=root, compose_path=compose_path)
         journal["target"]["containers"]["api"]["id"] = target_id
         _write_journal(root, journal)
         _, target = _actual(root, journal, compose_path)

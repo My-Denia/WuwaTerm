@@ -2662,7 +2662,7 @@ def _activate_readers(root: Path, journal: dict[str, Any], *, compose_path: Path
             snapshot = readers[name]["target_snapshot"]
             if target is None:
                 if name == "api":
-                    target_id = transaction._create_target(journal, snapshot)
+                    target_id = transaction._create_target(journal, snapshot, root=root, compose_path=compose_path)
                 else:
                     image = transaction._image(snapshot["image_id"])
                     environment = transaction._effective_environment(snapshot, image, compose_path, root)
