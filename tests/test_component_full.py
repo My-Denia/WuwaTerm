@@ -388,6 +388,47 @@ def test_full4_applied_copy_requires_old_reader_published_readback(tmp_path: Pat
         full._migrations_v4({"status": "applied", "items": [item, second]}, **kwargs)
 
 
+def test_full4_validate_existing_compares_active_state_not_stale_legacy_file(tmp_path: Path) -> None:
+    from test_component_state_copy_v4 import setup_copy
+
+    root = tmp_path / "retained"
+    root.mkdir()
+    request, _, _, _ = setup_copy(root, kind="chat-settings", direction="rollback")
+    active, stale = request["destination_before"], request["source_endpoint"]
+    assert active["referent"]["sha256"] != stale["referent"]["sha256"]
+    second_root = tmp_path / "other"
+    second_root.mkdir()
+    second_request, _, _, _ = setup_copy(second_root, kind="channel-replies", direction="rollback")
+    shared = second_request["destination_before"]
+    # An earlier relocation left the active state in place; a stale legacy file still exists beside it.
+    item = {"kind": "chat-settings", "action": "validate-existing", "old_endpoint": active,
+            "new_endpoint": active, "legacy_endpoint": stale, "quiescent_old_endpoint": active,
+            "quiescent_new_endpoint": active, "quiescent_legacy_endpoint": stale, "retained_reply_proof": None,
+            "compatibility": {"status": "pending", "raw_sha256": active["referent"]["sha256"],
+                              "old_canonical_sha256": None, "new_canonical_sha256": None,
+                              "old_writeable": True, "clock": 123},
+            "forward": None, "forward_old_readback": None, "progressed_endpoint": None,
+            "rollback_compatibility": None, "rollback": None, "cleanup": None}
+    second = {**item, "kind": "channel-replies", "action": "none", "old_endpoint": shared,
+              "new_endpoint": shared, "legacy_endpoint": None, "quiescent_old_endpoint": shared,
+              "quiescent_new_endpoint": shared, "quiescent_legacy_endpoint": None,
+              "compatibility": {**item["compatibility"], "raw_sha256": shared["referent"]["sha256"]}}
+    component = {"recipe": {"sha256": active["recipe_sha256"]},
+                 "image": {"id": active["image_id"], "revision": active["image_revision"]}}
+    kwargs = {"journal_id": request["binding"]["transaction_id"], "before": {"telegram": component},
+              "target": {"telegram": component}}
+
+    assert full._compatibility_source_v4(item) is active
+    assert full._compatibility_source_v4({**item, "action": "none"}) is active
+    assert full._compatibility_source_v4({**item, "action": "copy-if-absent"}) is stale
+    full._migrations_v4({"status": "planned", "items": [item, second]}, **kwargs)
+    # The writer records the source selected by action; the stale file's hash must not satisfy the validator.
+    wrong = copy.deepcopy(item)
+    wrong["compatibility"]["raw_sha256"] = stale["referent"]["sha256"]
+    with pytest.raises(full.FullError, match="source content differs"):
+        full._migrations_v4({"status": "planned", "items": [wrong, second]}, **kwargs)
+
+
 def test_database_classification_distinguishes_equal_content_by_recorded_inode(full_journal: dict) -> None:
     from scripts import component_full_db as full_db
 

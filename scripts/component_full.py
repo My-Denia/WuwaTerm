@@ -293,6 +293,15 @@ def _validate_quiescent_v4(item: dict[str, Any]) -> None:
         _fail("full migration: stopped retained writer views differ")
 
 
+def _compatibility_source_v4(item: dict[str, Any]) -> dict[str, Any]:
+    """The stopped endpoint whose bytes the native readers compare, keyed by action.
+
+    Only a relocation reads the legacy file; a retained writer (validate-existing, none)
+    compares the active old endpoint even when a stale legacy file still exists.
+    """
+    return item["quiescent_legacy_endpoint"] if item["action"] == "copy-if-absent" else item["quiescent_old_endpoint"]
+
+
 def _compatibility_v4(value: Any, source: dict[str, Any], where: str) -> None:
     evidence = runtime._object(value, {"status", "raw_sha256", "old_canonical_sha256", "new_canonical_sha256",
                                       "old_writeable", "clock"}, where)
@@ -486,7 +495,7 @@ def _migrations_v4(value: Any, *, journal_id: str, before: dict[str, Any], targe
         if item["compatibility"] is not None:
             if item["quiescent_old_endpoint"] is None:
                 _fail("full migration: quiescent old endpoint is missing")
-            source = item["quiescent_legacy_endpoint"] or item["quiescent_old_endpoint"]
+            source = _compatibility_source_v4(item)
             _compatibility_v4(item["compatibility"], source, "full migration.compatibility")
         if item["forward"] is not None:
             if (item["action"] != "copy-if-absent" or item["quiescent_legacy_endpoint"] is None
@@ -1891,7 +1900,7 @@ def _snapshot_state_v4(root: Path, journal: dict[str, Any], *, compose_path: Pat
     _write_journal(root, journal)
 
     for item in journal["migrations"]["items"]:
-        source = item["quiescent_legacy_endpoint"] if item["action"] == "copy-if-absent" else item["quiescent_old_endpoint"]
+        source = _compatibility_source_v4(item)
         if item["compatibility"] is None:
             item["compatibility"] = {"status": "pending", "raw_sha256": source["referent"]["sha256"],
                                      "old_canonical_sha256": None, "new_canonical_sha256": None,
