@@ -2371,8 +2371,8 @@ def _verify_progressed_state(root: Path, journal: dict[str, Any], *, compose_pat
             # back from applied to planned. That comparison is journaled
             # together with the restored status below instead.
             _write_journal(root, journal)
-        _guard_readers(root, journal, compose_path=compose_path,
-                       allowed_database_states={"old", "new", "restored", "absent"})
+            _guard_readers(root, journal, compose_path=compose_path,
+                           allowed_database_states={"old", "new", "restored", "absent"})
     if schema5 and journal["migrations"]["items"]:
         if all(_v5_rollback_evidence(item) for item in journal["migrations"]["items"]):
             # The bytes stay where the product wrote them; only the native
