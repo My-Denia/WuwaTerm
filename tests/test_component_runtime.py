@@ -858,16 +858,27 @@ def test_adopt_probe_create_carries_the_root_scope_label() -> None:
     ["capsule-recover-probe", "--probe-id", DEPLOYMENT_ID],
 ])
 def test_capsule_recovery_entries_stay_closed_under_protocol2(tmp_path: Path, command: list[str]) -> None:
-    """Protocol 2 is declared but its readiness flags are closed: nothing runs."""
+    """Protocol 2 is open by default, but fails closed when readiness flags are false."""
+    assert runtime.capsule_execution_ready(full=False) is True
+    assert runtime.capsule_execution_ready(full=True) is True
+    assert runtime.CAPSULE_RECOVERY_PROTOCOL == runtime.CAPSULE_FULL_RECOVERY_PROTOCOL == 2
     root = tmp_path / "root"
     (root / ".deployments").mkdir(parents=True)
     before = sorted((p.relative_to(root), p.stat().st_mtime_ns) for p in root.rglob("*"))
-    script = Path(runtime.__file__).resolve()
+    scripts_dir = str(Path(runtime.__file__).resolve().parent)
+    code = (
+        "import sys; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "import component_recovery as cr; "
+        "cr.ARTIFACT_RECOVERY_EXECUTION_READY = False; "
+        "cr.ARTIFACT_FULL_RECOVERY_EXECUTION_READY = False; "
+        "import component_runtime as runtime; "
+        "raise SystemExit(runtime.main(sys.argv[2:]))"
+    )
     result = subprocess.run(
-        [sys.executable, "-I", "-B", str(script), "--root", str(root), *command,
+        [sys.executable, "-I", "-B", "-c", code, scripts_dir, "--root", str(root), *command,
          "--capsule-source-tool", H, "--compose-executable", "/bin/false"],
         capture_output=True, text=True, check=False)
     assert result.returncode != 0
     assert "not yet available" in result.stderr
     assert sorted((p.relative_to(root), p.stat().st_mtime_ns) for p in root.rglob("*")) == before
-    assert runtime.CAPSULE_RECOVERY_PROTOCOL == runtime.CAPSULE_FULL_RECOVERY_PROTOCOL == 2
