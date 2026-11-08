@@ -43,7 +43,7 @@ A general-purpose translator sees game names as ordinary words, so an official n
 ## What you can do
 
 - **Look up a term in either direction.** Type Chinese or English and get the official pair. Short romanised queries such as `shenghai` can also match by pinyin.
-- **Translate a sentence with the names locked.** The direction is detected from the script, or you choose it. If a locked term goes missing or comes back altered, you get an error instead of a wrong name.
+- **Translate a sentence with the dictionary's terms.** The direction is detected from the script, or you choose it. Official terms are supplied to the model with their translations; a word that is also an ordinary word keeps its sentence meaning, and English output takes the number and article the sentence needs.
 - **Review a translation you already have.** Paste the source and your translation; WuwaTerm shows which official terms are confirmed and which need a look, and offers the official pair for each. It checks terminology only, not sentence meaning, and never calls a model.
 - **Pick up where you left off.** The review workbench downloads your draft as a manuscript file on your own computer, and you import it later to continue. The page cannot confirm the download reached disk. Ordinary leave and refresh ask first when the work cannot be restored from the manuscript imported in this visit. A crash or forced quit can still discard the page. There are no accounts and no cloud copy of your manuscript.
 
@@ -66,9 +66,9 @@ A general-purpose translator sees game names as ordinary words, so an official n
 
 ## How it works
 
-<img src="docs/assets/readme/how-it-works-en.png" alt="How WuwaTerm works: dictionary hits return official strings without a model; free text is term-locked before an OpenAI-compatible model translates it; the dictionary is built locally from pinned public game-text data">
+<img src="docs/assets/readme/how-it-works-en.png" alt="How WuwaTerm works: dictionary hits return official strings without a model; free text is translated by an OpenAI-compatible model with the dictionary's terms supplied; the dictionary is built locally from pinned public game-text data">
 
-Telegram commands and the HTTP API share one dictionary-first application layer, and the public beta and the Windows client reach it through the API. Linked-channel auto-translation has its own orchestration over the same dictionary lookup and term locking. The terminology database is a local SQLite file you build from a pinned public copy of the game's text data; it is never shipped in a release or container image. The model is optional: without one, dictionary lookups still work. Modules, trust boundaries and request flows are mapped in [Architecture](docs/architecture.md).
+Telegram commands and the HTTP API share one dictionary-first application layer, and the public beta and the Windows client reach it through the API. Linked-channel auto-translation has its own orchestration over the same dictionary lookup and term selection. The terminology database is a local SQLite file you build from a pinned public copy of the game's text data; it is never shipped in a release or container image. The model is optional: without one, dictionary lookups still work. Modules, trust boundaries and request flows are mapped in [Architecture](docs/architecture.md).
 
 ## Get started
 
@@ -78,7 +78,21 @@ Open the [public beta](https://wuwaterm.denia-official.chatgpt.site). There is n
 
 ### Run your own
 
-The [self-hosting guide](docs/self-hosting.md) goes from a checkout at a release tag to a first lookup: Docker Compose on Linux (or Python 3.11+ from source), about 2 GB of disk for the upstream data, and your own Telegram bot token and OpenAI-compatible endpoint if you want those features.
+One command does the first install and each later addition:
+
+```bash
+./deploy/setup.sh                  # shared translation service (Core API)
+./deploy/setup.sh --with-telegram  # add the bot
+./deploy/setup.sh --with-web       # add WuwaTerm-Web
+./deploy/setup.sh --status         # versions, components and health
+```
+
+The [self-hosting guide](docs/self-hosting.md) explains what each step does and
+lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
+source), about 2 GB of disk for the upstream data, and your own Telegram bot
+token and OpenAI-compatible endpoint if you want those features. The Web
+option needs a published WuwaTerm-Web package; that project has no release yet,
+and the command says so instead of pretending otherwise.
 
 ### Windows client
 
@@ -92,7 +106,7 @@ There is no shared public bot. Run the bot on your own server with your own BotF
 | --- | --- |
 | `/tr 声骸` | `Echo` |
 | `/tr Echo` | `声骸` |
-| `/tr --to en 今汐装备了声骸` | the sentence in English, names locked |
+| `/tr --to en 今汐装备了声骸` | the sentence in English with official terms |
 
 Commands, group authorization and linked-channel auto-translation are covered in [Telegram Behavior](docs/telegram-behavior.md).
 

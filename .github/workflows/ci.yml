@@ -96,7 +96,12 @@ jobs:
         # the versions above the floor are tested rather than assumed. A red
         # one is removed from this list with the reason recorded, never hidden
         # behind an upper bound the package does not need.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # Every supported version runs on main and on a dispatch, which is what
+        # the release receipt binds. A pull request runs the floor and the top
+        # of the range only: the intermediate versions stay supported and are
+        # still exercised by the main push that follows the merge, and this is
+        # the feedback-frequency change MY-159 asks for, not a support cut.
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.11", "3.14"]' || '["3.11", "3.12", "3.13", "3.14"]') }}
     steps:
       - uses: actions/checkout@v7
         with:

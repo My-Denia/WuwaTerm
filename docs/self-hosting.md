@@ -10,8 +10,8 @@ not a prerequisite for anything below.
 ## What You Get, And What You Still Have To Do
 
 You get a dictionary-first Wuthering Waves terminology service: exact
-Chinese-to-English term lookup and the reverse, plus term-locked sentence
-translation in both directions, reachable through a Telegram bot, a versioned
+Chinese-to-English term lookup and the reverse, plus dictionary-guided sentence
+translation in both directions with the official terms supplied to the model, reachable through a Telegram bot, a versioned
 HTTP API, or both. An exact dictionary hit returns the official string
 byte-for-byte and never calls a model.
 
@@ -111,6 +111,67 @@ extra installs the Bot's Telegram SDK; `api` carries FastAPI and uvicorn; and
 install `.[api,build]` for the API and local data build without the Telegram
 SDK. For the combined Bot and API runtime without data-build tooling, install
 `.[telegram,api]`.
+
+## One Command: `deploy/setup.sh`
+
+The commands below are the explicit path, and every one of them has a
+counterpart in one idempotent script. From the checkout:
+
+```bash
+./deploy/setup.sh                     # shared translation service (Core API) only
+./deploy/setup.sh --with-telegram     # also start the Telegram bot
+./deploy/setup.sh --with-web          # also install WuwaTerm-Web
+./deploy/setup.sh --status            # what is installed, its data version, health
+./deploy/setup.sh --check             # same, exit non-zero when the API is not ready
+```
+
+What it does, in this order:
+
+1. Creates `data/`, `state/` and `state-api/` with `state*` at mode `0700`, and
+   copies `deploy/env.example` to `.env` at mode `0600` if `.env` is missing.
+2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
+   `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
+   `TELEGRAM_BOT_TOKEN` only when `--with-telegram` is given. The bot is never
+   started otherwise, so an API-only installation cannot fall into a restart
+   loop.
+3. Pulls the official GHCR images for the declared version unless
+   `--build-local` is given, and builds `data/terms.db` when it is missing:
+   `refresh-data` → `build-db --atomic` on a candidate → `verify-db` → promote.
+   An existing database is kept untouched.
+4. Starts `wuwaterm-api`, waits for `/readyz`, and issues one
+   `translate,meta` device token into `state-api/first-device.token` (mode
+   `0600`) when the credential store is empty. No token is printed.
+5. `--with-telegram` starts `wuwaterm-bot` and fails if it is not running.
+6. `--with-web` writes `state-web/web.env` (mode `0600`) with a dedicated
+   `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the
+   API base URL and the URL prefix, then starts the Web package and waits for
+   its `/api/readyz`.
+7. Adopts the installed topology into `deploy/product-update.sh` metadata when
+   a standalone `docker-compose` binary and its `.sha256` receipt are present,
+   so later upgrades use the transactional path. Pass `--no-adopt` to skip it;
+   the script says when it skipped and why.
+
+Re-running a command is how a surface is added later: existing `.env` values,
+the database, the credential store and `state-web/web.env` are reused, and only
+the missing pieces are created.
+
+**The Web option needs a published package, and WuwaTerm-Web has none yet.**
+`--with-web` reads `manifest-{root|prefix}.json` and
+`SHA256SUMS-{root|prefix}` from the latest
+[WuwaTerm-Web release](https://github.com/My-Denia/WuwaTerm-Web/releases),
+verifies the archive, extracts it, and runs it with the Node image named by
+`WUWATERM_WEB_NODE_IMAGE` (default `node:24-alpine`). A package is a directory
+whose `manifest-{root|prefix}.json` names `artifact`, `start` (a shell command),
+`port` and `health_path`; `--web-package` accepts such a directory or a
+`.tar.gz`/`.tgz` archive built locally. Until the Web project publishes those
+assets, the command stops with that fact before building any data; keep Web on
+its own host or use the package you built. The in-process owner-private layer
+described later in [The owner-private web presentation layer](web-presentation-layer.md)
+is a different surface and is not installed by this flag.
+
+The script does not do TLS, reverse-proxy authentication, the Telegram token,
+or the model key for you. Those are the inputs described in
+[Configure](#configure) and [Publish It Over HTTPS](#publish-it-over-https).
 
 ## Configure
 
@@ -246,6 +307,10 @@ is running — stop it first, or use the transactional updater described in
 
 ## Start The Service
 
+`./deploy/setup.sh` above performs the container steps on this page, including
+the data build, readiness wait and first device credential. The rest of this
+section is the explicit path, and the reference for what the script runs.
+
 **Container path.** Name the service you want. Both are ordinary services in
 the Compose file, so a bare `up -d` starts both — and a bot with no token would
 then fail and be restarted forever by its restart policy on an API-only
@@ -316,6 +381,10 @@ answers `{"status":"ready"}` only when the terminology database is readable, and
 credential; every `/v1` route does.
 
 ## Issue The First Device Credential
+
+`./deploy/setup.sh` issues one token for you and writes it to
+`state-api/first-device.token`; this section is the explicit path and the
+reference for issuing more.
 
 There is no registration endpoint. The operator issues credentials, and the
 secret is read from standard input so it is never printed and never appears in

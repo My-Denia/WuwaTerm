@@ -8,6 +8,10 @@
 > recommendation.
 >
 > **If you are not the author, start with [self-hosting.md](self-hosting.md).**
+> A fresh install can use `./deploy/setup.sh` there; the same script adopts the
+> installed topology into this updater's metadata when a standalone
+> `docker-compose` binary and its `.sha256` receipt exist
+> ([Component Runtime](component-runtime.md#1-adopt-existing-services)).
 > Running your own copy — Docker Compose or plain Python, whichever TLS
 > terminator you already have, and how to upgrade, back up, restore and
 > troubleshoot it — is that document's subject, and none of it requires the

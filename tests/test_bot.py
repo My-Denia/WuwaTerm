@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -311,18 +312,29 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
         to_chinese=False,
         timeout_seconds=30.0,
         transport=None,
+        references=(),
     ):
         calls.append((locked_text, locks))
+        if len(inspect.signature(response_factory).parameters) >= 3:
+            return response_factory(locked_text, locks, references)
         return response_factory(locked_text, locks)
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
 
 
-def placeholder_for(locks, official):
+def placeholder_for(locks, official, references=(), *, to_chinese=True):
+    """What the model would emit for one official term.
+
+    A hard lock stays a placeholder the server restores; a contextual
+    reference is written as the official term in the target language.
+    """
     for placeholder, _source, en in locks:
         if en == official:
             return placeholder
-    raise AssertionError(f"missing official lock {official}")
+    for _source, zh, en, _category in references:
+        if en == official:
+            return zh if to_chinese else en
+    raise AssertionError(f"missing official term {official}")
 
 
 def html_with_segments(locked_text: str, *segments: str) -> str:
@@ -361,8 +373,11 @@ def test_sentence_command_locks_terms_without_llm(monkeypatch, sample_db):
 def test_tr_non_exact_text_uses_locked_llm(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
-        return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')} is strong."
+    def response(_locked_text, locks, references):
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=False)} says "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=False)} is strong."
+        )
 
     enable_mock_llm(monkeypatch, calls, response)
     update, message = fake_update()
@@ -373,9 +388,10 @@ def test_tr_non_exact_text_uses_locked_llm(monkeypatch, sample_db):
     assert message.replies == [("Jinhsi says Echo is strong.", None)]
     assert len(calls) == 1
     locked_text, locks = calls[0]
-    assert "今汐" not in locked_text
-    assert "声骸" not in locked_text
-    assert {lock[2] for lock in locks} >= {"Jinhsi", "Echo"}
+    # Chinese source: every term is a contextual reference, so the model sees
+    # the original words and nothing is replaced before it translates them.
+    assert "今汐" in locked_text
+    assert locks == ()
 
 
 def test_group_term_replies_to_asking_message(sample_db):
@@ -448,10 +464,14 @@ def test_group_html_reply_missing_target_then_parse_error_falls_back_plain(
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         assert html_mode is True
         return html_with_segments(
-            locked_text, "", placeholder_for(locks, "Jinhsi"), " says hi"
+            locked_text,
+            "",
+            placeholder_for(locks, "Jinhsi", references, to_chinese=to_chinese),
+            " says hi",
         )
 
     def fail_then_parse_error(_text, kwargs, call_number):
@@ -494,8 +514,11 @@ def test_group_html_reply_missing_target_then_parse_error_falls_back_plain(
 def test_group_tr_admin_sentence_uses_llm(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
-        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}."
+    def response(_locked_text, locks, references):
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=False)} equips "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=False)}."
+        )
 
     enable_mock_llm(monkeypatch, calls, response)
     update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=556)
@@ -675,10 +698,11 @@ def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sam
 def test_screenshot_noise_speaker_prefix_and_quote_bars_are_normalized(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
+    def response(_locked_text, locks, references):
         return (
-            f"{placeholder_for(locks, 'Lucilla')}: "
-            f"{placeholder_for(locks, 'Cartethyia')} found {placeholder_for(locks, 'Echo')}."
+            f"{placeholder_for(locks, 'Lucilla', references, to_chinese=False)}: "
+            f"{placeholder_for(locks, 'Cartethyia', references, to_chinese=False)} found "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=False)}."
         )
 
     enable_mock_llm(monkeypatch, calls, response)
@@ -695,8 +719,11 @@ def test_screenshot_noise_speaker_prefix_and_quote_bars_are_normalized(monkeypat
     assert "WW 3.4" not in locked_text
     assert "spolier" not in locked_text.casefold()
     assert ">" not in locked_text
+    # The speaker prefix is resolved to the official English name; the body
+    # keeps its Chinese terms as visible references.
     assert "洛瑟菈" not in locked_text
-    assert {lock[2] for lock in locks} >= {"Lucilla", "Cartethyia", "Echo"}
+    assert "声骸" in locked_text
+    assert locks == ()
 
 
 def test_spoiler_spelling_and_version_tag_are_stripped(monkeypatch, sample_db):
@@ -735,8 +762,11 @@ def test_tr_english_term_returns_official_chinese(sample_db):
 def test_tr_english_sentence_translates_to_chinese(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
-        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+    def response(_locked_text, locks, references):
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references)}装备了"
+            f"{placeholder_for(locks, 'Echo', references)}"
+        )
 
     enable_mock_llm(monkeypatch, calls, response)
     update, message = fake_update()
@@ -758,9 +788,13 @@ def test_tr_auto_chinese_sentence_defaults_to_english(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} equips "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -785,9 +819,13 @@ def test_tr_auto_english_sentence_defaults_to_chinese(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)}装备了"
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -812,9 +850,13 @@ def test_tr_to_en_flag_forces_english(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} equips "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -839,9 +881,13 @@ def test_tr_short_to_zh_flag_forces_chinese(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)}装备了"
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -866,9 +912,13 @@ def test_sentence_direction_flag_uses_same_parser(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} equips "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -990,9 +1040,13 @@ def test_forced_direction_reply_to_message(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append(to_chinese)
-        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+        return (
+            f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} equips "
+            f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+        )
 
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -1054,10 +1108,14 @@ def test_slow_llm_does_not_block_control_commands_or_other_chat(
             to_chinese=False,
             timeout_seconds=30.0,
             transport=None,
+            references=(),
         ):
             started.set()
             await release.wait()
-            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+            return (
+                f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} says "
+                f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+            )
 
         monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
         context = fake_context(sample_db, ["今汐说声骸很强"], limit=10)
@@ -1128,10 +1186,14 @@ def test_public_mode_reply_is_skipped_if_public_closes_during_llm(
             to_chinese=False,
             timeout_seconds=30.0,
             transport=None,
+            references=(),
         ):
             started.set()
             await release.wait()
-            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+            return (
+                f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} says "
+                f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+            )
 
         monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
         context = fake_context(
@@ -1179,10 +1241,14 @@ def test_group_reply_is_skipped_if_chat_revoked_during_llm(monkeypatch, sample_d
             to_chinese=False,
             timeout_seconds=30.0,
             transport=None,
+            references=(),
         ):
             started.set()
             await release.wait()
-            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+            return (
+                f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} says "
+                f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
+            )
 
         monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
         context = fake_context(sample_db, ["今汐说声骸很强"])
@@ -1225,6 +1291,7 @@ def test_llm_concurrency_limit_bounds_inflight_calls(monkeypatch, sample_db):
             to_chinese=False,
             timeout_seconds=30.0,
             transport=None,
+            references=(),
         ):
             nonlocal in_flight, max_in_flight
             in_flight += 1
@@ -1232,8 +1299,8 @@ def test_llm_concurrency_limit_bounds_inflight_calls(monkeypatch, sample_db):
             try:
                 await asyncio.sleep(0.02)
                 return (
-                    f"{placeholder_for(locks, 'Jinhsi')} says "
-                    f"{placeholder_for(locks, 'Echo')}"
+                    f"{placeholder_for(locks, 'Jinhsi', references, to_chinese=to_chinese)} says "
+                    f"{placeholder_for(locks, 'Echo', references, to_chinese=to_chinese)}"
                 )
             finally:
                 in_flight -= 1
@@ -2844,10 +2911,11 @@ def test_tr_reply_to_formatted_message_preserves_html(monkeypatch, sample_db):
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         calls.append((html_mode, to_chinese))
-        jinhsi = placeholder_for(locks, "Jinhsi")
-        echo = placeholder_for(locks, "Echo")
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=to_chinese)
+        echo = placeholder_for(locks, "Echo", references, to_chinese=to_chinese)
         return html_with_segments(
             locked_text, "", jinhsi, " says ", echo, " is strong"
         )
@@ -2888,10 +2956,11 @@ def test_sentence_reply_to_formatted_caption_preserves_html(monkeypatch, sample_
         to_chinese=False,
         timeout_seconds=45.0,
         transport=None,
+        references=(),
     ):
         assert html_mode is True
         assert to_chinese is False
-        jinhsi = placeholder_for(locks, "Jinhsi")
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=to_chinese)
         return html_with_segments(locked_text, "", jinhsi, " arrives")
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)

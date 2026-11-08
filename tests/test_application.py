@@ -70,8 +70,13 @@ def enable_mock_llm(monkeypatch, calls, response_factory) -> None:
         to_chinese=False,
         timeout_seconds=30.0,
         transport=None,
+        references=(),
     ):
         calls.append((locked_text, locks))
+        # Stand in for the model applying the supplied dictionary references;
+        # hard-locked placeholders stay byte-identical for restore.
+        for source, zh, en, _category in references:
+            locked_text = locked_text.replace(source, zh if to_chinese else en)
         return response_factory(locked_text, locks)
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -766,11 +771,12 @@ def test_error_codes_are_lowercase_snake_case(code: str):
     assert code.replace("_", "").isalpha()
 
 
-def test_lowercase_resonator_name_is_locked_through_the_pipeline(
+def test_lowercase_resonator_name_reaches_the_pipeline_as_a_reference(
     monkeypatch, sample_db
 ):
-    # Synthetic record: the application stage must see the lock that the
-    # sentence layer adds for an all-lowercase resonator name.
+    # Synthetic record: the application stage must pass the name the sentence
+    # layer selected. A resonator name is a reference now, so the model sees
+    # the lowercase surface and can still keep the official spelling.
     with connect(sample_db) as conn:
         insert_records(
             conn, [TermRecord("resonator", "fixture", "1", "1", "维米拉", "Velmira")]
@@ -788,10 +794,10 @@ def test_lowercase_resonator_name_is_locked_through_the_pipeline(
 
     assert outcome.kind == KIND_LLM
     locked_text, locks = calls[0]
-    assert "velmira" not in locked_text
-    assert [(zh, en) for _placeholder, zh, en in locks] == [("维米拉", "Velmira")]
+    assert "velmira" in locked_text
+    assert locks == ()
     assert outcome.text == "我把Velmira练满了"
-    # A locked official name suppresses the short-query dictionary-miss hint.
+    # A selected official name suppresses the short-query dictionary-miss hint.
     assert outcome.dictionary_miss is False
 
 
@@ -830,17 +836,14 @@ def test_excluded_surfaces_count_as_dictionary_miss(monkeypatch, sample_db, excl
 
     assert outcome.kind == KIND_LLM
     locked_text, locks = calls[0]
-    # A whitespace-free input is a short query, which is where the miss hint
-    # applies; excluded surfaces reach the LLM as ordinary words.
+    # Names are references, so they stay visible and the model applies them;
+    # an excluded surface is never selected at all.
+    assert locks == ()
     if excluded:
         assert locked_text == "Wren/Brook"
-        assert locks == ()
         assert outcome.text == "Wren/Brook"
     else:
-        assert [(zh, en) for _placeholder, zh, en in locks] == [
-            ("雷恩", "Wren"),
-            ("布鲁克", "Brook"),
-        ]
+        assert locked_text == "Wren/Brook"
         assert outcome.text == "雷恩/布鲁克"
     assert outcome.dictionary_miss is excluded
 
@@ -868,6 +871,8 @@ def test_plural_lock_suppresses_dictionary_miss_en_zh(monkeypatch, sample_db):
 
     assert outcome.kind == KIND_LLM
     locked_text, locks = calls[0]
+    # The sample database's core_term record owns this surface, so it stays a
+    # hard lock that suppresses the short-query miss hint.
     assert [(zh, en) for _placeholder, zh, en in locks] == [("共鸣者", "Resonator")]
     assert outcome.text == "共鸣者"
     # Locked via plural inflection: no "not authoritative" hint.

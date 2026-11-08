@@ -123,7 +123,7 @@ operator checklist are in [sites.md](sites.md). Do not add Sites setup to
 | System | Direction | Purpose |
 |--------|-----------|---------|
 | Telegram Bot API | Outbound long polling + send/edit/delete | Chat presentation only |
-| OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation after term lock |
+| OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation with dictionary terms as contextual references |
 | Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | One intended caller of the published `/v1` contract |
 | Sites Worker | **Inbound** to `/v1` over HTTPS from the Hosted runtime, using `WUWATERM_SITE_DEVICE_TOKEN` | The other published-contract caller; the browser never talks to `/v1` |
 | Owner's browser | **Inbound** over HTTPS to `/wuwaterm-web` through the same ingress, when that layer is switched on | Renders the private web layer's pages; it never calls `/v1` |
@@ -332,8 +332,8 @@ without anyone noticing, which is exactly what a second surface is most likely
 to do.
 
 The application layer holds the shared command/API/web pipeline (prepare →
-direction → exact hit → trusted fuzzy hit → length gate → chunked, term-locked
-LLM call) and knows nothing about Telegram or HTTP. Its adapter-shaped steps
+direction → exact hit → trusted fuzzy hit → length gate → chunked
+LLM call with contextual term references) and knows nothing about Telegram or HTTP. Its adapter-shaped steps
 are injected by the caller: Telegram commands inject a markup translator and
 UTF-16-aware splitter; the API injects neither, which is why its answers are
 plain text by construction. Those callers receive a `TranslationOutcome` and
@@ -345,9 +345,9 @@ primitives. This is a contract distinction, not a request to merge the flows.
 Adapters can construct `ProtectedText` and `ProtectedStructure` through
 `application` and call the translator's `translate_protected` or
 `translate_protected_async`. Each opaque structure carries its own visible
-context; Core uses that context for term boundaries, locks terms within each
-visible segment, validates placeholders and returns translated segments with
-their original structures. The adapter owns parsing and output validation.
+context; Core uses that context for term boundaries, keeps dictionary terms as
+contextual references within each visible segment, validates structural
+placeholders and returns translated segments with their original structures. The adapter owns parsing and output validation.
 Telegram decodes entity context itself and rejects newly generated HTML before
 reassembling and validating the original structure. A guarded markup hook must
 forward `before_llm_call` to the translator; the guard runs after acquiring the
@@ -406,7 +406,9 @@ Evidence: `bot.py` `create_application`, `_translation_command`,
    - exact hit → official string, **no LLM**;
    - short ASCII fuzzy dictionary short-circuit → **no LLM** (`_fuzzy_dictionary_answer`).
 7. Length gate (`translation_policy` / config limits).
-8. `SentenceTranslator`: lock DB terms → optional LLM → restore placeholders.
+8. `SentenceTranslator`: select DB terms → optional LLM with contextual references
+   (or, with no model, deterministic local substitution) → restore remaining
+   structural/name placeholders.
 9. `reply_to_user` (HTML with plain fallback; flood retry via channel helper).
 
 ### `POST /v1/translations`
@@ -423,8 +425,9 @@ Evidence: `src/wuwaterm_api/app.py` `create_translation`,
 4. **Scope**: `translate` required, else `403`.
 5. Re-check the device before the model call, so a revocation since admission
    spends no budget.
-6. The shared pipeline runs: exact hit → fuzzy hit → length gate → term-locked
-   model call, with the dictionary stage offloaded to a worker thread.
+6. The shared pipeline runs: exact hit → fuzzy hit → length gate → model call
+   with contextual term references, with the dictionary stage offloaded to a
+   worker thread.
 7. With no model configured, this surface refuses (`llm_unavailable`) rather
    than returning source text as though it had been translated — the chat
    fallback would be misleading over HTTP.
@@ -443,7 +446,7 @@ Evidence: `channel.py` `channel_post_handler` and registration in `bot.py`.
 3. Auth: discussion group must still satisfy allowlist gate.
 4. `ChannelRuntime.reserve` (process-local admission / budget).
 5. Claim original in `ChannelReplyIndex` (file-backed).
-6. Translate: exact DB / term lock / LLM with re-gates before send.
+6. Translate: exact DB / term selection / LLM with re-gates before send.
 7. Deliver reply or edit existing chunks with `send_with_flood_retry`.
 8. Telemetry outcomes via channel runtime counters.
 
@@ -460,7 +463,7 @@ Channel path is always auto-detected direction; it does not accept command
 | Invalid leading `--to` | Usage reply only |
 | Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
-| LLM env incomplete | The bot restores locked placeholders without inventing terms; the API refuses with `llm_unavailable` |
+| LLM env incomplete | The bot restores deterministic term substitutions without inventing terms; the API refuses with `llm_unavailable` |
 | `/about`, `/status`, grant/revoke/public membership housekeeping | No translation |
 
 ## Data model: immutable vs mutable

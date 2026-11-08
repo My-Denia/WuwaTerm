@@ -204,7 +204,7 @@ def test_llm_diagnostic_correlates_without_exposing_content(
 ):
     app, store = build_app(tmp_path, sample_db)
     device, token = issue_device(store)
-    source = "今汐回应诊断示例中的一句话。"
+    source = "Echo replies in this diagnostic example."
     output_marker = "synthetic-output-must-not-be-logged"
     calls = []
 
@@ -258,7 +258,7 @@ def test_concurrent_llm_diagnostics_stay_with_their_request(
         if arrived == 2:
             ready.set()
         await asyncio.wait_for(ready.wait(), 5)
-        return " " if "第一个" in locked_text else locked_text + locks[0][0]
+        return " " if "first" in locked_text else locked_text + locks[0][0]
 
     enable_diagnostic_llm(monkeypatch, answer)
 
@@ -268,7 +268,8 @@ def test_concurrent_llm_diagnostics_stay_with_their_request(
         return await asyncio.gather(*[
             call(app, "POST", "/v1/translations", json={"text": text},
                  headers={"Authorization": f"Bearer {token}"})
-            for text in ("今汐说第一个诊断句子。", "今汐说第二个诊断句子。")
+            for text in ("Echo says the first diagnostic sentence.",
+                         "Echo says the second diagnostic sentence.")
         ])
 
     with captured_records() as captured:

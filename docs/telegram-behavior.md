@@ -20,7 +20,7 @@ Commands:
 - `/tr --to zh Jinhsi equipped an Echo` and
   `/tr -to zh Jinhsi equipped an Echo` force Chinese output
 - `/term 今汐` returns `Jinhsi`
-- `/sentence 今汐装备了声骸` locks known DB terms before translation
+- `/sentence 今汐装备了声骸` supplies known DB terms as contextual references before translation
 - `/sentence --to en 今汐装备了声骸` and `/sent --to en 今汐装备了声骸`
   force English sentence translation
 - `/sentence --to zh Jinhsi equipped an Echo` and
