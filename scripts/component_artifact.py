@@ -23,7 +23,6 @@ they can never inherit the deployment lock.
 from __future__ import annotations
 
 import argparse
-import ast
 import configparser
 import contextlib
 import csv
@@ -33,17 +32,21 @@ import fcntl
 import gzip
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
 import marshal
+import math
 import os
 from pathlib import Path
 import posixpath
 import re
 import secrets
+import shutil
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import tarfile
 import time
@@ -1000,6 +1003,18 @@ def _validate_report(raw: bytes) -> dict[str, Any]:
                     "packages", "extra_files"}, "probe report")
     if report["schema_version"] != 1 or report["kind"] != "install-probe":
         _fail("unsupported probe report")
+    py_ver = report.get("python_version")
+    if not isinstance(py_ver, str):
+        _fail("invalid install probe report python_version")
+    parts = py_ver.split(".")
+    if len(parts) < 2:
+        _fail("invalid install probe report python_version")
+    try:
+        maj, min_ = int(parts[0]), int(parts[1])
+        if maj < 0 or min_ < 0:
+            _fail("invalid install probe report python_version")
+    except (ValueError, TypeError):
+        _fail("invalid install probe report python_version")
     if type(report["packages"]) is not list or not report["packages"]:
         _fail("probe report lists no packages")
     for package in report["packages"]:
@@ -1058,108 +1073,280 @@ def _skipped(path: str) -> bool:
     return path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/")
 
 
-_COMP_NAMES = {"<listcomp>", "<dictcomp>", "<setcomp>"}
+_CODE_ATTRS = (
+    "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
+    "co_stacksize", "co_flags", "co_code", "co_names", "co_varnames",
+    "co_filename", "co_name", "co_qualname", "co_firstlineno", "co_linetable",
+    "co_exceptiontable", "co_freevars", "co_cellvars",
+)
 
 
-def _while_true_scopes(tree: ast.AST) -> set[str]:
-    scopes: set[str] = set()
+def _exact_const_eq(c1: Any, c2: Any) -> bool:
+    if type(c1) is not type(c2):
+        return False
+    if isinstance(c1, types.CodeType):
+        return _exact_code_eq(c1, c2)
+    if isinstance(c1, tuple):
+        if len(c1) != len(c2):
+            return False
+        return all(_exact_const_eq(x1, x2) for x1, x2 in zip(c1, c2))
+    if isinstance(c1, frozenset):
+        if len(c1) != len(c2) or c1 != c2:
+            return False
+        for x1 in c1:
+            if not any(type(x1) is type(x2) and _exact_const_eq(x1, x2) for x2 in c2):
+                return False
+        return True
+    if isinstance(c1, float):
+        if math.isnan(c1) and math.isnan(c2):
+            return True
+        return c1 == c2 and math.copysign(1.0, c1) == math.copysign(1.0, c2)
+    if isinstance(c1, complex):
+        return _exact_const_eq(c1.real, c2.real) and _exact_const_eq(c1.imag, c2.imag)
+    return c1 == c2
 
-    def check(name: str, body: list[ast.stmt]) -> None:
-        queue = list(body)
-        while queue:
-            node = queue.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+
+def _exact_code_eq(co1: types.CodeType, co2: types.CodeType) -> bool:
+    if co1 != co2:
+        return False
+    for attr in _CODE_ATTRS:
+        if getattr(co1, attr, None) != getattr(co2, attr, None):
+            return False
+    if len(co1.co_consts) != len(co2.co_consts):
+        return False
+    for c1, c2 in zip(co1.co_consts, co2.co_consts):
+        if not _exact_const_eq(c1, c2):
+            return False
+    return True
+
+
+def _verify_pyc_code_in_process(pyc_payload: bytes, py_bytes: bytes, py_full: str) -> bool:
+    try:
+        bio = io.BytesIO(pyc_payload)
+        co_pyc = marshal.load(bio)
+        if bio.tell() != len(pyc_payload) or not isinstance(co_pyc, types.CodeType):
+            return False
+        co_expected = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
+        if len(pyc_payload) != len(marshal.dumps(co_expected)):
+            return False
+        return _exact_code_eq(co_pyc, co_expected)
+    except Exception:
+        return False
+
+
+def _find_trusted_python(major: int, minor: int) -> str | None:
+    target_name = f"python{major}.{minor}"
+    candidates: list[str | Path] = []
+    w = shutil.which(target_name)
+    if w:
+        candidates.append(w)
+    candidates.append(f"/usr/bin/{target_name}")
+    candidates.append(f"/usr/local/bin/{target_name}")
+    uv_dir = Path.home() / ".local/share/uv/python"
+    if uv_dir.is_dir():
+        candidates.extend(sorted(uv_dir.glob(f"cpython-{major}.{minor}.*/bin/{target_name}")))
+        candidates.extend(sorted(uv_dir.glob(f"cpython-{major}.{minor}-*/bin/{target_name}")))
+    tool_cache_roots: list[Path] = []
+    env_cache = os.environ.get("RUNNER_TOOL_CACHE")
+    if env_cache:
+        tool_cache_roots.append(Path(env_cache))
+    tool_cache_roots.append(Path("/opt/hostedtoolcache"))
+    for root in tool_cache_roots:
+        if root.is_dir():
+            candidates.extend(sorted(root.glob(f"Python/{major}.{minor}.*/*/bin/{target_name}")))
+    pyenv_dir = Path.home() / ".pyenv/versions"
+    if pyenv_dir.is_dir():
+        candidates.extend(sorted(pyenv_dir.glob(f"{major}.{minor}.*/bin/{target_name}")))
+
+    euid = os.geteuid()
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            resolved = os.path.realpath(str(cand))
+            if resolved in seen:
                 continue
-            if isinstance(node, ast.While) and isinstance(node.test, ast.Constant) and node.test.value is True:
-                scopes.add(name)
-                break
-            for child in ast.iter_child_nodes(node):
-                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    queue.append(child)
-
-    check("<module>", getattr(tree, "body", []))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            check(node.name, node.body)
-    return scopes
-
-
-def _extract_summary(co: types.CodeType, while_true_scopes: set[str]) -> tuple[
-    set[tuple[str, Any]], set[str], set[str], list[types.CodeType], list[tuple[str, Any]], set[int]
-]:
-    prims: set[tuple[str, Any]] = set()
-    ordered_prims: list[tuple[str, Any]] = []
-    lines = {line for _, _, line in co.co_lines() if line is not None}
-    names = set(co.co_names)
-    locals_and_cells = (set(v for v in co.co_varnames if not v.startswith("."))
-                        | set(co.co_cellvars)
-                        | set(co.co_freevars)) - {"__class__"}
-    children: list[types.CodeType] = []
-
-    def visit_const(c: Any) -> None:
-        if isinstance(c, types.CodeType):
-            if c.co_name in _COMP_NAMES:
-                sub_p, sub_n, sub_v, sub_ch, sub_o, sub_l = _extract_summary(c, while_true_scopes)
-                prims.update(sub_p)
-                names.update(sub_n)
-                locals_and_cells.update(sub_v)
-                children.extend(sub_ch)
-                lines.update(sub_l)
-            else:
-                children.append(c)
-        elif isinstance(c, (tuple, frozenset)):
-            for x in c:
-                visit_const(x)
-        else:
-            if c is None:
-                return
-            if isinstance(c, bool):
-                if c is True and co.co_name in while_true_scopes:
-                    return
-                prims.add(("bool", c))
-                ordered_prims.append(("bool", c))
-                return
-            if isinstance(c, str) and c.endswith((".<locals>.<listcomp>", ".<locals>.<dictcomp>", ".<locals>.<setcomp>")):
-                return
-            prims.add((type(c).__name__, c))
-            ordered_prims.append((type(c).__name__, c))
-
-    for c in co.co_consts:
-        visit_const(c)
-    return prims, names, locals_and_cells, children, ordered_prims, lines
+            seen.add(resolved)
+            st = os.stat(resolved)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if (st.st_mode & 0o111) == 0:
+                continue
+            if st.st_uid not in (0, euid):
+                continue
+            if (st.st_mode & 0o022) != 0:
+                continue
+            proc = subprocess.run(
+                [resolved, "-I", "-B", "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+                close_fds=True,
+                env={},
+            )
+            if proc.returncode == 0 and proc.stdout.strip() == f"{major}.{minor}":
+                return resolved
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    return None
 
 
-def _compare_merged(co1: types.CodeType, co2: types.CodeType, while_true_scopes: set[str],
-                    path: str = "", same_version: bool = False) -> list[str]:
-    errs: list[str] = []
-    for attr in ("co_name", "co_qualname", "co_filename", "co_firstlineno",
-                 "co_argcount", "co_posonlyargcount", "co_kwonlyargcount"):
-        v1, v2 = getattr(co1, attr, None), getattr(co2, attr, None)
-        if v1 != v2:
-            errs.append(f"{path}.{attr}: {v1!r} != {v2!r}")
-    p1, n1, v1, ch1, o1, l1 = _extract_summary(co1, while_true_scopes)
-    p2, n2, v2, ch2, o2, l2 = _extract_summary(co2, while_true_scopes)
-    if n1 != n2:
-        errs.append(f"{path}.names: {n1!r} != {n2!r}")
-    if v1 != v2:
-        errs.append(f"{path}.locals: {v1!r} != {v2!r}")
-    if p1 != p2:
-        errs.append(f"{path}.prims: {p1!r} != {p2!r}")
-    if same_version:
-        if o1 != o2:
-            errs.append(f"{path}.ordered_prims: {o1!r} != {o2!r}")
-        if l1 != l2:
-            errs.append(f"{path}.lines: {l1!r} != {l2!r}")
-    if len(ch1) != len(ch2):
-        errs.append(f"{path}.children len: {len(ch1)} != {len(ch2)}")
-    else:
-        for c1, c2 in zip(ch1, ch2):
-            child_name = getattr(c1, "co_qualname", c1.co_name)
-            errs.extend(_compare_merged(c1, c2, while_true_scopes, f"{path}/{child_name}", same_version))
-    return errs
+_PYC_VERIFY_HELPER = """
+import importlib.util, io, marshal, math, os, struct, sys, types
+
+target_py = TARGET_PY_PLACEHOLDER
+if sys.version_info[:2] != target_py:
+    sys.exit(2)
+
+_CODE_ATTRS = (
+    "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
+    "co_stacksize", "co_flags", "co_code", "co_names", "co_varnames",
+    "co_filename", "co_name", "co_qualname", "co_firstlineno", "co_linetable",
+    "co_exceptiontable", "co_freevars", "co_cellvars",
+)
+
+def _exact_const_eq(c1, c2):
+    if type(c1) is not type(c2):
+        return False
+    if isinstance(c1, types.CodeType):
+        return _exact_code_eq(c1, c2)
+    if isinstance(c1, tuple):
+        if len(c1) != len(c2):
+            return False
+        return all(_exact_const_eq(x1, x2) for x1, x2 in zip(c1, c2))
+    if isinstance(c1, frozenset):
+        if len(c1) != len(c2) or c1 != c2:
+            return False
+        for x1 in c1:
+            if not any(type(x1) is type(x2) and _exact_const_eq(x1, x2) for x2 in c2):
+                return False
+        return True
+    if isinstance(c1, float):
+        if math.isnan(c1) and math.isnan(c2):
+            return True
+        return c1 == c2 and math.copysign(1.0, c1) == math.copysign(1.0, c2)
+    if isinstance(c1, complex):
+        return _exact_const_eq(c1.real, c2.real) and _exact_const_eq(c1.imag, c2.imag)
+    return c1 == c2
+
+def _exact_code_eq(co1, co2):
+    if co1 != co2:
+        return False
+    for attr in _CODE_ATTRS:
+        if getattr(co1, attr, None) != getattr(co2, attr, None):
+            return False
+    if len(co1.co_consts) != len(co2.co_consts):
+        return False
+    for c1, c2 in zip(co1.co_consts, co2.co_consts):
+        if not _exact_const_eq(c1, c2):
+            return False
+    return True
+
+def _read_exact(stream, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = stream.read(n - len(buf))
+        if not chunk:
+            raise EOFError("premature end of stdin")
+        buf.extend(chunk)
+    return bytes(buf)
+
+stdin = sys.stdin.buffer
+try:
+    num_items = struct.unpack("<I", _read_exact(stdin, 4))[0]
+    for _ in range(num_items):
+        rel_len = struct.unpack("<I", _read_exact(stdin, 4))[0]
+        rel = _read_exact(stdin, rel_len).decode("utf-8")
+        full_len = struct.unpack("<I", _read_exact(stdin, 4))[0]
+        py_full = _read_exact(stdin, full_len).decode("utf-8")
+        py_len = struct.unpack("<I", _read_exact(stdin, 4))[0]
+        py_bytes = _read_exact(stdin, py_len)
+        magic = _read_exact(stdin, 4)
+        pyc_len = struct.unpack("<I", _read_exact(stdin, 4))[0]
+        pyc_payload = _read_exact(stdin, pyc_len)
+
+        if magic != importlib.util.MAGIC_NUMBER:
+            sys.stdout.write(rel + "\\n")
+            sys.stdout.flush()
+            sys.exit(1)
+
+        try:
+            bio = io.BytesIO(pyc_payload)
+            co_pyc = marshal.load(bio)
+            if bio.tell() != len(pyc_payload) or not isinstance(co_pyc, types.CodeType):
+                sys.stdout.write(rel + "\\n")
+                sys.stdout.flush()
+                sys.exit(1)
+            co_expected = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
+            if len(pyc_payload) != len(marshal.dumps(co_expected)):
+                sys.stdout.write(rel + "\\n")
+                sys.stdout.flush()
+                sys.exit(1)
+            if not _exact_code_eq(co_pyc, co_expected):
+                sys.stdout.write(rel + "\\n")
+                sys.stdout.flush()
+                sys.exit(1)
+        except Exception:
+            sys.stdout.write(rel + "\\n")
+            sys.stdout.flush()
+            sys.exit(1)
+except Exception:
+    sys.exit(1)
+
+sys.exit(0)
+"""
 
 
-def _verify_pyc(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, str], python_version: str) -> None:
+def _verify_pyc_batch(items: list[tuple[str, str, bytes, bytes, bytes]], target_py: tuple[int, int]) -> None:
+    if not items:
+        return
+    if sys.version_info[:2] == target_py:
+        for rel, py_full, py_bytes, magic, pyc_payload in items:
+            if magic != importlib.util.MAGIC_NUMBER or not _verify_pyc_code_in_process(pyc_payload, py_bytes, py_full):
+                _fail("compiled .pyc bytecode differs from verified source: " + rel)
+        return
+
+    interp = _find_trusted_python(*target_py)
+    if interp is None:
+        _fail(f"cannot verify cross-version .pyc bytecode without trusted python{target_py[0]}.{target_py[1]} interpreter: {items[0][0]}")
+
+    payload = bytearray()
+    payload.extend(struct.pack("<I", len(items)))
+    for rel, py_full, py_bytes, magic, pyc_payload in items:
+        rel_b = rel.encode("utf-8")
+        full_b = py_full.encode("utf-8")
+        payload.extend(struct.pack("<I", len(rel_b)))
+        payload.extend(rel_b)
+        payload.extend(struct.pack("<I", len(full_b)))
+        payload.extend(full_b)
+        payload.extend(struct.pack("<I", len(py_bytes)))
+        payload.extend(py_bytes)
+        payload.extend(magic)
+        payload.extend(struct.pack("<I", len(pyc_payload)))
+        payload.extend(pyc_payload)
+
+    helper = _PYC_VERIFY_HELPER.replace("TARGET_PY_PLACEHOLDER", repr(target_py))
+    cmd = [interp, "-I", "-B", "-c", helper]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=bytes(payload),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            env={},
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        _fail("timed out verifying .pyc bytecode: " + items[0][0])
+
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    failed_rel = out.splitlines()[0].strip() if out else ""
+    if proc.returncode != 0 or failed_rel:
+        _fail("compiled .pyc bytecode differs from verified source: " + (failed_rel or items[0][0]))
+
+
+def _verify_pyc_header(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, str] | None, python_version: str) -> tuple[str, str, bytes, bytes, bytes]:
     rel = pyc_path[len(site) + 1:]
     if rel.endswith(".pyo"):
         _fail("unexpected .pyo bytecode file: " + rel)
@@ -1167,7 +1354,8 @@ def _verify_pyc(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, s
     py_parts = python_version.split(".")
     xy = "".join(py_parts[:2])
     expected_suffix = f".cpython-{xy}.pyc"
-    if (len(parts) < 3
+    min_parts = 2 if (installed is None or parts == ["__pycache__", f"typing_extensions.cpython-{xy}.pyc"]) else 3
+    if (len(parts) < min_parts
             or parts[-2] != "__pycache__"
             or "__pycache__" in parts[:-2]
             or not parts[-1].endswith(expected_suffix)):
@@ -1175,8 +1363,11 @@ def _verify_pyc(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, s
     mod = parts[-1][:-len(expected_suffix)]
     if not mod.isidentifier():
         _fail("invalid module name in bytecode file: " + rel)
-    py_rel = "/".join(parts[:-2] + [mod + ".py"])
-    if py_rel not in installed:
+    if len(parts) == 2:
+        py_rel = mod + ".py"
+    else:
+        py_rel = "/".join(parts[:-2] + [mod + ".py"])
+    if installed is not None and py_rel not in installed:
         _fail("unrecorded or unverified source file for bytecode: " + rel)
     py_full = site + "/" + py_rel
     py_node = rootfs.nodes.get(py_full)
@@ -1189,45 +1380,9 @@ def _verify_pyc(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, s
     magic, flags, mtime, size = struct.unpack("<4sIII", raw[:16])
     if flags != 0:
         _fail("hash-based .pyc bytecode is forbidden: " + rel)
-    if xy == "311" and magic != b"\xa7\r\r\n":
-        _fail("unexpected .pyc magic bytes: " + rel)
-    if xy == "312" and magic != b"\xcb\r\r\n":
-        _fail("unexpected .pyc magic bytes: " + rel)
     if mtime != (py_node.mtime & 0xFFFFFFFF) or size != (py_node.size & 0xFFFFFFFF):
         _fail("stale or mismatched .pyc header: " + rel)
-    try:
-        co_pyc = marshal.loads(raw[16:])
-    except Exception:
-        _fail("compiled .pyc bytecode differs from verified source: " + rel)
-    if not isinstance(co_pyc, types.CodeType):
-        _fail("compiled .pyc bytecode differs from verified source: " + rel)
-    try:
-        co_compiled = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    except Exception:
-        _fail("compiled .pyc bytecode differs from verified source: " + rel)
-
-    try:
-        target_py = (int(py_parts[0]), int(py_parts[1]))
-    except (ValueError, IndexError):
-        _fail("invalid python version in probe report: " + python_version)
-
-    same_version = sys.version_info[:2] == target_py
-    if same_version:
-        if co_pyc != co_compiled:
-            _fail("compiled .pyc bytecode differs from verified source: " + rel)
-        return
-
-    if co_pyc == co_compiled:
-        return
-
-    try:
-        tree = ast.parse(py_bytes)
-    except Exception:
-        _fail("cannot parse source file: " + py_full)
-    while_true_scopes = _while_true_scopes(tree)
-    errs = _compare_merged(co_pyc, co_compiled, while_true_scopes, rel, same_version)
-    if errs:
-        _fail("compiled .pyc bytecode differs from verified source: " + rel)
+    return (rel, py_full, py_bytes, magic, raw[16:])
 
 
 def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] | None) -> dict[str, str]:
@@ -1366,10 +1521,18 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         base_prefix = posixpath.basename(path).split(".")[0]
         if base_prefix in ("sitecustomize", "usercustomize"):
             _fail(f"unauthorized {base_prefix} module in image: {path}")
+    py_parts = report["python_version"].split(".")
+    xy = "".join(py_parts[:2])
+    try:
+        target_py = (int(py_parts[0]), int(py_parts[1]))
+    except (ValueError, IndexError):
+        _fail("invalid python version in probe report: " + str(report.get("python_version")))
+    pyc_items: list[tuple[str, str, bytes, bytes, bytes]] = []
+    verified_pyc_paths: set[str] = set()
     pycache_site = site + "/__pycache__/"
     for path in rootfs.nodes:
         if path.startswith(pycache_site):
-            if posixpath.basename(path) != "typing_extensions.cpython-311.pyc":
+            if posixpath.basename(path) != f"typing_extensions.cpython-{xy}.pyc":
                 _fail("unexpected bytecode in site-packages: " + path)
         elif posixpath.dirname(path) == site and path.endswith((".pyc", ".pyo")):
             _fail("unexpected bytecode in site-packages: " + path)
@@ -1475,7 +1638,10 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                 full_p = site + "/" + p
                 if full_p not in rootfs.nodes:
                     _fail("RECORD entry missing in image: " + p)
-                _verify_pyc(rootfs, full_p, site, installed, report["python_version"])
+                if full_p not in verified_pyc_paths:
+                    item = _verify_pyc_header(rootfs, full_p, site, installed, report["python_version"])
+                    pyc_items.append(item)
+                    verified_pyc_paths.add(full_p)
         for path, node in rootfs.nodes.items():
             if (path == site or path.startswith(site + "/")) and node.kind not in ("dir", "file"):
                 _fail("unsafe non-regular entry in site-packages: " + path)
@@ -1491,7 +1657,10 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                         if relative not in installed:
                             _fail("unrecorded file in installed package: " + relative)
                     else:
-                        _verify_pyc(rootfs, path, site, installed, report["python_version"])
+                        if path not in verified_pyc_paths:
+                            item = _verify_pyc_header(rootfs, path, site, installed, report["python_version"])
+                            pyc_items.append(item)
+                            verified_pyc_paths.add(path)
         direct_path = dist_info + "/direct_url.json"
         if direct_path in rootfs.nodes:
             expected_direct = _parse_json(rootfs.read(direct_path))
@@ -1685,6 +1854,17 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     verified_bin_scripts.add(expected_target)
         if package["name"] not in wheels and package["name"] not in product["source_packages"]:
             _fail("no verified source or wheel for probed package: " + package["name"])
+    for path, node in rootfs.nodes.items():
+        if path.startswith(site + "/") and node.kind == "file":
+            if path.endswith(".pyc"):
+                if path not in verified_pyc_paths:
+                    item = _verify_pyc_header(rootfs, path, site, None, report["python_version"])
+                    pyc_items.append(item)
+                    verified_pyc_paths.add(path)
+            elif path.endswith(".pyo"):
+                rel = path[len(site) + 1:]
+                _fail("unexpected .pyo bytecode file: " + rel)
+    _verify_pyc_batch(pyc_items, target_py)
     bin_dir = posixpath.dirname(report["interpreter"]).lstrip("/")
     for name in ("wuwaterm", "wuwaterm-api", "wuwaterm-telegram"):
         candidate = posixpath.join(bin_dir, name)

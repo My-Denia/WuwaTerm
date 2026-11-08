@@ -1579,19 +1579,66 @@ def test_invalid_runtime_config_and_interpreter_rejected(tmp_path: Path) -> None
         fx_interp.seal(layers)
 
 
+_PRECOMPUTED_311_PYC: dict[tuple[str, bytes], bytes] = {
+    ("/app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py", b"def f(x):\n    return x + 1\n"): (
+        b'\xa7\r\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\xe3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00d\x00\x84\x00Z\x00d\x01S\x00)\x02c\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00|\x00d\x01z\x00\x00\x00S\x00)\x02N\xe9\x01\x00\x00\x00\xa9\x00)\x01\xda\x01xs\x01\x00\x00\x00 \xfa</app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py\xda\x01fr\x07\x00\x00\x00\x01\x00\x00\x00s\x0b\x00\x00\x00\x80\x00\xd8\x0b\x0c\x88q\x895\x80L\xf3\x00\x00\x00\x00N)\x01r\x07\x00\x00\x00r\x04\x00\x00\x00r\x08\x00\x00\x00r\x06\x00\x00\x00\xfa\x08<module>r\t\x00\x00\x00\x01\x00\x00\x00s\x1e\x00\x00\x00\xf0\x03\x01\x01\x01\xf0\x02\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11r\x08\x00\x00\x00'
+    ),
+    ("/app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py", b"def f(x):\n    return x - 1\n"): (
+        b'\xa7\r\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\xe3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00d\x00\x84\x00Z\x00d\x01S\x00)\x02c\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00|\x00d\x01z\n\x00\x00S\x00)\x02N\xe9\x01\x00\x00\x00\xa9\x00)\x01\xda\x01xs\x01\x00\x00\x00 \xfa</app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py\xda\x01fr\x07\x00\x00\x00\x01\x00\x00\x00s\x0b\x00\x00\x00\x80\x00\xd8\x0b\x0c\x88q\x895\x80L\xf3\x00\x00\x00\x00N)\x01r\x07\x00\x00\x00r\x04\x00\x00\x00r\x08\x00\x00\x00r\x06\x00\x00\x00\xfa\x08<module>r\t\x00\x00\x00\x01\x00\x00\x00s\x1e\x00\x00\x00\xf0\x03\x01\x01\x01\xf0\x02\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11r\x08\x00\x00\x00'
+    ),
+    ("/usr/local/lib/python3.11/site-packages/wuwaterm/__init__.py", b"def f(x):\n    return x + 1\n"): (
+        b'\xa7\r\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\xe3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00d\x00\x84\x00Z\x00d\x01S\x00)\x02c\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00|\x00d\x01z\x00\x00\x00S\x00)\x02N\xe9\x01\x00\x00\x00\xa9\x00)\x01\xda\x01xs\x01\x00\x00\x00 \xfa</usr/local/lib/python3.11/site-packages/wuwaterm/__init__.py\xda\x01fr\x07\x00\x00\x00\x01\x00\x00\x00s\x0b\x00\x00\x00\x80\x00\xd8\x0b\x0c\x88q\x895\x80L\xf3\x00\x00\x00\x00N)\x01r\x07\x00\x00\x00r\x04\x00\x00\x00r\x08\x00\x00\x00r\x06\x00\x00\x00\xfa\x08<module>r\t\x00\x00\x00\x01\x00\x00\x00s\x1e\x00\x00\x00\xf0\x03\x01\x01\x01\xf0\x02\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11r\x08\x00\x00\x00'
+    ),
+    ("/usr/local/lib/python3.11/site-packages/wuwaterm/__init__.py", b"def f(x):\n    return x - 1\n"): (
+        b'\xa7\r\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\xe3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00d\x00\x84\x00Z\x00d\x01S\x00)\x02c\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00|\x00d\x01z\n\x00\x00S\x00)\x02N\xe9\x01\x00\x00\x00\xa9\x00)\x01\xda\x01xs\x01\x00\x00\x00 \xfa</usr/local/lib/python3.11/site-packages/wuwaterm/__init__.py\xda\x01fr\x07\x00\x00\x00\x01\x00\x00\x00s\x0b\x00\x00\x00\x80\x00\xd8\x0b\x0c\x88q\x895\x80L\xf3\x00\x00\x00\x00N)\x01r\x07\x00\x00\x00r\x04\x00\x00\x00r\x08\x00\x00\x00r\x06\x00\x00\x00\xfa\x08<module>r\t\x00\x00\x00\x01\x00\x00\x00s\x1e\x00\x00\x00\xf0\x03\x01\x01\x01\xf0\x02\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11r\x08\x00\x00\x00'
+    ),
+}
+
+
+def compile_311_pyc(py_bytes: bytes, filename: str, mtime: int = 0, source_size: int | None = None, flags: int = 0) -> bytes:
+    if source_size is None:
+        source_size = len(py_bytes)
+    magic = b"\xa7\r\r\n"
+    if sys.version_info[:2] == (3, 11):
+        co = compile(py_bytes, filename, "exec", dont_inherit=True, optimize=0)
+        payload = marshal.dumps(co)
+    else:
+        interp = art._find_trusted_python(3, 11)
+        if interp is not None:
+            cmd = [interp, "-I", "-B", "-c", """
+import sys, marshal
+filename = sys.argv[1]
+source = sys.stdin.buffer.read()
+co = compile(source, filename, "exec", dont_inherit=True, optimize=0)
+sys.stdout.buffer.write(marshal.dumps(co))
+""", filename]
+            proc = subprocess.run(cmd, input=py_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            payload = proc.stdout
+        elif (filename, py_bytes) in _PRECOMPUTED_311_PYC:
+            payload = _PRECOMPUTED_311_PYC[(filename, py_bytes)][16:]
+        else:
+            raise RuntimeError(f"Python 3.11 interpreter not found to compile {filename}")
+    header = struct.pack("<4sIII", magic, flags, mtime, source_size)
+    return header + payload
+
+
 def test_bytecode_pep552_hash_pyc_rejected(tmp_path: Path) -> None:
-    # Codex reproduction: unrecorded wuwaterm/__pycache__/__init__.cpython-311.pyc
+    # Codex reproduction: unrecorded wuwaterm/__pycache__/__init__.cpython-XY.pyc
     # with PEP 552 unchecked-hash (flags=1) returning VERSION = 999
     fx = Fixture(tmp_path / "pep552")
     site, pkgs = fx.installed()
-    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    cur_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    xy = f"{sys.version_info.major}{sys.version_info.minor}"
+    magic = importlib.util.MAGIC_NUMBER
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
     co_evil = compile(b"VERSION = 999\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
-    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 1, 0, 0) + marshal.dumps(co_evil)
+    raw_pyc = struct.pack("<4sIII", magic, 1, 0, 0) + marshal.dumps(co_evil)
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
-    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
     modes = {"entrypoint.sh": 0o755}
-    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=cur_ver)
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     with pytest.raises(art.ArtifactError, match="hash-based .pyc bytecode is forbidden"):
         fx.seal(layers)
@@ -1601,19 +1648,23 @@ def test_bytecode_pep552_hash_pyc_rejected(tmp_path: Path) -> None:
 
 
 def test_bytecode_forged_timestamp_pyc_rejected(tmp_path: Path) -> None:
-    # Forged timestamp-based wuwaterm/__pycache__/__init__.cpython-311.pyc (flags=0)
+    # Forged timestamp-based wuwaterm/__pycache__/__init__.cpython-XY.pyc (flags=0)
     # matching (mtime, size) for wuwaterm/__init__.py, but code object sets VERSION = 999
     fx = Fixture(tmp_path / "forged_ts")
     site, pkgs = fx.installed()
-    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    cur_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    xy = f"{sys.version_info.major}{sys.version_info.minor}"
+    magic = importlib.util.MAGIC_NUMBER
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
     py_bytes = fx.pkg["wuwaterm/__init__.py"]
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
     co_evil = compile(b"VERSION = 999\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
-    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
+    raw_pyc = struct.pack("<4sIII", magic, 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
-    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
     modes = {"entrypoint.sh": 0o755}
-    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=cur_ver)
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
         fx.seal(layers)
@@ -1623,19 +1674,23 @@ def test_bytecode_forged_timestamp_pyc_rejected(tmp_path: Path) -> None:
 
 
 def test_bytecode_valid_timestamp_pyc_accepted(tmp_path: Path) -> None:
-    # Valid timestamp-based wuwaterm/__pycache__/__init__.cpython-311.pyc (flags=0)
+    # Valid timestamp-based wuwaterm/__pycache__/__init__.cpython-XY.pyc (flags=0)
     # matching (mtime, size) and matching compiled code object for VERSION = 1
     fx = Fixture(tmp_path / "valid_pyc")
     site, pkgs = fx.installed()
-    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    cur_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    xy = f"{sys.version_info.major}{sys.version_info.minor}"
+    magic = importlib.util.MAGIC_NUMBER
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
     py_bytes = fx.pkg["wuwaterm/__init__.py"]
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
     co_valid = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
-    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_valid)
+    raw_pyc = struct.pack("<4sIII", magic, 0, 0, len(py_bytes)) + marshal.dumps(co_valid)
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
-    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
     modes = {"entrypoint.sh": 0o755}
-    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=cur_ver)
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     verified = fx.seal(layers)
     assert verified is not None
@@ -1647,17 +1702,21 @@ def test_bytecode_valid_timestamp_pyc_accepted(tmp_path: Path) -> None:
 def test_bytecode_forged_bool_constant_rejected(tmp_path: Path) -> None:
     # Forged timestamp-based .pyc flipping FLAG = True -> FLAG = False is rejected
     fx = Fixture(tmp_path / "forged_bool")
-    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    cur_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    xy = f"{sys.version_info.major}{sys.version_info.minor}"
+    magic = importlib.util.MAGIC_NUMBER
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
     py_bytes = b"FLAG = True\n"
     fx.pkg["wuwaterm/__init__.py"] = py_bytes
     site, pkgs = fx.installed()
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
     co_evil = compile(b"FLAG = False\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
-    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
+    raw_pyc = struct.pack("<4sIII", magic, 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
-    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
     modes = {"entrypoint.sh": 0o755}
-    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=cur_ver)
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
         fx.seal(layers)
@@ -1669,26 +1728,148 @@ def test_bytecode_forged_bool_constant_rejected(tmp_path: Path) -> None:
 def test_bytecode_forged_constant_order_rejected(tmp_path: Path) -> None:
     # Forged timestamp-based .pyc swapping constant order PAIR = (1, 2) -> PAIR = (2, 1) is rejected
     fx = Fixture(tmp_path / "forged_order")
-    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    cur_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    xy = f"{sys.version_info.major}{sys.version_info.minor}"
+    magic = importlib.util.MAGIC_NUMBER
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
     py_bytes = b"PAIR = (1, 2)\n"
     fx.pkg["wuwaterm/__init__.py"] = py_bytes
     site, pkgs = fx.installed()
     co_evil = compile(b"PAIR = (2, 1)\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
-    py_ver = f"{sys.version_info[0]}.{sys.version_info[1]}.0"
-    xy = f"{sys.version_info[0]}{sys.version_info[1]}"
-    magic = importlib.util.MAGIC_NUMBER
-    pyc_full = SITE.lstrip("/") + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
     raw_pyc = struct.pack("<4sIII", magic, 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
-    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
     modes = {"entrypoint.sh": 0o755}
-    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=py_ver)
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=cur_ver)
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
         fx.seal(layers)
     bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
     with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
         art.verify_bundle(bundle_path)
+
+
+def test_bytecode_cross_version_operator_change_rejected(tmp_path: Path) -> None:
+    # Codex reproduction in PRRT_kwDOS82bU860-g2N:
+    # Source is def f(x):\n    return x + 1\n
+    # Pyc is genuine Python 3.11 bytecode compiled from def f(x):\n    return x - 1\n
+    # Header flags=0, matching (mtime, size) of source
+    fx = Fixture(tmp_path / "operator_change")
+    site_prefix = SITE.lstrip("/")
+    py_full = site_prefix + "/wuwaterm/__init__.py"
+    py_bytes = b"def f(x):\n    return x + 1\n"
+    evil_bytes = b"def f(x):\n    return x - 1\n"
+    fx.pkg["wuwaterm/__init__.py"] = py_bytes
+    site, pkgs = fx.installed()
+    pyc_full = site_prefix + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
+    raw_pyc = compile_311_pyc(evil_bytes, "/" + py_full, mtime=0, source_size=len(py_bytes))
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version="3.11.16")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+
+    has_trusted_311 = art._find_trusted_python(3, 11) is not None or sys.version_info[:2] == (3, 11)
+    expected_match = (
+        "compiled .pyc bytecode differs from verified source"
+        if has_trusted_311
+        else "cannot verify cross-version .pyc bytecode without trusted python3.11 interpreter"
+    )
+    with pytest.raises(art.ArtifactError, match=expected_match):
+        fx.seal(layers)
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match=expected_match):
+        art.verify_bundle(bundle_path)
+
+    # AND if any cross-version interpreter ((3, 11) or (3, 12) != sys.version_info[:2]) is available
+    # via art._find_trusted_python, explicitly verify that valid cross-version return x + 1 .pyc is
+    # accepted by fx.seal and art.verify_bundle, while forged return x - 1 .pyc is rejected.
+    cross_candidates = [(3, 11), (3, 12)]
+    cross_target = None
+    for cand in cross_candidates:
+        if cand != sys.version_info[:2] and art._find_trusted_python(*cand) is not None:
+            cross_target = cand
+            break
+
+    if cross_target is not None:
+        c_maj, c_min = cross_target
+        c_ver = f"{c_maj}.{c_min}.0"
+        c_xy = f"{c_maj}{c_min}"
+        interp = art._find_trusted_python(c_maj, c_min)
+        assert interp is not None
+
+        def _compile_cross(src: bytes) -> bytes:
+            cmd = [interp, "-I", "-B", "-c", """
+import importlib.util, marshal, struct, sys
+filename = sys.argv[1]
+source = sys.stdin.buffer.read()
+co = compile(source, filename, "exec", dont_inherit=True, optimize=0)
+payload = marshal.dumps(co)
+magic = importlib.util.MAGIC_NUMBER
+sys.stdout.buffer.write(magic + payload)
+""", "/" + py_full]
+            proc = subprocess.run(cmd, input=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            magic = proc.stdout[:4]
+            payload = proc.stdout[4:]
+            return magic + struct.pack("<III", 0, 0, len(py_bytes)) + payload
+
+        # 1. Valid cross-version return x + 1 .pyc is accepted
+        fx_valid = Fixture(tmp_path / "cross_valid")
+        fx_valid.pkg["wuwaterm/__init__.py"] = py_bytes
+        site_v, pkgs_v = fx_valid.installed()
+        pyc_path_v = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{c_xy}.pyc"
+        valid_pyc = _compile_cross(py_bytes)
+        base_v = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_path_v: valid_pyc}
+        base_v.update({site_prefix + "/" + k: v for k, v in site_v.items()})
+        rep_v = report_for(base_v, modes, pkgs_v, ["/entrypoint.sh"], "core", python_version=c_ver)
+        layers_v = [layer(base_v, modes=modes), layer({art.REPORT_PATH.lstrip("/"): rep_v})]
+        verified_v = fx_valid.seal(layers_v)
+        assert verified_v is not None
+        bp_v = fx_valid.delivery / "attempts" / fx_valid.attempt_id / "bundle" / art.BUNDLE_FILE
+        assert art.verify_bundle(bp_v).sha256 == verified_v.sha256
+
+        # 2. Forged cross-version return x - 1 .pyc is rejected
+        fx_forged = Fixture(tmp_path / "cross_forged")
+        fx_forged.pkg["wuwaterm/__init__.py"] = py_bytes
+        site_f, pkgs_f = fx_forged.installed()
+        pyc_path_f = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{c_xy}.pyc"
+        evil_pyc = _compile_cross(evil_bytes)
+        base_f = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_path_f: evil_pyc}
+        base_f.update({site_prefix + "/" + k: v for k, v in site_f.items()})
+        rep_f = report_for(base_f, modes, pkgs_f, ["/entrypoint.sh"], "core", python_version=c_ver)
+        layers_f = [layer(base_f, modes=modes), layer({art.REPORT_PATH.lstrip("/"): rep_f})]
+        with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+            fx_forged.seal(layers_f)
+        bp_f = fx_forged.delivery / "attempts" / fx_forged.attempt_id / "bundle" / art.BUNDLE_FILE
+        with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+            art.verify_bundle(bp_f)
+
+
+def test_bytecode_missing_trusted_python_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fx = Fixture(tmp_path / "missing_trusted_py")
+    site, pkgs = fx.installed()
+    site_prefix = SITE.lstrip("/")
+    init_py = fx.pkg["wuwaterm/__init__.py"]
+    if sys.version_info[:2] == (3, 11):
+        target_ver = "3.12.0"
+        xy = "312"
+        magic = b"\xcb\r\r\n"
+    else:
+        target_ver = "3.11.16"
+        xy = "311"
+        magic = b"\xa7\r\r\n"
+    pyc_full = site_prefix + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
+    raw_pyc = magic + struct.pack("<III", 0, 0, len(init_py)) + b"x"
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({site_prefix + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=target_ver)
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    monkeypatch.setattr(art, "_find_trusted_python", lambda major, minor: None)
+    with pytest.raises(art.ArtifactError, match="cannot verify cross-version .pyc bytecode without trusted"):
+        fx.seal(layers)
 
 
 def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
