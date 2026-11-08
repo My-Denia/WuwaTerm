@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import posixpath
 import subprocess
 import sys
 import tarfile
@@ -146,7 +147,10 @@ def report_for(fs: dict[str, bytes], modes: dict[str, int], packages: list[tuple
         paths = [line.split(",")[0] for line in record.splitlines() if line]
         files = []
         for path in sorted(set(paths)):
-            data = fs[SITE.lstrip("/") + "/" + path]
+            target = posixpath.normpath(posixpath.join(SITE, path)).lstrip("/")
+            data = fs.get(SITE.lstrip("/") + "/" + path)
+            if data is None:
+                data = fs[target]
             files.append({"path": path, "sha256": sha(data), "size": len(data)})
         raw_url = fs.get(SITE.lstrip("/") + "/" + info + "direct_url.json")
         items.append({"name": name, "version": version, "location": SITE,
@@ -254,16 +258,20 @@ class Fixture:
                           "core_source_commit": COMMIT, "compatibility": "exact"},
             authority=authority)
 
-    def write_wheels(self, attempt: Path) -> list[dict]:
+    def write_wheels(self, attempt: Path, *, extra_files: dict[str, dict[str, bytes]] | None = None) -> list[dict]:
         folder = attempt / "inputs" / "wheels"
-        folder.mkdir()
+        folder.mkdir(exist_ok=True)
         result = []
+        extra_files = extra_files or {}
         for name, version, files, role in (("wuwaterm", "0.7.0", self.pkg, "core"),
                                            ("wuwaterm-telegram", "0.1.0", self.tg_pkg, "telegram")):
             info = name.replace("-", "_") + "-" + version + ".dist-info/"
             buffer = io.BytesIO()
+            pkg_files = dict(files)
+            if name in extra_files:
+                pkg_files.update(extra_files[name])
             with zipfile.ZipFile(buffer, "w") as wheel:
-                for path, data in sorted(files.items()):
+                for path, data in sorted(pkg_files.items()):
                     wheel.writestr(path, data)
                 wheel.writestr(info + "METADATA", "Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (name, version))
                 wheel.writestr(info + "RECORD", "")
@@ -1125,4 +1133,245 @@ def test_direct_url_tamper_is_rejected_at_seal(fx: Fixture) -> None:
             compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
             core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
                           "core_source_commit": COMMIT, "compatibility": "exact"})
+
+
+def uv_launcher(interpreter: str, module: str, attr: str) -> bytes:
+    return (
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        f"from {module} import {attr}\n"
+        'if __name__ == "__main__":\n'
+        '    if sys.argv[0].endswith("-script.pyw"):\n'
+        "        sys.argv[0] = sys.argv[0][:-11]\n"
+        '    elif sys.argv[0].endswith(".exe"):\n'
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        f"    sys.exit({attr}())\n"
+    ).encode("utf-8")
+
+
+def pip_launcher(interpreter: str, module: str, attr: str) -> bytes:
+    return (
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import re\n"
+        "import sys\n"
+        f"from {module} import {attr}\n"
+        "if __name__ == '__main__':\n"
+        "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        f"    sys.exit({attr}())\n"
+    ).encode("utf-8")
+
+
+def test_valid_console_script_launcher_passes_verification(tmp_path: Path) -> None:
+    # 1. uv launcher in wuwaterm-api (source package)
+    fx_api = Fixture(tmp_path / "uv_valid")
+    src_api = fx_api.source_files()
+    src_api["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
+        b'[project.scripts]\nwuwaterm = "wuwaterm.cli:main"\n'
+    )
+    info_api = "wuwaterm-0.7.0.dev1.dist-info/"
+    launcher_api = uv_launcher("/app/.venv/bin/python", "wuwaterm.cli", "main")
+    site_api = dist(
+        "wuwaterm", fx_api.version,
+        {**fx_api.pkg, info_api + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.cli:main\n",
+         "../../../bin/wuwaterm": launcher_api},
+        {"url": "file:///app", "dir_info": {"editable": False}},
+    )
+    base_api = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+                "app/.venv/bin/wuwaterm": launcher_api}
+    base_api.update({SITE.lstrip("/") + "/" + k: v for k, v in site_api.items() if not k.startswith("../")})
+    modes_api = {"entrypoint.sh": 0o755, "app/.venv/bin/wuwaterm": 0o755}
+    report_api = report_for(base_api, modes_api, [("wuwaterm", fx_api.version)], ["/entrypoint.sh"], "core")
+    layers_api = [layer(base_api, modes=modes_api), layer({art.REPORT_PATH.lstrip("/"): report_api})]
+    verified_api = fx_api.seal(layers_api, source_files=src_api)
+    assert art.verify_bundle(verified_api.path).sha256 == verified_api.sha256
+
+    # 2. pip launcher in wuwaterm-telegram (wheel + source package)
+    fx_tg = Fixture(tmp_path / "pip_valid", "wuwaterm-telegram")
+    src_tg = fx_tg.source_files()
+    src_tg["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm-telegram"\nversion = "0.1.0"\n'
+        b'[project.scripts]\nwuwaterm-telegram = "wuwaterm_telegram.cli:main"\n'
+    )
+    info_tg = "wuwaterm_telegram-0.1.0.dist-info/"
+    launcher_tg = pip_launcher("/app/.venv/bin/python", "wuwaterm_telegram.cli", "main")
+    tg = dist(
+        "wuwaterm-telegram", "0.1.0",
+        {**fx_tg.tg_pkg, info_tg + "entry_points.txt": b"[console_scripts]\nwuwaterm-telegram = wuwaterm_telegram.cli:main\n",
+         "../../../bin/wuwaterm-telegram": launcher_tg},
+    )
+    core = dist("wuwaterm", "0.7.0", fx_tg.pkg)
+    base_tg = {"app/scripts/install_probe.py": PROBE_BYTES, "app/.venv/bin/wuwaterm-telegram": launcher_tg}
+    base_tg.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg}.items() if not k.startswith("../")})
+    modes_tg = {"app/.venv/bin/wuwaterm-telegram": 0o755}
+    report_tg = report_for(base_tg, modes_tg, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers_tg = [layer(base_tg, modes=modes_tg), layer({art.REPORT_PATH.lstrip("/"): report_tg})]
+    attempt_tg = fx_tg.build(layers_tg, source_files=src_tg)
+    wheels_tg = fx_tg.write_wheels(
+        attempt_tg,
+        extra_files={"wuwaterm-telegram": {info_tg + "entry_points.txt": b"[console_scripts]\nwuwaterm-telegram = wuwaterm_telegram.cli:main\n"}},
+    )
+    image_tg = art.read_oci_archive(attempt_tg / "bundle" / art.ARCHIVE_FILE)
+    verified_tg = art.seal_bundle(
+        fx_tg.delivery, fx_tg.attempt_id, product=fx_tg.product, commit=TG_COMMIT, tree=fx_tg.source.tree,
+        iid=image_tg.manifest_digest, build_script_sha256="c" * 64, base_images=[BASES[1]],
+        build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+        compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels_tg,
+        core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels_tg[0]["sha256"],
+                      "core_source_commit": COMMIT, "compatibility": "exact"},
+    )
+    assert art.verify_bundle(verified_tg.path).sha256 == verified_tg.sha256
+
+
+def test_undeclared_binary_or_outside_file_in_record_is_rejected(tmp_path: Path) -> None:
+    # 1. Undeclared ../../../bin/evil in wheels mode (wuwaterm-telegram)
+    fx_tg_bin = Fixture(tmp_path / "tg_bin", "wuwaterm-telegram")
+    tg_bin = dist("wuwaterm-telegram", "0.1.0", {**fx_tg_bin.tg_pkg, "../../../bin/evil": b"evil"})
+    core_tg = dist("wuwaterm", "0.7.0", fx_tg_bin.pkg)
+    base_tg_bin = {"app/scripts/install_probe.py": PROBE_BYTES, "app/.venv/bin/evil": b"evil"}
+    base_tg_bin.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core_tg, **tg_bin}.items() if not k.startswith("../")})
+    modes_tg_bin = {"app/.venv/bin/evil": 0o755}
+    report_tg_bin = report_for(base_tg_bin, modes_tg_bin, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers_tg_bin = [layer(base_tg_bin, modes=modes_tg_bin), layer({art.REPORT_PATH.lstrip("/"): report_tg_bin})]
+    attempt_tg_bin = fx_tg_bin.build(layers_tg_bin)
+    wheels_tg_bin = fx_tg_bin.write_wheels(attempt_tg_bin)
+    image_tg_bin = art.read_oci_archive(attempt_tg_bin / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="installed file is not in verified wheel: ../../../bin/evil"):
+        art.seal_bundle(
+            fx_tg_bin.delivery, fx_tg_bin.attempt_id, product=fx_tg_bin.product, commit=TG_COMMIT,
+            tree=fx_tg_bin.source.tree, iid=image_tg_bin.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels_tg_bin,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels_tg_bin[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+        )
+
+    # 2. Undeclared ../outside.py in wheels mode (wuwaterm-telegram)
+    fx_tg_out = Fixture(tmp_path / "tg_out", "wuwaterm-telegram")
+    tg_out = dist("wuwaterm-telegram", "0.1.0", {**fx_tg_out.tg_pkg, "../outside.py": b"outside"})
+    target_out = posixpath.normpath(posixpath.join(SITE, "../outside.py")).lstrip("/")
+    base_tg_out = {"app/scripts/install_probe.py": PROBE_BYTES, target_out: b"outside"}
+    base_tg_out.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core_tg, **tg_out}.items() if not k.startswith("../")})
+    report_tg_out = report_for(base_tg_out, {}, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers_tg_out = [layer(base_tg_out), layer({art.REPORT_PATH.lstrip("/"): report_tg_out})]
+    attempt_tg_out = fx_tg_out.build(layers_tg_out)
+    wheels_tg_out = fx_tg_out.write_wheels(attempt_tg_out)
+    image_tg_out = art.read_oci_archive(attempt_tg_out / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match=r"installed file is not in verified wheel: \.\./outside\.py"):
+        art.seal_bundle(
+            fx_tg_out.delivery, fx_tg_out.attempt_id, product=fx_tg_out.product, commit=TG_COMMIT,
+            tree=fx_tg_out.source.tree, iid=image_tg_out.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels_tg_out,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels_tg_out[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+        )
+
+    # 3. Undeclared ../../../bin/evil in source_packages mode (wuwaterm-api)
+    fx_api_bin = Fixture(tmp_path / "api_bin")
+    site_api_bin = dist("wuwaterm", fx_api_bin.version, {**fx_api_bin.pkg, "../../../bin/evil": b"evil"},
+                        {"url": "file:///app", "dir_info": {"editable": False}})
+    base_api_bin = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/.venv/bin/evil": b"evil"}
+    base_api_bin.update({SITE.lstrip("/") + "/" + k: v for k, v in site_api_bin.items() if not k.startswith("../")})
+    modes_api_bin = {"entrypoint.sh": 0o755, "app/.venv/bin/evil": 0o755}
+    report_api_bin = report_for(base_api_bin, modes_api_bin, [("wuwaterm", fx_api_bin.version)], ["/entrypoint.sh"], "core")
+    layers_api_bin = [layer(base_api_bin, modes=modes_api_bin), layer({art.REPORT_PATH.lstrip("/"): report_api_bin})]
+    with pytest.raises(art.ArtifactError, match="installed file is outside expected package directories: ../../../bin/evil"):
+        fx_api_bin.seal(layers_api_bin)
+
+    # 4. Undeclared ../outside.py in source_packages mode (wuwaterm-api)
+    fx_api_out = Fixture(tmp_path / "api_out")
+    site_api_out = dist("wuwaterm", fx_api_out.version, {**fx_api_out.pkg, "../outside.py": b"outside"},
+                        {"url": "file:///app", "dir_info": {"editable": False}})
+    base_api_out = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, target_out: b"outside"}
+    base_api_out.update({SITE.lstrip("/") + "/" + k: v for k, v in site_api_out.items() if not k.startswith("../")})
+    modes_api_out = {"entrypoint.sh": 0o755}
+    report_api_out = report_for(base_api_out, modes_api_out, [("wuwaterm", fx_api_out.version)], ["/entrypoint.sh"], "core")
+    layers_api_out = [layer(base_api_out, modes=modes_api_out), layer({art.REPORT_PATH.lstrip("/"): report_api_out})]
+    with pytest.raises(art.ArtifactError, match=r"installed file is outside expected package directories: \.\./outside\.py"):
+        fx_api_out.seal(layers_api_out)
+
+
+def test_declared_console_script_tampered_or_omitted_is_rejected(tmp_path: Path) -> None:
+    def make_setup(case_name: str, launcher_data: bytes, mode: int = 0o755, omit_record: bool = False):
+        fx = Fixture(tmp_path / case_name)
+        src = fx.source_files()
+        src["pyproject.toml"] = (
+            b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
+            b'[project.scripts]\nwuwaterm = "wuwaterm.cli:main"\n'
+        )
+        info = "wuwaterm-0.7.0.dev1.dist-info/"
+        extra = {info + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.cli:main\n"}
+        if not omit_record:
+            extra["../../../bin/wuwaterm"] = launcher_data
+        site = dist("wuwaterm", fx.version, {**fx.pkg, **extra}, {"url": "file:///app", "dir_info": {"editable": False}})
+        base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/.venv/bin/wuwaterm": launcher_data}
+        base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items() if not k.startswith("../")})
+        modes = {"entrypoint.sh": 0o755, "app/.venv/bin/wuwaterm": mode}
+        report = report_for(base, modes, [("wuwaterm", fx.version)], ["/entrypoint.sh"], "core")
+        layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+        return fx, layers, src
+
+    # 1. Tampered module: from evil import main
+    bad_module_launcher = (
+        b"#!/app/.venv/bin/python\n# -*- coding: utf-8 -*-\nimport sys\nfrom evil import main\n"
+        b'if __name__ == "__main__":\n'
+        b'    if sys.argv[0].endswith("-script.pyw"): sys.argv[0] = sys.argv[0][:-11]\n'
+        b'    elif sys.argv[0].endswith(".exe"): sys.argv[0] = sys.argv[0][:-4]\n'
+        b"    sys.exit(main())\n"
+    )
+    fx_mod, layers_mod, src_mod = make_setup("bad_mod", bad_module_launcher)
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        fx_mod.seal(layers_mod, source_files=src_mod)
+    bundle_mod = fx_mod.delivery / "attempts" / fx_mod.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_mod.exists()
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        art.verify_bundle(bundle_mod)
+
+    # 2. Tampered shebang: #!/usr/bin/python3
+    bad_shebang_launcher = (
+        b"#!/usr/bin/python3\n# -*- coding: utf-8 -*-\nimport sys\nfrom wuwaterm.cli import main\n"
+        b'if __name__ == "__main__":\n'
+        b'    if sys.argv[0].endswith("-script.pyw"): sys.argv[0] = sys.argv[0][:-11]\n'
+        b'    elif sys.argv[0].endswith(".exe"): sys.argv[0] = sys.argv[0][:-4]\n'
+        b"    sys.exit(main())\n"
+    )
+    fx_sh, layers_sh, src_sh = make_setup("bad_shebang", bad_shebang_launcher)
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        fx_sh.seal(layers_sh, source_files=src_sh)
+    bundle_sh = fx_sh.delivery / "attempts" / fx_sh.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_sh.exists()
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        art.verify_bundle(bundle_sh)
+
+    # 3. Arbitrary payload
+    payload_launcher = b"#!/bin/sh\necho evil\n"
+    fx_pay, layers_pay, src_pay = make_setup("bad_payload", payload_launcher)
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        fx_pay.seal(layers_pay, source_files=src_pay)
+    bundle_pay = fx_pay.delivery / "attempts" / fx_pay.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_pay.exists()
+    with pytest.raises(art.ArtifactError, match="console script launcher differs from entry point"):
+        art.verify_bundle(bundle_pay)
+
+    # 4. Non-executable mode (0o644)
+    valid_launcher = uv_launcher("/app/.venv/bin/python", "wuwaterm.cli", "main")
+    fx_mode, layers_mode, src_mode = make_setup("bad_mode", valid_launcher, mode=0o644)
+    with pytest.raises(art.ArtifactError, match="console script is not executable"):
+        fx_mode.seal(layers_mode, source_files=src_mode)
+    bundle_mode = fx_mode.delivery / "attempts" / fx_mode.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_mode.exists()
+    with pytest.raises(art.ArtifactError, match="console script is not executable"):
+        art.verify_bundle(bundle_mode)
+
+    # 5. Omitted from RECORD when entry_points.txt declares it
+    fx_omit, layers_omit, src_omit = make_setup("omitted", valid_launcher, omit_record=True)
+    with pytest.raises(art.ArtifactError, match="declared console script is not installed: wuwaterm"):
+        fx_omit.seal(layers_omit, source_files=src_omit)
+    bundle_omit = fx_omit.delivery / "attempts" / fx_omit.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle_omit.exists()
+    with pytest.raises(art.ArtifactError, match="declared console script is not installed: wuwaterm"):
+        art.verify_bundle(bundle_omit)
 

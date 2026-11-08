@@ -23,6 +23,7 @@ they can never inherit the deployment lock.
 from __future__ import annotations
 
 import argparse
+import configparser
 import contextlib
 import csv
 import dataclasses
@@ -460,7 +461,9 @@ class RootFS:
 
 
 def _capture(name: str) -> bool:
-    return (name.endswith((".dist-info/RECORD", ".dist-info/METADATA", ".dist-info/direct_url.json"))
+    return (name.endswith((".dist-info/RECORD", ".dist-info/METADATA",
+                           ".dist-info/direct_url.json", ".dist-info/entry_points.txt"))
+            or "/bin/" in ("/" + name)
             or name in (REPORT_PATH.lstrip("/"), PROGRAM_PATH.lstrip("/")))
 
 
@@ -1041,6 +1044,85 @@ def _skipped(path: str) -> bool:
     return path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/")
 
 
+def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] | None) -> dict[str, str]:
+    ep_path = dist_info + "/entry_points.txt"
+    ep_scripts: dict[str, str] | None = None
+    if ep_path in rootfs.nodes:
+        raw = rootfs.read(ep_path)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError as exc:
+            raise ArtifactError("invalid entry_points.txt") from exc
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.optionxform = str
+        try:
+            cp.read_string(text)
+        except configparser.Error as exc:
+            raise ArtifactError("invalid entry_points.txt") from exc
+        if cp.has_section("console_scripts"):
+            ep_scripts = {k.strip(): v.strip() for k, v in cp.items("console_scripts")}
+        else:
+            ep_scripts = {}
+
+    if pyproject is not None:
+        proj = pyproject.get("project")
+        toml_scripts: dict[str, str] = {}
+        if isinstance(proj, dict) and "scripts" in proj:
+            scripts = proj["scripts"]
+            if not isinstance(scripts, dict):
+                _fail("project.scripts in pyproject.toml must be a table")
+            for k, v in scripts.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    _fail("project.scripts keys and values must be strings")
+            toml_scripts = {k.strip(): v.strip() for k, v in scripts.items()}
+        if ep_scripts is not None and ep_scripts != toml_scripts:
+            _fail("installed entry_points.txt differs from pyproject.toml scripts")
+
+    return ep_scripts if ep_scripts is not None else {}
+
+
+def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, interpreter: str) -> None:
+    if posixpath.dirname(target) != posixpath.dirname(interpreter):
+        _fail("console script launcher differs from entry point: " + target)
+    if ":" not in entry_point:
+        _fail("invalid console script entry point: " + entry_point)
+    module, attr = [part.strip() for part in entry_point.split(":", 1)]
+    if not module or not attr:
+        _fail("invalid console script entry point: " + entry_point)
+    if not all(part.isidentifier() for part in module.split(".")):
+        _fail("invalid console script entry point: " + entry_point)
+    if not attr.isidentifier():
+        _fail("invalid console script entry point: " + entry_point)
+    _, node = rootfs.regular(target)
+    if node.mode & 0o111 == 0:
+        _fail("console script is not executable: " + target)
+    raw = rootfs.read(target)
+    pip_bytes = (
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import re\n"
+        "import sys\n"
+        f"from {module} import {attr}\n"
+        "if __name__ == '__main__':\n"
+        "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        f"    sys.exit({attr}())\n"
+    ).encode("utf-8")
+    uv_bytes = (
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        f"from {module} import {attr}\n"
+        'if __name__ == "__main__":\n'
+        '    if sys.argv[0].endswith("-script.pyw"):\n'
+        "        sys.argv[0] = sys.argv[0][:-11]\n"
+        '    elif sys.argv[0].endswith(".exe"):\n'
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        f"    sys.exit({attr}())\n"
+    ).encode("utf-8")
+    if raw not in (pip_bytes, uv_bytes):
+        _fail("console script launcher differs from entry point: " + target)
+
+
 def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str, Any],
                       source: SourceArchive, wheels: dict[str, dict[str, str]],
                       wheel_hashes: dict[str, str],
@@ -1112,6 +1194,17 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         else:
             if package["direct_url"] is not None:
                 _fail("probe report claims direct_url but direct_url.json is missing: " + package["name"])
+        pyproject: dict[str, Any] | None = None
+        if package["name"] in product["source_packages"]:
+            pyproject_raw = source.content.get("pyproject.toml")
+            if pyproject_raw is not None:
+                try:
+                    pyproject = tomllib.loads(pyproject_raw.decode("utf-8"))
+                except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+                    raise ArtifactError("cannot parse pyproject.toml") from exc
+            else:
+                pyproject = {}
+        console_scripts = _console_scripts(rootfs, dist_info, pyproject)
         if package["name"] in wheels:
             if wheel_versions is not None and package["version"] != wheel_versions.get(package["name"]):
                 _fail("installed distribution version differs from wheel: " + package["name"])
@@ -1132,8 +1225,6 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     continue
                 if path.startswith("../"):
                     target = posixpath.normpath(posixpath.join(location, path))
-                    target_dir, script_name = posixpath.split(target)
-                    is_bin_script = target_dir.endswith("/bin") and bool(script_name)
                     is_data_member = False
                     for m, m_digest in members.items():
                         if ".data/data/" in m and m_digest == digest:
@@ -1141,9 +1232,27 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                             if target.endswith("/" + data_rel):
                                 is_data_member = True
                                 break
-                    if is_bin_script or is_data_member:
+                    if is_data_member:
+                        continue
+                    if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
+                            and posixpath.basename(target) in console_scripts):
+                        _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
+                                                 report["interpreter"])
                         continue
                 _fail("installed file is not in verified wheel: " + path)
+            if console_scripts and (dist_info + "/entry_points.txt") in rootfs.nodes:
+                for script_name in console_scripts:
+                    expected_rel = posixpath.relpath(
+                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name),
+                        location,
+                    )
+                    found = (expected_rel in installed) or any(
+                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) ==
+                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name)
+                        for p in installed
+                    )
+                    if not found:
+                        _fail("declared console script is not installed: " + script_name)
             direct = package["direct_url"]
             if isinstance(direct, dict):
                 archive_info = direct.get("archive_info")
@@ -1153,13 +1262,6 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                         _fail("installed distribution came from a different wheel: " + package["name"])
         if package["name"] in product["source_packages"]:
             root = product["source_packages"][package["name"]]
-            pyproject_raw = source.content.get("pyproject.toml")
-            pyproject: dict[str, Any] = {}
-            if pyproject_raw is not None:
-                try:
-                    pyproject = tomllib.loads(pyproject_raw.decode("utf-8"))
-                except (UnicodeError, tomllib.TOMLDecodeError) as exc:
-                    raise ArtifactError("cannot parse pyproject.toml") from exc
             tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
             hatch = tool.get("hatch") if isinstance(tool.get("hatch"), dict) else {}
             build = hatch.get("build") if isinstance(hatch.get("build"), dict) else {}
@@ -1208,8 +1310,33 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             all_tops = expected_source_tops | {t for t in tops if not t.endswith(".dist-info")}
             dist_info_base = posixpath.basename(dist_info)
             for path in installed:
-                if path.startswith("../") or path.startswith(dist_info_base + "/") or ".data/" in path:
+                if path.startswith(dist_info_base + "/") or ".data/" in path:
                     continue
+                if path.startswith("../"):
+                    if package["name"] in wheels:
+                        continue
+                    target = posixpath.normpath(posixpath.join(location, path))
+                    if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
+                            and posixpath.basename(target) in console_scripts):
+                        _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
+                                                 report["interpreter"])
+                        continue
+                    is_data_file = False
+                    st_data_files = setuptools.get("data-files") if isinstance(setuptools.get("data-files"), dict) else {}
+                    for dest_dir, src_list in st_data_files.items():
+                        if isinstance(src_list, list):
+                            for src in src_list:
+                                if isinstance(src, str):
+                                    origin = source.files.get(src)
+                                    if origin is not None and origin[1] == installed[path]:
+                                        if target.endswith("/" + posixpath.normpath(posixpath.join(dest_dir, posixpath.basename(src)))):
+                                            is_data_file = True
+                                            break
+                            if is_data_file:
+                                break
+                    if is_data_file:
+                        continue
+                    _fail("installed file is outside expected package directories: " + path)
                 if "/" not in path or not any(path.startswith(top + "/") for top in all_tops):
                     _fail("installed file is outside expected package directories: " + path)
             for top in sorted(all_tops):
@@ -1221,6 +1348,19 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     _fail("installed package differs from the sealed source archive: " + top)
             if not all_tops or not (tops - {t for t in tops if t.endswith(".dist-info")}):
                 _fail("installed source package is empty")
+            if console_scripts and (dist_info + "/entry_points.txt") in rootfs.nodes:
+                for script_name in console_scripts:
+                    expected_rel = posixpath.relpath(
+                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name),
+                        location,
+                    )
+                    found = (expected_rel in installed) or any(
+                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) ==
+                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name)
+                        for p in installed
+                    )
+                    if not found:
+                        _fail("declared console script is not installed: " + script_name)
         if package["name"] not in wheels and package["name"] not in product["source_packages"]:
             _fail("no verified source or wheel for probed package: " + package["name"])
     extras = report["extra_files"]
