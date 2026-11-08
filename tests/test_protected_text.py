@@ -44,6 +44,18 @@ def model_server(monkeypatch):
                 state.first_started.set()
                 state.release_first.wait(10)
             content = payload["messages"][1]["content"]
+            # This fixture stands in for the model: apply the dictionary
+            # references the request supplied, then corrupt the structure or
+            # the placeholders as a real model may.
+            system = payload["messages"][0]["content"]
+            if "Dictionary term references:\n" in system:
+                block = system.split("Dictionary term references:\n", 1)[1]
+                for line in block.splitlines():
+                    reference = re.match(r"^(.*) = (.*) \(([a-z_]+)\)$", line)
+                    if reference:
+                        content = content.replace(
+                            reference.group(1), reference.group(2), 1
+                        )
             tokens = re.findall(r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4,}__", content)
             terms = re.findall(r"__WUWA_TERM_[0-9a-f]{16}_[0-9]{4,}__", content)
             if state.mode == "missing":
@@ -200,7 +212,7 @@ def test_empty_and_corrupt_term_responses_remain_content_failures(sample_db, mod
 
     async def run():
         try:
-            await translator.translate_html_async("<b>椿</b> joins.")
+            await translator.translate_html_async("<b>Echo</b> joins.", to_chinese=True)
         finally:
             await translator.aclose()
 

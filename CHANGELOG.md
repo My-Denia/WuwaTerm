@@ -3,13 +3,114 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.7.0
 
+### Highlights
+
+- Translation now uses the dictionary as a reference rather than an
+  unconditional substitution. Every selected term reaches the model with its
+  official translation and category, and the sentence decides: `Encore!` in
+  prose stays an encore, `白芷` in a prescription is the herb, a tree `椿` stays
+  a tree, and the same surface can carry both meanings in one paragraph.
+  In-game mentions still use the official name.
+- Chinese-to-English output takes the grammar the sentence needs. `共鸣者` can
+  become `Resonators`, `声骸` `Echoes`, and an article agrees with the official
+  English term instead of a hidden token. The saved P22 response no longer
+  reads `that Resonator can activate`.
+- `./deploy/setup.sh` is the supported first install: Core API only by default,
+  `--with-telegram` or `--with-web` to add a surface later, `--status`/`--check`
+  to inspect. It creates the directories and `.env` with safe modes, builds the
+  dictionary only when it is missing, waits for `/readyz`, issues the first
+  device token and, when a verified standalone Compose binary is present,
+  adopts the topology for transactional updates.
+- A pull request runs the Python test matrix at 3.11 and 3.14 only; `main`
+  pushes and release dispatches keep 3.11–3.14.
+
+### Changed
+
+- Terms: the model path supplies contextual references instead of forced term
+  placeholders, per [ADR 0017](docs/adr/0017-contextual-term-references.md).
+  The placeholder design solved a real problem — a model could not paraphrase
+  or invent an official term — but it also hid the word that decides the
+  meaning and fixed the target word form. The exact problem a reference solves
+  is recorded in the ADR: ordinary-word collisions (`Encore`, `白芷`, `秋水`,
+  `散华`, `椿`), a single surface with two meanings, and English number and
+  articles that a single replacement cannot express. This is a change of
+  mechanism, not a reduction of the dictionary's role: whole-input lookup,
+  exact hits, the no-model substitution path, HTML structural placeholders and
+  `review-v2` term coverage keep their behavior.
+- Terms: translating into Chinese keeps hard term placeholders for every
+  category except names (`resonator`, `speaker`), so ordinary official nouns
+  such as `声骸` cannot be paraphrased and the existing fail-closed
+  placeholder diagnostics remain. Translating into English uses a reference
+  for every selected term, because number and articles belong to the sentence.
+- Terms: a one-character resonator name the narrow lock whitelist skips
+  (`欢迎椿`, `院子里的椿`) is offered to the model as a reference unless an
+  ordinary word covers the character (`香椿`, `臭椿`, `椿树`). This restores the
+  hint that `欢迎椿` used to lose without forcing the name.
 - Terms: sentence translation no longer synthesizes lowercase `encore` as a
-  character lock, leaving ordinary uses to translation. A lowercase character
-  mention is also left unlocked; exact dictionary sources, `Encore`, `ENCORE`,
-  `安可`, whole-input lookup and speaker-prefix resolution retain their existing
-  behavior. Capitalized ordinary uses remain ambiguous.
+  character lock, leaving ordinary uses to translation (the 0.6.1 behaviour).
+  Exact dictionary sources, `Encore`, `ENCORE`, `安可`, whole-input lookup and
+  speaker-prefix resolution retain their existing behavior; the reference
+  mechanism now covers the remaining capitalized-ordinary-word ambiguity.
+
+### Added
+
+- `deploy/setup.sh`: one idempotent entry point for a new install and for
+  adding a surface to an existing one. It prefers the official GHCR images and
+  takes `--build-local` as the fallback, keeps an existing `data/terms.db`,
+  never starts the bot unless `--with-telegram` is given and a token exists,
+  and writes no secret to the terminal (`state-api/first-device.token` and
+  `state-web/web.env` are mode `0600`). `--status` reports the installed
+  components, the data version from `/v1/meta`, and readiness; `--check` exits
+  non-zero when the API is not ready. See
+  [Self-Hosting](docs/self-hosting.md#one-command-deploysetupsh).
+- `--with-web` installs the WuwaTerm-Web workbench from a verified release
+  package (`manifest-{root|prefix}.json` plus `SHA256SUMS-{root|prefix}`) or a
+  local package, issues it a dedicated `translate,meta` device token, generates
+  `WUWATERM_WEB_EDGE_SECRET`, and waits for `/api/readyz`. WuwaTerm-Web has no
+  published release yet, so the command stops with that fact, before building
+  any data, instead of reporting a false success. The package format is
+  documented in the self-hosting guide.
+- Adoption into `deploy/product-update.sh` metadata after the first install
+  when a standalone `docker-compose` binary and its `.sha256` receipt exist, so
+  later upgrades and restarts use protocol 2; `--no-adopt` skips it and the
+  script says why it skipped.
+
+### Fixed
+
+- P22: Chinese-to-English sentences with a plural or a vowel-initial official
+  term now read naturally (`Resonators`, `Echoes`, `an Echo`) instead of
+  forcing a singular or an article the token could not justify. The exact
+  request that produced the saved response is covered by a test, and a
+  real-model probe on 2026-11-08 returned grammatical English.
+- `Encore! The crowd cheered for another song.` no longer becomes `安可！...`;
+  a paragraph mixing the name and the ordinary word keeps both meanings; the
+  Chinese homographs `白芷` and `椿` are translated by context while
+  `安可`/`Encore` in an in-game sentence keeps the official pair.
+- An API-only installation can no longer fall into a bot restart loop started
+  by the documented `up` command: `deploy/setup.sh` starts the bot only when
+  `--with-telegram` is given, and refuses before starting it when
+  `TELEGRAM_BOT_TOKEN` is empty.
+
+### Compatibility and distribution
+
+- `/v1`, `review-v1`, `review-v2` and `wuwaterm-manuscript-v1` are unchanged.
+  `LockedSentence` keeps its two positional fields and gains an optional
+  `references` tuple; `lock_terms`, `_lock_terms`, `select_term_spans`,
+  `exact_lockable_sources`, `restore`, `_lock_protected_terms` and
+  `_case_variant_sources` keep their signatures and deterministic behavior.
+- A contextual term no longer fails with `missing_placeholder`; structural HTML
+  drift and broken hard-locked placeholders still fail closed. A no-model
+  deployment keeps the previous deterministic behaviour exactly.
+- The Web workbench remains a separately released product. This release ships
+  the install and verification path, not a Web package.
+
+### CI
+
+- Pull requests run the `pytest` matrix at 3.11 and 3.14; `main` pushes and
+  release dispatches keep 3.11, 3.12, 3.13 and 3.14, which is what the release
+  receipt binds. Intermediate versions stay supported.
 - Review: `review-v2` now treats a bounded English plural as the official term
   in both directions. A Chinese mention that the English target answers in its
   correct plural verifies over the whole word (`共鸣者` → `Resonators`, `声骸` →

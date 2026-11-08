@@ -12,7 +12,8 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.7.0.dev1`, a candidate, not an eligible stable release; `v0.6.0` is the previous-release baseline. Set
+  published tag. The current Core version is `0.7.0`, the contextual-term and
+  installer batch; `v0.6.1` is the previous-release baseline. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
@@ -100,6 +101,23 @@ the test suite, in that order, and it is the same entry point CI's server
 matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
+
+For 0.7.0 specifically, also confirm:
+
+- `./deploy/setup.sh --help`, an API-only install, and the
+  `--with-telegram` refusal without a token behave as the installer tests
+  describe. These exercise Docker and curl through stubs; they do not replace
+  the clean-host install described below.
+- A pull request run shows the `pytest` matrix at 3.11 and 3.14 only, while the
+  `main` push or dispatch run for the released commit shows all four versions.
+  The release receipt binds the main run, not the pull request.
+- `docs/api/openapi.json` matches the generated document after the version and
+  description changes (`python scripts/check_api_contract.py`).
+- The Web workbench is still a separate product. This release carries the
+  installer and verification path for `--with-web`; it does not carry a Web
+  package, and the release notes say so rather than implying that
+  `./deploy/setup.sh --with-web` works before WuwaTerm-Web publishes
+  `manifest-{root|prefix}.json` and `SHA256SUMS-{root|prefix}`.
 
 For a locally built release candidate database, also run:
 

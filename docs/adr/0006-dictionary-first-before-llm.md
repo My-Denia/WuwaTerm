@@ -21,6 +21,14 @@ Always attempt structured dictionary work before any model call:
 4. Restore placeholders verbatim; reject broken model output rather than
    shipping raw placeholders or invented official terms.
 
+**Amendment (2026-11-08, [ADR 0017](0017-contextual-term-references.md)).** On
+the model path, free-text terms are supplied to the model as contextual
+references instead of forced placeholders, so a word that is also an ordinary
+word keeps its sentence meaning and an English term can take the number and
+article it needs. Exact lookup (step 2), the no-model substitution path, the
+strict `restore()` contract for the placeholders that are still produced, and
+review are unchanged.
+
 Fuzzy short dictionary answers on the command path also short-circuit without
 LLM (`bot._fuzzy_dictionary_answer`).
 

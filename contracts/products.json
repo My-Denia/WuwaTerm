@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-06",
+  "observed_on": "2026-11-08",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -52,14 +52,21 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "be6029df0a5096853e9f436fb3efcb8be7554027",
-        "tree": "b61d34d3b958b44c888e9b8ca1074d50f3dd53c6",
+        "commit": "dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39",
+        "tree": "d2ebc057751a1da2c95357772774510018d955b7",
         "status": "merged"
       },
       "source_version": "0.7.0.dev1",
       "release": {
         "target_version": "0.7.0",
         "status": "not_released"
+      },
+      "candidate_source": {
+        "branch": "feat/product-delivery-and-contextual-terms",
+        "base_commit": "dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39",
+        "version": "0.7.0",
+        "state": "in_review",
+        "note": "The 0.7.0 source adds contextual term references and deploy/setup.sh. It is not merged, released or deployed; the candidate wheel below belongs to an earlier candidate checkout and is not this source."
       },
       "candidate_wheel": {
         "version": "0.7.0.dev1",
@@ -73,8 +80,8 @@
       "adoption": "unknown",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/be6029df0a5096853e9f436fb3efcb8be7554027/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/be6029df0a5096853e9f436fb3efcb8be7554027/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39/docs/data-refresh.md"
       ]
     },
     {

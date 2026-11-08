@@ -231,7 +231,7 @@ prepare → 解析方向 → lookup_exact → 可信 ASCII 模糊短路 → 长�
 
 **可信模糊短路**（`application.py`，须同时满足）：查询为 ASCII 且匹配短查询正则；`lookup(..., limit=5)` 最高分 ≥ 80；reason 属于 `{exact, pinyin, pinyin-abbrev}`，或较长的 pinyin-prefix/substring，或缩写等于查询。然后返回官方 zh/en，**不调 LLM**。
 
-**会调 LLM 时：** 词典阶段都未命中，且长度门通过。`sentence.py` 再做一次 `lookup_exact`；仍未命中则把已知跨度锁成 `__WUWA_TERM_<nonce>_<n>__`，再 `POST {base}/chat/completions`，`temperature: 0`。系统提示含方向、不信任源、以及 `Locked terms: {placeholder} = {官方目标语}`。用户消息是锁定后的可见文本。
+**会调 LLM 时：** 词典阶段都未命中，且长度门通过。`sentence.py` 再做一次 `lookup_exact`；仍未命中则选出已知术语：译成中文时角色名/说话人作为上下文参考留在原文，其余术语仍锁成 `__WUWA_TERM_<nonce>_<n>__`；译成英文时所有术语都作为参考留在原文，模型按英文语法决定单复数与冠词。随后 `POST {base}/chat/completions`，`temperature: 0`。系统提示含方向、不信任源、`Locked terms: {placeholder} = {官方目标语}`，以及 `Dictionary term references: {源词} = {官方目标语} ({类别})` 与按语境取词的说明。用户消息是可见源文本加剩余占位符。
 
 LLM 已配置当且仅当 base URL、API key、`WUWATERM_OPENAI_MODEL` 都非空（`WUWATERM_OPENAI_*`，base/key 可回退到 `OPENAI_*`）。
 

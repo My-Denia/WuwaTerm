@@ -9,7 +9,7 @@ an intention.
 | | |
 | --- | --- |
 | Declared range | `requires-python >=3.11`, no upper bound (`pyproject.toml`) |
-| Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
+| Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest`, through the `pytest (py3.x)` matrix. `main` pushes and release dispatches execute every version; a pull request runs 3.11 and 3.14 to shorten feedback, and the intermediate versions stay supported and are covered by the main push that follows a merge. |
 | Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Docker boundary job and the Web and Windows contract jobs run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
 | Published images from v0.4.0 onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |

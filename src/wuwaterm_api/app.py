@@ -1156,7 +1156,8 @@ Read-only translation surface for the Wuthering Waves terminology service.
 
 This API uses the application pipeline also used by Telegram command routes
 and the in-process private web layer: official dictionary hit first, then a
-trusted pinyin hit, then a term-locked model call. Linked-channel
+trusted pinyin hit, then a dictionary-guided model call with official terms
+supplied as contextual references. Linked-channel
 auto-translation has specialized channel orchestration and is not part of this
 API contract. Responses are plain text; rich-text markup is never part of this
 contract.

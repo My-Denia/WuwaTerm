@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -240,8 +241,11 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
         to_chinese=False,
         timeout_seconds=30.0,
         transport=None,
+        references=(),
     ):
         calls.append((locked_text, locks, html_mode))
+        if len(inspect.signature(response_factory).parameters) >= 3:
+            return response_factory(locked_text, locks, references)
         return response_factory(locked_text, locks)
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -295,11 +299,19 @@ def forbid_llm_call(monkeypatch):
     return calls
 
 
-def placeholder_for(locks, official):
+def placeholder_for(locks, official, references=(), *, to_chinese=True):
+    """What the model would emit for one official term.
+
+    A hard lock stays a placeholder the server restores; a contextual
+    reference is written as the official term in the target language.
+    """
     for placeholder, _source, en in locks:
         if en == official:
             return placeholder
-    raise AssertionError(f"missing official lock {official}")
+    for _source, zh, en, _category in references:
+        if en == official:
+            return zh if to_chinese else en
+    raise AssertionError(f"missing official term {official}")
 
 
 def html_with_segments(locked_text: str, *segments: str) -> str:
@@ -315,9 +327,9 @@ def html_with_segments(locked_text: str, *segments: str) -> str:
 def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, sample_db):
     calls = []
 
-    def response(locked_text, locks):
-        jinhsi = placeholder_for(locks, "Jinhsi")
-        echo = placeholder_for(locks, "Echo")
+    def response(locked_text, locks, references):
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=False)
+        echo = placeholder_for(locks, "Echo", references, to_chinese=False)
         return html_with_segments(
             locked_text,
             "",
@@ -338,9 +350,10 @@ def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, samp
     assert len(calls) == 1
     locked_text, locks, html_mode = calls[0]
     assert html_mode is True
-    assert "今汐" not in locked_text
-    assert "声骸" not in locked_text
-    assert {lock[2] for lock in locks} >= {"Jinhsi", "Echo"}
+    # Chinese source: terms stay visible as references for the model.
+    assert "今汐" in locked_text
+    assert "声骸" in locked_text
+    assert locks == ()
     assert message.replies == [
         (
             '<b>Jinhsi</b> says <a href="https://example.com">Echo</a>'
@@ -415,9 +428,9 @@ def test_non_translatable_post_is_silent_and_consumes_no_throttle(monkeypatch, s
 def test_english_post_translates_to_chinese_html(monkeypatch, sample_db):
     calls = []
 
-    def response(locked_text, locks):
-        jinhsi = placeholder_for(locks, "Jinhsi")
-        echo = placeholder_for(locks, "Echo")
+    def response(locked_text, locks, references):
+        jinhsi = placeholder_for(locks, "Jinhsi", references)
+        echo = placeholder_for(locks, "Echo", references)
         return html_with_segments(
             locked_text, "", jinhsi, "装备了", echo, ""
         )
@@ -473,9 +486,9 @@ def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db, caplog):
 def test_structurally_changed_llm_html_falls_back_to_plain(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
-        jinhsi = placeholder_for(locks, "Jinhsi")
-        echo = placeholder_for(locks, "Echo")
+    def response(_locked_text, locks, references):
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=False)
+        echo = placeholder_for(locks, "Echo", references, to_chinese=False)
         return f"<div><b>{jinhsi} says {echo} is strong</div>"
 
     enable_mock_llm(monkeypatch, calls, response)
@@ -813,8 +826,8 @@ def test_invalid_html_result_is_delivered_as_plain(monkeypatch, sample_db):
 def test_caption_post_uses_same_html_pipeline(monkeypatch, sample_db):
     calls = []
 
-    def response(locked_text, locks):
-        jinhsi = placeholder_for(locks, "Jinhsi")
+    def response(locked_text, locks, references):
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=False)
         return html_with_segments(locked_text, "", jinhsi, " arrives")
 
     enable_mock_llm(monkeypatch, calls, response)
@@ -3180,9 +3193,9 @@ def test_edit_identical_translation_is_silent_noop(monkeypatch, sample_db):
 def test_edit_invalid_html_falls_back_to_plain_edit(monkeypatch, sample_db):
     # An HTML edit Telegram rejects re-raises into the plain-edit fallback,
     # mirroring the new-post fallback — formatting never fails the update.
-    def response(locked_text, locks):
-        jinhsi = placeholder_for(locks, "Jinhsi")
-        echo = placeholder_for(locks, "Echo")
+    def response(locked_text, locks, references):
+        jinhsi = placeholder_for(locks, "Jinhsi", references, to_chinese=False)
+        echo = placeholder_for(locks, "Echo", references, to_chinese=False)
         return html_with_segments(
             locked_text, "", jinhsi, " says ", echo, " is strong", "", ""
         )

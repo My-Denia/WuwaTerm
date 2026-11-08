@@ -4,7 +4,7 @@ This module owns the shared dictionary-first pipeline used by Telegram command
 handlers, the HTTP API, and the API process's private web layer:
 
     prepare -> resolve direction -> exact dictionary hit -> trusted fuzzy hit
-    -> input length gate -> long-text splitting -> term-locked LLM call
+    -> input length gate -> long-text splitting -> dictionary-guided LLM call
 
 Linked-channel auto-translation is intentionally different: ``channel.py``
 owns channel admission, freshness, edit and delivery orchestration and calls

@@ -7,9 +7,11 @@ runtime state, and logs.
 
 An exact database hit returns the official string byte-for-byte from the local
 SQLite database and does not call the LLM. This applies to command paths and
-linked-channel auto-translation. Sentence translation locks known DB terms
-before any LLM call, so official terms are restored verbatim in the target
-language rather than paraphrased.
+linked-channel auto-translation. Free-text sentence translation supplies known
+DB terms to the model as contextual references together with their official
+translations, so an in-game term keeps the official string while a word that is
+also an ordinary word keeps its sentence meaning. Without a configured model the
+translator substitutes the official terms locally instead.
 
 Generated TextMap data, SQLite DBs, runtime settings, channel reply indexes,
 tokens, API keys, and real Telegram chat/user/message ids must stay out of
@@ -24,7 +26,7 @@ The no-account public beta is
 <https://wuwaterm.denia-official.chatgpt.site>. Its browser sends terms and
 sentences only to same-origin `/api/*`; the Hosted server-side proxy forwards
 them to the authoritative VPS `/v1` API with a credential that never enters the
-browser. Dictionary-first processing and term locking remain backend behavior,
+browser. Dictionary-first processing and term selection remain backend behavior,
 not a second implementation in the Site.
 
 The WuwaTerm application does not create visitor profiles or history and does
@@ -75,24 +77,28 @@ No Telegram token, LLM key, endpoint, or model is hardcoded.
 
 The LLM system prompt treats user/channel text as untrusted source text: it is
 translation input only, and instructions inside that source text must not be
-followed. The prompt stays short and requires opaque placeholders exactly
+followed. The prompt stays short and requires structural placeholders exactly
 unchanged.
 
-This is a prompt-level guard. The stronger protection is structural: official
-terms are locked, and in HTML mode every tag, attribute, link, custom emoji id,
-and entity is replaced before the model sees only visible text. Restore checks
-exact placeholder count and order and rejects raw or unknown structure.
+This is a prompt-level guard. The stronger protection is structural: in HTML
+mode every tag, attribute, link, custom emoji id, and entity is replaced before
+the model sees only visible text, and restore rejects raw or unknown structure.
+Hard-locked name/term placeholders must also be copied exactly once.
 
 ## Placeholder Integrity
 
-Term locking uses per-request nonce placeholders with the `__WUWA_TERM_...__`
-shape. User literal placeholders such as `__TERM_0__` and strings that only
-look like internal placeholders are not restored unless they were generated for
-that request.
+Placeholders use per-request nonce shapes: `__WUWA_TERM_...__` for terms that are
+still hard-locked (names translating into Chinese, and the no-model path) and
+`__WUWA_HTML_...__` for structure. User literal placeholders such as `__TERM_0__`
+and strings that only look like internal placeholders are not restored unless
+they were generated for that request.
 
-After the LLM returns, placeholder restore performs integrity checks. Missing,
-duplicated, or malformed placeholders fail closed instead of producing a
-translation that silently drops or corrupts official terms.
+After the LLM returns, restore performs integrity checks. Missing, duplicated,
+or malformed hard-locked term placeholders fail closed instead of producing a
+translation that silently corrupts an official name; structural placeholders
+fail closed on any drift. A contextual term reference has no placeholder to
+restore, so the model's sentence is returned as written and a review check is
+what reports the official term it used.
 
 ## Settings And Authorization
 
