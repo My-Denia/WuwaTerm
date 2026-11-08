@@ -477,6 +477,7 @@ def _capture(name: str) -> bool:
                            ".dist-info/direct_url.json", ".dist-info/entry_points.txt",
                            ".py", ".pyc", ".pyo", ".pth", "/pyvenv.cfg", "pyvenv.cfg"))
             or "/bin/" in ("/" + name)
+            or name == "entrypoint.sh"
             or name in (REPORT_PATH.lstrip("/"), PROGRAM_PATH.lstrip("/")))
 
 
@@ -1268,7 +1269,9 @@ def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] |
     return ep_scripts if ep_scripts is not None else toml_scripts
 
 
-def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, interpreter: str) -> None:
+def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, interpreter: str,
+                             installed: dict[str, str] | None = None,
+                             site: str | None = None) -> None:
     if posixpath.dirname(target) != posixpath.dirname(interpreter):
         _fail("console script launcher differs from entry point: " + target)
     if ":" not in entry_point:
@@ -1280,6 +1283,13 @@ def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, inte
         _fail("invalid console script entry point: " + entry_point)
     if not attr.isidentifier():
         _fail("invalid console script entry point: " + entry_point)
+    if installed is not None and site is not None:
+        mod_rel = module.replace(".", "/")
+        py_rel = (mod_rel + ".py") if (mod_rel + ".py") in installed else (
+            (mod_rel + "/__init__.py") if (mod_rel + "/__init__.py") in installed else None
+        )
+        if py_rel is None:
+            _fail("console script target module is not installed: " + module)
     _, node = rootfs.regular(target)
     if node.mode & 0o111 == 0:
         _fail("console script is not executable: " + target)
@@ -1323,7 +1333,7 @@ def _verify_interpreter(rootfs: RootFS, report: dict[str, Any], product: dict[st
         _fail("unexpected interpreter path: " + interpreter)
     current = rootfs.resolve(interpreter)
     if current not in rootfs.nodes:
-        return
+        _fail("reported interpreter is missing in the image: " + interpreter)
     for _ in range(40):
         node = rootfs.nodes.get(current)
         if node is None:
@@ -1374,19 +1384,27 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                 if rootfs.read(path).strip() != b"import _virtualenv":
                     _fail("unauthorized content in _virtualenv.pth: " + path)
                 vpy_path = posixpath.join(posixpath.dirname(path), "_virtualenv.py")
-                if vpy_path in rootfs.nodes:
-                    if _sha(rootfs.read(vpy_path)) != "6cf30c56faf2a55228914dbbd17f8088ed371ebb08f5e7fa6fd931f913fcaf1d":
-                        _fail("unauthorized content in _virtualenv.py: " + vpy_path)
+                if vpy_path not in rootfs.nodes:
+                    _fail("missing _virtualenv.py for _virtualenv.pth: " + vpy_path)
+                if _sha(rootfs.read(vpy_path)) != "6cf30c56faf2a55228914dbbd17f8088ed371ebb08f5e7fa6fd931f913fcaf1d":
+                    _fail("unauthorized content in _virtualenv.py: " + vpy_path)
             elif base == "distutils-precedence.pth":
                 if _sha(rootfs.read(path)) != "2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224":
                     _fail("unauthorized content in distutils-precedence.pth: " + path)
-    if "app/.venv" in rootfs.nodes and "app/.venv/bin/python" in rootfs.nodes:
+        elif posixpath.basename(path) == "_virtualenv.py":
+            if _sha(rootfs.read(path)) != "6cf30c56faf2a55228914dbbd17f8088ed371ebb08f5e7fa6fd931f913fcaf1d":
+                _fail("unauthorized content in _virtualenv.py: " + path)
+    if report["interpreter"].startswith("/app/.venv/") or "app/.venv" in rootfs.nodes:
         if "app/.venv/pyvenv.cfg" not in rootfs.nodes:
             _fail("missing pyvenv.cfg in virtual environment: app/.venv")
-    if "app/.venv/pyvenv.cfg" in rootfs.nodes:
-        pyvenv_cfg = rootfs.read("app/.venv/pyvenv.cfg").decode("utf-8", "replace").lower()
-        if "include-system-site-packages = false" not in pyvenv_cfg:
-            _fail("pyvenv.cfg must specify include-system-site-packages = false")
+        pyvenv_cfg = rootfs.read("app/.venv/pyvenv.cfg").decode("utf-8", "replace")
+        kv = [
+            (line.split("=", 1)[0].strip().lower(), line.split("=", 1)[1].strip().lower())
+            for line in pyvenv_cfg.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        ]
+        if [v for k, v in kv if k == "include-system-site-packages"] != ["false"]:
+            _fail("pyvenv.cfg must set include-system-site-packages = false")
     for path, node in rootfs.nodes.items():
         if posixpath.dirname(path) == "app":
             base = posixpath.basename(path)
@@ -1519,7 +1537,7 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
                             and posixpath.basename(target) in console_scripts):
                         _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
-                                                 report["interpreter"])
+                                                 report["interpreter"], installed=installed, site=site)
                         verified_bin_scripts.add(target)
                         continue
                     is_data_member = False
@@ -1547,7 +1565,8 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     )
                     if not found:
                         _fail("declared console script is not installed: " + script_name)
-                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"])
+                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"],
+                                             installed=installed, site=site)
                     verified_bin_scripts.add(expected_target)
             direct = package["direct_url"]
             if isinstance(direct, dict):
@@ -1615,7 +1634,7 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
                             and posixpath.basename(target) in console_scripts):
                         _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
-                                                 report["interpreter"])
+                                                 report["interpreter"], installed=installed, site=site)
                         verified_bin_scripts.add(target)
                         continue
                     is_data_file = False
@@ -1661,7 +1680,8 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     )
                     if not found:
                         _fail("declared console script is not installed: " + script_name)
-                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"])
+                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"],
+                                             installed=installed, site=site)
                     verified_bin_scripts.add(expected_target)
         if package["name"] not in wheels and package["name"] not in product["source_packages"]:
             _fail("no verified source or wheel for probed package: " + package["name"])
@@ -1684,6 +1704,39 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             _fail("extra file differs from the sealed source archive: " + item["path"])
         if node.mode & 0o111 == 0 or origin[0] & 0o111 == 0:
             _fail("extra file is not executable: " + item["path"])
+        if not rootfs.read(item["path"]).startswith(b"#!/bin/sh\n"):
+            _fail("extra file has invalid shebang: " + item["path"])
+        if "bin/sh" in rootfs.nodes or "bin" in rootfs.nodes:
+            current = rootfs.resolve("bin/sh")
+            if current not in rootfs.nodes:
+                _fail("shell is missing in the image: bin/sh")
+            for _ in range(40):
+                node = rootfs.nodes.get(current)
+                if node is None:
+                    _fail("shell symlink target is missing in the image: bin/sh")
+                if node.kind == "file":
+                    if node.mode & 0o111 == 0:
+                        _fail("shell in the image is not executable: bin/sh")
+                    break
+                if node.kind != "symlink" or not node.link:
+                    _fail("shell in the image is not a regular file: bin/sh")
+                target = node.link if node.link.startswith("/") else posixpath.join(posixpath.dirname("/" + current), node.link)
+                current = rootfs.resolve(target)
+            else:
+                _fail("symlink loop in shell path: bin/sh")
+    entrypoint = (image.config.get("config") or {}).get("Entrypoint")
+    if isinstance(entrypoint, list) and entrypoint and isinstance(entrypoint[0], str):
+        if entrypoint[0].startswith("/"):
+            try:
+                _, ep_node = rootfs.regular(entrypoint[0])
+            except ArtifactError:
+                _fail("image Entrypoint is missing or not executable: " + entrypoint[0])
+            if ep_node.mode & 0o111 == 0:
+                _fail("image Entrypoint is missing or not executable: " + entrypoint[0])
+        else:
+            ep_script = posixpath.normpath(posixpath.join(posixpath.dirname(report["interpreter"]), entrypoint[0]))
+            if ep_script not in verified_bin_scripts:
+                _fail("image Entrypoint console script is not installed and verified: " + entrypoint[0])
 
 
 # --------------------------------------------------------------------------

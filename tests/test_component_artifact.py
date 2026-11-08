@@ -74,14 +74,34 @@ def dirs_for(path: str) -> list[tuple]:
     return [("/".join(parts[:i + 1]), "dir", None, 0o755) for i in range(len(parts))]
 
 
-def layer(files: dict[str, bytes], *, extra: list[tuple] = (), modes: dict[str, int] | None = None) -> list[tuple]:
+def layer(files: dict[str, bytes], *, extra: list[tuple] = (), modes: dict[str, int] | None = None,
+          omit_venv_files: set[str] | None = None) -> list[tuple]:
+    omitted = omit_venv_files or set()
+    files = {k: v for k, v in files.items() if k not in omitted}
+    effective_modes = dict(modes or {})
+    if any(k.startswith(SITE.lstrip("/") + "/") for k in files):
+        if "app/.venv/bin/python" not in files and "app/.venv/bin/python" not in omitted:
+            files["app/.venv/bin/python"] = b"#!/bin/sh\n"
+            effective_modes.setdefault("app/.venv/bin/python", 0o755)
+        elif "app/.venv/bin/python" in files and "app/.venv/bin/python" not in effective_modes:
+            effective_modes["app/.venv/bin/python"] = 0o755
+
+        if "app/.venv/pyvenv.cfg" not in files and "app/.venv/pyvenv.cfg" not in omitted:
+            files["app/.venv/pyvenv.cfg"] = b"home = /usr/local/bin\ninclude-system-site-packages = false\n"
+
+        if "entrypoint.sh" not in files and "entrypoint.sh" not in omitted:
+            files["entrypoint.sh"] = ENTRYPOINT
+            effective_modes.setdefault("entrypoint.sh", 0o755)
+        elif "entrypoint.sh" in files and "entrypoint.sh" not in effective_modes:
+            effective_modes["entrypoint.sh"] = 0o755
+
     entries, seen = [], set()
     for path in sorted(files):
         for item in dirs_for(path):
             if item[0] not in seen:
                 seen.add(item[0])
                 entries.append(item)
-        entries.append((path, "file", files[path], (modes or {}).get(path, 0o644)))
+        entries.append((path, "file", files[path], effective_modes.get(path, 0o644)))
     return entries + list(extra)
 
 
@@ -175,8 +195,15 @@ class Fixture:
         (self.root / ".deployments").mkdir(parents=True)
         self.attempt_id = art.new_id()
         self.version = "0.7.0.dev1"
-        self.pkg = {"wuwaterm/__init__.py": b"VERSION = 1\n", "wuwaterm/core.py": b"def f():\n    return 1\n"}
-        self.tg_pkg = {"wuwaterm_telegram/__init__.py": b"T = 1\n"}
+        self.pkg = {
+            "wuwaterm/__init__.py": b"VERSION = 1\n",
+            "wuwaterm/core.py": b"def f():\n    return 1\n",
+            "wuwaterm/cli.py": b"def main():\n    return 0\n",
+        }
+        self.tg_pkg = {
+            "wuwaterm_telegram/__init__.py": b"T = 1\n",
+            "wuwaterm_telegram/cli.py": b"def main():\n    return 0\n",
+        }
 
     # source archive -------------------------------------------------------
     def source_files(self) -> dict[str, bytes]:
@@ -1796,7 +1823,7 @@ def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
     modes11 = {"entrypoint.sh": 0o755}
     report11 = report_for(base11, modes11, pkgs11, ["/entrypoint.sh"], "core")
     layers11 = [layer(base11, modes=modes11), layer({art.REPORT_PATH.lstrip("/"): report11})]
-    with pytest.raises(art.ArtifactError, match="pyvenv.cfg must specify include-system-site-packages = false"):
+    with pytest.raises(art.ArtifactError, match="pyvenv.cfg must set include-system-site-packages = false"):
         fx11.seal(layers11)
 
     # 12. Unexpected bytecode in app/scripts
@@ -1843,7 +1870,7 @@ def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
     base15.update({SITE.lstrip("/") + "/" + k: v for k, v in site15.items()})
     modes15 = {"entrypoint.sh": 0o755, "app/.venv/bin/python": 0o755}
     report15 = report_for(base15, modes15, pkgs15, ["/entrypoint.sh"], "core")
-    layers15 = [layer(base15, modes=modes15), layer({art.REPORT_PATH.lstrip("/"): report15})]
+    layers15 = [layer(base15, modes=modes15, omit_venv_files={"app/.venv/pyvenv.cfg"}), layer({art.REPORT_PATH.lstrip("/"): report15})]
     with pytest.raises(art.ArtifactError, match="missing pyvenv.cfg in virtual environment"):
         fx15.seal(layers15)
 
@@ -1858,6 +1885,89 @@ def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
     layers16 = [layer(base16, modes=modes16), layer({art.REPORT_PATH.lstrip("/"): report16})]
     with pytest.raises(art.ArtifactError, match="unauthorized .pth file in image"):
         fx16.seal(layers16)
+
+
+def test_missing_reported_interpreter_rejected_at_seal_and_verify(tmp_path: Path) -> None:
+    # Codex reproduction PRRT_kwDOS82bU860-UgA: missing report["interpreter"]
+    # in image rootfs is rejected at both seal_bundle and verify_bundle
+    fx = Fixture(tmp_path / "missing_interp")
+    site, pkgs = fx.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes, omit_venv_files={"app/.venv/bin/python"}),
+              layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="reported interpreter is missing in the image: /app/.venv/bin/python"):
+        fx.seal(layers)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+    bundle_file = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="reported interpreter is missing in the image: /app/.venv/bin/python"):
+        art.verify_bundle(bundle_file)
+
+
+def test_entrypoint_missing_console_launcher_rejected(tmp_path: Path) -> None:
+    # Entrypoint: ["wuwaterm-telegram"] when wuwaterm-telegram console script
+    # launcher is absent from image is rejected
+    fx = Fixture(tmp_path / "missing_ep_script", "wuwaterm-telegram")
+    site, pkgs = fx.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    report = report_for(base, {}, pkgs, [], "telegram")
+    layers = [layer(base), layer({art.REPORT_PATH.lstrip("/"): report})]
+    attempt = fx.build(layers, config_extra={"Entrypoint": ["wuwaterm-telegram"], "Cmd": ["--db", "/app/data/terms.db"]})
+    wheels = fx.write_wheels(attempt)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="image Entrypoint console script is not installed and verified: wuwaterm-telegram"):
+        art.seal_bundle(
+            fx.delivery, fx.attempt_id, product=fx.product, commit=TG_COMMIT,
+            tree=fx.source.tree, iid=image.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+        )
+
+
+def test_console_launcher_missing_target_module_rejected(tmp_path: Path) -> None:
+    # Console launcher whose target module does not exist in installed is rejected
+    fx = Fixture(tmp_path / "missing_target_module")
+    src = fx.source_files()
+    src["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
+        b'[project.scripts]\nwuwaterm = "wuwaterm.missing_cli:main"\n'
+    )
+    info = "wuwaterm-0.7.0.dev1.dist-info/"
+    launcher_data = uv_launcher("/app/.venv/bin/python", "wuwaterm.missing_cli", "main")
+    extra = {
+        info + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.missing_cli:main\n",
+        "../../../bin/wuwaterm": launcher_data,
+    }
+    site = dist("wuwaterm", fx.version, {**fx.pkg, **extra}, {"url": "file:///app", "dir_info": {"editable": False}})
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/.venv/bin/wuwaterm": launcher_data}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items() if not k.startswith("../")})
+    modes = {"entrypoint.sh": 0o755, "app/.venv/bin/wuwaterm": 0o755}
+    report = report_for(base, modes, [("wuwaterm", fx.version)], ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="console script target module is not installed: wuwaterm.missing_cli"):
+        fx.seal(layers, source_files=src)
+
+
+def test_entrypoint_sh_invalid_shebang_rejected(tmp_path: Path) -> None:
+    # /entrypoint.sh extra file with invalid shebang (not #!/bin/sh\n) is rejected
+    fx = Fixture(tmp_path / "bad_shebang")
+    site, pkgs = fx.installed()
+    bad_entrypoint = b"#!/bin/bash\nexec python -m wuwaterm\n"
+    src = fx.source_files()
+    src["deploy/entrypoint.sh"] = bad_entrypoint
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": bad_entrypoint}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="extra file has invalid shebang: /entrypoint.sh"):
+        fx.seal(layers, source_files=src)
 
 
 
