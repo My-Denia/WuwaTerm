@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
+import marshal
 import os
 from pathlib import Path
 import posixpath
+import struct
 import subprocess
 import sys
 import tarfile
@@ -138,7 +141,7 @@ def dist(name: str, version: str, files: dict[str, bytes], direct_url: dict | No
 
 
 def report_for(fs: dict[str, bytes], modes: dict[str, int], packages: list[tuple[str, str]],
-               extras: list[str], product: str) -> bytes:
+               extras: list[str], product: str, python_version: str = "3.11.16") -> bytes:
     """Build the probe report exactly as install_probe.py does, from file bytes."""
     items = []
     for name, version in sorted(packages):
@@ -157,7 +160,7 @@ def report_for(fs: dict[str, bytes], modes: dict[str, int], packages: list[tuple
                       "direct_url": json.loads(raw_url) if raw_url else None,
                       "record_entries": len(paths), "files": files})
     report = {"schema_version": 1, "kind": "install-probe", "product": product,
-              "interpreter": "/app/.venv/bin/python", "python_version": "3.11.16", "site_packages": SITE,
+              "interpreter": "/app/.venv/bin/python", "python_version": python_version, "site_packages": SITE,
               "packages": items,
               "extra_files": [{"path": p, "sha256": sha(fs[p.lstrip("/")]), "mode": modes.get(p.lstrip("/"), 0o644)}
                               for p in extras]}
@@ -1547,5 +1550,314 @@ def test_invalid_runtime_config_and_interpreter_rejected(tmp_path: Path) -> None
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
     with pytest.raises(art.ArtifactError, match="interpreter in the image is not executable: /app/.venv/bin/python"):
         fx_interp.seal(layers)
+
+
+def test_bytecode_pep552_hash_pyc_rejected(tmp_path: Path) -> None:
+    # Codex reproduction: unrecorded wuwaterm/__pycache__/__init__.cpython-311.pyc
+    # with PEP 552 unchecked-hash (flags=1) returning VERSION = 999
+    fx = Fixture(tmp_path / "pep552")
+    site, pkgs = fx.installed()
+    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    co_evil = compile(b"VERSION = 999\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
+    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 1, 0, 0) + marshal.dumps(co_evil)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="hash-based .pyc bytecode is forbidden"):
+        fx.seal(layers)
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="hash-based .pyc bytecode is forbidden"):
+        art.verify_bundle(bundle_path)
+
+
+def test_bytecode_forged_timestamp_pyc_rejected(tmp_path: Path) -> None:
+    # Forged timestamp-based wuwaterm/__pycache__/__init__.cpython-311.pyc (flags=0)
+    # matching (mtime, size) for wuwaterm/__init__.py, but code object sets VERSION = 999
+    fx = Fixture(tmp_path / "forged_ts")
+    site, pkgs = fx.installed()
+    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    py_bytes = fx.pkg["wuwaterm/__init__.py"]
+    co_evil = compile(b"VERSION = 999\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
+    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        fx.seal(layers)
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        art.verify_bundle(bundle_path)
+
+
+def test_bytecode_valid_timestamp_pyc_accepted(tmp_path: Path) -> None:
+    # Valid timestamp-based wuwaterm/__pycache__/__init__.cpython-311.pyc (flags=0)
+    # matching (mtime, size) and matching compiled code object for VERSION = 1
+    fx = Fixture(tmp_path / "valid_pyc")
+    site, pkgs = fx.installed()
+    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    py_bytes = fx.pkg["wuwaterm/__init__.py"]
+    co_valid = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
+    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_valid)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    verified = fx.seal(layers)
+    assert verified is not None
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    verified2 = art.verify_bundle(bundle_path)
+    assert verified2.sha256 == verified.sha256
+
+
+def test_bytecode_forged_bool_constant_rejected(tmp_path: Path) -> None:
+    # Forged timestamp-based .pyc flipping FLAG = True -> FLAG = False is rejected
+    fx = Fixture(tmp_path / "forged_bool")
+    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    py_bytes = b"FLAG = True\n"
+    fx.pkg["wuwaterm/__init__.py"] = py_bytes
+    site, pkgs = fx.installed()
+    co_evil = compile(b"FLAG = False\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    pyc_full = SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc"
+    raw_pyc = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        fx.seal(layers)
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        art.verify_bundle(bundle_path)
+
+
+def test_bytecode_forged_constant_order_rejected(tmp_path: Path) -> None:
+    # Forged timestamp-based .pyc swapping constant order PAIR = (1, 2) -> PAIR = (2, 1) is rejected
+    fx = Fixture(tmp_path / "forged_order")
+    py_full = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    py_bytes = b"PAIR = (1, 2)\n"
+    fx.pkg["wuwaterm/__init__.py"] = py_bytes
+    site, pkgs = fx.installed()
+    co_evil = compile(b"PAIR = (2, 1)\n", "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    py_ver = f"{sys.version_info[0]}.{sys.version_info[1]}.0"
+    xy = f"{sys.version_info[0]}{sys.version_info[1]}"
+    magic = importlib.util.MAGIC_NUMBER
+    pyc_full = SITE.lstrip("/") + f"/wuwaterm/__pycache__/__init__.cpython-{xy}.pyc"
+    raw_pyc = struct.pack("<4sIII", magic, 0, 0, len(py_bytes)) + marshal.dumps(co_evil)
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, pyc_full: raw_pyc}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core", python_version=py_ver)
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        fx.seal(layers)
+    bundle_path = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="compiled .pyc bytecode differs from verified source"):
+        art.verify_bundle(bundle_path)
+
+
+def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
+    # 1. Shadowing in /app: /app/wuwaterm.py
+    fx1 = Fixture(tmp_path / "shadow_py")
+    site1, pkgs1 = fx1.installed()
+    base1 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/wuwaterm.py": b"# evil\n"}
+    base1.update({SITE.lstrip("/") + "/" + k: v for k, v in site1.items()})
+    modes1 = {"entrypoint.sh": 0o755}
+    report1 = report_for(base1, modes1, pkgs1, ["/entrypoint.sh"], "core")
+    layers1 = [layer(base1, modes=modes1), layer({art.REPORT_PATH.lstrip("/"): report1})]
+    with pytest.raises(art.ArtifactError, match="unauthorized executable or package file directly in /app"):
+        fx1.seal(layers1)
+
+    # 2. Shadowing in /app: /app/evil/__init__.py
+    fx2 = Fixture(tmp_path / "shadow_dir")
+    site2, pkgs2 = fx2.installed()
+    base2 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/evil/__init__.py": b"# evil\n"}
+    base2.update({SITE.lstrip("/") + "/" + k: v for k, v in site2.items()})
+    modes2 = {"entrypoint.sh": 0o755}
+    report2 = report_for(base2, modes2, pkgs2, ["/entrypoint.sh"], "core")
+    layers2 = [layer(base2, modes=modes2), layer({art.REPORT_PATH.lstrip("/"): report2})]
+    with pytest.raises(art.ArtifactError, match="unauthorized directory in /app"):
+        fx2.seal(layers2)
+
+    # 3. Tampered _virtualenv.pth content
+    fx3 = Fixture(tmp_path / "bad_vpth")
+    site3, pkgs3 = fx3.installed()
+    base3 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             SITE.lstrip("/") + "/_virtualenv.pth": b"import evil\n"}
+    base3.update({SITE.lstrip("/") + "/" + k: v for k, v in site3.items()})
+    modes3 = {"entrypoint.sh": 0o755}
+    report3 = report_for(base3, modes3, pkgs3, ["/entrypoint.sh"], "core")
+    layers3 = [layer(base3, modes=modes3), layer({art.REPORT_PATH.lstrip("/"): report3})]
+    with pytest.raises(art.ArtifactError, match="unauthorized content in _virtualenv.pth"):
+        fx3.seal(layers3)
+
+    # 4. sitecustomize package (directory)
+    fx4 = Fixture(tmp_path / "sitecust_dir")
+    site4, pkgs4 = fx4.installed()
+    base4 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             "app/sitecustomize/__init__.py": b"# evil\n"}
+    base4.update({SITE.lstrip("/") + "/" + k: v for k, v in site4.items()})
+    modes4 = {"entrypoint.sh": 0o755}
+    report4 = report_for(base4, modes4, pkgs4, ["/entrypoint.sh"], "core")
+    layers4 = [layer(base4, modes=modes4), layer({art.REPORT_PATH.lstrip("/"): report4})]
+    with pytest.raises(art.ArtifactError, match="unauthorized sitecustomize module in image"):
+        fx4.seal(layers4)
+
+    # 5. sitecustomize pyc
+    fx5 = Fixture(tmp_path / "sitecust_pyc")
+    site5, pkgs5 = fx5.installed()
+    base5 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             SITE.lstrip("/") + "/sitecustomize.cpython-311.pyc": b"\x00" * 32}
+    base5.update({SITE.lstrip("/") + "/" + k: v for k, v in site5.items()})
+    modes5 = {"entrypoint.sh": 0o755}
+    report5 = report_for(base5, modes5, pkgs5, ["/entrypoint.sh"], "core")
+    layers5 = [layer(base5, modes=modes5), layer({art.REPORT_PATH.lstrip("/"): report5})]
+    with pytest.raises(art.ArtifactError, match="unauthorized sitecustomize module in image"):
+        fx5.seal(layers5)
+
+    # 6. /etc/ld.so.preload
+    fx6 = Fixture(tmp_path / "ld_preload")
+    site6, pkgs6 = fx6.installed()
+    base6 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "etc/ld.so.preload": b"/libevil.so\n"}
+    base6.update({SITE.lstrip("/") + "/" + k: v for k, v in site6.items()})
+    modes6 = {"entrypoint.sh": 0o755}
+    report6 = report_for(base6, modes6, pkgs6, ["/entrypoint.sh"], "core")
+    layers6 = [layer(base6, modes=modes6), layer({art.REPORT_PATH.lstrip("/"): report6})]
+    with pytest.raises(art.ArtifactError, match="unauthorized /etc/ld.so.preload in image"):
+        fx6.seal(layers6)
+
+    # 7. Unexpected .pyo file
+    fx7 = Fixture(tmp_path / "pyo_file")
+    site7, pkgs7 = fx7.installed()
+    base7 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyo": b"pyo"}
+    base7.update({SITE.lstrip("/") + "/" + k: v for k, v in site7.items()})
+    modes7 = {"entrypoint.sh": 0o755}
+    report7 = report_for(base7, modes7, pkgs7, ["/entrypoint.sh"], "core")
+    layers7 = [layer(base7, modes=modes7), layer({art.REPORT_PATH.lstrip("/"): report7})]
+    with pytest.raises(art.ArtifactError, match="unexpected .pyo bytecode file"):
+        fx7.seal(layers7)
+
+    # 8. Stale .pyc header (mtime mismatch)
+    fx8 = Fixture(tmp_path / "stale_pyc")
+    site8, pkgs8 = fx8.installed()
+    py_full8 = SITE.lstrip("/") + "/wuwaterm/__init__.py"
+    py_bytes8 = fx8.pkg["wuwaterm/__init__.py"]
+    co8 = compile(py_bytes8, "/" + py_full8, "exec", dont_inherit=True, optimize=0)
+    raw_pyc8 = struct.pack("<4sIII", b"\xa7\r\r\n", 0, 99999, len(py_bytes8)) + marshal.dumps(co8)
+    base8 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             SITE.lstrip("/") + "/wuwaterm/__pycache__/__init__.cpython-311.pyc": raw_pyc8}
+    base8.update({SITE.lstrip("/") + "/" + k: v for k, v in site8.items()})
+    modes8 = {"entrypoint.sh": 0o755}
+    report8 = report_for(base8, modes8, pkgs8, ["/entrypoint.sh"], "core")
+    layers8 = [layer(base8, modes=modes8), layer({art.REPORT_PATH.lstrip("/"): report8})]
+    with pytest.raises(art.ArtifactError, match="stale or mismatched .pyc header"):
+        fx8.seal(layers8)
+
+    # 9. Tampered _virtualenv.py hash
+    fx9 = Fixture(tmp_path / "bad_vpy")
+    site9, pkgs9 = fx9.installed()
+    base9 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+             SITE.lstrip("/") + "/_virtualenv.pth": b"import _virtualenv",
+             SITE.lstrip("/") + "/_virtualenv.py": b"# evil virtualenv"}
+    base9.update({SITE.lstrip("/") + "/" + k: v for k, v in site9.items()})
+    modes9 = {"entrypoint.sh": 0o755}
+    report9 = report_for(base9, modes9, pkgs9, ["/entrypoint.sh"], "core")
+    layers9 = [layer(base9, modes=modes9), layer({art.REPORT_PATH.lstrip("/"): report9})]
+    with pytest.raises(art.ArtifactError, match="unauthorized content in _virtualenv.py"):
+        fx9.seal(layers9)
+
+    # 10. Tampered distutils-precedence.pth hash
+    fx10 = Fixture(tmp_path / "bad_distutils")
+    site10, pkgs10 = fx10.installed()
+    base10 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              SITE.lstrip("/") + "/distutils-precedence.pth": b"import evil"}
+    base10.update({SITE.lstrip("/") + "/" + k: v for k, v in site10.items()})
+    modes10 = {"entrypoint.sh": 0o755}
+    report10 = report_for(base10, modes10, pkgs10, ["/entrypoint.sh"], "core")
+    layers10 = [layer(base10, modes=modes10), layer({art.REPORT_PATH.lstrip("/"): report10})]
+    with pytest.raises(art.ArtifactError, match="unauthorized content in distutils-precedence.pth"):
+        fx10.seal(layers10)
+
+    # 11. Tampered pyvenv.cfg include-system-site-packages = true
+    fx11 = Fixture(tmp_path / "bad_pyvenv")
+    site11, pkgs11 = fx11.installed()
+    base11 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              "app/.venv/pyvenv.cfg": b"include-system-site-packages = true\n"}
+    base11.update({SITE.lstrip("/") + "/" + k: v for k, v in site11.items()})
+    modes11 = {"entrypoint.sh": 0o755}
+    report11 = report_for(base11, modes11, pkgs11, ["/entrypoint.sh"], "core")
+    layers11 = [layer(base11, modes=modes11), layer({art.REPORT_PATH.lstrip("/"): report11})]
+    with pytest.raises(art.ArtifactError, match="pyvenv.cfg must specify include-system-site-packages = false"):
+        fx11.seal(layers11)
+
+    # 12. Unexpected bytecode in app/scripts
+    fx12 = Fixture(tmp_path / "bad_scripts_pyc")
+    site12, pkgs12 = fx12.installed()
+    base12 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              "app/scripts/__pycache__/install_probe.cpython-311.pyc": b"pyc"}
+    base12.update({SITE.lstrip("/") + "/" + k: v for k, v in site12.items()})
+    modes12 = {"entrypoint.sh": 0o755}
+    report12 = report_for(base12, modes12, pkgs12, ["/entrypoint.sh"], "core")
+    layers12 = [layer(base12, modes=modes12), layer({art.REPORT_PATH.lstrip("/"): report12})]
+    with pytest.raises(art.ArtifactError, match="unexpected bytecode in app directory"):
+        fx12.seal(layers12)
+
+    # 13. Unexpected bytecode in site-packages/__pycache__/
+    fx13 = Fixture(tmp_path / "bad_site_pycache")
+    site13, pkgs13 = fx13.installed()
+    base13 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              SITE.lstrip("/") + "/__pycache__/evil.cpython-311.pyc": b"pyc"}
+    base13.update({SITE.lstrip("/") + "/" + k: v for k, v in site13.items()})
+    modes13 = {"entrypoint.sh": 0o755}
+    report13 = report_for(base13, modes13, pkgs13, ["/entrypoint.sh"], "core")
+    layers13 = [layer(base13, modes=modes13), layer({art.REPORT_PATH.lstrip("/"): report13})]
+    with pytest.raises(art.ArtifactError, match="unexpected bytecode in site-packages"):
+        fx13.seal(layers13)
+
+    # 14. Unverified Python file in app/scripts/
+    fx14 = Fixture(tmp_path / "bad_app_script")
+    site14, pkgs14 = fx14.installed()
+    base14 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              "app/scripts/evil.py": b"# evil\n"}
+    base14.update({SITE.lstrip("/") + "/" + k: v for k, v in site14.items()})
+    modes14 = {"entrypoint.sh": 0o755}
+    report14 = report_for(base14, modes14, pkgs14, ["/entrypoint.sh"], "core")
+    layers14 = [layer(base14, modes=modes14), layer({art.REPORT_PATH.lstrip("/"): report14})]
+    with pytest.raises(art.ArtifactError, match="unverified Python file in /app"):
+        fx14.seal(layers14)
+
+    # 15. Missing pyvenv.cfg in virtual environment when python executable exists
+    fx15 = Fixture(tmp_path / "missing_pyvenv_cfg")
+    site15, pkgs15 = fx15.installed()
+    base15 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              "app/.venv/bin/python": b"fake-python"}
+    base15.update({SITE.lstrip("/") + "/" + k: v for k, v in site15.items()})
+    modes15 = {"entrypoint.sh": 0o755, "app/.venv/bin/python": 0o755}
+    report15 = report_for(base15, modes15, pkgs15, ["/entrypoint.sh"], "core")
+    layers15 = [layer(base15, modes=modes15), layer({art.REPORT_PATH.lstrip("/"): report15})]
+    with pytest.raises(art.ArtifactError, match="missing pyvenv.cfg in virtual environment"):
+        fx15.seal(layers15)
+
+    # 16. Unauthorized .pth file anywhere in image
+    fx16 = Fixture(tmp_path / "bad_pth_anywhere")
+    site16, pkgs16 = fx16.installed()
+    base16 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+              "usr/local/lib/python3.11/dist-packages/evil.pth": b"import evil\n"}
+    base16.update({SITE.lstrip("/") + "/" + k: v for k, v in site16.items()})
+    modes16 = {"entrypoint.sh": 0o755}
+    report16 = report_for(base16, modes16, pkgs16, ["/entrypoint.sh"], "core")
+    layers16 = [layer(base16, modes=modes16), layer({art.REPORT_PATH.lstrip("/"): report16})]
+    with pytest.raises(art.ArtifactError, match="unauthorized .pth file in image"):
+        fx16.seal(layers16)
+
 
 

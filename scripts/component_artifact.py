@@ -23,6 +23,7 @@ they can never inherit the deployment lock.
 from __future__ import annotations
 
 import argparse
+import ast
 import configparser
 import contextlib
 import csv
@@ -34,6 +35,7 @@ import hashlib
 import http.client
 import io
 import json
+import marshal
 import os
 from pathlib import Path
 import posixpath
@@ -41,10 +43,12 @@ import re
 import secrets
 import socket
 import stat
+import struct
 import sys
 import tarfile
 import time
 import tomllib
+import types
 from typing import Any, BinaryIO, Callable, Iterator
 import zipfile
 
@@ -314,6 +318,7 @@ class Node:
     sha256: str | None
     link: str | None
     layer: int
+    mtime: int = 0
 
 
 class RootFS:
@@ -365,6 +370,7 @@ class RootFS:
                         listing.append((name, "whiteout"))
                         continue
                     mode = member.mode & 0o7777
+                    mtime = int(member.mtime)
                     if member.isreg():
                         data = layer.extractfile(member)
                         if data is None:
@@ -378,21 +384,21 @@ class RootFS:
                                 kept.append(chunk)
                         if size != member.size:
                             _fail("layer file truncated")
-                        node = Node("file", mode, size, digest.hexdigest(), None, index)
+                        node = Node("file", mode, size, digest.hexdigest(), None, index, mtime)
                         additions.append((name, node, b"".join(kept) if keep else None, None))
                         listing.append((name, "file"))
                     elif member.isdir():
-                        additions.append((name, Node("dir", mode, 0, None, None, index), None, None))
+                        additions.append((name, Node("dir", mode, 0, None, None, index, mtime), None, None))
                         listing.append((name, "dir"))
                     elif member.issym():
-                        additions.append((name, Node("symlink", mode, 0, None, member.linkname, index), None, None))
+                        additions.append((name, Node("symlink", mode, 0, None, member.linkname, index, mtime), None, None))
                         listing.append((name, "symlink"))
                     elif member.islnk():
-                        additions.append((name, Node("file", mode, 0, None, None, index), None,
+                        additions.append((name, Node("file", mode, 0, None, None, index, mtime), None,
                                           _member_name(member.linkname)))
                         listing.append((name, "hardlink"))
                     else:
-                        additions.append((name, Node("other", mode, 0, None, None, index), None, None))
+                        additions.append((name, Node("other", mode, 0, None, None, index, mtime), None, None))
                         listing.append((name, "other"))
         except tarfile.TarError as exc:
             raise ArtifactError("invalid layer tar") from exc
@@ -468,7 +474,8 @@ class RootFS:
 
 def _capture(name: str) -> bool:
     return (name.endswith((".dist-info/RECORD", ".dist-info/METADATA",
-                           ".dist-info/direct_url.json", ".dist-info/entry_points.txt"))
+                           ".dist-info/direct_url.json", ".dist-info/entry_points.txt",
+                           ".py", ".pyc", ".pyo", ".pth", "/pyvenv.cfg", "pyvenv.cfg"))
             or "/bin/" in ("/" + name)
             or name in (REPORT_PATH.lstrip("/"), PROGRAM_PATH.lstrip("/")))
 
@@ -1050,6 +1057,178 @@ def _skipped(path: str) -> bool:
     return path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/")
 
 
+_COMP_NAMES = {"<listcomp>", "<dictcomp>", "<setcomp>"}
+
+
+def _while_true_scopes(tree: ast.AST) -> set[str]:
+    scopes: set[str] = set()
+
+    def check(name: str, body: list[ast.stmt]) -> None:
+        queue = list(body)
+        while queue:
+            node = queue.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(node, ast.While) and isinstance(node.test, ast.Constant) and node.test.value is True:
+                scopes.add(name)
+                break
+            for child in ast.iter_child_nodes(node):
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    queue.append(child)
+
+    check("<module>", getattr(tree, "body", []))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            check(node.name, node.body)
+    return scopes
+
+
+def _extract_summary(co: types.CodeType, while_true_scopes: set[str]) -> tuple[
+    set[tuple[str, Any]], set[str], set[str], list[types.CodeType], list[tuple[str, Any]], set[int]
+]:
+    prims: set[tuple[str, Any]] = set()
+    ordered_prims: list[tuple[str, Any]] = []
+    lines = {line for _, _, line in co.co_lines() if line is not None}
+    names = set(co.co_names)
+    locals_and_cells = (set(v for v in co.co_varnames if not v.startswith("."))
+                        | set(co.co_cellvars)
+                        | set(co.co_freevars)) - {"__class__"}
+    children: list[types.CodeType] = []
+
+    def visit_const(c: Any) -> None:
+        if isinstance(c, types.CodeType):
+            if c.co_name in _COMP_NAMES:
+                sub_p, sub_n, sub_v, sub_ch, sub_o, sub_l = _extract_summary(c, while_true_scopes)
+                prims.update(sub_p)
+                names.update(sub_n)
+                locals_and_cells.update(sub_v)
+                children.extend(sub_ch)
+                lines.update(sub_l)
+            else:
+                children.append(c)
+        elif isinstance(c, (tuple, frozenset)):
+            for x in c:
+                visit_const(x)
+        else:
+            if c is None:
+                return
+            if isinstance(c, bool):
+                if c is True and co.co_name in while_true_scopes:
+                    return
+                prims.add(("bool", c))
+                ordered_prims.append(("bool", c))
+                return
+            if isinstance(c, str) and c.endswith((".<locals>.<listcomp>", ".<locals>.<dictcomp>", ".<locals>.<setcomp>")):
+                return
+            prims.add((type(c).__name__, c))
+            ordered_prims.append((type(c).__name__, c))
+
+    for c in co.co_consts:
+        visit_const(c)
+    return prims, names, locals_and_cells, children, ordered_prims, lines
+
+
+def _compare_merged(co1: types.CodeType, co2: types.CodeType, while_true_scopes: set[str],
+                    path: str = "", same_version: bool = False) -> list[str]:
+    errs: list[str] = []
+    for attr in ("co_name", "co_qualname", "co_filename", "co_firstlineno",
+                 "co_argcount", "co_posonlyargcount", "co_kwonlyargcount"):
+        v1, v2 = getattr(co1, attr, None), getattr(co2, attr, None)
+        if v1 != v2:
+            errs.append(f"{path}.{attr}: {v1!r} != {v2!r}")
+    p1, n1, v1, ch1, o1, l1 = _extract_summary(co1, while_true_scopes)
+    p2, n2, v2, ch2, o2, l2 = _extract_summary(co2, while_true_scopes)
+    if n1 != n2:
+        errs.append(f"{path}.names: {n1!r} != {n2!r}")
+    if v1 != v2:
+        errs.append(f"{path}.locals: {v1!r} != {v2!r}")
+    if p1 != p2:
+        errs.append(f"{path}.prims: {p1!r} != {p2!r}")
+    if same_version:
+        if o1 != o2:
+            errs.append(f"{path}.ordered_prims: {o1!r} != {o2!r}")
+        if l1 != l2:
+            errs.append(f"{path}.lines: {l1!r} != {l2!r}")
+    if len(ch1) != len(ch2):
+        errs.append(f"{path}.children len: {len(ch1)} != {len(ch2)}")
+    else:
+        for c1, c2 in zip(ch1, ch2):
+            child_name = getattr(c1, "co_qualname", c1.co_name)
+            errs.extend(_compare_merged(c1, c2, while_true_scopes, f"{path}/{child_name}", same_version))
+    return errs
+
+
+def _verify_pyc(rootfs: RootFS, pyc_path: str, site: str, installed: dict[str, str], python_version: str) -> None:
+    rel = pyc_path[len(site) + 1:]
+    if rel.endswith(".pyo"):
+        _fail("unexpected .pyo bytecode file: " + rel)
+    parts = rel.split("/")
+    py_parts = python_version.split(".")
+    xy = "".join(py_parts[:2])
+    expected_suffix = f".cpython-{xy}.pyc"
+    if (len(parts) < 3
+            or parts[-2] != "__pycache__"
+            or "__pycache__" in parts[:-2]
+            or not parts[-1].endswith(expected_suffix)):
+        _fail("invalid or misplaced bytecode file: " + rel)
+    mod = parts[-1][:-len(expected_suffix)]
+    if not mod.isidentifier():
+        _fail("invalid module name in bytecode file: " + rel)
+    py_rel = "/".join(parts[:-2] + [mod + ".py"])
+    if py_rel not in installed:
+        _fail("unrecorded or unverified source file for bytecode: " + rel)
+    py_full = site + "/" + py_rel
+    py_node = rootfs.nodes.get(py_full)
+    if py_node is None or py_node.kind != "file":
+        _fail("missing source file for bytecode: " + rel)
+    raw = rootfs.read(pyc_path)
+    py_bytes = rootfs.read(py_full)
+    if len(raw) <= 16:
+        _fail("stale or mismatched .pyc header: " + rel)
+    magic, flags, mtime, size = struct.unpack("<4sIII", raw[:16])
+    if flags != 0:
+        _fail("hash-based .pyc bytecode is forbidden: " + rel)
+    if xy == "311" and magic != b"\xa7\r\r\n":
+        _fail("unexpected .pyc magic bytes: " + rel)
+    if xy == "312" and magic != b"\xcb\r\r\n":
+        _fail("unexpected .pyc magic bytes: " + rel)
+    if mtime != (py_node.mtime & 0xFFFFFFFF) or size != (py_node.size & 0xFFFFFFFF):
+        _fail("stale or mismatched .pyc header: " + rel)
+    try:
+        co_pyc = marshal.loads(raw[16:])
+    except Exception:
+        _fail("compiled .pyc bytecode differs from verified source: " + rel)
+    if not isinstance(co_pyc, types.CodeType):
+        _fail("compiled .pyc bytecode differs from verified source: " + rel)
+    try:
+        co_compiled = compile(py_bytes, "/" + py_full, "exec", dont_inherit=True, optimize=0)
+    except Exception:
+        _fail("compiled .pyc bytecode differs from verified source: " + rel)
+
+    try:
+        target_py = (int(py_parts[0]), int(py_parts[1]))
+    except (ValueError, IndexError):
+        _fail("invalid python version in probe report: " + python_version)
+
+    same_version = sys.version_info[:2] == target_py
+    if same_version:
+        if co_pyc != co_compiled:
+            _fail("compiled .pyc bytecode differs from verified source: " + rel)
+        return
+
+    if co_pyc == co_compiled:
+        return
+
+    try:
+        tree = ast.parse(py_bytes)
+    except Exception:
+        _fail("cannot parse source file: " + py_full)
+    while_true_scopes = _while_true_scopes(tree)
+    errs = _compare_merged(co_pyc, co_compiled, while_true_scopes, rel, same_version)
+    if errs:
+        _fail("compiled .pyc bytecode differs from verified source: " + rel)
+
+
 def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] | None) -> dict[str, str]:
     ep_path = dist_info + "/entry_points.txt"
     ep_scripts: dict[str, str] | None = None
@@ -1167,14 +1346,63 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
     rootfs = image.rootfs
     _verify_interpreter(rootfs, report, product)
     site = rootfs.resolve(report["site_packages"])
+    if "etc/ld.so.preload" in rootfs.nodes:
+        _fail("unauthorized /etc/ld.so.preload in image")
     if (site + "/sitecustomize.py") in rootfs.nodes:
         _fail("unauthorized sitecustomize.py in site-packages")
     if (site + "/usercustomize.py") in rootfs.nodes:
         _fail("unauthorized usercustomize.py in site-packages")
     for path in rootfs.nodes:
-        if posixpath.dirname(path) == site and path.endswith(".pth"):
-            if posixpath.basename(path) not in ("_virtualenv.pth", "distutils-precedence.pth"):
-                _fail("unauthorized .pth file in site-packages: " + path)
+        base_prefix = posixpath.basename(path).split(".")[0]
+        if base_prefix in ("sitecustomize", "usercustomize"):
+            _fail(f"unauthorized {base_prefix} module in image: {path}")
+    pycache_site = site + "/__pycache__/"
+    for path in rootfs.nodes:
+        if path.startswith(pycache_site):
+            if posixpath.basename(path) != "typing_extensions.cpython-311.pyc":
+                _fail("unexpected bytecode in site-packages: " + path)
+        elif posixpath.dirname(path) == site and path.endswith((".pyc", ".pyo")):
+            _fail("unexpected bytecode in site-packages: " + path)
+    for path in rootfs.nodes:
+        if path.endswith(".pth"):
+            base = posixpath.basename(path)
+            if base not in ("_virtualenv.pth", "distutils-precedence.pth"):
+                if "site-packages" in path.split("/"):
+                    _fail("unauthorized .pth file in site-packages: " + path)
+                _fail("unauthorized .pth file in image: " + path)
+            if base == "_virtualenv.pth":
+                if rootfs.read(path).strip() != b"import _virtualenv":
+                    _fail("unauthorized content in _virtualenv.pth: " + path)
+                vpy_path = posixpath.join(posixpath.dirname(path), "_virtualenv.py")
+                if vpy_path in rootfs.nodes:
+                    if _sha(rootfs.read(vpy_path)) != "6cf30c56faf2a55228914dbbd17f8088ed371ebb08f5e7fa6fd931f913fcaf1d":
+                        _fail("unauthorized content in _virtualenv.py: " + vpy_path)
+            elif base == "distutils-precedence.pth":
+                if _sha(rootfs.read(path)) != "2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224":
+                    _fail("unauthorized content in distutils-precedence.pth: " + path)
+    if "app/.venv" in rootfs.nodes and "app/.venv/bin/python" in rootfs.nodes:
+        if "app/.venv/pyvenv.cfg" not in rootfs.nodes:
+            _fail("missing pyvenv.cfg in virtual environment: app/.venv")
+    if "app/.venv/pyvenv.cfg" in rootfs.nodes:
+        pyvenv_cfg = rootfs.read("app/.venv/pyvenv.cfg").decode("utf-8", "replace").lower()
+        if "include-system-site-packages = false" not in pyvenv_cfg:
+            _fail("pyvenv.cfg must specify include-system-site-packages = false")
+    for path, node in rootfs.nodes.items():
+        if posixpath.dirname(path) == "app":
+            base = posixpath.basename(path)
+            if node.kind == "dir":
+                if base not in (".venv", "build", "scripts", "src", "wheels"):
+                    _fail("unauthorized directory in /app: " + path)
+            else:
+                if base.endswith((".py", ".pyc", ".pyo", ".pth", ".so", ".pyd", ".egg", ".whl")):
+                    _fail("unauthorized executable or package file directly in /app: " + path)
+        if any(path.startswith(p) for p in ("app/scripts/", "app/src/", "app/build/")):
+            if path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/"):
+                _fail("unexpected bytecode in app directory: " + path)
+        if (path.startswith("app/scripts/") or path.startswith("app/src/")) and path.endswith(".py"):
+            rel = path[4:]
+            if rel not in source.files or source.files[rel][1] != node.sha256:
+                _fail("unverified Python file in /app: " + path)
     verified_bin_scripts: set[str] = set()
     names = [p["name"] for p in report["packages"]]
     if names != sorted(set(names)):
@@ -1224,6 +1452,15 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             if node.sha256 != item["sha256"] or node.size != item["size"]:
                 _fail("installed file differs from probe report: " + p)
             installed[p] = item["sha256"]
+        for p in record_paths:
+            if _skipped(p):
+                full_p = site + "/" + p
+                if full_p not in rootfs.nodes:
+                    _fail("RECORD entry missing in image: " + p)
+                _verify_pyc(rootfs, full_p, site, installed, report["python_version"])
+        for path, node in rootfs.nodes.items():
+            if (path == site or path.startswith(site + "/")) and node.kind not in ("dir", "file"):
+                _fail("unsafe non-regular entry in site-packages: " + path)
         # Files placed in the distribution's package directories but omitted
         # from RECORD would still be importable.
         tops = {p.split("/", 1)[0] for p in installed if not p.startswith("../") and "/" in p}
@@ -1232,8 +1469,11 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             for path, node in rootfs.nodes.items():
                 if path.startswith(prefix) and node.kind != "dir":
                     relative = path[len(site) + 1:]
-                    if not _skipped(relative) and relative not in installed:
-                        _fail("unrecorded file in installed package: " + relative)
+                    if not _skipped(relative):
+                        if relative not in installed:
+                            _fail("unrecorded file in installed package: " + relative)
+                    else:
+                        _verify_pyc(rootfs, path, site, installed, report["python_version"])
         direct_path = dist_info + "/direct_url.json"
         if direct_path in rootfs.nodes:
             expected_direct = _parse_json(rootfs.read(direct_path))
