@@ -2606,6 +2606,126 @@ def test_telegram_database_resolution_requires_explicit_path() -> None:
         transaction._telegram_database_path({"path_settings": {"WUWATERM_DB_PATH": None}}, {"command": []})
 
 
+@pytest.mark.parametrize("operation,expected_error", [
+    ("prepare_pending", "pending preflight database mount changed"),
+    ("retire_committed", "committed Telegram database mount changed"),
+])
+def test_telegram_lifecycle_checks_honor_command_db_precedence_over_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, expected_error: str,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    correct_db = data / "correct.db"
+    correct_db.write_bytes(b"correct")
+    wrong_db = data / "wrong.db"
+    wrong_db.write_bytes(b"wrong")
+
+    from test_product_manifest import component, snapshot
+    from test_component_runtime import container
+
+    record = component(tmp_path, "telegram")
+    recipe = snapshot("wuwaterm-telegram", record["image"]["id"])
+    # command specifies the correct db mount path
+    recipe["command"] = ["--db", "/app/data/correct.db"]
+    recipe["mounts"][0]["host"] = str(data)
+    path, digest = manifest.write_recipe_snapshot(tmp_path, recipe)
+    record["recipe"] = {key: recipe[key] for key in manifest._RECIPE_FIELDS}
+    record["recipe"].update(snapshot_path=path, sha256=digest)
+    expected = container(record, name="fixture-telegram", image_digit="b")
+
+    # In path_settings (environment), WUWATERM_DB_PATH points to a different/wrong db path
+    actual = {
+        "container": expected,
+        "recipe": recipe,
+        "path_settings": {"WUWATERM_DB_PATH": "/app/data/wrong.db", "WUWATERM_STATE_DIR": None,
+                          "WUWATERM_SETTINGS_PATH": None, "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None},
+    }
+
+    stat = {"device": 1, "inode": 2}
+    journal = {
+        "schema_version": 5,
+        "kind": "component-runtime",
+        "status": "active",
+        "phase": "prepared",
+        "transaction_id": "20261107T120000Z-" + "3" * 32,
+        "selection": ["telegram"],
+        "migrations": [],
+        "before": {"topology": {"api": None, "telegram": record}, "containers": {"api": None, "telegram": expected}},
+        "target": {
+            "manifest": {"components": {"telegram": record}},
+            "containers": {"telegram": None if operation == "prepare_pending" else {**expected, "running": False}},
+        },
+        "database": {
+            "binding": {"path": str(correct_db), "sha256": "4" * 64, "schema_version": 2, "provenance": "fixture"},
+            "stat": stat,
+        },
+        "pointers": {
+            "old": {
+                ".deploy_commit": {"present": False, "bytes": None},
+                ".deploy_current": {"present": False, "bytes": None},
+            },
+            "target": {
+                ".deploy_commit": {"present": False, "bytes": None},
+                ".deploy_current": {"present": False, "bytes": None},
+            },
+        },
+    }
+
+    target_container = container(record, name="fixture-telegram-target", image_digit="c")
+    retained_name = transaction._retained_name(journal, "telegram")
+    old_actual = {
+        "container": {**expected, "name": retained_name, "running": False},
+        "recipe": recipe,
+        "path_settings": {"WUWATERM_DB_PATH": "/app/data/wrong.db", "WUWATERM_STATE_DIR": None,
+                          "WUWATERM_SETTINGS_PATH": None, "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None},
+    }
+    target_actual = {
+        "container": target_container,
+        "recipe": recipe,
+        "path_settings": {"WUWATERM_DB_PATH": "/app/data/wrong.db", "WUWATERM_STATE_DIR": None,
+                          "WUWATERM_SETTINGS_PATH": None, "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None},
+    }
+
+    if operation == "retire_committed":
+        journal["target"]["containers"]["telegram"] = target_container
+
+    def mock_observed(cid: str, snapshot: dict, key: bytes) -> dict:
+        if cid == expected["id"]:
+            return old_actual
+        return target_actual
+
+    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": expected["id"]}] if operation == "prepare_pending" else [{"Id": expected["id"]}, {"Id": target_container["id"]}])
+    monkeypatch.setattr(transaction, "_observed", lambda cid, snap, key: actual if operation == "prepare_pending" else mock_observed(cid, snap, key))
+    monkeypatch.setattr(transaction, "_image", lambda *args: {"Config": {"Labels": {"org.opencontainers.image.revision": record["image"]["revision"]}}})
+    monkeypatch.setattr(transaction, "_effective_environment", lambda *args: {})
+    monkeypatch.setattr(transaction, "_env_map", lambda *args: {})
+    monkeypatch.setattr(transaction.observe, "_inspect", lambda *args: {"Config": {"Env": []}})
+    monkeypatch.setattr(transaction, "_pointer", lambda root, name: {"present": False, "bytes": None})
+    monkeypatch.setattr(transaction.manifest, "verify_database_binding", lambda *args: stat)
+    monkeypatch.setattr(transaction.manifest, "read_manifest", lambda *args: journal["target"]["manifest"])
+    monkeypatch.setattr(transaction, "_same_container_binding", lambda c1, c2: True)
+    monkeypatch.setattr(transaction, "_telegram_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transaction, "_verify_current_telegram_paths", lambda *args: None)
+    monkeypatch.setattr(transaction, "_other_api", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transaction, "_docker", lambda *args, **kwargs: None)
+
+    # With command precedence, binding path resolves to /app/data/correct.db -> str(correct_db), matching journal
+    if operation == "prepare_pending":
+        res = transaction._recover_pending_telegram(tmp_path, journal, Path("/unused"), finish=False)
+        assert res["status"] == "pending"
+    else:
+        res = transaction._retire_telegram(tmp_path, journal, remove=False)
+        assert res is True
+
+    # If journal expects wrong_db, but command gave correct_db, it must raise expected_error because command takes precedence
+    journal["database"]["binding"]["path"] = str(wrong_db)
+    with pytest.raises(transaction.TransactionError, match=expected_error):
+        if operation == "prepare_pending":
+            transaction._recover_pending_telegram(tmp_path, journal, Path("/unused"), finish=False)
+        else:
+            transaction._retire_telegram(tmp_path, journal, remove=False)
+
+
 def _rollback_fixture(tmp_path: Path) -> tuple[Path, dict, dict]:
     """A schema-5 cutover journal with one recorded state kind per kind pair."""
     root = tmp_path / "root"

@@ -1761,7 +1761,7 @@ def _recover_pending_telegram(root: Path, journal: dict[str, Any], compose_path:
             api = actual
         else:
             db = actual["path_settings"]["WUWATERM_DB_PATH"]
-            if db is None and snapshot["command"] and snapshot["command"][:1] == ["--db"]:
+            if snapshot["command"] and snapshot["command"][:1] == ["--db"]:
                 db = snapshot["command"][1]
             if db is None or observe.resolve_bind_path(actual["recipe"], db, writable=False) != journal["database"]["binding"]["path"]:
                 raise TransactionError("pending preflight database mount changed")
@@ -2123,7 +2123,7 @@ def _retire_telegram(root: Path, journal: dict[str, Any], *, remove: bool = True
             raise TransactionError("retained Telegram no longer matches retirement intent")
         observations.append(old)
     db = target["path_settings"]["WUWATERM_DB_PATH"]
-    if db is None and target_snap["command"] and target_snap["command"][:1] == ["--db"]:
+    if target_snap["command"] and target_snap["command"][:1] == ["--db"]:
         db = target_snap["command"][1]
     if db is None or observe.resolve_bind_path(target["recipe"], db, writable=False) != journal["database"]["binding"]["path"]:
         raise TransactionError("committed Telegram database mount changed")
