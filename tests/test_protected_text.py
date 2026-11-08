@@ -51,11 +51,13 @@ def model_server(monkeypatch):
             if "Dictionary term references:\n" in system:
                 block = system.split("Dictionary term references:\n", 1)[1]
                 for line in block.splitlines():
-                    reference = re.match(r"^(.*) = (.*) \(([a-z_]+)\)$", line)
-                    if reference:
-                        content = content.replace(
-                            reference.group(1), reference.group(2), 1
-                        )
+                    source, sep, rest = line.partition(" = ")
+                    if not sep or not rest.endswith(")"):
+                        continue
+                    official, _, category = rest.rpartition(" (")
+                    if not official or not category[:-1].replace("_", "").islower():
+                        continue
+                    content = content.replace(source, official, 1)
             tokens = re.findall(r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4,}__", content)
             terms = re.findall(r"__WUWA_TERM_[0-9a-f]{16}_[0-9]{4,}__", content)
             if state.mode == "missing":
