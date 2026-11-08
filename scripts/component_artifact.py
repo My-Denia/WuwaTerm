@@ -91,7 +91,7 @@ _PRODUCTS: dict[str, dict[str, Any]] = {
     "wuwaterm-telegram": {
         "repository": "My-Denia/WuwaTerm-Telegram", "probe": "telegram",
         "revision_arg": "WUWATERM_SOURCE_REVISION", "lock": "core-lock.json", "extra": {},
-        "source_packages": {}, "target": None,
+        "source_packages": {"wuwaterm-telegram": "src"}, "target": None,
     },
 }
 _BUILD_ARGS = {"SOURCE_COMMIT", "WUWATERM_SOURCE_REVISION", "PIP_NO_INDEX", "PIP_FIND_LINKS"}
@@ -845,6 +845,7 @@ def validate_bundle_schema(bundle: Any) -> dict[str, Any]:
     if type(bundle["wheels"]) is not list:
         _fail("invalid wheels")
     seen = set()
+    seen_packages = set()
     for wheel in bundle["wheels"]:
         _exact(wheel, {"filename", "package", "version", "sha256", "role"}, "wheel")
         filename = _str(wheel["filename"], "wheel filename")
@@ -853,9 +854,17 @@ def validate_bundle_schema(bundle: Any) -> dict[str, Any]:
         seen.add(filename)
         _str(wheel["package"], "wheel package")
         _str(wheel["version"], "wheel version")
+        if not _VERSION.fullmatch(wheel["version"]):
+            _fail("invalid wheel version")
         _hex(wheel["sha256"], "wheel digest")
         if wheel["role"] not in ("core", "telegram", "dependency"):
             _fail("invalid wheel role")
+        pkg_norm = _normalize(wheel["package"])
+        if pkg_norm in seen_packages:
+            _fail("duplicate wheel package")
+        seen_packages.add(pkg_norm)
+        if wheel["role"] == "dependency" and pkg_norm in ("wuwaterm", "wuwaterm-telegram"):
+            _fail("dependency wheel cannot be a WuwaTerm product: " + wheel["package"])
     binding = _exact(bundle["core_binding"], {"core_version", "core_wheel_sha256", "core_source_commit",
                                               "compatibility"}, "core binding")
     _str(binding["core_version"], "core version")
@@ -1047,6 +1056,8 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         location = _str(package["location"], "package location")
         if not location.startswith("/") or posixpath.normpath(location) != location:
             _fail("package location is not normalized")
+        if location != report["site_packages"]:
+            _fail("package location differs from site_packages: " + package["name"])
         site = rootfs.resolve(location)
         site_node = rootfs.nodes.get(site)
         if site_node is None or site_node.kind != "dir":
@@ -1065,6 +1076,9 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         if meta.get("Version") != package["version"]:
             _fail("installed version differs from probe report: " + package["name"])
         record_paths = _record_rows(rootfs.read(dist_info + "/RECORD"))
+        for p in record_paths:
+            if not p or p.startswith("/") or "\\" in p or posixpath.normpath(p) != p or p in (".", ".."):
+                _fail("invalid or unsafe path in RECORD: " + p)
         if len(record_paths) != package["record_entries"]:
             _fail("probe RECORD entry count differs: " + package["name"])
         expected = sorted({p for p in record_paths if not _skipped(p)})
@@ -1072,11 +1086,14 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             _fail("probe file list differs from installed RECORD: " + package["name"])
         installed: dict[str, str] = {}
         for item in package["files"]:
-            target = posixpath.normpath(posixpath.join(location, item["path"]))
+            p = item["path"]
+            if not p or p.startswith("/") or "\\" in p or posixpath.normpath(p) != p or p in (".", ".."):
+                _fail("invalid or unsafe path in probed file: " + p)
+            target = posixpath.normpath(posixpath.join(location, p))
             _, node = rootfs.regular(target)
             if node.sha256 != item["sha256"] or node.size != item["size"]:
-                _fail("installed file differs from probe report: " + item["path"])
-            installed[item["path"]] = item["sha256"]
+                _fail("installed file differs from probe report: " + p)
+            installed[p] = item["sha256"]
         # Files placed in the distribution's package directories but omitted
         # from RECORD would still be importable.
         tops = {p.split("/", 1)[0] for p in installed if not p.startswith("../") and "/" in p}
@@ -1087,6 +1104,14 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     relative = path[len(site) + 1:]
                     if not _skipped(relative) and relative not in installed:
                         _fail("unrecorded file in installed package: " + relative)
+        direct_path = dist_info + "/direct_url.json"
+        if direct_path in rootfs.nodes:
+            expected_direct = _parse_json(rootfs.read(direct_path))
+            if package["direct_url"] != expected_direct:
+                _fail("installed direct_url differs from probe report: " + package["name"])
+        else:
+            if package["direct_url"] is not None:
+                _fail("probe report claims direct_url but direct_url.json is missing: " + package["name"])
         if package["name"] in wheels:
             if wheel_versions is not None and package["version"] != wheel_versions.get(package["name"]):
                 _fail("installed distribution version differs from wheel: " + package["name"])
@@ -1097,11 +1122,36 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     continue
                 if installed.get(path) != digest:
                     _fail("installed file differs from verified wheel: " + path)
+            dist_info_name = posixpath.basename(dist_info)
+            for path, digest in installed.items():
+                if path.split("/", 1)[0] == dist_info_name and posixpath.basename(path) in _INSTALLER_FILES:
+                    continue
+                if path in members:
+                    if members[path] != digest:
+                        _fail("installed file differs from verified wheel: " + path)
+                    continue
+                if path.startswith("../"):
+                    target = posixpath.normpath(posixpath.join(location, path))
+                    target_dir, script_name = posixpath.split(target)
+                    is_bin_script = target_dir.endswith("/bin") and bool(script_name)
+                    is_data_member = False
+                    for m, m_digest in members.items():
+                        if ".data/data/" in m and m_digest == digest:
+                            data_rel = m.split(".data/data/", 1)[1]
+                            if target.endswith("/" + data_rel):
+                                is_data_member = True
+                                break
+                    if is_bin_script or is_data_member:
+                        continue
+                _fail("installed file is not in verified wheel: " + path)
             direct = package["direct_url"]
-            hashes = direct.get("archive_info", {}).get("hashes", {}) if type(direct) is dict else {}
-            if type(hashes) is dict and "sha256" in hashes and hashes["sha256"] != wheel_hashes[package["name"]]:
-                _fail("installed distribution came from a different wheel: " + package["name"])
-        elif package["name"] in product["source_packages"]:
+            if isinstance(direct, dict):
+                archive_info = direct.get("archive_info")
+                hashes = archive_info.get("hashes") if isinstance(archive_info, dict) else direct.get("hashes")
+                if isinstance(hashes, dict) and "sha256" in hashes:
+                    if hashes["sha256"] != wheel_hashes[package["name"]]:
+                        _fail("installed distribution came from a different wheel: " + package["name"])
+        if package["name"] in product["source_packages"]:
             root = product["source_packages"][package["name"]]
             pyproject_raw = source.content.get("pyproject.toml")
             pyproject: dict[str, Any] = {}
@@ -1117,12 +1167,14 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             wheel_cfg = targets.get("wheel") if isinstance(targets.get("wheel"), dict) else {}
             wheel_packages = wheel_cfg.get("packages")
             if wheel_packages is not None:
-                if not isinstance(wheel_packages, list):
-                    _fail("wheel packages in pyproject.toml must be a list")
+                if not isinstance(wheel_packages, list) or not wheel_packages:
+                    _fail("wheel packages in pyproject.toml must be a non-empty list")
                 expected_source_tops: set[str] = set()
                 for entry in wheel_packages:
-                    if not isinstance(entry, str):
+                    if not isinstance(entry, str) or not entry:
                         _fail("wheel package entry in pyproject.toml must be a string")
+                    if posixpath.normpath(entry) != entry.strip("/") or ".." in entry.split("/"):
+                        _fail("wheel package entry in pyproject.toml is not normalized: " + entry)
                     norm = posixpath.normpath(entry)
                     if not (norm == root or norm.startswith(root + "/")):
                         _fail("wheel package in pyproject.toml is outside the source root: " + entry)
@@ -1141,17 +1193,35 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     for p in source.files
                     if p.startswith(root + "/") and "/" in p[len(root) + 1:] and not _skipped(p)
                 }
+            setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
+            st_packages = setuptools.get("packages") if isinstance(setuptools.get("packages"), dict) else {}
+            st_find = st_packages.get("find") if isinstance(st_packages.get("find"), dict) else {}
+            if "where" in st_find:
+                where = st_find["where"]
+                if where != [root]:
+                    _fail(f"tool.setuptools.packages.find.where must be [{root!r}]")
+            for p in source.files:
+                if p.startswith(root + "/"):
+                    rel = p[len(root) + 1:]
+                    if "/" not in rel and not _skipped(p):
+                        _fail("stray regular file directly in source root: " + p)
             all_tops = expected_source_tops | {t for t in tops if not t.endswith(".dist-info")}
+            dist_info_base = posixpath.basename(dist_info)
+            for path in installed:
+                if path.startswith("../") or path.startswith(dist_info_base + "/") or ".data/" in path:
+                    continue
+                if "/" not in path or not any(path.startswith(top + "/") for top in all_tops):
+                    _fail("installed file is outside expected package directories: " + path)
             for top in sorted(all_tops):
                 prefix = root + "/" + top + "/"
                 from_source = {p[len(root) + 1:]: v[1] for p, v in source.files.items()
                                if p.startswith(prefix) and not _skipped(p)}
                 from_image = {p: d for p, d in installed.items() if p.startswith(top + "/")}
-                if from_source != from_image:
+                if not from_source or from_source != from_image:
                     _fail("installed package differs from the sealed source archive: " + top)
             if not all_tops or not (tops - {t for t in tops if t.endswith(".dist-info")}):
                 _fail("installed source package is empty")
-        else:
+        if package["name"] not in wheels and package["name"] not in product["source_packages"]:
             _fail("no verified source or wheel for probed package: " + package["name"])
     extras = report["extra_files"]
     if type(extras) is not list or [e.get("path") if type(e) is dict else None for e in extras] != sorted(product["extra"]):
@@ -1187,15 +1257,47 @@ def _default_inputs(bundle_path: Path) -> Path:
 
 
 def _verify_source(bundle: dict[str, Any], source_path: Path) -> SourceArchive:
-    wanted = {"pyproject.toml", "deploy/Dockerfile", "scripts/install_probe.py"}
+    wanted = {"pyproject.toml", "deploy/Dockerfile", "scripts/install_probe.py", "core-lock.json"}
     source = read_source_archive(source_path, keep=lambda name: name in wanted)
     if source.sha256 != bundle["source"]["archive_sha256"]:
         _fail("source archive differs from the bundle")
     if source.tree != bundle["source"]["tree"]:
         _fail("source archive tree differs from the bundle")
-    if source.commit is not None and source.commit != bundle["source"]["commit"]:
+    if source.commit != bundle["source"]["commit"]:
         _fail("source archive commit differs from the bundle")
     return source
+
+
+def _verify_telegram_core_binding(source: SourceArchive, pyproject_data: dict[str, Any],
+                                   core_binding: dict[str, Any], authority: str) -> None:
+    raw_lock = source.content.get("core-lock.json")
+    if raw_lock is None:
+        _fail("source archive has no core-lock.json")
+    lock_data = _parse_json(raw_lock)
+    if not isinstance(lock_data, dict):
+        _fail("core-lock.json is not a JSON object")
+    if authority == "official-ci":
+        if not lock_data:
+            _fail("official-ci Telegram bundle requires non-empty core-lock.json")
+        if lock_data.get("version") != core_binding["core_version"]:
+            _fail("core-lock.json version differs from core binding")
+        if lock_data.get("sha256") != core_binding["core_wheel_sha256"]:
+            _fail("core-lock.json sha256 differs from core binding")
+        lock_commit = lock_data.get("checkout_sha") or lock_data.get("source_commit")
+        if lock_commit != core_binding["core_source_commit"]:
+            _fail("core-lock.json source commit differs from core binding")
+    elif authority == "local-source":
+        if lock_data and "version" in lock_data:
+            if lock_data.get("version") != core_binding["core_version"]:
+                _fail("core-lock.json version differs from core binding")
+    deps = pyproject_data.get("project", {}).get("dependencies") if isinstance(pyproject_data.get("project"), dict) else None
+    if isinstance(deps, list):
+        for dep in deps:
+            if isinstance(dep, str):
+                norm_dep = re.sub(r"\s+", "", dep)
+                m = re.match(r"^wuwaterm==([^;,\s]+)", norm_dep, re.IGNORECASE)
+                if m and m.group(1) != core_binding["core_version"]:
+                    _fail("pyproject.toml wuwaterm dependency pin differs from core binding: " + m.group(1))
 
 
 def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
@@ -1235,11 +1337,22 @@ def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
     if pyproject_raw is None:
         _fail("source archive has no pyproject.toml")
     try:
-        source_version = tomllib.loads(pyproject_raw.decode("utf-8"))["project"]["version"]
+        pyproject_data = tomllib.loads(pyproject_raw.decode("utf-8"))
+        proj_section = pyproject_data.get("project")
+        if not isinstance(proj_section, dict):
+            _fail("pyproject.toml has no project section")
+        source_version = proj_section["version"]
+        proj_name = proj_section.get("name", "")
     except (KeyError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ArtifactError("cannot read the source package version") from exc
+    expected_name = "wuwaterm" if bundle["product"] == "wuwaterm-api" else "wuwaterm-telegram"
+    if not isinstance(proj_name, str) or _normalize(proj_name) != expected_name:
+        _fail("source pyproject.toml project name differs from expected product: " + str(proj_name))
     if source_version != bundle["version"]:
         _fail("bundle version differs from the sealed source")
+    if bundle["product"] == "wuwaterm-telegram":
+        _verify_telegram_core_binding(source, pyproject_data, bundle["core_binding"],
+                                      bundle["build_result"]["authority"])
     wheels: dict[str, dict[str, str]] = {}
     wheel_hashes: dict[str, str] = {}
     wheel_versions: dict[str, str] = {}
@@ -1253,6 +1366,8 @@ def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
                 wheels[wheel["package"]] = _wheel_contents(path, wheel["package"], wheel["version"])
                 wheel_hashes[wheel["package"]] = wheel["sha256"]
                 wheel_versions[wheel["package"]] = wheel["version"]
+            elif wheel["role"] == "dependency":
+                _wheel_contents(path, wheel["package"], wheel["version"])
     image = read_oci_archive(directory / ARCHIVE_FILE)
     if image.facts() != bundle["oci"]:
         _fail("sealed OCI archive differs from the bundle")
@@ -1365,15 +1480,23 @@ def seal_bundle(delivery: Path, attempt_id: str, *, product: str, commit: str, t
     refuse_inherited_fd9()
     attempt = _delivery_attempt(delivery, attempt_id)
     state = attempt / "state"
-    if not (state / "building.json").is_file() or (state / "sealed.json").exists():
-        _fail("delivery attempt is not in the building state")
+    if not (state / "building.json").is_file():
+        _fail("delivery attempt is missing building.json")
+    if (state / "sealed.json").exists():
+        _fail("delivery attempt is already sealed")
+    building = decode_canonical(_read_regular(state / "building.json", _MAX_JSON))
+    if building.get("state") != "building" or building.get("attempt_id") != attempt_id or building.get("product") != product:
+        _fail("delivery attempt is not in the building state for this product and attempt")
     info = _PRODUCTS.get(product)
     if info is None:
         _fail("unknown product")
     source = read_source_archive(attempt / "inputs" / "source.tar",
-                                 keep=lambda n: n in ("pyproject.toml", "deploy/Dockerfile", "scripts/install_probe.py"))
-    if source.tree != tree or (source.commit is not None and source.commit != commit):
+                                 keep=lambda n: n in ("pyproject.toml", "deploy/Dockerfile",
+                                                      "scripts/install_probe.py", "core-lock.json"))
+    if source.tree != tree or source.commit != commit:
         _fail("source archive differs from the selected Git objects")
+    if info["lock"] not in source.files:
+        _fail("source archive is missing lock file: " + info["lock"])
     bundle_dir = attempt / "bundle"
     image = read_oci_archive(bundle_dir / ARCHIVE_FILE)
     report_raw = image.rootfs.read(REPORT_PATH)
@@ -1382,9 +1505,17 @@ def seal_bundle(delivery: Path, attempt_id: str, *, product: str, commit: str, t
     if pyproject_raw is None:
         _fail("source archive has no pyproject.toml")
     try:
-        source_version = tomllib.loads(pyproject_raw.decode("utf-8"))["project"]["version"]
+        pyproject_data = tomllib.loads(pyproject_raw.decode("utf-8"))
+        proj_section = pyproject_data.get("project")
+        if not isinstance(proj_section, dict):
+            _fail("pyproject.toml has no project section")
+        source_version = proj_section["version"]
+        proj_name = proj_section.get("name", "")
     except (KeyError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ArtifactError("cannot read the source package version") from exc
+    expected_name = "wuwaterm" if product == "wuwaterm-api" else "wuwaterm-telegram"
+    if not isinstance(proj_name, str) or _normalize(proj_name) != expected_name:
+        _fail("source pyproject.toml project name differs from expected product: " + str(proj_name))
     if product == "wuwaterm-api":
         version = source_version
     else:
@@ -1394,6 +1525,10 @@ def seal_bundle(delivery: Path, attempt_id: str, *, product: str, commit: str, t
         version = telegram_wheels[0]["version"]
         if version != source_version:
             _fail("bundle version differs from the sealed source")
+    binding = core_binding or {"core_version": version, "core_wheel_sha256": None,
+                               "core_source_commit": commit, "compatibility": "exact"}
+    if product == "wuwaterm-telegram":
+        _verify_telegram_core_binding(source, pyproject_data, binding, authority)
     _write_new(bundle_dir / REPORT_FILE, report_raw, 0o644)
     program = source.content.get("scripts/install_probe.py")
     if program is None:
@@ -1409,11 +1544,10 @@ def seal_bundle(delivery: Path, attempt_id: str, *, product: str, commit: str, t
             "target": info["target"], "platform": "linux/amd64",
             "build_args": sorted(build_args, key=lambda a: a["name"]),
             "base_images": base_images,
-            "lock_sha256": source.files[info["lock"]][1] if info["lock"] in source.files else "",
+            "lock_sha256": source.files[info["lock"]][1],
         },
         "wheels": wheels or [],
-        "core_binding": core_binding or {"core_version": version, "core_wheel_sha256": None,
-                                         "core_source_commit": commit, "compatibility": "exact"},
+        "core_binding": binding,
         "oci": image.facts(),
         "install_probe": _bundle_probe(report, _sha(program), _sha(report_raw), image.layers[-1]["digest"]),
         "build_result": {"authority": authority, "foreground_exit": 0, "iid": iid, "ci": ci},
@@ -1689,7 +1823,8 @@ def _check_disjoint(bundle_path: Path, root: Path, attempt_id: str) -> None:
 
 
 def _register(root: Path, verified: VerifiedBundle, intent: dict[str, Any], native_id: str) -> dict[str, Any]:
-    receipt = {"schema_version": 1, "kind": ACQUISITION_KIND, "acquisition_id": intent["acquisition_id"],
+    receipt = {"schema_version": 1, "kind": ACQUISITION_KIND,
+               "acquisition_id": intent["acquisition_id"],
                "bundle_sha256": verified.sha256, "attempt_id": intent["attempt_id"], "store": intent["store"],
                "native_image_id": native_id, "graph_equal": True, "state": "registered",
                "registered_utc": _utc_now()}

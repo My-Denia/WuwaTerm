@@ -234,14 +234,15 @@ class Fixture:
         (attempt / "bundle" / art.ARCHIVE_FILE).write_bytes(raw)
         return attempt
 
-    def seal(self, layers=None, **options) -> art.VerifiedBundle:
+    def seal(self, layers=None, *, authority: str = "local-source", **options) -> art.VerifiedBundle:
         attempt = self.build(layers, **options)
         image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
         if self.product == "wuwaterm-api":
             return art.seal_bundle(self.delivery, self.attempt_id, product=self.product, commit=COMMIT,
                                    tree=self.source.tree, iid=image.manifest_digest,
                                    build_script_sha256="c" * 64, base_images=BASES,
-                                   build_args=[{"name": "SOURCE_COMMIT", "value": COMMIT}], compatibility=COMPAT)
+                                   build_args=[{"name": "SOURCE_COMMIT", "value": COMMIT}], compatibility=COMPAT,
+                                   authority=authority)
         wheels = self.write_wheels(attempt)
         core = next(w for w in wheels if w["role"] == "core")
         return art.seal_bundle(
@@ -250,7 +251,8 @@ class Fixture:
             build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
             compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
             core_binding={"core_version": "0.7.0", "core_wheel_sha256": core["sha256"],
-                          "core_source_commit": COMMIT, "compatibility": "exact"})
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+            authority=authority)
 
     def write_wheels(self, attempt: Path) -> list[dict]:
         folder = attempt / "inputs" / "wheels"
@@ -822,3 +824,305 @@ def test_attempt_without_an_intent_is_tombstoned_instead_of_dead_ending(fx: Fixt
     assert art.cancel(fx.root, identifier)["already_cancelled"] is True
     # Nothing was loaded and no receipt was written for an empty attempt.
     assert os.listdir(store(fx) / "acquisitions") == []
+
+
+def test_telegram_bundle_source_tamper_is_rejected_at_seal_and_verify(tmp_path: Path) -> None:
+    # 1. seal_bundle rejects when source.tar differs from installed / wheel
+    fx = Fixture(tmp_path / "seal", "wuwaterm-telegram")
+    source_files = fx.source_files()
+    source_files["src/wuwaterm_telegram/__init__.py"] = b"T = 999\n"
+    with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_telegram"):
+        fx.seal(source_files=source_files)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+
+    # 2. verify_bundle also rejects when source package differs from installed
+    fx2 = Fixture(tmp_path / "verify", "wuwaterm-telegram")
+    verified = fx2.seal()
+    source_tar = fx2.delivery / "attempts" / fx2.attempt_id / "inputs" / "source.tar"
+    tampered_files = fx2.source_files()
+    tampered_files["src/wuwaterm_telegram/__init__.py"] = b"T = 999\n"
+    entries = [(p, "file", d, 0o755 if p.endswith(".sh") else 0o644) for p, d in sorted(tampered_files.items())]
+    source_tar.write_bytes(tar_bytes(entries, pax={"comment": TG_COMMIT}))
+    new_source = art.read_source_archive(source_tar)
+    bundle_data = json.loads(verified.path.read_bytes())
+    bundle_data["source"]["archive_sha256"] = new_source.sha256
+    bundle_data["source"]["tree"] = new_source.tree
+    bundle_data["recipe"]["context_manifest_sha256"] = art.context_manifest_sha256(new_source)
+    verified.path.write_bytes(art.canonical(bundle_data))
+    with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_telegram"):
+        art.verify_bundle(verified.path)
+
+
+def test_wheel_package_extra_file_in_image_is_rejected_at_seal(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path, "wuwaterm-telegram")
+    extra_files = dict(fx.tg_pkg)
+    extra_files["wuwaterm_telegram/extra.py"] = b"extra = 1\n"
+    core = dist("wuwaterm", "0.7.0", fx.pkg)
+    tg_extra = dist("wuwaterm-telegram", "0.1.0", extra_files)
+    site = {**core, **tg_extra}
+    base = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    report = report_for(base, {}, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers = [layer(base), layer({art.REPORT_PATH.lstrip("/"): report})]
+    attempt = fx.build(layers)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    wheels = fx.write_wheels(attempt)
+    with pytest.raises(art.ArtifactError, match="installed file is not in verified wheel: wuwaterm_telegram/extra.py"):
+        art.seal_bundle(
+            fx.delivery, fx.attempt_id, product=fx.product, commit=TG_COMMIT, tree=fx.source.tree,
+            iid=image.manifest_digest, build_script_sha256="c" * 64, base_images=[BASES[1]],
+            build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"})
+
+
+def test_site_packages_top_level_files_rejected(tmp_path: Path) -> None:
+    # 1. Recorded top-level file in site-packages (source package wuwaterm-api)
+    fx_rec_api = Fixture(tmp_path / "rec_api")
+    site_tampered = dist("wuwaterm", fx_rec_api.version, {**fx_rec_api.pkg, "sitecustomize.py": b"# evil\n"},
+                         {"url": "file:///app", "dir_info": {"editable": False}})
+    base_api = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base_api.update({SITE.lstrip("/") + "/" + k: v for k, v in site_tampered.items()})
+    modes_api = {"entrypoint.sh": 0o755}
+    report_api = report_for(base_api, modes_api, [("wuwaterm", fx_rec_api.version)], ["/entrypoint.sh"], "core")
+    layers_api = [layer(base_api, modes=modes_api), layer({art.REPORT_PATH.lstrip("/"): report_api})]
+    with pytest.raises(art.ArtifactError, match="installed file is outside expected package directories: sitecustomize.py"):
+        fx_rec_api.seal(layers_api)
+
+    # 2. Recorded top-level file in site-packages (wheel package in wuwaterm-telegram)
+    fx_rec_tg = Fixture(tmp_path / "rec_tg", "wuwaterm-telegram")
+    core = dist("wuwaterm", "0.7.0", {**fx_rec_tg.pkg, "sitecustomize.py": b"# evil\n"})
+    tg = dist("wuwaterm-telegram", "0.1.0", fx_rec_tg.tg_pkg)
+    base_tg = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base_tg.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg}.items()})
+    report_tg = report_for(base_tg, {}, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers_tg = [layer(base_tg), layer({art.REPORT_PATH.lstrip("/"): report_tg})]
+    attempt = fx_rec_tg.build(layers_tg)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    wheels = fx_rec_tg.write_wheels(attempt)
+    with pytest.raises(art.ArtifactError, match="installed file is not in verified wheel: sitecustomize.py"):
+        art.seal_bundle(
+            fx_rec_tg.delivery, fx_rec_tg.attempt_id, product=fx_rec_tg.product, commit=TG_COMMIT,
+            tree=fx_rec_tg.source.tree, iid=image.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"})
+
+
+def test_wheel_uniqueness_and_dependency_wheel_validation(tmp_path: Path) -> None:
+    # 1. Duplicate wheel package names in schema validation
+    base_wheel = {"filename": "dep_a-1.0-py3-none-any.whl", "package": "dep-a", "version": "1.0",
+                  "sha256": "0" * 64, "role": "dependency"}
+    dup_wheel = {"filename": "dep_a_dup-1.0-py3-none-any.whl", "package": "dep_a", "version": "1.0",
+                 "sha256": "1" * 64, "role": "dependency"}
+    bundle = {
+        "schema_version": 1, "kind": art.BUNDLE_KIND, "attempt_id": art.new_id(), "product": "wuwaterm-api",
+        "repository": "My-Denia/WuwaTerm", "version": "0.7.0.dev1",
+        "source": {"commit": COMMIT, "tree": COMMIT, "archive_sha256": "0" * 64}, "tag": None,
+        "recipe": {"dockerfile_sha256": "0" * 64, "build_script_sha256": "0" * 64,
+                   "context_manifest_sha256": "0" * 64, "target": "runtime", "platform": "linux/amd64",
+                   "build_args": [{"name": "SOURCE_COMMIT", "value": COMMIT}],
+                   "base_images": BASES, "lock_sha256": "0" * 64},
+        "wheels": [base_wheel, dup_wheel],
+        "core_binding": {"core_version": "0.7.0.dev1", "core_wheel_sha256": None,
+                         "core_source_commit": COMMIT, "compatibility": "exact"},
+        "oci": {"archive_sha256": "0" * 64, "archive_size": 1, "index_digest": "sha256:" + "0" * 64,
+                "manifest_digest": "sha256:" + "0" * 64, "config_digest": "sha256:" + "0" * 64,
+                "layers": [{"digest": "sha256:" + "0" * 64, "size": 1, "diff_id": "sha256:" + "0" * 64,
+                            "media_type": "application/vnd.oci.image.layer.v1.tar+gzip"}],
+                "platform": {"os": "linux", "architecture": "amd64", "variant": None}},
+        "install_probe": {"program_sha256": "0" * 64, "report_sha256": "0" * 64,
+                          "report_layer_digest": "sha256:" + "0" * 64, "report_path": art.REPORT_PATH,
+                          "interpreter": "/python", "site_packages": "/site",
+                          "packages": [{"name": "wuwaterm", "version": "0.7.0.dev1", "location": "/site",
+                                        "files": [{"path": "m.py", "sha256": "0" * 64, "size": 1}]}],
+                          "extra_files": [{"path": "/entrypoint.sh", "sha256": "0" * 64, "mode": 0o755}]},
+        "build_result": {"authority": "local-source", "foreground_exit": 0, "iid": "sha256:" + "0" * 64, "ci": None},
+        "compatibility": COMPAT,
+        "payload": [{"path": art.ARCHIVE_FILE, "sha256": "0" * 64, "size": 1},
+                    {"path": art.REPORT_FILE, "sha256": "0" * 64, "size": 1}],
+    }
+    with pytest.raises(art.ArtifactError, match="duplicate wheel package"):
+        art.validate_bundle_schema(bundle)
+
+    # 2. Dependency wheel cannot be wuwaterm or wuwaterm-telegram
+    bundle["wheels"] = [{"filename": "wuwaterm-0.7.0-py3-none-any.whl", "package": "wuwaterm",
+                         "version": "0.7.0", "sha256": "0" * 64, "role": "dependency"}]
+    with pytest.raises(art.ArtifactError, match="dependency wheel cannot be a WuwaTerm product"):
+        art.validate_bundle_schema(bundle)
+
+    # 3. Dependency wheel with mismatched METADATA rejected at verify_bundle
+    fx = Fixture(tmp_path / "dep_verify", "wuwaterm-telegram")
+    verified = fx.seal()
+    wheel_folder = verified.path.parent.parent / "inputs" / "wheels"
+    dep_buffer = io.BytesIO()
+    with zipfile.ZipFile(dep_buffer, "w") as zf:
+        zf.writestr("dep_pkg-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: mismatched-name\nVersion: 1.0\n")
+        zf.writestr("dep_pkg-1.0.dist-info/RECORD", "")
+    dep_filename = "dep_pkg-1.0-py3-none-any.whl"
+    dep_bytes = dep_buffer.getvalue()
+    (wheel_folder / dep_filename).write_bytes(dep_bytes)
+    bundle_data = json.loads(verified.path.read_bytes())
+    bundle_data["wheels"].append({"filename": dep_filename, "package": "dep-pkg", "version": "1.0",
+                                  "sha256": sha(dep_bytes), "role": "dependency"})
+    verified.path.write_bytes(art.canonical(bundle_data))
+    with pytest.raises(art.ArtifactError, match="wheel package or version differs"):
+        art.verify_bundle(verified.path)
+
+
+def test_pyproject_name_and_core_lock_mismatches_are_rejected(tmp_path: Path) -> None:
+    # 1. Mismatched pyproject.toml [project].name for API
+    fx_api = Fixture(tmp_path / "api_wrong_name")
+    api_src = fx_api.source_files()
+    api_src["pyproject.toml"] = b'[project]\nname = "wrong-api"\nversion = "0.7.0.dev1"\n'
+    with pytest.raises(art.ArtifactError, match="source pyproject.toml project name differs"):
+        fx_api.seal(source_files=api_src)
+
+    # 2. Mismatched pyproject.toml [project].name for Telegram
+    fx_tg = Fixture(tmp_path / "tg_wrong_name", "wuwaterm-telegram")
+    tg_src = fx_tg.source_files()
+    tg_src["pyproject.toml"] = b'[project]\nname = "wrong-tg"\nversion = "0.1.0"\n'
+    with pytest.raises(art.ArtifactError, match="source pyproject.toml project name differs"):
+        fx_tg.seal(source_files=tg_src)
+
+    # 3. Mismatched non-empty core-lock.json version in wuwaterm-telegram (local-source and official-ci)
+    fx_lock_ver = Fixture(tmp_path / "lock_ver", "wuwaterm-telegram")
+    lock_ver_src = fx_lock_ver.source_files()
+    lock_ver_src["core-lock.json"] = json.dumps({
+        "version": "9.9.9", "sha256": "0" * 64, "checkout_sha": COMMIT
+    }).encode()
+    with pytest.raises(art.ArtifactError, match="core-lock.json version differs from core binding"):
+        fx_lock_ver.seal(source_files=lock_ver_src, authority="local-source")
+
+    fx_lock_ver_ci = Fixture(tmp_path / "lock_ver_ci", "wuwaterm-telegram")
+    lock_ver_ci_src = fx_lock_ver_ci.source_files()
+    lock_ver_ci_src["core-lock.json"] = json.dumps({
+        "version": "9.9.9", "sha256": "0" * 64, "checkout_sha": COMMIT
+    }).encode()
+    with pytest.raises(art.ArtifactError, match="core-lock.json version differs from core binding"):
+        fx_lock_ver_ci.seal(source_files=lock_ver_ci_src, authority="official-ci")
+
+    # 4. Mismatched non-empty core-lock.json sha256 in wuwaterm-telegram (official-ci only)
+    fx_lock_sha = Fixture(tmp_path / "lock_sha", "wuwaterm-telegram")
+    lock_sha_src = fx_lock_sha.source_files()
+    lock_sha_src["core-lock.json"] = json.dumps({
+        "version": "0.7.0", "sha256": "0" * 64, "checkout_sha": COMMIT
+    }).encode()
+    with pytest.raises(art.ArtifactError, match="core-lock.json sha256 differs from core binding"):
+        fx_lock_sha.seal(source_files=lock_sha_src, authority="official-ci")
+
+    # 5. Mismatched non-empty core-lock.json checkout_sha in wuwaterm-telegram (official-ci only)
+    fx_lock_commit = Fixture(tmp_path / "lock_commit", "wuwaterm-telegram")
+    lock_commit_src = fx_lock_commit.source_files()
+    attempt = fx_lock_commit.build(source_files=lock_commit_src)
+    wheels = fx_lock_commit.write_wheels(attempt)
+    core_wheel = next(w for w in wheels if w["role"] == "core")
+    correct_sha_lock = json.dumps({
+        "version": "0.7.0", "sha256": core_wheel["sha256"], "checkout_sha": "9" * 40
+    }).encode()
+    lock_commit_src["core-lock.json"] = correct_sha_lock
+    new_src = fx_lock_commit.write_source(attempt, lock_commit_src, TG_COMMIT)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="core-lock.json source commit differs from core binding"):
+        art.seal_bundle(
+            fx_lock_commit.delivery, fx_lock_commit.attempt_id, product=fx_lock_commit.product,
+            commit=TG_COMMIT, tree=new_src.tree, iid=image.manifest_digest,
+            build_script_sha256="c" * 64, base_images=[BASES[1]],
+            build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": core_wheel["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+            authority="official-ci")
+
+    # 6. Empty core-lock.json {} rejected under official-ci
+    fx_lock_empty = Fixture(tmp_path / "lock_empty", "wuwaterm-telegram")
+    lock_empty_src = fx_lock_empty.source_files()
+    lock_empty_src["core-lock.json"] = b"{}"
+    with pytest.raises(art.ArtifactError, match="official-ci Telegram bundle requires non-empty core-lock.json"):
+        fx_lock_empty.seal(source_files=lock_empty_src, authority="official-ci")
+
+    # 7. Mismatched dependencies pin in pyproject.toml
+    fx_dep_pin = Fixture(tmp_path / "dep_pin", "wuwaterm-telegram")
+    dep_pin_src = fx_dep_pin.source_files()
+    dep_pin_src["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm-telegram"\nversion = "0.1.0"\n'
+        b'dependencies = ["wuwaterm==9.9.9"]\n'
+    )
+    with pytest.raises(art.ArtifactError, match="pyproject.toml wuwaterm dependency pin differs"):
+        fx_dep_pin.seal(source_files=dep_pin_src)
+
+
+def test_seal_bundle_validates_building_state(fx: Fixture) -> None:
+    attempt = fx.build()
+    state_file = attempt / "state" / "building.json"
+    state_file.write_bytes(art.canonical({"schema_version": 1, "kind": art.DELIVERY_STATE_KIND,
+                                          "attempt_id": fx.attempt_id, "state": "other",
+                                          "product": fx.product, "utc": "2026-01-01T00:00:00Z"}))
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="delivery attempt is not in the building state"):
+        art.seal_bundle(fx.delivery, fx.attempt_id, product=fx.product, commit=COMMIT,
+                        tree=fx.source.tree, iid=image.manifest_digest,
+                        build_script_sha256="c" * 64, base_images=BASES,
+                        build_args=[{"name": "SOURCE_COMMIT", "value": COMMIT}], compatibility=COMPAT)
+
+
+def test_seal_bundle_requires_lock_file(fx: Fixture) -> None:
+    source_files = fx.source_files()
+    del source_files["uv.lock"]
+    with pytest.raises(art.ArtifactError, match="source archive is missing lock file"):
+        fx.seal(source_files=source_files)
+
+
+def test_direct_url_tamper_is_rejected_at_seal(fx: Fixture) -> None:
+    # 1. direct_url.json in rootfs differs from probe report
+    site = dist("wuwaterm", fx.version, fx.pkg, {"url": "file:///app", "dir_info": {"editable": False}})
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    # Build report, then tamper the probe report's direct_url claim
+    raw_report = report_for(base, modes, [("wuwaterm", fx.version)], ["/entrypoint.sh"], "core")
+    report_data = json.loads(raw_report)
+    report_data["packages"][0]["direct_url"] = {"url": "file:///forged"}
+    tampered_report = install_probe._canonical(report_data)
+
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): tampered_report})]
+    with pytest.raises(art.ArtifactError, match="installed direct_url differs from probe report: wuwaterm"):
+        fx.seal(layers)
+
+    # 2. Probe report claims direct_url, but direct_url.json missing in rootfs
+    fx2 = Fixture(fx.tmp / "no_url")
+    site_no_url = dist("wuwaterm", fx2.version, fx2.pkg)
+    base_no_url = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base_no_url.update({SITE.lstrip("/") + "/" + k: v for k, v in site_no_url.items()})
+    raw_report2 = report_for(base_no_url, modes, [("wuwaterm", fx2.version)], ["/entrypoint.sh"], "core")
+    report_data2 = json.loads(raw_report2)
+    report_data2["packages"][0]["direct_url"] = {"url": "file:///app"}
+    tampered_report2 = install_probe._canonical(report_data2)
+
+    layers2 = [layer(base_no_url, modes=modes), layer({art.REPORT_PATH.lstrip("/"): tampered_report2})]
+    with pytest.raises(art.ArtifactError, match="probe report claims direct_url but direct_url.json is missing: wuwaterm"):
+        fx2.seal(layers2)
+
+    # 3. Wheel direct_url hash differs from verified wheel hash
+    fx_tg = Fixture(fx.tmp / "tg_url", "wuwaterm-telegram")
+    core = dist("wuwaterm", "0.7.0", fx_tg.pkg, {"url": "file:///pkg.whl", "archive_info": {"hashes": {"sha256": "0" * 64}}})
+    tg = dist("wuwaterm-telegram", "0.1.0", fx_tg.tg_pkg)
+    base_tg = {"app/scripts/install_probe.py": PROBE_BYTES}
+    base_tg.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg}.items()})
+    report_tg = report_for(base_tg, {}, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers_tg = [layer(base_tg), layer({art.REPORT_PATH.lstrip("/"): report_tg})]
+    attempt = fx_tg.build(layers_tg)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    wheels = fx_tg.write_wheels(attempt)
+    with pytest.raises(art.ArtifactError, match="installed distribution came from a different wheel: wuwaterm"):
+        art.seal_bundle(
+            fx_tg.delivery, fx_tg.attempt_id, product=fx_tg.product, commit=TG_COMMIT,
+            tree=fx_tg.source.tree, iid=image.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"})
+
