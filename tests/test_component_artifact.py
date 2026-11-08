@@ -889,19 +889,19 @@ def test_wheel_package_extra_file_in_image_is_rejected_at_seal(tmp_path: Path) -
 def test_site_packages_top_level_files_rejected(tmp_path: Path) -> None:
     # 1. Recorded top-level file in site-packages (source package wuwaterm-api)
     fx_rec_api = Fixture(tmp_path / "rec_api")
-    site_tampered = dist("wuwaterm", fx_rec_api.version, {**fx_rec_api.pkg, "sitecustomize.py": b"# evil\n"},
+    site_tampered = dist("wuwaterm", fx_rec_api.version, {**fx_rec_api.pkg, "stray_toplevel.py": b"# evil\n"},
                          {"url": "file:///app", "dir_info": {"editable": False}})
     base_api = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
     base_api.update({SITE.lstrip("/") + "/" + k: v for k, v in site_tampered.items()})
     modes_api = {"entrypoint.sh": 0o755}
     report_api = report_for(base_api, modes_api, [("wuwaterm", fx_rec_api.version)], ["/entrypoint.sh"], "core")
     layers_api = [layer(base_api, modes=modes_api), layer({art.REPORT_PATH.lstrip("/"): report_api})]
-    with pytest.raises(art.ArtifactError, match="installed file is outside expected package directories: sitecustomize.py"):
+    with pytest.raises(art.ArtifactError, match="installed file is outside expected package directories: stray_toplevel.py"):
         fx_rec_api.seal(layers_api)
 
     # 2. Recorded top-level file in site-packages (wheel package in wuwaterm-telegram)
     fx_rec_tg = Fixture(tmp_path / "rec_tg", "wuwaterm-telegram")
-    core = dist("wuwaterm", "0.7.0", {**fx_rec_tg.pkg, "sitecustomize.py": b"# evil\n"})
+    core = dist("wuwaterm", "0.7.0", {**fx_rec_tg.pkg, "stray_toplevel.py": b"# evil\n"})
     tg = dist("wuwaterm-telegram", "0.1.0", fx_rec_tg.tg_pkg)
     base_tg = {"app/scripts/install_probe.py": PROBE_BYTES}
     base_tg.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg}.items()})
@@ -910,7 +910,7 @@ def test_site_packages_top_level_files_rejected(tmp_path: Path) -> None:
     attempt = fx_rec_tg.build(layers_tg)
     image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
     wheels = fx_rec_tg.write_wheels(attempt)
-    with pytest.raises(art.ArtifactError, match="installed file is not in verified wheel: sitecustomize.py"):
+    with pytest.raises(art.ArtifactError, match="installed file is not in verified wheel: stray_toplevel.py"):
         art.seal_bundle(
             fx_rec_tg.delivery, fx_rec_tg.attempt_id, product=fx_rec_tg.product, commit=TG_COMMIT,
             tree=fx_rec_tg.source.tree, iid=image.manifest_digest, build_script_sha256="c" * 64,
@@ -1374,4 +1374,178 @@ def test_declared_console_script_tampered_or_omitted_is_rejected(tmp_path: Path)
     assert bundle_omit.exists()
     with pytest.raises(art.ArtifactError, match="declared console script is not installed: wuwaterm"):
         art.verify_bundle(bundle_omit)
+
+
+def test_entrypoint_mode_rejection(tmp_path: Path) -> None:
+    # 1. Image /entrypoint.sh has mode 0o644 while source has 0o755
+    fx1 = Fixture(tmp_path / "img_mode_644")
+    site1, pkgs1 = fx1.installed()
+    base1 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base1.update({SITE.lstrip("/") + "/" + k: v for k, v in site1.items()})
+    modes1 = {"entrypoint.sh": 0o644}
+    report1 = report_for(base1, modes1, pkgs1, ["/entrypoint.sh"], "core")
+    layers1 = [layer(base1, modes=modes1), layer({art.REPORT_PATH.lstrip("/"): report1})]
+    with pytest.raises(art.ArtifactError, match="extra file differs from the sealed source archive: /entrypoint.sh"):
+        fx1.seal(layers1)
+    bundle1 = fx1.delivery / "attempts" / fx1.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle1.exists()
+    with pytest.raises(art.ArtifactError, match="extra file differs from the sealed source archive: /entrypoint.sh"):
+        art.verify_bundle(bundle1)
+
+    # 2. Both source and image have mode 0o644 (non-executable extra file)
+    fx2 = Fixture(tmp_path / "both_mode_644")
+    src2 = fx2.source_files()
+    attempt2 = art.begin_delivery(fx2.delivery, fx2.attempt_id, fx2.product)
+    entries2 = [(p, "file", d, 0o644 if p.endswith(".sh") else 0o644) for p, d in sorted(src2.items())]
+    path2 = attempt2 / "inputs" / "source.tar"
+    path2.write_bytes(tar_bytes(entries2, pax={"comment": COMMIT}))
+    fx2.source = art.read_source_archive(path2)
+    site2, pkgs2 = fx2.installed()
+    base2 = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base2.update({SITE.lstrip("/") + "/" + k: v for k, v in site2.items()})
+    modes2 = {"entrypoint.sh": 0o644}
+    report2 = report_for(base2, modes2, pkgs2, ["/entrypoint.sh"], "core")
+    layers2 = [layer(base2, modes=modes2), layer({art.REPORT_PATH.lstrip("/"): report2})]
+    raw2 = oci_archive(layers2)
+    (attempt2 / "bundle" / art.ARCHIVE_FILE).write_bytes(raw2)
+    image2 = art.read_oci_archive(attempt2 / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="extra file is not executable: /entrypoint.sh"):
+        art.seal_bundle(fx2.delivery, fx2.attempt_id, product=fx2.product, commit=COMMIT,
+                        tree=fx2.source.tree, iid=image2.manifest_digest,
+                        build_script_sha256="c" * 64, base_images=BASES,
+                        build_args=[{"name": "SOURCE_COMMIT", "value": COMMIT}], compatibility=COMPAT,
+                        authority="local-source")
+    bundle2 = attempt2 / "bundle" / art.BUNDLE_FILE
+    assert bundle2.exists()
+    with pytest.raises(art.ArtifactError, match="extra file is not executable: /entrypoint.sh"):
+        art.verify_bundle(bundle2)
+
+
+def test_omitted_entry_points_txt_rejected(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path / "omit_ep")
+    src = fx.source_files()
+    src["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
+        b'[project.scripts]\nwuwaterm = "wuwaterm.cli:main"\n'
+    )
+    site = dist("wuwaterm", fx.version, fx.pkg, {"url": "file:///app", "dir_info": {"editable": False}})
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, [("wuwaterm", fx.version)], ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="installed distribution is missing entry_points.txt for project.scripts"):
+        fx.seal(layers, source_files=src)
+    bundle = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    assert bundle.exists()
+    with pytest.raises(art.ArtifactError, match="installed distribution is missing entry_points.txt for project.scripts"):
+        art.verify_bundle(bundle)
+
+
+def test_data_member_bin_bypass_rejected(tmp_path: Path) -> None:
+    fx = Fixture(tmp_path, "wuwaterm-telegram")
+    evil_bin = b"#!/bin/sh\necho evil\n"
+    core = dist("wuwaterm", "0.7.0", fx.pkg)
+    tg = dist("wuwaterm-telegram", "0.1.0", {**fx.tg_pkg, "../../../bin/wuwaterm-telegram": evil_bin})
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "app/.venv/bin/wuwaterm-telegram": evil_bin}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in {**core, **tg}.items() if not k.startswith("../")})
+    modes = {"app/.venv/bin/wuwaterm-telegram": 0o755}
+    report = report_for(base, modes, [("wuwaterm", "0.7.0"), ("wuwaterm-telegram", "0.1.0")], [], "telegram")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    attempt = fx.build(layers)
+    extra_files = {"wuwaterm-telegram": {"wuwaterm_telegram-0.1.0.data/data/bin/wuwaterm-telegram": evil_bin}}
+    wheels = fx.write_wheels(attempt, extra_files=extra_files)
+    image = art.read_oci_archive(attempt / "bundle" / art.ARCHIVE_FILE)
+    with pytest.raises(art.ArtifactError, match="data file cannot target bin directory: ../../../bin/wuwaterm-telegram"):
+        art.seal_bundle(
+            fx.delivery, fx.attempt_id, product=fx.product, commit=TG_COMMIT,
+            tree=fx.source.tree, iid=image.manifest_digest, build_script_sha256="c" * 64,
+            base_images=[BASES[1]], build_args=[{"name": "WUWATERM_SOURCE_REVISION", "value": TG_COMMIT}],
+            compatibility=dict(COMPAT, telegram_state_protocol=1), wheels=wheels,
+            core_binding={"core_version": "0.7.0", "core_wheel_sha256": wheels[0]["sha256"],
+                          "core_source_commit": COMMIT, "compatibility": "exact"},
+        )
+
+
+def test_startup_hooks_and_unrecorded_bin_rejected(tmp_path: Path) -> None:
+    # 1. Unrecorded sitecustomize.py in site-packages
+    fx_site = Fixture(tmp_path / "sitecust")
+    site_sc, pkgs_sc = fx_site.installed()
+    base_sc = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+               SITE.lstrip("/") + "/sitecustomize.py": b"# evil\n"}
+    base_sc.update({SITE.lstrip("/") + "/" + k: v for k, v in site_sc.items()})
+    modes_sc = {"entrypoint.sh": 0o755}
+    report_sc = report_for(base_sc, modes_sc, pkgs_sc, ["/entrypoint.sh"], "core")
+    layers_sc = [layer(base_sc, modes=modes_sc), layer({art.REPORT_PATH.lstrip("/"): report_sc})]
+    with pytest.raises(art.ArtifactError, match="unauthorized sitecustomize.py in site-packages"):
+        fx_site.seal(layers_sc)
+
+    # 2. Unrecorded evil.pth in site-packages
+    fx_pth = Fixture(tmp_path / "evil_pth")
+    site_pth, pkgs_pth = fx_pth.installed()
+    base_pth = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+                SITE.lstrip("/") + "/evil.pth": b"import evil\n"}
+    base_pth.update({SITE.lstrip("/") + "/" + k: v for k, v in site_pth.items()})
+    modes_pth = {"entrypoint.sh": 0o755}
+    report_pth = report_for(base_pth, modes_pth, pkgs_pth, ["/entrypoint.sh"], "core")
+    layers_pth = [layer(base_pth, modes=modes_pth), layer({art.REPORT_PATH.lstrip("/"): report_pth})]
+    with pytest.raises(art.ArtifactError, match=r"unauthorized \.pth file in site-packages"):
+        fx_pth.seal(layers_pth)
+
+    # 3. Unrecorded /app/.venv/bin/wuwaterm binary
+    fx_bin = Fixture(tmp_path / "unrec_bin")
+    site_bin, pkgs_bin = fx_bin.installed()
+    base_bin = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+                "app/.venv/bin/wuwaterm": b"#!/bin/sh\n"}
+    base_bin.update({SITE.lstrip("/") + "/" + k: v for k, v in site_bin.items()})
+    modes_bin = {"entrypoint.sh": 0o755, "app/.venv/bin/wuwaterm": 0o755}
+    report_bin = report_for(base_bin, modes_bin, pkgs_bin, ["/entrypoint.sh"], "core")
+    layers_bin = [layer(base_bin, modes=modes_bin), layer({art.REPORT_PATH.lstrip("/"): report_bin})]
+    with pytest.raises(art.ArtifactError, match="unrecorded product console script in image: /app/.venv/bin/wuwaterm"):
+        fx_bin.seal(layers_bin)
+
+
+def test_invalid_runtime_config_and_interpreter_rejected(tmp_path: Path) -> None:
+    # 1. WorkingDir mismatch
+    fx_wd = Fixture(tmp_path / "bad_wd")
+    with pytest.raises(art.ArtifactError, match="runtime config WorkingDir must be /app"):
+        fx_wd.seal(config_extra={"WorkingDir": "/root"})
+
+    # 2. Entrypoint mismatch
+    fx_ep = Fixture(tmp_path / "bad_ep")
+    with pytest.raises(art.ArtifactError, match="invalid runtime config Entrypoint or Cmd for wuwaterm-api"):
+        fx_ep.seal(config_extra={"Entrypoint": ["/bin/sh"]})
+
+    # 3. Cmd mismatch
+    fx_cmd = Fixture(tmp_path / "bad_cmd")
+    with pytest.raises(art.ArtifactError, match="invalid runtime config Entrypoint or Cmd for wuwaterm-api"):
+        fx_cmd.seal(config_extra={"Cmd": ["bash"]})
+
+    # 4. Env with PYTHONPATH
+    fx_py = Fixture(tmp_path / "bad_pythonpath")
+    with pytest.raises(art.ArtifactError, match="forbidden env variable: PYTHONPATH"):
+        fx_py.seal(config_extra={"Env": ["PYTHONPATH=/evil"]})
+
+    # 5. Env with LD_PRELOAD
+    fx_ld = Fixture(tmp_path / "bad_ld_preload")
+    with pytest.raises(art.ArtifactError, match="forbidden env variable: LD_PRELOAD"):
+        fx_ld.seal(config_extra={"Env": ["LD_PRELOAD=/libevil.so"]})
+
+    # 6. Mismatched revision label
+    fx_rev = Fixture(tmp_path / "bad_rev")
+    with pytest.raises(art.ArtifactError, match="runtime config revision label differs from bundle source commit"):
+        fx_rev.seal(config_extra={"Labels": {"org.opencontainers.image.revision": "bad" * 10}})
+
+    # 7. Non-executable interpreter in image rootfs
+    fx_interp = Fixture(tmp_path / "bad_interp")
+    site, pkgs = fx_interp.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+            "app/.venv/bin/python": b"#!/bin/sh\n"}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755, "app/.venv/bin/python": 0o644}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    with pytest.raises(art.ArtifactError, match="interpreter in the image is not executable: /app/.venv/bin/python"):
+        fx_interp.seal(layers)
+
 

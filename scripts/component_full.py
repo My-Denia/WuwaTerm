@@ -1213,7 +1213,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
                 if name in recipes:
                     _fail("API target recipe changes are unsupported")
                 snapshot = {**copy.deepcopy(snapshots[name]), "image_id": image_id}
-            elif old["components"]["telegram"]["provenance"]["kind"] == "legacy-image":
+            elif name == "telegram":
                 # Counterexample 1: the legacy wrapper's effective DB path and
                 # state bindings are translated, never re-derived.
                 snapshot = prepare_runtime.translate_preserved_recipe(

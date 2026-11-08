@@ -68,6 +68,12 @@ _GIT = re.compile(r"[0-9a-f]{40}\Z")
 _ATTEMPT = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\Z")
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+!_-]*\Z")
+_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*\Z")
+_USER_RE = re.compile(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
+_FORBIDDEN_ENV = {
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONUSERBASE",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV"
+}
 _CONTRACT = re.compile(r"v[0-9]+\Z")
 _CHUNK = 1024 * 1024
 _MAX_JSON = 16 * 1024 * 1024
@@ -1064,9 +1070,9 @@ def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] |
         else:
             ep_scripts = {}
 
+    toml_scripts: dict[str, str] = {}
     if pyproject is not None:
         proj = pyproject.get("project")
-        toml_scripts: dict[str, str] = {}
         if isinstance(proj, dict) and "scripts" in proj:
             scripts = proj["scripts"]
             if not isinstance(scripts, dict):
@@ -1075,10 +1081,12 @@ def _console_scripts(rootfs: RootFS, dist_info: str, pyproject: dict[str, Any] |
                 if not isinstance(k, str) or not isinstance(v, str):
                     _fail("project.scripts keys and values must be strings")
             toml_scripts = {k.strip(): v.strip() for k, v in scripts.items()}
+        if toml_scripts and ep_scripts is None:
+            _fail("installed distribution is missing entry_points.txt for project.scripts")
         if ep_scripts is not None and ep_scripts != toml_scripts:
             _fail("installed entry_points.txt differs from pyproject.toml scripts")
 
-    return ep_scripts if ep_scripts is not None else {}
+    return ep_scripts if ep_scripts is not None else toml_scripts
 
 
 def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, interpreter: str) -> None:
@@ -1123,11 +1131,51 @@ def _verify_console_launcher(rootfs: RootFS, target: str, entry_point: str, inte
         _fail("console script launcher differs from entry point: " + target)
 
 
+def _verify_interpreter(rootfs: RootFS, report: dict[str, Any], product: dict[str, Any]) -> None:
+    interpreter = _str(report["interpreter"], "interpreter")
+    site_packages = _str(report["site_packages"], "site packages")
+    if not interpreter.startswith("/") or "\\" in interpreter or posixpath.normpath(interpreter) != interpreter:
+        _fail("interpreter path is not normalized: " + interpreter)
+    if not site_packages.startswith("/") or "\\" in site_packages or posixpath.normpath(site_packages) != site_packages:
+        _fail("site_packages path is not normalized: " + site_packages)
+    allowed = ("/app/.venv/bin/python",) if product["probe"] == "core" else ("/usr/local/bin/python", "/app/.venv/bin/python")
+    expected_prefix = posixpath.normpath(posixpath.join(site_packages, "../../.."))
+    if interpreter not in allowed or interpreter != posixpath.join(expected_prefix, "bin", "python"):
+        _fail("unexpected interpreter path: " + interpreter)
+    current = rootfs.resolve(interpreter)
+    if current not in rootfs.nodes:
+        return
+    for _ in range(40):
+        node = rootfs.nodes.get(current)
+        if node is None:
+            _fail("interpreter symlink target is missing in the image: " + interpreter)
+        if node.kind == "file":
+            if node.mode & 0o111 == 0:
+                _fail("interpreter in the image is not executable: " + interpreter)
+            return
+        if node.kind != "symlink" or not node.link:
+            _fail("interpreter in the image is not a regular file: " + interpreter)
+        target = node.link if node.link.startswith("/") else posixpath.join(posixpath.dirname("/" + current), node.link)
+        current = rootfs.resolve(target)
+    _fail("symlink loop in interpreter path: " + interpreter)
+
+
 def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str, Any],
                       source: SourceArchive, wheels: dict[str, dict[str, str]],
                       wheel_hashes: dict[str, str],
                       wheel_versions: dict[str, str] | None = None) -> None:
     rootfs = image.rootfs
+    _verify_interpreter(rootfs, report, product)
+    site = rootfs.resolve(report["site_packages"])
+    if (site + "/sitecustomize.py") in rootfs.nodes:
+        _fail("unauthorized sitecustomize.py in site-packages")
+    if (site + "/usercustomize.py") in rootfs.nodes:
+        _fail("unauthorized usercustomize.py in site-packages")
+    for path in rootfs.nodes:
+        if posixpath.dirname(path) == site and path.endswith(".pth"):
+            if posixpath.basename(path) not in ("_virtualenv.pth", "distutils-precedence.pth"):
+                _fail("unauthorized .pth file in site-packages: " + path)
+    verified_bin_scripts: set[str] = set()
     names = [p["name"] for p in report["packages"]]
     if names != sorted(set(names)):
         _fail("probe packages must be unique and sorted")
@@ -1205,6 +1253,9 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             else:
                 pyproject = {}
         console_scripts = _console_scripts(rootfs, dist_info, pyproject)
+        if (dist_info + "/entry_points.txt") in rootfs.nodes:
+            if package["name"] == "wuwaterm-telegram" and console_scripts.get("wuwaterm-telegram") != "wuwaterm_telegram.cli:main":
+                _fail("unexpected console script entry point for wuwaterm-telegram")
         if package["name"] in wheels:
             if wheel_versions is not None and package["version"] != wheel_versions.get(package["name"]):
                 _fail("installed distribution version differs from wheel: " + package["name"])
@@ -1225,34 +1276,39 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     continue
                 if path.startswith("../"):
                     target = posixpath.normpath(posixpath.join(location, path))
-                    is_data_member = False
-                    for m, m_digest in members.items():
-                        if ".data/data/" in m and m_digest == digest:
-                            data_rel = m.split(".data/data/", 1)[1]
-                            if target.endswith("/" + data_rel):
-                                is_data_member = True
-                                break
-                    if is_data_member:
-                        continue
                     if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
                             and posixpath.basename(target) in console_scripts):
                         _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
                                                  report["interpreter"])
+                        verified_bin_scripts.add(target)
+                        continue
+                    is_data_member = False
+                    for m, m_digest in members.items():
+                        if ".data/data/" in m and m_digest == digest:
+                            data_rel = m.split(".data/data/", 1)[1]
+                            if target == posixpath.normpath(posixpath.join(location, "../../..", data_rel)):
+                                if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
+                                        or data_rel.startswith("bin/")):
+                                    _fail("data file cannot target bin directory: " + path)
+                                is_data_member = True
+                                break
+                    if is_data_member:
                         continue
                 _fail("installed file is not in verified wheel: " + path)
-            if console_scripts and (dist_info + "/entry_points.txt") in rootfs.nodes:
-                for script_name in console_scripts:
-                    expected_rel = posixpath.relpath(
-                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name),
-                        location,
-                    )
-                    found = (expected_rel in installed) or any(
-                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) ==
+            if console_scripts:
+                for script_name, entry_point in console_scripts.items():
+                    expected_target = posixpath.normpath(
                         posixpath.join(posixpath.dirname(report["interpreter"]), script_name)
+                    )
+                    expected_rel = posixpath.relpath(expected_target, location)
+                    found = (expected_rel in installed) or any(
+                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) == expected_target
                         for p in installed
                     )
                     if not found:
                         _fail("declared console script is not installed: " + script_name)
+                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"])
+                    verified_bin_scripts.add(expected_target)
             direct = package["direct_url"]
             if isinstance(direct, dict):
                 archive_info = direct.get("archive_info")
@@ -1320,6 +1376,7 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                             and posixpath.basename(target) in console_scripts):
                         _verify_console_launcher(rootfs, target, console_scripts[posixpath.basename(target)],
                                                  report["interpreter"])
+                        verified_bin_scripts.add(target)
                         continue
                     is_data_file = False
                     st_data_files = setuptools.get("data-files") if isinstance(setuptools.get("data-files"), dict) else {}
@@ -1329,7 +1386,11 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                                 if isinstance(src, str):
                                     origin = source.files.get(src)
                                     if origin is not None and origin[1] == installed[path]:
-                                        if target.endswith("/" + posixpath.normpath(posixpath.join(dest_dir, posixpath.basename(src)))):
+                                        data_rel = posixpath.normpath(posixpath.join(dest_dir, posixpath.basename(src)))
+                                        if target == posixpath.normpath(posixpath.join(location, "../../..", data_rel)):
+                                            if (posixpath.dirname(target) == posixpath.dirname(report["interpreter"])
+                                                    or data_rel.startswith("bin/")):
+                                                _fail("data file cannot target bin directory: " + path)
                                             is_data_file = True
                                             break
                             if is_data_file:
@@ -1348,21 +1409,27 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     _fail("installed package differs from the sealed source archive: " + top)
             if not all_tops or not (tops - {t for t in tops if t.endswith(".dist-info")}):
                 _fail("installed source package is empty")
-            if console_scripts and (dist_info + "/entry_points.txt") in rootfs.nodes:
-                for script_name in console_scripts:
-                    expected_rel = posixpath.relpath(
-                        posixpath.join(posixpath.dirname(report["interpreter"]), script_name),
-                        location,
-                    )
-                    found = (expected_rel in installed) or any(
-                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) ==
+            if console_scripts:
+                for script_name, entry_point in console_scripts.items():
+                    expected_target = posixpath.normpath(
                         posixpath.join(posixpath.dirname(report["interpreter"]), script_name)
+                    )
+                    expected_rel = posixpath.relpath(expected_target, location)
+                    found = (expected_rel in installed) or any(
+                        p.startswith("../") and posixpath.normpath(posixpath.join(location, p)) == expected_target
                         for p in installed
                     )
                     if not found:
                         _fail("declared console script is not installed: " + script_name)
+                    _verify_console_launcher(rootfs, expected_target, entry_point, report["interpreter"])
+                    verified_bin_scripts.add(expected_target)
         if package["name"] not in wheels and package["name"] not in product["source_packages"]:
             _fail("no verified source or wheel for probed package: " + package["name"])
+    bin_dir = posixpath.dirname(report["interpreter"]).lstrip("/")
+    for name in ("wuwaterm", "wuwaterm-api", "wuwaterm-telegram"):
+        candidate = posixpath.join(bin_dir, name)
+        if candidate in rootfs.nodes and ("/" + candidate) not in verified_bin_scripts:
+            _fail("unrecorded product console script in image: /" + candidate)
     extras = report["extra_files"]
     if type(extras) is not list or [e.get("path") if type(e) is dict else None for e in extras] != sorted(product["extra"]):
         _fail("probe extra files differ from the product contract")
@@ -1372,8 +1439,11 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         if node.sha256 != item["sha256"] or node.mode != item["mode"]:
             _fail("extra file differs from probe report: " + item["path"])
         origin = source.files.get(product["extra"][item["path"]])
-        if origin is None or origin[1] != item["sha256"]:
+        if (origin is None or origin[1] != item["sha256"]
+                or bool(origin[0] & 0o111) != bool(node.mode & 0o111)):
             _fail("extra file differs from the sealed source archive: " + item["path"])
+        if node.mode & 0o111 == 0 or origin[0] & 0o111 == 0:
+            _fail("extra file is not executable: " + item["path"])
 
 
 # --------------------------------------------------------------------------
@@ -1516,10 +1586,76 @@ def verify_bundle(bundle_path: Path, *, source_archive: Path | None = None,
     return VerifiedBundle(bundle_path, raw, _sha(raw), bundle)
 
 
+def _empty(value: Any) -> bool:
+    return value in (None, "", [], {}, False)
+
+
+def _verify_runtime_config(runtime_config: dict[str, Any], bundle: dict[str, Any], *,
+                           dockerfile_text: str | None = None) -> None:
+    if not isinstance(runtime_config, dict):
+        _fail("runtime config is not an object")
+    for field in ("Volumes", "OnBuild", "Healthcheck", "Shell"):
+        if not _empty(runtime_config.get(field)):
+            _fail(f"runtime config declares {field}")
+    if runtime_config.get("WorkingDir") != "/app":
+        _fail("runtime config WorkingDir must be /app")
+    user = runtime_config.get("User")
+    if user not in (None, "", "0", "0:0"):
+        if not isinstance(user, str) or not _USER_RE.fullmatch(user):
+            _fail("runtime config User is invalid: " + str(user))
+    if bundle["product"] == "wuwaterm-api":
+        if runtime_config.get("Entrypoint") != ["/entrypoint.sh"] or runtime_config.get("Cmd") != ["bot"]:
+            _fail("invalid runtime config Entrypoint or Cmd for wuwaterm-api")
+    elif bundle["product"] == "wuwaterm-telegram":
+        expected_tg = (["wuwaterm-telegram"], ["--db", "/app/data/terms.db"])
+        legacy_tg = (["/entrypoint.sh"], ["bot"])
+        current_entry = (runtime_config.get("Entrypoint"), runtime_config.get("Cmd"))
+        if dockerfile_text is not None and "ENTRYPOINT" in dockerfile_text:
+            if current_entry != expected_tg:
+                _fail("invalid runtime config Entrypoint or Cmd for wuwaterm-telegram")
+        else:
+            if current_entry not in (expected_tg, legacy_tg):
+                _fail("invalid runtime config Entrypoint or Cmd for wuwaterm-telegram")
+    labels = runtime_config.get("Labels")
+    if labels is not None:
+        if not isinstance(labels, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in labels.items()):
+            _fail("runtime config Labels must be an object with string values")
+    has_rev = isinstance(labels, dict) and "org.opencontainers.image.revision" in labels
+    df_has_rev = dockerfile_text is not None and "org.opencontainers.image.revision" in dockerfile_text
+    if has_rev or df_has_rev:
+        if (labels or {}).get("org.opencontainers.image.revision") != bundle["source"]["commit"]:
+            _fail("runtime config revision label differs from bundle source commit")
+    env = runtime_config.get("Env")
+    if env is not None:
+        if not isinstance(env, list):
+            _fail("runtime config Env must be a list")
+        seen_keys: set[str] = set()
+        for item in env:
+            if not isinstance(item, str) or "=" not in item:
+                _fail("invalid env entry: " + str(item))
+            key, val = item.split("=", 1)
+            if not _ENV_KEY_RE.fullmatch(key):
+                _fail("invalid env key: " + key)
+            if key in seen_keys:
+                _fail("duplicate env key: " + key)
+            seen_keys.add(key)
+            if key in _FORBIDDEN_ENV:
+                _fail("forbidden env variable: " + key)
+            if key == "PATH":
+                parts = val.split(":")
+                if not parts or not all(p.startswith("/") and "\\" not in p and posixpath.normpath(p) == p for p in parts):
+                    _fail("PATH variable entries must be normalized absolute paths")
+                expected_bin = posixpath.dirname(bundle["install_probe"]["interpreter"])
+                if parts[0] != expected_bin:
+                    _fail("PATH does not start with interpreter bin directory: " + parts[0])
+
+
 def _verify_image(image: OciImage, bundle: dict[str, Any], product: dict[str, Any], source: SourceArchive,
                   wheels: dict[str, dict[str, str]], wheel_hashes: dict[str, str],
                   wheel_versions: dict[str, str], report_copy: bytes) -> None:
     _check_final_layer(image)
+    _verify_runtime_config(image.config.get("config") or {}, bundle,
+                           dockerfile_text=source.content["deploy/Dockerfile"].decode("utf-8", "replace"))
     probe = bundle["install_probe"]
     if probe["report_layer_digest"] != image.layers[-1]["digest"]:
         _fail("probe report is not in the final layer")
@@ -1810,10 +1946,6 @@ def store_identity(docker: Any) -> dict[str, Any]:
             "storage_driver": driver, "containerd_snapshotter": snapshotter}
 
 
-def _empty(value: Any) -> bool:
-    return value in (None, "", [], {}, False)
-
-
 def verify_inspected_graph(inspected: dict[str, Any] | None, bundle: dict[str, Any], expected_id: str,
                            config: dict[str, Any] | None = None) -> str:
     """Require the store's image to be exactly the sealed graph; return its native ID."""
@@ -1831,6 +1963,7 @@ def verify_inspected_graph(inspected: dict[str, Any] | None, bundle: dict[str, A
     actual = inspected.get("Config") or {}
     if type(actual) is not dict or not _empty(actual.get("Volumes")):
         _fail("target store image declares volumes")
+    _verify_runtime_config(actual, bundle)
     if config is not None:
         for key, value in config.items():
             if actual.get(key) != value and not (_empty(value) and _empty(actual.get(key))):
