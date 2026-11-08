@@ -115,7 +115,11 @@ def validate_workflow(raw_workflow: str, config: dict[str, Any]) -> None:
     consumers = config["consumers"]
     recipe = (f"{consumers['windows_repository']}/{consumers['windows_recipe_workflow']}"
               f"@{_sha(consumers.get('windows_recipe_sha'), 'windows_recipe_sha')}")
-    _require(job == [
+    _require(len(job) >= 3 and bool(re.fullmatch(r"    needs: (?:source|\[\s*source\s*\])", job[2])),
+             "historical Windows job does not match control policy")
+    normalized_job = ["    needs: source" if index == 2 else line
+                      for index, line in enumerate(job)]
+    _require(normalized_job == [
         "  historical-windows:",
         "    name: Historical bundled Windows validation",
         "    needs: source",

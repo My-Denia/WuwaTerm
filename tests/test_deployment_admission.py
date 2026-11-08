@@ -21,7 +21,12 @@ import sys
 
 import pytest
 
+from scripts import component_recovery
 from scripts import component_runtime
+from scripts import component_state
+from scripts import deployment_admission as admission
+from scripts import package_recovery_source
+import test_component_recovery as recovery_tests
 from test_component_runtime import journal as runtime_journal  # noqa: F401
 from test_deploy_scripts import _deployment_db
 
@@ -32,6 +37,44 @@ NEXT_COMMIT = "b" * 40
 OLD_HEAD = "f8a9008d7adf60006ca210c750aa97f5de386a26"
 COMPONENT_RUNTIME = ".deployments/.component-runtime-transaction.json"
 COMPONENT_FULL = ".deployments/.component-full-transaction.json"
+
+
+@pytest.mark.parametrize("directory", [admission.BUILD_STAGING, admission.WHEEL_BUILD_STAGING])
+def test_builder_staging_requires_exact_recovery_before_other_admission(tmp_path: Path, directory: str) -> None:
+    deployments = tmp_path / ".deployments"
+    deployments.mkdir()
+    staging = deployments / directory
+    staging.mkdir()
+    admission._attempts_clear(tmp_path)
+    unknown = staging / "unknown.json"
+    unknown.write_bytes(b"untrusted stage")
+    before = unknown.stat()
+    with pytest.raises(admission.AdmissionError, match="requires recovery"):
+        admission._attempts_clear(tmp_path)
+    assert unknown.read_bytes() == b"untrusted stage" and unknown.stat().st_ino == before.st_ino
+
+
+@pytest.mark.parametrize("directory", [admission.BUILD_STAGING, admission.WHEEL_BUILD_STAGING])
+def test_builder_staging_refuses_symlinked_directory(tmp_path: Path, directory: str) -> None:
+    deployments = tmp_path / ".deployments"
+    deployments.mkdir()
+    target = tmp_path / "other"
+    target.mkdir()
+    (deployments / directory).symlink_to(target, target_is_directory=True)
+    with pytest.raises(admission.AdmissionError, match="cannot be inspected"):
+        admission._attempts_clear(tmp_path)
+    assert target.is_dir() and list(target.iterdir()) == []
+
+
+def test_unknown_probe_staging_blocks_admission_without_removal(tmp_path: Path) -> None:
+    staging = tmp_path / ".deployments" / admission.ADOPT_PROBE_STAGING
+    staging.mkdir(parents=True)
+    unknown = staging / "unknown"
+    unknown.write_bytes(b"unattributed stage")
+    inode = unknown.stat().st_ino
+    with pytest.raises(admission.AdmissionError, match="probe staging metadata is unknown"):
+        admission._attempts_clear(tmp_path)
+    assert unknown.read_bytes() == b"unattributed stage" and unknown.stat().st_ino == inode
 
 
 def _environment() -> dict[str, str]:
@@ -57,6 +100,27 @@ def _snapshot(root: Path) -> dict[str, tuple]:
     return result
 
 
+def _set_recovery_capability(root: Path, *, kind: str, ready: bool, protocol: object = 1) -> None:
+    """Change only the copied checkout for tests of ordinary admission."""
+    flag = "FULL_RECOVERY_EXECUTION_READY" if kind == "full" else "RECOVERY_EXECUTION_READY"
+    artifact_flag = "ARTIFACT_FULL_RECOVERY_EXECUTION_READY" if kind == "full" else "ARTIFACT_RECOVERY_EXECUTION_READY"
+    name = "CAPSULE_FULL_RECOVERY_PROTOCOL" if kind == "full" else "CAPSULE_RECOVERY_PROTOCOL"
+    recovery = root / "scripts/component_recovery.py"
+    text = recovery.read_text(encoding="utf-8")
+    original = f"\n{flag} = False\n"
+    assert original in text
+    text = text.replace(original, f"\n{flag} = {ready!r}\n", 1)
+    if protocol == 2:
+        assert f"\n{artifact_flag} = True\n" in text
+        text = text.replace(f"\n{artifact_flag} = True\n", f"\n{artifact_flag} = False\n", 1)
+    recovery.write_text(text, encoding="utf-8")
+    runtime = root / "scripts/component_runtime.py"
+    text = runtime.read_text(encoding="utf-8")
+    marker = 'if __name__ == "__main__":\n'
+    assert marker in text
+    runtime.write_text(text.replace(marker, f"{name} = {protocol!r}\n\n" + marker, 1), encoding="utf-8")
+
+
 @pytest.fixture()
 def checkout(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     root = tmp_path / "checkout"
@@ -70,6 +134,12 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
                  "scripts/deployment_manifest.py", "scripts/deployment_admission.py",
                  "scripts/full_update.py", "scripts/runtime_update.py",
                  "scripts/component_runtime.py", "scripts/component_build.py",
+                 "scripts/component_artifact.py", "scripts/install_probe.py",
+                 "scripts/component_build_isolation.py", "scripts/component_full.py", "scripts/component_full_db.py",
+                 "scripts/component_prepare.py",
+                 "scripts/component_recovery.py", "scripts/component_wheel_build.py",
+                 "scripts/component_state.py", "scripts/component_state_copy_v4.py", "scripts/component_state_endpoint.py",
+                 "scripts/component_transaction.py",
                  "scripts/product_manifest.py", "scripts/package_recovery_source.py"):
         shutil.copy2(ROOT / name, root / name)
     (root / ".env").write_text("fixture=only\n", encoding="ascii")
@@ -528,6 +598,7 @@ runtime._publish_pointer(sys.argv[1])
 
 def test_admitted_component_parent_can_import_manifest_helper(checkout):
     root, env, _spy = checkout
+    _set_recovery_capability(root, kind="runtime", ready=True)
     code = r"""
 import pathlib, sys
 from scripts import deployment_admission as admission
@@ -562,6 +633,7 @@ print('admitted')
 ])
 def test_component_admission_respects_old_journal_without_rewriting_it(checkout, old_state, allowed):
     root, env, spy = checkout
+    _set_recovery_capability(root, kind="runtime", ready=True)
     old = root / ".deployments/.runtime-transaction.json"
     if old_state in ("committed", "rolled_back", "active"):
         journal = _active_runtime_journal()
@@ -588,7 +660,7 @@ def test_component_admission_respects_old_journal_without_rewriting_it(checkout,
 
 @pytest.mark.parametrize(("state", "operation", "transaction", "allowed"), [
     ("active", "adopt", "", False),
-    ("active", "recover", "matching", True),
+    ("active", "recover", "matching", False),
     ("active", "recover", "other", False),
     ("terminal", "adopt", "", True),
     ("terminal", "recover", "matching", False),
@@ -597,6 +669,8 @@ def test_component_admission_respects_old_journal_without_rewriting_it(checkout,
     ("link", "adopt", "", False),
     ("full-conflict", "recover", "matching", False),
     ("build-unknown", "adopt", "", False),
+    ("wheel-build-unknown", "adopt", "", False),
+    ("adopt-probe-unknown", "adopt", "", False),
     ("pointer-malformed", "adopt", "", False),
     ("pointer-unbound", "adopt", "", False),
 ])
@@ -604,6 +678,7 @@ def test_component_admission_requires_matching_recovery_and_refuses_conflicts(
     checkout, runtime_journal, state, operation, transaction, allowed,  # noqa: F811
 ):
     root, env, spy = checkout
+    _set_recovery_capability(root, kind="runtime", ready=True)
     path = root / COMPONENT_RUNTIME
     if state in ("active", "terminal", "full-conflict"):
         journal = copy.deepcopy(runtime_journal)
@@ -617,6 +692,14 @@ def test_component_admission_requires_matching_recovery_and_refuses_conflicts(
         path.symlink_to("missing")
     elif state == "build-unknown":
         attempts = root / ".deployments/component-build-attempts"
+        attempts.mkdir()
+        (attempts / "unknown.json").write_text("{}", encoding="ascii")
+    elif state == "wheel-build-unknown":
+        attempts = root / ".deployments/component-wheel-build-attempts"
+        attempts.mkdir()
+        (attempts / "unknown.json").write_text("{}", encoding="ascii")
+    elif state == "adopt-probe-unknown":
+        attempts = root / ".deployments/component-adopt-probes"
         attempts.mkdir()
         (attempts / "unknown.json").write_text("{}", encoding="ascii")
     elif state.startswith("pointer-"):
@@ -646,10 +729,640 @@ def test_component_admission_rejects_foreign_code_root_and_missing_lock(checkout
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     before = _snapshot(root)
-    for code_root, lock in ((root, None), (foreign, root / ".deployments/.deployment.lock")):
-        command = [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), "adopt", str(code_root), ""]
-        result = _run(root, env, command, lock=lock)
+    for operation in ("adopt", "prepare-source"):
+        for code_root, lock in ((root, None), (foreign, root / ".deployments/.deployment.lock")):
+            command = [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), operation, str(code_root), ""]
+            result = _run(root, env, command, lock=lock)
+            assert result.returncode != 0
+            assert "lock FD9" in result.stderr if lock is None else "roots differ" in result.stderr
+            assert _snapshot(root) == before
+            assert not spy.exists()
+
+
+@pytest.mark.parametrize("operation,kind", [("adopt", "runtime"), ("update", "runtime"),
+                                             ("full-update", "full")])
+@pytest.mark.parametrize("ready,protocol", [(False, 1), (True, None), (True, True),
+                                           (True, "1"), (True, 1.0), (True, 2)])
+def test_component_writes_require_their_own_recovery_capability(checkout, operation, kind, ready, protocol):
+    root, env, spy = checkout
+    _set_recovery_capability(root, kind=kind, ready=ready, protocol=protocol)
+    # A conflict makes the ordering observable: readiness must fail first.
+    (root / ".deployments/.full-transaction.json").write_text("{}", encoding="ascii")
+    before = _snapshot(root)
+    command = [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), operation, str(root), ""]
+    result = _run(root, env, command, lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    assert f"{kind} saved-source recovery is not ready" in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+@pytest.mark.parametrize("kind,operation", [("runtime", "update"), ("full", "full-update")])
+def test_component_admission_accepts_independently_ready_capability(checkout, kind, operation):
+    root, env, spy = checkout
+    _set_recovery_capability(root, kind=kind, ready=True)
+    before = _snapshot(root)
+    command = [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), operation, str(root), ""]
+    result = _run(root, env, command, lock=root / ".deployments/.deployment.lock")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "admitted"
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+@pytest.mark.parametrize("conflict,expected", [
+    ("legacy-full", "legacy full transaction requires recovery"),
+    ("runtime", "component runtime journal is unknown"),
+    ("pointer", "component deployment pointer is unknown"),
+    ("registry", "build attempt metadata is unknown"),
+])
+def test_prepare_source_admission_keeps_conflict_pointer_and_registry_checks(checkout, conflict, expected):
+    root, env, spy = checkout
+    if conflict == "legacy-full":
+        (root / ".deployments/.full-transaction.json").write_text("{}", encoding="ascii")
+    elif conflict == "runtime":
+        (root / COMPONENT_RUNTIME).write_text("{}", encoding="ascii")
+    elif conflict == "pointer":
+        (root / ".deploy_current").write_text("invalid\n", encoding="ascii")
+    else:
+        directory = root / ".deployments/component-build-attempts"
+        directory.mkdir()
+        (directory / "unknown.json").write_text("{}", encoding="ascii")
+    before = _snapshot(root)
+    code = r"""
+import pathlib, sys
+r = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(r / 'scripts'))
+import component_recovery as recovery
+recovery.prepare_source(r, 'a' * 40, 'b' * 40)
+"""
+    result = _run(root, env, [sys.executable, "-B", "-c", code, str(root)],
+                  lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+def test_prepare_source_refuses_a_different_physical_root(checkout, tmp_path):
+    root, env, spy = checkout
+    other = tmp_path / "other-root"
+    (other / ".deployments").mkdir(parents=True)
+    before, other_before = _snapshot(root), _snapshot(other)
+    code = r"""
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(source / 'scripts'))
+import component_recovery as recovery
+recovery.prepare_source(pathlib.Path(sys.argv[2]), 'a' * 40, 'b' * 40)
+"""
+    result = _run(root, env, [sys.executable, "-B", "-c", code, str(root), str(other)])
+    assert result.returncode != 0
+    assert "source and deployment roots differ" in result.stderr
+    assert _snapshot(root) == before and _snapshot(other) == other_before
+    assert not spy.exists()
+
+
+def test_prepare_source_rechecks_registered_build_provenance(checkout, runtime_journal):  # noqa: F811
+    from scripts import component_build  # noqa: PLC0415
+
+    root, env, spy = checkout
+    recovery_source = runtime_journal["source"]
+    source = {key: recovery_source[key] for key in ("commit", "tree", "tool_bytes_sha256", "source_tool_sha256")}
+    identifier = "20261106T110000Z-0123456789abcdef0123456789abcdef"
+    context_path = ".deployments/component-build-context-" + identifier
+    context = root / context_path / "source"
+    target_ref = "wuwaterm-component-build:" + identifier
+    attempt = {
+        "schema_version": 1, "build_id": identifier, "status": "active", "phase": "receipt",
+        "source": source, "target_ref": target_ref, "context_path": context_path,
+        "context_sha256": "1" * 64, "recipe_sha256": "2" * 64,
+        "command": ["build", "--pull=false", "--rm=false", "--target", "runtime",
+                    "--build-arg", "SOURCE_COMMIT=" + source["commit"], "--tag", target_ref,
+                    "--file", str(context / "deploy/Dockerfile"), str(context)],
+        "build_result": {"exit_code": 0, "output_sha256": "3" * 64,
+                         "intermediate_prefixes": ["4" * 12], "intermediate_container_ids": ["4" * 64]},
+        "probe_name": "wuwaterm-component-probe-" + identifier, "probe_container_id": "5" * 64,
+        "receipt_sha256": None, "failure": None, "recovery_source": recovery_source,
+    }
+    _, digest = component_build._receipt(root, attempt, "sha256:" + "6" * 64, "0.7.0.dev1", ["4" * 64])
+    attempt.update(status="registered", phase="registered", receipt_sha256=digest)
+    component_build._write_attempt(root, attempt, new=True)
+    assert component_build._read_attempt(root, identifier + ".json")["status"] == "registered"
+    before = _snapshot(root)
+    code = r"""
+import pathlib, sys
+r = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(r / 'scripts'))
+import component_recovery as recovery
+recovery.prepare_source(r, 'a' * 40, 'b' * 40)
+"""
+    result = _run(root, env, [sys.executable, "-B", "-c", code, str(root)],
+                  lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    assert "retained build source" in result.stderr
+    assert "build attempt metadata is unknown" in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+@pytest.mark.parametrize("route", ["adopt", "api", "telegram", "both", "full"])
+def test_direct_mutators_refuse_before_predecessor_or_external_work(checkout, runtime_journal, route):  # noqa: F811
+    root, env, spy = checkout
+    shutil.copy2(ROOT / "scripts/component_observe.py", root / "scripts/component_observe.py")
+    # The inverse combination proves that FULL does not borrow runtime readiness.
+    if route == "full":
+        _set_recovery_capability(root, kind="runtime", ready=True)
+        _set_recovery_capability(root, kind="full", ready=False)
+    else:
+        _set_recovery_capability(root, kind="runtime", ready=False)
+    journal = copy.deepcopy(runtime_journal)
+    selection = {"api": ["api"], "telegram": ["telegram"], "both": ["api", "telegram"]}.get(route, ["api"])
+    journal["selection"] = selection
+    for name in ("api", "telegram"):
+        target = journal["target"]["containers"][name]
+        if name in selection:
+            target.update(id=None, name=None, started_at=None, restart_count=None,
+                          transaction_label=journal["transaction_id"])
+        else:
+            journal["target"]["containers"][name] = copy.deepcopy(journal["before"]["containers"][name])
+    component_runtime.validate_journal(journal)
+    code = r"""
+import json, pathlib, sys
+r = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(r / 'scripts'))
+import component_runtime as runtime
+import component_transaction as transaction
+import component_full as full
+def forbidden(*args, **kwargs):
+    raise AssertionError('predecessor or external work was reached')
+transaction._prepare_predecessor = forbidden
+transaction._compose_binary = forbidden
+route = sys.argv[2]
+if route == 'adopt':
+    runtime.adopt(r, projects=[], compose_executable=pathlib.Path('/unused'), api_receipt=None, telegram_receipt=None)
+elif route == 'full':
+    full.prepare(r, pathlib.Path('/unused'), {'selection': 'none', 'receipts': {}, 'recipes': {}},
+                 compose_path=pathlib.Path('/unused'))
+else:
+    transaction.update(r, json.loads(sys.argv[3]), compose_path=pathlib.Path('/unused'))
+"""
+    before = _snapshot(root)
+    result = _run(root, env, [sys.executable, "-B", "-c", code, str(root), route, json.dumps(journal)],
+                  lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    assert ("full" if route == "full" else "runtime") + " saved-source recovery is not ready" in result.stderr
+    assert "predecessor or external work was reached" not in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+def test_full_ready_runtime_unready_reaches_real_source_and_compose_packaging(tmp_path, runtime_journal):  # noqa: F811
+    root, _, _ = recovery_tests.create_source(tmp_path / "source")
+    _set_recovery_capability(root, kind="full", ready=True)
+    recovery_tests.git(root, "add", "scripts/component_recovery.py", "scripts/component_runtime.py")
+    recovery_tests.git(root, "commit", "--quiet", "-m", "Enable full recovery fixture")
+    binary = tmp_path / "compose"
+    binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    Path(str(binary) + ".sha256").write_text(f"{digest}  {binary.name}\n", encoding="ascii")
+    previous = copy.deepcopy(runtime_journal)
+    previous["status"] = "committed"
+    code = r"""
+import json, pathlib, sys
+r = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(r / 'scripts'))
+import component_full as full
+import component_recovery as recovery
+import component_runtime as runtime
+import component_transaction as transaction
+import deployment_admission as admission
+recovery.ARTIFACT_RECOVERY_EXECUTION_READY = False
+previous = json.loads(sys.argv[3]); events = []; saved = []
+admission.admit_component(r, operation='full-update', code_root=r)
+try:
+    admission.admit_component(r, operation='update', code_root=r)
+except admission.AdmissionError as exc:
+    assert 'runtime saved-source recovery is not ready' in str(exc)
+else:
+    raise AssertionError('runtime admission unexpectedly succeeded')
+transaction.verify_terminal_for_full4 = lambda *args, **kwargs: (b'verified predecessor', previous)
+def retirement(*args, **kwargs):
+    events.append('predecessor')
+    return b'verified predecessor'
+transaction._prepare_predecessor = retirement
+runtime.inspect_deployment = lambda root: {'binding': 'recorded', 'manifest': previous['target']['manifest']}
+original = recovery.prepare_source
+def capture(*args, **kwargs):
+    source = original(*args, **kwargs)
+    saved.append(source)
+    return source
+recovery.prepare_source = capture
+class AfterPackaging(Exception):
+    pass
+def stop_after_packaging(*args, **kwargs):
+    raise AfterPackaging()
+full.manifest.verify_database_binding = stop_after_packaging
+try:
+    full.prepare(r, pathlib.Path('/unused'), {'selection': 'none', 'receipts': {}, 'recipes': {}},
+                 compose_path=pathlib.Path(sys.argv[2]))
+except AfterPackaging:
+    pass
+else:
+    raise AssertionError('expected to stop after source packaging')
+assert events == ['predecessor'] and len(saved) == 1
+source = saved[0]
+recovery._verify_capsule(r, source)
+recovery._verify_bootstrap(r, source)
+assert recovery._verify_bound_compose(r, source) == r / source['compose']['path']
+print(json.dumps(source))
+"""
+    result = recovery_tests.locked(root, sys.executable, "-I", "-B", "-c", code,
+                                   str(root), str(binary), json.dumps(previous))
+    assert result.returncode == 0, result.stderr
+    source = json.loads(result.stdout)
+    assert source["compose"]["sha256"] == digest
+    assert (root / source["capsule"]["path"] / "source.tar").is_file()
+    assert (root / source["bootstrap"]["path"] / "component_recovery.py").is_file()
+
+
+@pytest.mark.parametrize("state", ["active", "failed", "unknown"])
+@pytest.mark.parametrize("operation", ["legacy", "component"])
+def test_wheel_build_attempts_gate_legacy_and_component_writers(checkout, runtime_journal, state, operation):  # noqa: F811
+    root, env, spy = checkout
+    if operation == "component":
+        _set_recovery_capability(root, kind="runtime", ready=True)
+    source = runtime_journal["source"]
+    ident = "20261106T110000Z-0123456789abcdef0123456789abcdef"
+    operations = {key: source[key] for key in ("commit", "tree", "tool_bytes_sha256", "source_tool_sha256")}
+    attempt = {
+        "schema_version": 1, "build_id": ident, "status": state, "phase": "failed" if state == "failed" else "prepared",
+        "operations_source": operations, "recovery_source": source,
+        "source": {"commit": "c" * 40, "tree": "d" * 40},
+        "target_ref": "wuwaterm-wheel-build:" + ident,
+        "context_path": ".deployments/component-wheel-build-context-" + ident,
+        "telegram_wheel_sha256": None, "telegram_version": None, "core_wheel_sha256": None,
+        "core_version": None, "core_lock_sha256": None, "core_artifact_sha256": None,
+        "core_checksums_sha256": None, "core_source": None, "core_producer_kind": None,
+        "dependencies": None, "source_archive_sha256": None, "context_sha256": None,
+        "recipe_sha256": None, "wheel_build": None, "command": None, "build_result": None,
+        "probe_name": "wuwaterm-wheel-probe-" + ident, "probe_container_id": None,
+        "probe_sha256": None, "image_id": None, "image_revision": None, "receipt_sha256": None,
+        "failure": "BuildError" if state == "failed" else None,
+    }
+    directory = root / ".deployments/component-wheel-build-attempts"
+    directory.mkdir()
+    (directory / (ident + ".json")).write_text(json.dumps(attempt if state != "unknown" else {}))
+    before = _snapshot(root)
+    if operation == "legacy":
+        command = [sys.executable, "-B", str(root / "scripts/deployment_admission.py"), "legacy"]
+    else:
+        command = [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), "adopt", str(root), ""]
+    result = _run(root, env, command, lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    if state == "failed":
+        assert "legacy failed builder lacks verified cleanup evidence" in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+@pytest.mark.parametrize("operation", ["legacy", "component"])
+def test_legacy_failed_source_builder_blocks_writers(checkout, runtime_journal, operation):  # noqa: F811
+    root, env, spy = checkout
+    if operation == "component":
+        _set_recovery_capability(root, kind="runtime", ready=True)
+    source = runtime_journal["source"]
+    ident = "20261106T110000Z-0123456789abcdef0123456789abcdef"
+    operations = {key: source[key] for key in ("commit", "tree", "tool_bytes_sha256", "source_tool_sha256")}
+    attempt = {"schema_version": 1, "build_id": ident, "status": "failed", "phase": "failed",
+               "source": operations, "target_ref": "wuwaterm-component-build:" + ident,
+               "context_path": ".deployments/component-build-context-" + ident,
+               "context_sha256": None, "recipe_sha256": None, "command": None, "build_result": None,
+               "probe_name": "wuwaterm-component-probe-" + ident, "probe_container_id": None,
+               "receipt_sha256": None, "failure": "BuildError", "recovery_source": source}
+    directory = root / ".deployments/component-build-attempts"
+    directory.mkdir()
+    (directory / (ident + ".json")).write_text(json.dumps(attempt), encoding="utf-8")
+    before = _snapshot(root)
+    command = ([sys.executable, "-B", str(root / "scripts/deployment_admission.py"), "legacy"] if operation == "legacy"
+               else [sys.executable, "-B", "-c", _COMPONENT_ADMIT, str(root), "adopt", str(root), ""])
+    result = _run(root, env, command, lock=root / ".deployments/.deployment.lock")
+    assert result.returncode != 0
+    assert "legacy failed builder lacks verified cleanup evidence" in result.stderr
+    assert _snapshot(root) == before
+    assert not spy.exists()
+
+
+@pytest.mark.parametrize("case", [
+    "old", "commit-target", "current-target", "both-target", "foreign-pointer",
+    "rolled-back", "rolled-back-target", "committed", "committed-old", "committed-split",
+    "changed-source", "wrong-identity", "conflict", "no-lock",
+])
+def test_recovery_admission_verifies_saved_a_against_b_and_pointer_preimages(
+    tmp_path, runtime_journal, case,  # noqa: F811
+):
+    root, commit_a, tree_a = recovery_tests.create_source(tmp_path / "source-b")
+    prepared = recovery_tests.prepare(root, commit_a, tree_a)
+    assert prepared.returncode == 0, prepared.stderr
+    source = json.loads(prepared.stdout)
+    journal = copy.deepcopy(runtime_journal)
+    if case.startswith("rolled-back"):
+        journal.update(status="rolled_back", phase="rolled-back")
+    elif case.startswith("committed"):
+        journal.update(status="committed", phase="committed")
+    recovery_tests.add_journal(root, source, journal)
+
+    # The actual deployment checkout advances to B, whose runtime module
+    # deliberately cannot be imported. Admission must use the extracted A.
+    runtime_b = root / "scripts/component_runtime.py"
+    runtime_b.write_text(runtime_b.read_text() + '\nraise RuntimeError("source B was imported")\n')
+    recovery_tests.git(root, "add", "scripts/component_runtime.py")
+    recovery_tests.git(root, "commit", "--quiet", "-m", "Synthetic source B")
+    assert recovery_tests.git(root, "rev-parse", "HEAD") != commit_a
+
+    code_root = tmp_path / "extracted-a"
+    code_root.mkdir()
+    package_recovery_source.verify(root / source["capsule"]["path"], commit_a,
+                                   extracted=code_root, allow_backup=True)
+    if case == "changed-source":
+        (code_root / "docs/fixture.txt").write_text("modified after extraction\n")
+    old_commit = journal["pointers"]["old"][".deploy_commit"]["bytes"]
+    target_commit = journal["pointers"]["target"][".deploy_commit"]["bytes"]
+    target_current = journal["pointers"]["target"][".deploy_current"]["bytes"]
+    (root / ".deploy_commit").write_text(
+        ("f" * 40 + "\n") if case == "foreign-pointer" else
+        target_commit if case in ("commit-target", "both-target", "rolled-back-target", "committed", "committed-split") else old_commit,
+        encoding="ascii",
+    )
+    if case in ("current-target", "both-target", "committed"):
+        (root / ".deploy_current").write_text(target_current, encoding="ascii")
+    if case == "conflict":
+        (root / ".deployments/.full-transaction.json").write_text("{}", encoding="ascii")
+    identity = "0" * 64 if case == "wrong-identity" else source["source_tool_sha256"]
+    before = _snapshot(root)
+    code = r"""
+import pathlib, sys
+code_root = pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(code_root / 'scripts'))
+import deployment_admission as admission
+try:
+    journal = admission.admit_component_recovery(pathlib.Path(sys.argv[1]),
+        transaction_id=sys.argv[3], source_tool_sha256=sys.argv[4], code_root=code_root)
+except admission.AdmissionError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+print(journal['transaction_id'])
+"""
+    result = recovery_tests.locked(root, sys.executable, "-I", "-B", "-c", code,
+                                   str(root), str(code_root), journal["transaction_id"], identity,
+                                   lock=case != "no-lock")
+    if case in ("old", "commit-target", "current-target", "both-target", "rolled-back", "committed"):
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == journal["transaction_id"]
+    else:
         assert result.returncode != 0
-        assert "admission refused" in result.stderr
-        assert _snapshot(root) == before
-        assert not spy.exists()
+    assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("mode,case,allowed", [
+    ("same", "new", True), ("same", "matching", True), ("same", "no-id", False),
+    ("same", "wrong-id", False), ("same", "wrong-txn", False), ("same", "wrong-source", False),
+    ("same", "multiple", False), ("same", "no-lock", False), ("same", "non-telegram", False),
+    ("standalone", "matching", False),
+    ("capsule", "matching", True), ("capsule", "wrong-txn", False),
+    ("capsule", "wrong-source", False), ("capsule", "multiple", False), ("capsule", "terminal", False),
+    ("capsule", "non-telegram", False), ("capsule", "committed", False),
+])
+def test_state_probe_admission_is_bound_to_one_verified_telegram_transaction(
+    tmp_path, runtime_journal, mode, case, allowed,  # noqa: F811
+):
+    root, commit_a, tree_a = recovery_tests.create_source(tmp_path / "source")
+    prepared = recovery_tests.prepare(root, commit_a, tree_a)
+    assert prepared.returncode == 0, prepared.stderr
+    source = json.loads(prepared.stdout)
+    journal = copy.deepcopy(runtime_journal)
+    if case != "non-telegram":
+        journal["selection"] = ["telegram"]
+        journal["target"]["containers"]["api"] = copy.deepcopy(journal["before"]["containers"]["api"])
+        telegram = copy.deepcopy(journal["before"]["containers"]["telegram"])
+        telegram.update(id=None, name=None, started_at=None, restart_count=None,
+                        transaction_label=journal["transaction_id"])
+        journal["target"]["containers"]["telegram"] = telegram
+    if case == "terminal":
+        journal.update(status="rolled_back", phase="rolled-back")
+    elif case == "committed":
+        journal.update(status="committed", phase="committed")
+    recovery_tests.add_journal(root, source, journal)
+    (root / ".deploy_commit").write_text(journal["pointers"]["old"][".deploy_commit"]["bytes"])
+    probe_id = "20261106T110001Z-0123456789abcdef0123456789abcdef"
+    record = {
+        "schema_version": 1, "kind": "state-plan", "probe_id": probe_id,
+        "status": "active", "phase": "prepared", "transaction_id": journal["transaction_id"],
+        "source_tool_sha256": source["source_tool_sha256"], "daemon_id": "1" * 64,
+        "image_id": "sha256:" + "2" * 64, "image_revision": "3" * 40,
+        "container_name": "wuwaterm-state-probe-" + probe_id, "container_id": None,
+        "user": "0:0", "working_dir": "/app",
+        "mounts": [{"host": "/srv/state", "container": "/app/data", "read_only": True,
+                    "device": 1, "inode": 2}],
+        "path_settings": {key: None for key in component_state._PATH_KEYS},
+        "input_path": "/app/data/terms.db", "command": None, "output_sha256": None,
+        "result": None, "failure": None,
+    }
+    if case == "wrong-txn":
+        record["transaction_id"] = "20261106T110000Z-ffffffffffffffffffffffffffffffff"
+    if case == "wrong-source":
+        record["source_tool_sha256"] = "f" * 64
+    record["command"] = component_state._command(record)
+    if case != "new":
+        directory = root / ".deployments/component-adopt-probes"
+        directory.mkdir()
+        (directory / (probe_id + ".json")).write_text(json.dumps(record))
+        if case == "multiple":
+            second = copy.deepcopy(record)
+            second["probe_id"] = "20261106T110002Z-0123456789abcdef0123456789abcdef"
+            second["container_name"] = "wuwaterm-state-probe-" + second["probe_id"]
+            (directory / (second["probe_id"] + ".json")).write_text(json.dumps(second))
+    code_root = root
+    if mode == "capsule":
+        code_root = tmp_path / "extracted-a"
+        code_root.mkdir()
+        package_recovery_source.verify(root / source["capsule"]["path"], commit_a,
+                                       extracted=code_root, allow_backup=True)
+        runtime_b = root / "scripts/component_runtime.py"
+        runtime_b.write_text(runtime_b.read_text() + '\nraise RuntimeError("source B was imported")\n')
+        recovery_tests.git(root, "add", "scripts/component_runtime.py")
+        recovery_tests.git(root, "commit", "--quiet", "-m", "Synthetic source B")
+    supplied_id = ("" if case in ("new", "no-id") else
+                   "20261106T110003Z-ffffffffffffffffffffffffffffffff" if case == "wrong-id" else probe_id)
+    code = r"""
+import pathlib,sys
+root,code_root=map(pathlib.Path,sys.argv[1:3]); sys.path.insert(0,str(code_root/'scripts'))
+import deployment_admission as a
+try:
+ if sys.argv[3]=='capsule':
+  a.admit_component_recovery(root,transaction_id=sys.argv[4],source_tool_sha256=sys.argv[5],code_root=code_root)
+ elif sys.argv[3]=='standalone':
+  a.admit_adoption_probe_recovery(root,probe_id=sys.argv[6],code_root=code_root)
+ else:
+  a.admit_state_probe(root,transaction_id=sys.argv[4],source_tool_sha256=sys.argv[5],
+                      code_root=code_root,probe_id=sys.argv[6] or None)
+except a.AdmissionError as exc:
+ print(str(exc),file=sys.stderr); raise SystemExit(1)
+print('admitted')
+"""
+    before = _snapshot(root)
+    result = recovery_tests.locked(root, sys.executable, "-I", "-B", "-c", code,
+                                   str(root), str(code_root), mode, journal["transaction_id"],
+                                   source["source_tool_sha256"], supplied_id, lock=case != "no-lock")
+    if allowed:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+    assert _snapshot(root) == before
+
+
+# ------------------------------------------------- protocol-2 mutator gates
+
+def _parked_fd9():
+    try:
+        saved = os.dup(9)
+    except OSError:
+        return None
+    os.close(9)
+    return saved
+
+
+def _restore_fd9(saved) -> None:
+    if saved is not None:
+        os.dup2(saved, 9)
+        os.close(saved)
+
+
+def test_artifact_attempts_block_mutators_until_registered_or_cancelled(tmp_path: Path) -> None:
+    import test_component_artifact as artifact_tests  # noqa: PLC0415
+
+    art = artifact_tests.art
+    fx = artifact_tests.Fixture(tmp_path)
+    admission._check_artifact_attempts(fx.root)  # no store: nothing to block
+    saved = _parked_fd9()
+    try:
+        verified = fx.seal()
+        docker = artifact_tests.FakeDocker()
+        docker.fail_after_load = True
+        with pytest.raises(art.ArtifactError):
+            art.acquire(verified.path, fx.root, docker=docker)
+    finally:
+        _restore_fd9(saved)
+    attempts = fx.root / ".deployments/artifacts/attempts"
+    before = sorted((p.relative_to(fx.root), p.read_bytes()) for p in attempts.rglob("*") if p.is_file())
+    with pytest.raises(admission.AdmissionError, match="requires recover or cancel: " + fx.attempt_id):
+        admission._check_artifact_attempts(fx.root)
+    assert sorted((p.relative_to(fx.root), p.read_bytes()) for p in attempts.rglob("*") if p.is_file()) == before
+    saved = _parked_fd9()
+    try:
+        docker.fail_after_load = False
+        assert art.recover(fx.root, fx.attempt_id, docker=docker)["state"] == "registered"
+        other = artifact_tests.Fixture(tmp_path / "other")
+        other.root = fx.root
+        other.seal()
+        art.cancel(fx.root, other.attempt_id)
+    finally:
+        _restore_fd9(saved)
+    admission._check_artifact_attempts(fx.root)
+
+
+def _helper_scan(monkeypatch, root: Path, statuses: dict, containers: dict) -> None:
+    monkeypatch.setattr(admission, "_probe_statuses", lambda _root: dict(statuses))
+    monkeypatch.setattr(admission, "_labelled_containers", lambda label: list(containers.get(label, [])))
+    admission.scan_root_helpers(root)
+
+
+def test_helper_scan_refuses_unrecorded_or_terminal_containers_with_exact_ids(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    mine, foreign = admission.root_label_value(root), admission.root_label_value(other)
+    assert mine == hashlib.sha256(str(root).encode()).hexdigest() != foreign
+    probe_a, probe_b, probe_c = ("20261106T110000Z-" + c * 32 for c in "abc")
+    state, adopt = admission.STATE_PROBE_LABEL, admission.ADOPT_PROBE_LABEL
+    unrecorded = {"Id": "1" * 64, "Labels": {state: probe_a, admission.ROOT_LABEL: mine}}
+    terminal = {"Id": "2" * 64, "Labels": {adopt: probe_b}}
+    active = {"Id": "3" * 64, "Labels": {state: probe_c, admission.ROOT_LABEL: mine}}
+    cross_root = {"Id": "4" * 64, "Labels": {state: "20261106T110000Z-" + "d" * 32, admission.ROOT_LABEL: foreign}}
+    historical_foreign = {"Id": "5" * 64, "Labels": {adopt: "20261106T110000Z-" + "e" * 32}}
+    statuses = {probe_b: "completed", probe_c: "active"}
+    # Active helpers, other roots' helpers and unrelated historical helpers pass.
+    _helper_scan(monkeypatch, root, statuses, {state: [active, cross_root], adopt: [historical_foreign]})
+    with pytest.raises(admission.AdmissionError) as refused:
+        _helper_scan(monkeypatch, root, statuses,
+                     {state: [unrecorded, active, cross_root], adopt: [terminal, historical_foreign]})
+    message = str(refused.value)
+    assert "1" * 64 in message and "2" * 64 in message
+    assert "3" * 64 not in message and "4" * 64 not in message and "5" * 64 not in message
+    assert "no record" in message and "record is completed" in message
+    # The other root sees only its own leftover, never this root's.
+    with pytest.raises(admission.AdmissionError, match="4" * 64):
+        _helper_scan(monkeypatch, other, {}, {state: [unrecorded, cross_root]})
+
+
+def test_helper_scan_runs_inside_component_conflicts_before_writes(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / ".deployments").mkdir(parents=True)
+    leftover = {"Id": "6" * 64, "Labels": {admission.STATE_PROBE_LABEL: "20261106T110000Z-" + "f" * 32,
+                                           admission.ROOT_LABEL: admission.root_label_value(root)}}
+    monkeypatch.setattr(admission, "_labelled_containers",
+                        lambda label: [leftover] if label == admission.STATE_PROBE_LABEL else [])
+    before = sorted(p.relative_to(root) for p in root.rglob("*"))
+    with pytest.raises(admission.AdmissionError, match="6" * 64):
+        admission._component_conflicts(root)
+    assert sorted(p.relative_to(root) for p in root.rglob("*")) == before
+
+
+def test_helper_scan_against_the_real_daemon_ignores_other_fixture_roots(tmp_path: Path) -> None:
+    """Read-only listing only: other fixtures' helpers on this daemon never block a fresh root."""
+    root = tmp_path / "fresh"
+    (root / ".deployments").mkdir(parents=True)
+    try:
+        for label in (admission.STATE_PROBE_LABEL, admission.ADOPT_PROBE_LABEL):
+            assert type(admission._labelled_containers(label)) is list
+    except admission.AdmissionError as exc:
+        pytest.skip(f"Docker listing unavailable here: {exc}")
+    admission.scan_root_helpers(root)
+
+
+def test_product_update_refuses_build_before_taking_fd9(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    for argv in (["--root", str(root), "build", "api"], ["--root=" + str(root), "build"]):
+        result = subprocess.run(["sh", str(ROOT / "deploy/product-update.sh"), *argv],
+                                capture_output=True, text=True, check=False)
+        assert result.returncode == 2
+        assert "build" in result.stderr and "build-delivery" in result.stderr
+    assert list(root.iterdir()) == []
+
+
+def test_schema5_runtime_canonical_is_admissible_only_as_a_read_only_helper() -> None:
+    runtime5 = {"schema_version": 5, "kind": "component-runtime", "selection": ["telegram"]}
+    full5 = {"schema_version": 5, "kind": "component-full"}
+    canonical = {"schema_version": 5, "kind": "state-canonical", "transaction_kind": "runtime"}
+    # Schema 5 reads state through its own image, so its canonical comparison is
+    # not a FULL-only endpoint claim.
+    admission.refuse_inadmissible_state_probe(runtime5, canonical, "runtime")
+    admission.refuse_inadmissible_state_probe(full5, dict(canonical, transaction_kind="full"), "full")
+    for journal, probe, kind in (
+            (runtime5, dict(canonical, kind="state-copy-stage"), "runtime"),
+            (runtime5, dict(canonical, kind="state-endpoint"), "runtime"),
+            (runtime5, dict(canonical, kind="state-canonical-v4"), "runtime"),
+            ({"schema_version": 4, "kind": "component-runtime", "selection": ["telegram"]},
+             dict(canonical, schema_version=4), "runtime"),
+            (runtime5, dict(canonical, transaction_kind="full"), "runtime"),
+            (full5, canonical, "full")):
+        with pytest.raises(admission.AdmissionError):
+            admission.refuse_inadmissible_state_probe(journal, probe, kind)
+    # A schema-5 record still admits only the helpers whose programs never write.
+    with pytest.raises(admission.AdmissionError, match="non-mutating"):
+        admission.refuse_inadmissible_state_probe(
+            runtime5, {"schema_version": 5, "kind": "state-copy-v4", "transaction_kind": "runtime"}, "runtime")
+
+
+def test_artifact_recovery_flags_are_ready_by_default() -> None:
+    assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is True
+    assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True
+

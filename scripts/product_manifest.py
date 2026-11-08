@@ -26,7 +26,19 @@ from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 
-MANIFEST_SCHEMA_VERSION = 2
+# Schema 3 is written by protocol-2 (completed-artifact) updates. Schema 2
+# remains readable: historical journals embed schema-2 manifests and their
+# source-image / wheel-image provenance is interpreted only by schema 2.
+MANIFEST_SCHEMA_VERSION = 3
+PREVIOUS_MANIFEST_SCHEMA_VERSION = 2
+SCHEMA_VERSION = MANIFEST_SCHEMA_VERSION
+PREVIOUS_SCHEMA_VERSION = PREVIOUS_MANIFEST_SCHEMA_VERSION
+PROVENANCE_KINDS = {
+    PREVIOUS_MANIFEST_SCHEMA_VERSION: frozenset({"source-image", "wheel-image", "legacy-image"}),
+    MANIFEST_SCHEMA_VERSION: frozenset({"completed-artifact", "legacy-image"}),
+}
+ARTIFACT_REPOSITORIES = {"api": "My-Denia/WuwaTerm", "telegram": "My-Denia/WuwaTerm-Telegram"}
+ARTIFACT_PRODUCTS = {"api": "wuwaterm-api", "telegram": "wuwaterm-telegram"}
 RECIPE_SCHEMA_VERSION = 1
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _GIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -128,6 +140,18 @@ def _path(value: Any, where: str) -> str:
         part in (".", "..", "") for part in value.split("/")[1:]
     ):
         _fail(f"{where}: expected normalized absolute path")
+    return value
+
+
+def _recipe_environment_path(value: Any, where: str) -> str:
+    """Keep a container path literal while requiring a normalized spelling."""
+    value = _text(value, where)
+    if value != value.strip() or value.startswith("~") or "\\" in value:
+        _fail(f"{where}: expected normalized container path")
+    if value.startswith("/"):
+        return _path(value, where)
+    if any(part in ("", ".", "..") for part in value.split("/")):
+        _fail(f"{where}: expected normalized container path")
     return value
 
 
@@ -319,7 +343,7 @@ def validate_recipe_snapshot(value: Any) -> dict[str, Any]:
                 _fail("recipe snapshot: literal environment value is not allowed")
             value = _text(item["value"], "recipe snapshot.environment_override.value")
             if name in _PATH_ENV:
-                _path(value, "recipe snapshot.environment_override.value")
+                _recipe_environment_path(value, "recipe snapshot.environment_override.value")
             elif name == "WUWATERM_API_PORT":
                 if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= 65535:
                     _fail("recipe snapshot: invalid API port")
@@ -399,12 +423,22 @@ def verify_poll_health_mount(snapshot: dict[str, Any], *, effective_uid: int) ->
         _fail("poll health tmpfs owner lacks explicit read/write/search mode")
 
 
+def validate_manifest_v2(value: Any) -> dict[str, Any]:
+    """Validate a historical schema-2 manifest only."""
+    manifest = validate_manifest(value)
+    if manifest["schema_version"] != PREVIOUS_MANIFEST_SCHEMA_VERSION:
+        _fail("manifest: expected schema version 2")
+    return manifest
+
+
 def validate_manifest(value: Any) -> dict[str, Any]:
+    """Validate a schema-2 or schema-3 manifest by its own declared version."""
     manifest = _object(value, {
         "schema_version", "deployment_id", "deployment_utc", "operations",
         "components", "database", "api_identity",
     }, "manifest")
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != MANIFEST_SCHEMA_VERSION:
+    version = manifest["schema_version"]
+    if type(version) is not int or version not in PROVENANCE_KINDS:
         _fail("manifest: unsupported schema version")
     deployment_id = _matches(manifest["deployment_id"], _ID, "manifest.deployment_id")
     try:
@@ -438,7 +472,20 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         if not isinstance(provenance, dict):
             _fail(f"{where}.provenance: expected object")
         kind = provenance.get("kind")
-        if kind == "source-image":
+        if kind not in PROVENANCE_KINDS[version]:
+            _fail(f"{where}: unsupported provenance")
+        if kind == "completed-artifact":
+            _object(provenance, {
+                "kind", "bundle_sha256", "acquisition_sha256", "authority", "native_image_id",
+            }, f"{where}.provenance")
+            _sha(provenance["bundle_sha256"], f"{where}.provenance.bundle_sha256")
+            _sha(provenance["acquisition_sha256"], f"{where}.provenance.acquisition_sha256")
+            _image_id(provenance["native_image_id"], f"{where}.provenance.native_image_id")
+            if provenance["authority"] not in ("official-ci", "local-source"):
+                _fail(f"{where}: invalid completed-artifact authority")
+            if component["repository"] != ARTIFACT_REPOSITORIES[name]:
+                _fail(f"{where}: completed-artifact repository differs from component")
+        elif kind == "source-image":
             _object(provenance, {
                 "kind", "build_recipe_sha256", "build_receipt_sha256", "wheel_identity",
             }, f"{where}.provenance")
@@ -447,16 +494,25 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             _sha(provenance["build_recipe_sha256"], f"{where}.provenance.build_recipe_sha256")
             _sha(provenance["build_receipt_sha256"], f"{where}.provenance.build_receipt_sha256")
         elif kind == "wheel-image":
-            _object(provenance, {
-                "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
-                "core_producer_kind",
-            }, f"{where}.provenance")
+            if not isinstance(provenance, dict) or set(provenance) not in (
+                {
+                    "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
+                    "core_producer_kind",
+                },
+                {
+                    "kind", "telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256",
+                    "core_producer_kind", "build_receipt_sha256",
+                },
+            ):
+                _fail(f"{where}.provenance: unexpected or missing fields")
             if name != "telegram" or provenance["core_producer_kind"] not in (
                 "github-actions-artifact", "github-release",
             ):
                 _fail(f"{where}: invalid wheel-image provenance")
             for key in ("telegram_wheel_sha256", "core_wheel_sha256", "core_lock_sha256"):
                 _sha(provenance[key], f"{where}.provenance.{key}")
+            if "build_receipt_sha256" in provenance:
+                _sha(provenance["build_receipt_sha256"], f"{where}.provenance.build_receipt_sha256")
         elif kind == "legacy-image":
             _object(provenance, {
                 "kind", "legacy_manifest_sha256", "wheel_identity", "lock_identity",
@@ -467,6 +523,9 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         else:
             _fail(f"{where}: unsupported provenance")
         source = _identity(component["source"], f"{where}.source", claim_required=kind != "wheel-image")
+        if kind == "completed-artifact":
+            if source["verified_commit"] is None:
+                _fail(f"{where}: completed artifact requires a verified source")
         core = _object(component["core"], {
             "version", "revision_claim", "verified_commit", "verified_tree",
         }, f"{where}.core")
@@ -485,7 +544,12 @@ def validate_manifest(value: Any) -> dict[str, Any]:
                 _fail(f"{where}.image.digest: immutable digest required")
         if image["revision"] != source["revision_claim"]:
             _fail(f"{where}: image revision and source claim differ")
-        if kind == "source-image":
+        if kind == "completed-artifact" and (image["id"] != provenance["native_image_id"]
+                                             or image["digest"] != provenance["native_image_id"]):
+            # A nameless acquisition has no registry digest; the store's
+            # native ID is the only immutable reference.
+            _fail(f"{where}: image differs from the registered native image")
+        if kind == "source-image" or (kind == "completed-artifact" and name == "api"):
             if source["verified_commit"] is None or source["verified_commit"] != core["verified_commit"] \
                     or source["verified_tree"] != core["verified_tree"] \
                     or component["version"] != core["version"]:
@@ -590,21 +654,23 @@ def _directory(root: Path, parts: tuple[str, ...], *, create: bool) -> Iterator[
             os.close(fd)
 
 
-def _read_file(directory: int, name: str) -> bytes:
+def _read_file(directory: int, name: str, *, limit: int = _LIMIT) -> bytes:
+    if type(limit) is not int or not 0 <= limit <= 16 * 1024 * 1024:
+        _fail("immutable record read limit is invalid")
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222 or info.st_nlink != 1:
                 _fail("immutable record is not a singly-linked read-only regular file")
-            if info.st_size > _LIMIT:
+            if info.st_size > limit:
                 _fail("immutable record exceeds size limit")
             chunks = []
             size = 0
-            while chunk := os.read(fd, min(65536, _LIMIT + 1 - size)):
+            while chunk := os.read(fd, min(65536, limit + 1 - size)):
                 chunks.append(chunk)
                 size += len(chunk)
-                if size > _LIMIT:
+                if size > limit:
                     _fail("immutable record exceeds size limit")
             after = os.fstat(fd)
             named = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -618,34 +684,55 @@ def _read_file(directory: int, name: str) -> bytes:
 
 
 def _write_file(directory: int, name: str, raw: bytes, *, reuse: bool) -> None:
-    temporary = f".tmp-{secrets.token_hex(16)}"
+    # Archives may contain the full journal rather than a 4 MiB manifest.
+    _write_file_unnamed(directory, name, raw, reuse=reuse, limit=16 * 1024 * 1024)
+
+
+def _publish_unnamed(directory: int, name: str, raw: bytes, *, mode: int,
+                     limit: int | None = None) -> None:
+    """Publish one fully synced file without a named temporary or replacement."""
+    maximum = (16 * 1024 * 1024 if mode == 0o600 else _LIMIT) if limit is None else limit
+    if (type(name) is not str or name in ("", ".", "..") or "/" in name or "\x00" in name
+            or type(raw) is not bytes or type(mode) is not int or mode not in (0o400, 0o600)
+            or type(maximum) is not int or not 0 <= maximum <= 16 * 1024 * 1024 or len(raw) > maximum):
+        _fail("invalid unnamed publication request")
+    if not hasattr(os, "O_TMPFILE"):
+        _fail("unnamed publication is unavailable")
     fd = None
-    created = False
     try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     0o600, dir_fd=directory)
-        created = True
-        with os.fdopen(fd, "wb") as stream:
-            fd = None
-            stream.write(raw)
-            stream.flush()
-            os.fchmod(stream.fileno(), 0o400)
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        except FileExistsError:
-            if not reuse or _read_file(directory, name) != raw:
-                _fail("immutable record already exists")
-        os.unlink(temporary, dir_fd=directory)
-        created = False
+        if not stat.S_ISDIR(os.fstat(directory).st_mode):
+            _fail("unnamed publication directory is invalid")
+        fd = os.open(".", os.O_TMPFILE | os.O_WRONLY | os.O_CLOEXEC, 0o600, dir_fd=directory)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(fd, raw[offset:])
+            if written <= 0:
+                _fail("unnamed publication write did not advance")
+            offset += written
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.link(f"/proc/self/fd/{fd}", name, dst_dir_fd=directory, follow_symlinks=True)
         os.fsync(directory)
+    except FileExistsError:
+        raise
     except OSError as exc:
-        raise ManifestError(f"cannot publish immutable record: {exc.strerror}") from exc
+        raise ManifestError(f"cannot publish unnamed record: {exc.strerror}") from exc
     finally:
         if fd is not None:
             os.close(fd)
-        if created:
-            os.unlink(temporary, dir_fd=directory)
+
+
+def _write_file_unnamed(directory: int, name: str, raw: bytes, *, reuse: bool, limit: int = _LIMIT) -> None:
+    """Publish or exactly reuse a singly-linked immutable record."""
+    try:
+        _publish_unnamed(directory, name, raw, mode=0o400, limit=limit)
+    except FileExistsError:
+        if not reuse or _read_file(directory, name, limit=limit) != raw:
+            _fail("immutable record already exists")
+        try:
+            os.fsync(directory)
+        except OSError as exc:
+            raise ManifestError(f"cannot sync reused immutable record: {exc.strerror}") from exc
 
 
 def _db_stat(info: os.stat_result) -> dict[str, int]:
@@ -766,10 +853,98 @@ def _verify_snapshots(root: Path, manifest: dict[str, Any]) -> None:
             _fail("recipe snapshot does not match installed component")
 
 
+def _artifact_module() -> Any:
+    import component_artifact  # noqa: PLC0415
+    if Path(component_artifact.__file__).resolve() != Path(__file__).resolve().parent / "component_artifact.py":
+        _fail("artifact verifier is not this source's module")
+    return component_artifact
+
+
+def read_artifact_records(root: Path, bundle_sha256: str, acquisition_sha256: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read one registered acquisition receipt and its bundle copy, without writing.
+
+    The receipt is located by content digest among the root's immutable
+    registered receipts; no record is created and no lock file is opened.
+    """
+    _sha(bundle_sha256, "bundle digest")
+    _sha(acquisition_sha256, "acquisition digest")
+    artifact = _artifact_module()
+    store = Path(root) / ".deployments" / "artifacts"
+    try:
+        for part in (Path(root) / ".deployments", store, store / "acquisitions", store / "bundles"):
+            if not stat.S_ISDIR(os.lstat(part).st_mode):
+                _fail("artifact store path is not a directory")
+        names = sorted(os.listdir(store / "acquisitions"))
+    except OSError as exc:
+        raise ManifestError("registered artifact store is unavailable") from exc
+    found = []
+    try:
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            raw = artifact._read_regular(store / "acquisitions" / name, _LIMIT)
+            if hashlib.sha256(raw).hexdigest() == acquisition_sha256:
+                found.append((name, raw))
+        if len(found) != 1:
+            _fail("registered acquisition receipt is missing or duplicated")
+        name, raw = found[0]
+        receipt = artifact.validate_receipt(artifact.decode_canonical(raw))
+        if name != receipt["acquisition_id"] + ".json" or receipt["bundle_sha256"] != bundle_sha256:
+            _fail("acquisition receipt differs from its manifest binding")
+        bundle_raw = artifact._read_regular(store / "bundles" / (bundle_sha256 + ".json"), _LIMIT)
+        if hashlib.sha256(bundle_raw).hexdigest() != bundle_sha256:
+            _fail("registered bundle copy differs")
+        bundle = artifact.validate_bundle_schema(artifact.decode_canonical(bundle_raw))
+        if bundle["attempt_id"] != receipt["attempt_id"]:
+            _fail("acquisition receipt and bundle attempts differ")
+        if receipt["native_image_id"] != artifact.native_image_candidate(
+                bundle["oci"], receipt["store"]["containerd_snapshotter"]):
+            _fail("acquisition receipt image differs from the sealed bundle")
+    except artifact.ArtifactError as exc:
+        raise ManifestError("registered artifact records cannot be verified") from exc
+    return receipt, bundle
+
+
+def verify_artifact_binding(name: str, component: dict[str, Any], receipt: dict[str, Any],
+                            bundle: dict[str, Any]) -> None:
+    """Require a schema-3 component to state exactly its registered bundle's facts."""
+    provenance = component["provenance"]
+    where = f"manifest.components.{name}"
+    if (bundle["product"] != ARTIFACT_PRODUCTS[name] or bundle["repository"] != component["repository"]
+            or bundle["version"] != component["version"]
+            or bundle["build_result"]["authority"] != provenance["authority"]
+            or receipt["native_image_id"] != provenance["native_image_id"]):
+        _fail(f"{where}: completed-artifact facts differ from the registered bundle")
+    source = component["source"]
+    if (source["revision_claim"] != bundle["source"]["commit"]
+            or source["verified_commit"] != bundle["source"]["commit"]
+            or source["verified_tree"] != bundle["source"]["tree"]):
+        _fail(f"{where}: completed-artifact source differs from the registered bundle")
+    core = component["core"]
+    binding = bundle["core_binding"]
+    if core["version"] != binding["core_version"] or core["revision_claim"] != binding["core_source_commit"]:
+        _fail(f"{where}: completed-artifact Core binding differs from the registered bundle")
+    if name == "api":
+        if core["verified_commit"] != bundle["source"]["commit"] or core["verified_tree"] != bundle["source"]["tree"]:
+            _fail(f"{where}: Core bundle must bind its own source as the Core")
+    elif core["verified_commit"] is not None and core["verified_commit"] != binding["core_source_commit"]:
+        _fail(f"{where}: Telegram Core binding differs from the registered bundle")
+
+
+def _verify_artifacts(root: Path, manifest: dict[str, Any]) -> None:
+    for name, component in manifest["components"].items():
+        if component is None or component["provenance"]["kind"] != "completed-artifact":
+            continue
+        provenance = component["provenance"]
+        receipt, bundle = read_artifact_records(root, provenance["bundle_sha256"], provenance["acquisition_sha256"])
+        verify_artifact_binding(name, component, receipt, bundle)
+
+
 def write_manifest(root: Path, payload: dict[str, Any]) -> Path:
     raw = _encode(validate_manifest(payload))
     manifest = validate_manifest(_decode(raw))
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     verify_database_binding(manifest["database"])
     name = f"{manifest['deployment_id']}.json"
     with _directory(root, (".deployments", "products"), create=True) as directory:
@@ -785,6 +960,7 @@ def read_manifest(root: Path, deployment_id: str) -> dict[str, Any]:
     if manifest["deployment_id"] != deployment_id:
         _fail("manifest ID and filename differ")
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     return manifest
 
 
@@ -796,4 +972,5 @@ def manifest_sha256(root: Path, deployment_id: str) -> str:
     if manifest["deployment_id"] != deployment_id:
         _fail("manifest ID and filename differ")
     _verify_snapshots(root, manifest)
+    _verify_artifacts(root, manifest)
     return hashlib.sha256(raw).hexdigest()

@@ -290,3 +290,29 @@ def test_missing_actual_interop_or_optional_sdk_is_not_downgraded(config, tempor
     control["last_legacy_source"] = source
     with pytest.raises(ValueError, match="optional Telegram"):
         epoch.resolve(source, control)
+
+
+def test_validate_workflow_accepts_bracketed_needs(config):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    bracketed = workflow.replace("    needs: source\n    if: needs.source.outputs.source_epoch == 'legacy'",
+                                "    needs: [source]\n    if: needs.source.outputs.source_epoch == 'legacy'", 1)
+    spaced = workflow.replace("    needs: source\n    if: needs.source.outputs.source_epoch == 'legacy'",
+                             "    needs: [ source ]\n    if: needs.source.outputs.source_epoch == 'legacy'", 1)
+    epoch.validate_workflow(workflow, config)
+    epoch.validate_workflow(bracketed, config)
+    epoch.validate_workflow(spaced, config)
+
+    for invalid_needs in (
+        "    needs: test",
+        "    needs: [test]",
+        "   needs: source",
+        "      needs: source",
+        "    needs:source",
+    ):
+        invalid = workflow.replace(
+            "    needs: source\n    if: needs.source.outputs.source_epoch == 'legacy'",
+            f"{invalid_needs}\n    if: needs.source.outputs.source_epoch == 'legacy'",
+            1,
+        )
+        with pytest.raises(ValueError):
+            epoch.validate_workflow(invalid, config)
