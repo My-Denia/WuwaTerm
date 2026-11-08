@@ -22,6 +22,7 @@ from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
 )
+from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
 from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
@@ -290,44 +291,6 @@ def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> b
     ):
         return False
     return True
-
-
-# Orthodox English plural endings that take "es". A bare trailing "s" that
-# is not part of "ss" (Bus, Titus, Mephis) is deliberately NOT a trigger:
-# those singulars stay exact, so "Buses" never locks "Bus". Nouns ending in
-# consonant+o (Echo, Hero) also take "es"; vowel+o (Milo, Romeo) takes "s".
-_ES_PLURAL_LOWER_TRIGGERS = ("ss", "x", "z", "ch", "sh")
-_VOWELS_LOWER = frozenset("aeiou")
-
-
-def _plural_suffix_candidates(
-    source: str, official: tuple[str, str]
-) -> tuple[str, ...]:
-    """Bounded trailing inflections admitted for an exact English surface.
-
-    Only exact English official surfaces qualify (``source == official[1]``):
-    Chinese surfaces and lowercase/all-caps case variants stay exact. The
-    surface must end in an ASCII letter and carry no CJK character. At most
-    ONE suffix is ever returned: plain "s" for ordinary endings, "es" for
-    orthodox triggers (ss/x/z/ch/sh and consonant+o). Surfaces already
-    ending in "s" get no plain "+s" — "Boss"+s is a double-s, not a plural —
-    and no "es" unless the ending is "ss". This is a bounded heuristic, not
-    a morphological engine.
-    """
-    if source != official[1]:
-        return ()
-    if not source or not (source[-1].isascii() and source[-1].isalpha()):
-        return ()
-    if any(_is_cjk_character(char) for char in source):
-        return ()
-    lowered = source.lower()
-    if lowered.endswith("s"):
-        return ("es",) if lowered.endswith("ss") else ()
-    if lowered.endswith(_ES_PLURAL_LOWER_TRIGGERS):
-        return ("es",)
-    if lowered.endswith("o") and lowered[-2] not in _VOWELS_LOWER:
-        return ("es",)
-    return ("s",)
 
 
 def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:

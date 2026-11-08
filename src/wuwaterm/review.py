@@ -21,6 +21,7 @@ from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
 )
+from .english_plural import plural_forms
 from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
@@ -149,6 +150,18 @@ class ReviewResolutionContext:
 
 def mention_id(start: int, end: int, text: str) -> str:
     return f"{start}:{end}:{text}"
+
+
+def _span_mention_id(source: str, start: int, end: int) -> str:
+    """review-v2 mention id of the source span the report shows.
+
+    A plural mention keeps its dictionary surface for candidates, but the
+    span it was read from is the inflected word. Clients rebuild a mention id
+    from ``source_span`` before submitting a resolution, so the id must be
+    that span, never the surface: an exact span is unchanged, a plural span
+    carries the inflected word the client sees.
+    """
+    return mention_id(start, end, source[start:end])
 
 
 def text_revision(text: str) -> str:
@@ -387,9 +400,10 @@ def _automatic_term_exclusions(metadata: dict[str, str]) -> frozenset[str]:
     otherwise. Each key is read independently: a missing key is the normal
     state of a database built without it and contributes nothing; an invalid
     value is warned about and contributes nothing from that key while the
-    other key still applies. This reader never changes which mentions or
-    candidates a report contains; it only decides whether an unresolved
-    mention asserts a terminology constraint.
+    other key still applies. It decides whether an unresolved mention asserts
+    a terminology constraint, and it also keeps an excluded ordinary word out
+    of the synthesized-plural pass, because sentence locking removes excluded
+    surfaces before selecting spans; candidates are unaffected either way.
     """
     surfaces: set[str] = set()
     for key, parser in (
@@ -468,6 +482,8 @@ def _collect_mentions(
     surfaces: dict[str, list[TermEntry]],
     *,
     eligible: object = None,
+    allow_plural_inflection: bool = False,
+    excluded_sources: frozenset[str] = frozenset(),
 ) -> list[_TermSpan]:
     spans: list[_TermSpan] = []
     for order, surface in enumerate(surfaces):
@@ -484,6 +500,40 @@ def _collect_mentions(
                     _TermSpan(start=start, end=end, source=surface, order=order)
                 )
             start = source.find(surface, start + 1)
+    if allow_plural_inflection:
+        # A legitimately plural English source still mentions its dictionary
+        # term: "Type-S Restoratives" is one mention of "Type-S Restorative".
+        # The span covers the inflected word while the mention keeps the
+        # dictionary surface, so candidates and mention identity are the
+        # singular ones. An exact surface already admitted at the same bounds
+        # wins, so an independent dictionary plural entry is never shadowed
+        # by another entry's synthesized plural.
+        exact_bounds = {(span.start, span.end) for span in spans}
+        for order, surface in enumerate(surfaces):
+            if surface in excluded_sources:
+                # Sentence locking removes an excluded ordinary word before
+                # selecting spans, so "It" is never inflected to "Its"; the
+                # review must not invent that plural mention either, or the
+                # possessive spends a finding the locked text never had.
+                continue
+            entries = surfaces[surface]
+            if not any(entry.en == surface for entry in entries):
+                continue
+            for inflected in plural_forms(surface):
+                start = source.find(inflected)
+                while start != -1:
+                    end = start + len(inflected)
+                    if (
+                        (start, end) not in exact_bounds
+                        and _ascii_word_boundaries_ok(source, start, end, inflected)
+                        and (eligible is None or eligible(start, end, surface, entries))
+                    ):
+                        spans.append(
+                            _TermSpan(
+                                start=start, end=end, source=surface, order=order
+                            )
+                        )
+                    start = source.find(inflected, start + 1)
     selected: list[_TermSpan] = []
     occupied: list[tuple[int, int]] = []
     for span in sorted(
@@ -952,7 +1002,7 @@ def _judge_mention_v2(
     resolution: ReviewResolution | None,
     automatic_term_excluded: bool = False,
 ) -> ReviewFinding:
-    finding_id = mention_id(mention.start, mention.end, mention.source)
+    finding_id = _span_mention_id(source, mention.start, mention.end)
     source_span = _span_at(source, mention.start, mention.end)
 
     if resolution is not None and resolution.choice == CHOICE_NOT_A_TERM:
@@ -1011,10 +1061,27 @@ def _judge_mention_v2(
         and len(candidate.zh) == 1 and _is_cjk_character(candidate.zh)
     }
 
+    # direction == "en": the target may spell an official English form as its
+    # bounded plural ("Resonators", "Echoes", "Type-S Restoratives"), and the
+    # span then covers the whole inflected word. A variant that is itself
+    # another candidate's exact form stays exact, so an ambiguous dictionary
+    # keeps its existing exact-form verdicts.
+    plural_variants = {
+        form: (
+            tuple(variant for variant in plural_forms(form) if variant not in forms)
+            if direction == "en"
+            else ()
+        )
+        for form in forms
+    }
+
     def occurrences(text: str, form: str) -> list[tuple[int, int]]:
-        return _find_occurrences_v2(
+        found = _find_occurrences_v2(
             text, form, single_character_name=form in single_character_names
         )
+        for variant in plural_variants.get(form, ()):
+            found.extend(_find_occurrences_v2(text, variant))
+        return sorted(found)
 
     if corresponding is None:
         return ReviewFinding(
@@ -1299,6 +1366,14 @@ def _review_pair_v2(
             _v2_one_character_eligible(source, start, end, surface, entries)
             and not crosses_cjk_word_boundary(source, start, end)
         ),
+        # The English side of an en->zh review is the source, so that is where
+        # a plural English term must still be recognized. The zh->en source is
+        # Chinese and its plural gap is on the target side instead.
+        allow_plural_inflection=direction == "zh",
+        # The plural pass must skip the same ordinary words: sentence locking
+        # removes excluded surfaces before selecting spans, so a possessive
+        # "Its" is never an "It" mention.
+        excluded_sources=automatic_exclusions,
     )
     if alignments is None:
         source_sentences = _sentence_ranges_v2(source)
@@ -1331,7 +1406,7 @@ def _review_pair_v2(
 
     for mention in mentions:
         candidates = _candidates_for(surfaces[mention.source], include_id=True)
-        finding_id = mention_id(mention.start, mention.end, mention.source)
+        finding_id = _span_mention_id(source, mention.start, mention.end)
         resolution = by_id.get(finding_id)
         if resolution is not None:
             seen_resolution_ids.add(finding_id)
