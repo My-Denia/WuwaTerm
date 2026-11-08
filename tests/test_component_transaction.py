@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Any
 import uuid
 
 import pytest
@@ -2988,3 +2989,66 @@ def test_schema5_pending_native_copy_stays_pending_until_the_product_starts(tmp_
     replies.unlink()
     with pytest.raises(transaction.TransactionError, match="legacy Telegram state disappeared"):
         transaction._telegram_state_bindings(journal, [actual])
+
+
+def test_api_ready_probe_script_formats_loopback_addresses_and_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_ready executes an inline probe script that respects WUWATERM_API_BIND and WUWATERM_API_PORT."""
+    recorded_commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        recorded_commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    transaction._ready("test-container-id")
+    assert recorded_commands, "subprocess.run was not called"
+    cmd = recorded_commands[0]
+    assert cmd[:6] == ["docker", "exec", "test-container-id", "python", "-B", "-c"]
+    inline_script = cmd[6]
+
+    # Verify execution of the inline script under different environment configurations:
+    def eval_probe(env_vars: dict[str, str]) -> str:
+        requested_urls: list[str] = []
+
+        class DummyResponse:
+            status = 200
+
+        def dummy_urlopen(url: str, *a: Any, **kw: Any) -> DummyResponse:
+            requested_urls.append(url)
+            return DummyResponse()
+
+        # Run the script with the requested environment and fake urlopen
+        script_code = compile(inline_script, "<ready_probe>", "exec")
+        env_backup = {k: os.environ.get(k) for k in ("WUWATERM_API_BIND", "WUWATERM_API_PORT")}
+        try:
+            for k in ("WUWATERM_API_BIND", "WUWATERM_API_PORT"):
+                os.environ.pop(k, None)
+            os.environ.update(env_vars)
+            globs = {"__builtins__": __builtins__}
+            locs: dict[str, Any] = {}
+            with monkeypatch.context() as m:
+                import urllib.request  # noqa: PLC0415
+                m.setattr(urllib.request, "urlopen", dummy_urlopen)
+                exec(script_code, globs, locs)  # noqa: S102
+        finally:
+            for k, v in env_backup.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        assert requested_urls, f"urlopen was not called for env {env_vars}"
+        return requested_urls[0]
+
+    # 1. Default (unset) -> http://127.0.0.1:8788/readyz
+    assert eval_probe({}) == "http://127.0.0.1:8788/readyz"
+
+    # 2. IPv4 loopback with custom port -> http://127.0.0.2:9000/readyz
+    assert eval_probe({"WUWATERM_API_BIND": "127.0.0.2", "WUWATERM_API_PORT": "9000"}) == "http://127.0.0.2:9000/readyz"
+
+    # 3. IPv6 loopback without brackets -> http://[::1]:8788/readyz
+    assert eval_probe({"WUWATERM_API_BIND": "::1"}) == "http://[::1]:8788/readyz"
+
+    # 4. IPv6 loopback with brackets -> http://[::1]:8788/readyz
+    assert eval_probe({"WUWATERM_API_BIND": "[::1]"}) == "http://[::1]:8788/readyz"
+

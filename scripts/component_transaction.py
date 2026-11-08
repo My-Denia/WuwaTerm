@@ -968,8 +968,9 @@ def _container_command(method: str, container_id: str, operation: str) -> None:
 
 def _ready(container_id: str) -> None:
     # The probe reads only the local API and inherits the same lock FD9.
-    code = ("import os,urllib.request; p=int(os.getenv('WUWATERM_API_PORT') or '8788'); "
-            "r=urllib.request.urlopen('http://127.0.0.1:%d/readyz'%p,timeout=2); "
+    code = ("import os,urllib.request; b=(os.getenv('WUWATERM_API_BIND') or '127.0.0.1').strip().strip('[]'); "
+            "h=f'[{b}]' if ':' in b else b; p=int(os.getenv('WUWATERM_API_PORT') or '8788'); "
+            "r=urllib.request.urlopen(f'http://{h}:{p}/readyz',timeout=2); "
             "assert r.status==200")
     deadline = time.monotonic() + 45
     while True:
