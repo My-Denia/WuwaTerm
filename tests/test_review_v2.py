@@ -1065,7 +1065,7 @@ def test_review_v2_single_character_compound_elsewhere_is_not_an_occurrence(tmp_
 @pytest.mark.parametrize(
     ("target", "start", "end", "valid"),
     [("xEcho", 1, 5, False), ("Echox", 0, 4, False),
-     ("xEchoz", 1, 5, False), ("Echoes", 0, 4, False),
+     ("xEchoz", 1, 5, False), ("xEchoes", 1, 5, False),
      ("Echo", 0, 4, True), ("x Echo", 2, 6, True),
      ("Echo and more", 0, 4, True)],
 )
@@ -1093,3 +1093,102 @@ def test_review_v2_alignment_filters_full_word_matches_without_banning_ranges(
                             "matcher_revision": report.matcher_revision},
     )
     assert _finding_for(selected, "声骸").verdict == (VERDICT_VERIFIED if valid else VERDICT_CONFLICT)
+
+
+_PLURAL_RECORDS = (
+    TermRecord("core_term", "fixture", "resonator", "resonator", "共鸣者", "Resonator"),
+    TermRecord("item", "fixture", "echo", "echo", "声骸", "Echo"),
+    TermRecord("item", "fixture", "restorative", "restorative", "S型还原素", "Type-S Restorative"),
+)
+
+
+def _plural_service(tmp_path: Path, *extra: TermRecord) -> TermService:
+    path = tmp_path / "review-v2-plural.db"
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")),
+        )
+        insert_records(conn, (*_PLURAL_RECORDS, *extra))
+        conn.commit()
+    return TermService(path)
+
+
+def test_review_v2_english_target_accepts_bounded_plural(tmp_path):
+    # The translator spells the official English term in its correct plural, so
+    # the term is verified over the whole inflected word, multi-word ones too.
+    service = _plural_service(tmp_path)
+    report = review_pair(
+        service, "交付共鸣者、声骸与S型还原素。",
+        "Deliver Resonators, Echoes and Type-S Restoratives.", "en",
+        review_version=RULE_VERSION_V2,
+    )
+    assert {(item.source_span.text, item.verdict, item.target_span.text)
+            for item in report.findings} == {
+        ("共鸣者", VERDICT_VERIFIED, "Resonators"),
+        ("声骸", VERDICT_VERIFIED, "Echoes"),
+        ("S型还原素", VERDICT_VERIFIED, "Type-S Restoratives"),
+    }
+
+
+def test_review_v2_english_plural_source_mention_is_verified(tmp_path):
+    # The English source term is plural and the Chinese target carries the
+    # official pair; the mention spans the inflected word it was read from.
+    service = _plural_service(tmp_path)
+    source = "Collect and deliver Type-S Restoratives to progress the restoration."
+    target = "收集并交付S型还原素以推进修复。"
+    report = review_pair(service, source, target, "zh", review_version=RULE_VERSION_V2)
+    finding = _finding_for(report, "Type-S Restoratives")
+    assert finding.source_span.text == "Type-S Restoratives"
+    # The id is the span the report shows, never the dictionary surface: both
+    # clients rebuild a mention id from source_span before submitting a
+    # resolution, so a plural span must carry the inflected text in its id.
+    assert finding.id == (
+        f"{finding.source_span.start}:{finding.source_span.end}:"
+        f"{finding.source_span.text}"
+    )
+    assert finding.verdict == VERDICT_VERIFIED
+    assert finding.target_span.text == "S型还原素"
+    resolved = review_pair(
+        service, source, target, "zh",
+        review_version=RULE_VERSION_V2,
+        resolutions=({"mention_id": finding.id, "choice": "not_a_term"},),
+        resolution_context={
+            "source_revision": report.source_revision,
+            "rule_version": report.rule_version,
+            "dictionary_revision": report.dictionary.revision,
+            "matcher_revision": report.matcher_revision,
+        },
+    )
+    assert _finding_for(resolved, "Type-S Restoratives").verdict == (
+        VERDICT_NOT_EVALUATED
+    )
+
+
+def test_review_v2_exact_dictionary_plural_beats_synthesized_plural(tmp_path):
+    # An independent plural entry keeps the span; another entry's synthesized
+    # plural never shadows it.
+    service = _plural_service(
+        tmp_path,
+        TermRecord("item", "fixture", "chorus", "chorus", "群鸣", "Echoes"),
+    )
+    report = review_pair(
+        service, "New Echoes appear.", "新的群鸣出现了。", "zh",
+        review_version=RULE_VERSION_V2,
+    )
+    finding = _finding_for(report, "Echoes")
+    assert finding.source_span.text == "Echoes"
+    assert finding.candidates[0].zh == "群鸣"
+    assert not any(item.source_span.text == "Echo" for item in report.findings)
+
+
+def test_review_v1_ignores_bounded_english_plurals(tmp_path):
+    service = _plural_service(tmp_path)
+    target = review_pair(service, "交付共鸣者。", "Deliver Resonators.", "en")
+    assert _finding_for(target, "共鸣者").verdict == VERDICT_NEEDS_REVIEW
+    assert _finding_for(target, "共鸣者").target_span is None
+    source = review_pair(
+        service, "Collect Type-S Restoratives.", "收集并交付。", "zh"
+    )
+    assert source.findings == ()

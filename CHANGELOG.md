@@ -10,6 +10,28 @@ does not distribute generated game data or generated SQLite databases.
   mention is also left unlocked; exact dictionary sources, `Encore`, `ENCORE`,
   `安可`, whole-input lookup and speaker-prefix resolution retain their existing
   behavior. Capitalized ordinary uses remain ambiguous.
+- Review: `review-v2` now treats a bounded English plural as the official term
+  in both directions. A Chinese mention that the English target answers in its
+  correct plural verifies over the whole word (`共鸣者` → `Resonators`, `声骸` →
+  `Echoes`, `S型还原素` → `Type-S Restoratives`) instead of staying
+  `needs_review` with no span, and an English source that already carries the
+  plural is a mention of its singular entry (`Type-S Restoratives` keeps the
+  span it was read from and verifies `S型还原素`, and its finding id is that
+  span's `start:end:text`, so a client that rebuilds the id from `source_span`
+  can resolve it) instead of going unreported. An English surface the
+  exclusion metadata records as an ordinary word is never pluralized (`Its`
+  is not `It`), matching sentence locking, which drops those surfaces before
+  selecting spans.
+  The rule is the one sentence locking already used — at most one orthodox
+  `s`/`es` suffix, exact dictionary surfaces and independent plural entries
+  first, glued ASCII and CJK word boundaries still veto — now shared from
+  `wuwaterm.english_plural` so the two paths cannot drift; an explicit
+  alignment that covers only part of an inflected word cannot claim it, and
+  that word then counts as an occurrence elsewhere. The canonical matcher label
+  becomes `wuwaterm-cjk-matcher-v4` on the same lexicon slice, so stored opt-in
+  resolution contexts carrying the older hash become stale by the existing
+  freshness rule and need confirmation; legacy three-key contexts and
+  `review-v1` judgments are unchanged.
 
 ## 0.6.1
 

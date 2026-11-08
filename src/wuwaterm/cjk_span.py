@@ -45,6 +45,12 @@ wuwaterm-cjk-matcher-v3 adds target-side compound qualification for actual
 single-character resonator candidates. The pinned jieba slice and existing
 crosses_cjk_word_boundary policy stay unchanged; source mention and sentence
 locking admission retain their prior conservative policy.
+
+wuwaterm-cjk-matcher-v4 adds bounded English plural admission to review-v2: an
+en->zh source mention may appear as its orthodox plural, and a zh->en target
+may answer with one. The lexicon slice, the CJK boundary policy and every
+other MATCHER_REVISION input are unchanged; stored resolution contexts
+carrying an older matcher hash become stale by the existing freshness rule.
 """
 
 from __future__ import annotations
@@ -66437,7 +66443,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v3", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS)],
+        ["wuwaterm-cjk-matcher-v4", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

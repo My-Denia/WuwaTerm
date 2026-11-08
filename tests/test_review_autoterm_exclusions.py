@@ -206,6 +206,18 @@ def test_excluded_automatic_without_target_form_is_not_evaluated(excluded_servic
     assert _finding_identity(plain.findings[0]) == _finding_identity(finding)
 
 
+def test_excluded_english_word_is_not_pluralized(excluded_service):
+    # Sentence locking removes excluded ordinary words before selecting spans,
+    # so "Its" is never an "It" mention; review must not spend a finding on
+    # the possessive, while the exact ordinary word keeps its finding.
+    report = _v2(excluded_service, "Its power grows.", "它的力量增长。", "zh")
+    assert report.findings == ()
+    exact = _v2(excluded_service, "It grows.", "它生长。", "zh")
+    assert [(item.source_span.text, item.verdict) for item in exact.findings] == [
+        ("It", VERDICT_NOT_EVALUATED)
+    ]
+
+
 def test_excluded_automatic_with_present_form_is_not_evaluated(excluded_service, plain_service):
     # The official zh form 祂 sits in the mapped region, but target-form
     # presence alone must not verify an ambiguous ordinary word (D3).

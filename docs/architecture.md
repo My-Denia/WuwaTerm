@@ -302,7 +302,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `protected_text` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence` | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -317,7 +317,9 @@ Strict parsers for the builder's versioned free-text lock exclusion
 metadata live in `exclusion_metadata` — standard-library modules plus
 `constants` only. Sentence locking and the review engine's
 automatic-assessment policy both consume that same corpus evidence while
-keeping their own policies separate.
+keeping their own policies separate. The bounded English plural rule lives
+in `english_plural`, so `sentence` locking (en→zh) and `review-v2` admit the
+same inflected spellings instead of two drifting copies.
 
 **The API import allowlist.** `src/wuwaterm_api` may import exactly four
 modules from `wuwaterm`: `application`, `models`, `translation_policy`,
