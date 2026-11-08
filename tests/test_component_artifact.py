@@ -95,6 +95,13 @@ def layer(files: dict[str, bytes], *, extra: list[tuple] = (), modes: dict[str, 
         elif "entrypoint.sh" in files and "entrypoint.sh" not in effective_modes:
             effective_modes["entrypoint.sh"] = 0o755
 
+    if "entrypoint.sh" in files or "app/scripts/install_probe.py" in files or "app/.venv/bin/python" in files:
+        if "bin/sh" not in files and "usr/bin/sh" not in files and "bin/sh" not in omitted:
+            files["bin/sh"] = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
+            effective_modes.setdefault("bin/sh", 0o755)
+        elif "bin/sh" in files and "bin/sh" not in effective_modes:
+            effective_modes["bin/sh"] = 0o755
+
     entries, seen = [], set()
     for path in sorted(files):
         for item in dirs_for(path):
@@ -571,7 +578,7 @@ def test_report_copy_and_payload_tamper_is_rejected(fx: Fixture) -> None:
 def test_missing_source_package_is_rejected_at_seal_and_verify(fx: Fixture) -> None:
     source_files = fx.source_files()
     source_files["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
-    source_files["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    source_files["src/wuwaterm_api/service.py"] = b"def main(): pass\n"
     with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_api"):
         fx.seal(source_files=source_files)
     sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
@@ -590,7 +597,7 @@ def test_hatch_wheel_packages_in_pyproject_toml(tmp_path: Path) -> None:
         b'[tool.hatch.build.targets.wheel]\npackages = ["src/wuwaterm"]\n'
     )
     source_files["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
-    source_files["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    source_files["src/wuwaterm_api/service.py"] = b"def main(): pass\n"
     verified = fx.seal(source_files=source_files)
     assert verified.bundle["product"] == "wuwaterm-api"
 
@@ -601,7 +608,7 @@ def test_hatch_wheel_packages_in_pyproject_toml(tmp_path: Path) -> None:
         b'[tool.hatch.build.targets.wheel]\npackages = ["src/wuwaterm", "src/wuwaterm_api"]\n'
     )
     source_files2["src/wuwaterm_api/__init__.py"] = b"API = 1\n"
-    source_files2["src/wuwaterm_api/cli.py"] = b"def main(): pass\n"
+    source_files2["src/wuwaterm_api/service.py"] = b"def main(): pass\n"
     with pytest.raises(art.ArtifactError, match="installed package differs from the sealed source archive: wuwaterm_api"):
         fx2.seal(source_files=source_files2)
 
@@ -2040,7 +2047,7 @@ def test_app_shadowing_and_runtime_hooks_rejected(tmp_path: Path) -> None:
     modes14 = {"entrypoint.sh": 0o755}
     report14 = report_for(base14, modes14, pkgs14, ["/entrypoint.sh"], "core")
     layers14 = [layer(base14, modes=modes14), layer({art.REPORT_PATH.lstrip("/"): report14})]
-    with pytest.raises(art.ArtifactError, match="unverified Python file in /app"):
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app"):
         fx14.seal(layers14)
 
     # 15. Missing pyvenv.cfg in virtual environment when python executable exists
@@ -2114,24 +2121,26 @@ def test_entrypoint_missing_console_launcher_rejected(tmp_path: Path) -> None:
 def test_console_launcher_missing_target_module_rejected(tmp_path: Path) -> None:
     # Console launcher whose target module does not exist in installed is rejected
     fx = Fixture(tmp_path / "missing_target_module")
+    pkg = {k: v for k, v in fx.pkg.items() if k != "wuwaterm/cli.py"}
     src = fx.source_files()
+    src.pop("src/wuwaterm/cli.py", None)
     src["pyproject.toml"] = (
         b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
-        b'[project.scripts]\nwuwaterm = "wuwaterm.missing_cli:main"\n'
+        b'[project.scripts]\nwuwaterm = "wuwaterm.cli:main"\n'
     )
     info = "wuwaterm-0.7.0.dev1.dist-info/"
-    launcher_data = uv_launcher("/app/.venv/bin/python", "wuwaterm.missing_cli", "main")
+    launcher_data = uv_launcher("/app/.venv/bin/python", "wuwaterm.cli", "main")
     extra = {
-        info + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.missing_cli:main\n",
+        info + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.cli:main\n",
         "../../../bin/wuwaterm": launcher_data,
     }
-    site = dist("wuwaterm", fx.version, {**fx.pkg, **extra}, {"url": "file:///app", "dir_info": {"editable": False}})
+    site = dist("wuwaterm", fx.version, {**pkg, **extra}, {"url": "file:///app", "dir_info": {"editable": False}})
     base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT, "app/.venv/bin/wuwaterm": launcher_data}
     base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items() if not k.startswith("../")})
     modes = {"entrypoint.sh": 0o755, "app/.venv/bin/wuwaterm": 0o755}
     report = report_for(base, modes, [("wuwaterm", fx.version)], ["/entrypoint.sh"], "core")
     layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
-    with pytest.raises(art.ArtifactError, match="console script target module is not installed: wuwaterm.missing_cli"):
+    with pytest.raises(art.ArtifactError, match="console script target module is not installed: wuwaterm.cli"):
         fx.seal(layers, source_files=src)
 
 
@@ -2151,4 +2160,195 @@ def test_entrypoint_sh_invalid_shebang_rejected(tmp_path: Path) -> None:
         fx.seal(layers, source_files=src)
 
 
+def test_entrypoint_missing_bin_sh_rejected(tmp_path: Path) -> None:
+    # 1. Neither "bin" nor "bin/sh" nor "usr/bin/sh" exists in rootfs.nodes
+    # (Codex reproduction in PRRT_kwDOS82bU860_loP)
+    fx = Fixture(tmp_path / "missing_bin_sh")
+    site, pkgs = fx.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [
+        layer(base, modes=modes, omit_venv_files={"bin/sh"}),
+        layer({art.REPORT_PATH.lstrip("/"): report}, omit_venv_files={"bin/sh"}),
+    ]
+    with pytest.raises(art.ArtifactError, match="entrypoint shell /bin/sh is missing"):
+        fx.seal(layers)
+    sealed = fx.delivery / "attempts" / fx.attempt_id / "state" / "sealed.json"
+    assert not sealed.exists()
+    bundle_file = fx.delivery / "attempts" / fx.attempt_id / "bundle" / art.BUNDLE_FILE
+    with pytest.raises(art.ArtifactError, match="entrypoint shell /bin/sh is missing"):
+        art.verify_bundle(bundle_file)
 
+    # 2a. "bin/sh" exists as non-executable regular file (mode 0o644)
+    fx_ne = Fixture(tmp_path / "nonexec_bin_sh")
+    site_ne, pkgs_ne = fx_ne.installed()
+    base_ne = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+               "bin/sh": b"\x7fELF" + bytes(12)}
+    base_ne.update({SITE.lstrip("/") + "/" + k: v for k, v in site_ne.items()})
+    modes_ne = {"entrypoint.sh": 0o755, "bin/sh": 0o644}
+    report_ne = report_for(base_ne, modes_ne, pkgs_ne, ["/entrypoint.sh"], "core")
+    layers_ne = [layer(base_ne, modes=modes_ne), layer({art.REPORT_PATH.lstrip("/"): report_ne})]
+    with pytest.raises(art.ArtifactError, match="entrypoint shell /bin/sh is not executable: /bin/sh"):
+        fx_ne.seal(layers_ne)
+
+    # 2b. "bin/sh" exists as a dangling symlink (link="missing_dash")
+    fx_sym = Fixture(tmp_path / "dangling_bin_sh")
+    site_sym, pkgs_sym = fx_sym.installed()
+    base_sym = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base_sym.update({SITE.lstrip("/") + "/" + k: v for k, v in site_sym.items()})
+    modes_sym = {"entrypoint.sh": 0o755}
+    report_sym = report_for(base_sym, modes_sym, pkgs_sym, ["/entrypoint.sh"], "core")
+    extra_sym = [("bin", "dir", None, 0o755), ("bin/sh", "symlink", "missing_dash", 0o777)]
+    layers_sym = [
+        layer(base_sym, modes=modes_sym, omit_venv_files={"bin/sh"}, extra=extra_sym),
+        layer({art.REPORT_PATH.lstrip("/"): report_sym}),
+    ]
+    with pytest.raises(art.ArtifactError, match="entrypoint shell /bin/sh is missing in image: /bin/missing_dash"):
+        fx_sym.seal(layers_sym)
+
+    # 3a. /app/build/lib/wuwaterm/__init__.py tampered vs source.tar
+    fx_build = Fixture(tmp_path / "tampered_build_lib")
+    site_b, pkgs_b = fx_build.installed()
+    base_b = {
+        "app/scripts/install_probe.py": PROBE_BYTES,
+        "entrypoint.sh": ENTRYPOINT,
+        "app/build/lib/wuwaterm/__init__.py": b"VERSION = 999\n",
+    }
+    base_b.update({SITE.lstrip("/") + "/" + k: v for k, v in site_b.items()})
+    modes_b = {"entrypoint.sh": 0o755}
+    report_b = report_for(base_b, modes_b, pkgs_b, ["/entrypoint.sh"], "core")
+    layers_b = [layer(base_b, modes=modes_b), layer({art.REPORT_PATH.lstrip("/"): report_b})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app"):
+        fx_build.seal(layers_b)
+
+    # 3b. /app/scripts/build-delivery.sh tampered vs source.tar
+    fx_sh = Fixture(tmp_path / "tampered_app_script")
+    site_sh, pkgs_sh = fx_sh.installed()
+    base_sh = {
+        "app/scripts/install_probe.py": PROBE_BYTES,
+        "entrypoint.sh": ENTRYPOINT,
+        "app/scripts/build-delivery.sh": b"#!/bin/sh\necho malicious\n",
+    }
+    base_sh.update({SITE.lstrip("/") + "/" + k: v for k, v in site_sh.items()})
+    modes_sh = {"entrypoint.sh": 0o755, "app/scripts/build-delivery.sh": 0o755}
+    report_sh = report_for(base_sh, modes_sh, pkgs_sh, ["/entrypoint.sh"], "core")
+    layers_sh = [layer(base_sh, modes=modes_sh), layer({art.REPORT_PATH.lstrip("/"): report_sh})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app"):
+        fx_sh.seal(layers_sh)
+
+
+def test_wuwaterm_console_scripts_and_cli_audit(tmp_path: Path) -> None:
+    # 1. Unexpected console script entry point for wuwaterm
+    fx_ep = Fixture(tmp_path / "bad_ep")
+    src_ep = fx_ep.source_files()
+    src_ep["pyproject.toml"] = (
+        b'[project]\nname = "wuwaterm"\nversion = "0.7.0.dev1"\n'
+        b'[project.scripts]\nwuwaterm = "wuwaterm.custom:main"\n'
+    )
+    info = "wuwaterm-0.7.0.dev1.dist-info/"
+    extra_ep = {info + "entry_points.txt": b"[console_scripts]\nwuwaterm = wuwaterm.custom:main\n"}
+    site_ep = dist("wuwaterm", fx_ep.version, {**fx_ep.pkg, **extra_ep}, {"url": "file:///app", "dir_info": {"editable": False}})
+    base_ep = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base_ep.update({SITE.lstrip("/") + "/" + k: v for k, v in site_ep.items()})
+    modes_ep = {"entrypoint.sh": 0o755}
+    report_ep = report_for(base_ep, modes_ep, [("wuwaterm", fx_ep.version)], ["/entrypoint.sh"], "core")
+    layers_ep = [layer(base_ep, modes=modes_ep), layer({art.REPORT_PATH.lstrip("/"): report_ep})]
+    with pytest.raises(art.ArtifactError, match="unexpected console script entry point for wuwaterm"):
+        fx_ep.seal(layers_ep, source_files=src_ep)
+
+    # 2. Missing required cli module for entrypoint.sh (wuwaterm/cli.py in source but not installed)
+    fx_cli = Fixture(tmp_path / "missing_cli")
+    pkg_no_cli = {k: v for k, v in fx_cli.pkg.items() if k != "wuwaterm/cli.py"}
+    site_cli = dist("wuwaterm", fx_cli.version, pkg_no_cli, {"url": "file:///app", "dir_info": {"editable": False}})
+    base_cli = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT}
+    base_cli.update({SITE.lstrip("/") + "/" + k: v for k, v in site_cli.items()})
+    modes_cli = {"entrypoint.sh": 0o755}
+    report_cli = report_for(base_cli, modes_cli, [("wuwaterm", fx_cli.version)], ["/entrypoint.sh"], "core")
+    layers_cli = [layer(base_cli, modes=modes_cli), layer({art.REPORT_PATH.lstrip("/"): report_cli})]
+    with pytest.raises(art.ArtifactError, match="missing required cli module for entrypoint.sh"):
+        fx_cli.seal(layers_cli)
+
+
+def test_generated_egg_info_metadata_is_inert_but_not_importable(tmp_path: Path) -> None:
+    # Installing the distribution inside the image makes the setuptools backend
+    # write src/<name>.egg-info metadata into /app/src, where the sealed git
+    # archive has nothing. That is tolerated only for inert non-executable
+    # metadata under app/src/*.egg-info: everything else under app/scripts,
+    # app/src and app/build stays pinned to the sealed source.
+    fx = Fixture(tmp_path / "egg_info")
+    site, pkgs = fx.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+            "app/src/wuwaterm.egg-info/PKG-INFO": b"Metadata-Version: 2.1\nName: wuwaterm\n",
+            "app/src/wuwaterm.egg-info/top_level.txt": b"wuwaterm\n"}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    assert fx.seal(layers).bundle["product"] == "wuwaterm-api"
+
+    # 1. Importable file hidden in the generated metadata directory
+    fx_py = Fixture(tmp_path / "egg_info_py")
+    site_py, pkgs_py = fx_py.installed()
+    base_py = dict(base, **{"app/src/wuwaterm.egg-info/evil.py": b"# evil\n"})
+    base_py.update({SITE.lstrip("/") + "/" + k: v for k, v in site_py.items()})
+    report_py = report_for(base_py, modes, pkgs_py, ["/entrypoint.sh"], "core")
+    layers_py = [layer(base_py, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report_py})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app"):
+        fx_py.seal(layers_py)
+
+    # 2. Executable file hidden in the generated metadata directory
+    fx_exec = Fixture(tmp_path / "egg_info_exec")
+    site_exec, pkgs_exec = fx_exec.installed()
+    base_exec = dict(base, **{"app/src/wuwaterm.egg-info/run.sh": b"#!/bin/sh\ntrue\n"})
+    base_exec.update({SITE.lstrip("/") + "/" + k: v for k, v in site_exec.items()})
+    modes_exec = {"entrypoint.sh": 0o755, "app/src/wuwaterm.egg-info/run.sh": 0o755}
+    report_exec = report_for(base_exec, modes_exec, pkgs_exec, ["/entrypoint.sh"], "core")
+    layers_exec = [layer(base_exec, modes=modes_exec), layer({art.REPORT_PATH.lstrip("/"): report_exec})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app"):
+        fx_exec.seal(layers_exec)
+
+    # 3. Regular file in /app/build outside the build/lib copy of the source
+    fx_bdist = Fixture(tmp_path / "build_outside_lib")
+    site_bdist, pkgs_bdist = fx_bdist.installed()
+    base_bdist = dict(base, **{"app/build/bdist.linux-x86_64/evil.txt": b"payload\n"})
+    base_bdist.update({SITE.lstrip("/") + "/" + k: v for k, v in site_bdist.items()})
+    report_bdist = report_for(base_bdist, modes, pkgs_bdist, ["/entrypoint.sh"], "core")
+    layers_bdist = [layer(base_bdist, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report_bdist})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app/build"):
+        fx_bdist.seal(layers_bdist)
+
+    # 4. /app/build/lib file that the sealed source does not carry
+    fx_extra = Fixture(tmp_path / "build_lib_extra")
+    site_extra, pkgs_extra = fx_extra.installed()
+    base_extra = dict(base, **{"app/build/lib/wuwaterm/evil.py": b"# evil\n"})
+    base_extra.update({SITE.lstrip("/") + "/" + k: v for k, v in site_extra.items()})
+    report_extra = report_for(base_extra, modes, pkgs_extra, ["/entrypoint.sh"], "core")
+    layers_extra = [layer(base_extra, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report_extra})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app/build"):
+        fx_extra.seal(layers_extra)
+
+
+def test_build_lib_copy_must_match_sealed_source(tmp_path: Path) -> None:
+    # setuptools leaves app/build/lib/<top> as a copy of the sealed source; only
+    # an exact copy is accepted, anything else is an unverified file in /app/build
+    fx = Fixture(tmp_path / "build_lib_copy")
+    site, pkgs = fx.installed()
+    base = {"app/scripts/install_probe.py": PROBE_BYTES, "entrypoint.sh": ENTRYPOINT,
+            "app/build/lib/wuwaterm/core.py": b"def f():\n    return 1\n",
+            "app/build/lib/wuwaterm/cli.py": b"def main():\n    return 0\n"}
+    base.update({SITE.lstrip("/") + "/" + k: v for k, v in site.items()})
+    modes = {"entrypoint.sh": 0o755}
+    report = report_for(base, modes, pkgs, ["/entrypoint.sh"], "core")
+    layers = [layer(base, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report})]
+    assert fx.seal(layers).bundle["product"] == "wuwaterm-api"
+
+    fx_bad = Fixture(tmp_path / "build_lib_copy_bad")
+    site_bad, pkgs_bad = fx_bad.installed()
+    base_bad = dict(base, **{"app/build/lib/wuwaterm/core.py": b"def f():\n    return 2\n"})
+    base_bad.update({SITE.lstrip("/") + "/" + k: v for k, v in site_bad.items()})
+    report_bad = report_for(base_bad, modes, pkgs_bad, ["/entrypoint.sh"], "core")
+    layers_bad = [layer(base_bad, modes=modes), layer({art.REPORT_PATH.lstrip("/"): report_bad})]
+    with pytest.raises(art.ArtifactError, match="unverified or modified file in /app/build"):
+        fx_bad.seal(layers_bad)

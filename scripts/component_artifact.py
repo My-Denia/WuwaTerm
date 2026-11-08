@@ -1073,6 +1073,22 @@ def _skipped(path: str) -> bool:
     return path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/")
 
 
+def _generated_egg_info(path: str) -> bool:
+    """True for setuptools ``src/<name>.egg-info`` metadata in the build context.
+
+    Installing the distribution inside the runtime image (``uv sync`` over
+    ``/app``) runs the setuptools build backend, which writes ``egg-info``
+    metadata into the source tree it is building from, so ``/app/src`` carries
+    ``<name>.egg-info`` files that the sealed git archive never contains. They
+    are inert: nothing imports from a dotted ``*.egg-info`` directory, and the
+    distribution metadata the runtime resolves is the installed ``.dist-info``,
+    which is verified separately. Only that generated directory is exempt, and
+    it may never carry importable or executable content.
+    """
+    parts = path.split("/")
+    return len(parts) > 3 and parts[0] == "app" and parts[1] == "src" and parts[2].endswith(".egg-info")
+
+
 _CODE_ATTRS = (
     "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
     "co_stacksize", "co_flags", "co_code", "co_names", "co_varnames",
@@ -1504,6 +1520,23 @@ def _verify_interpreter(rootfs: RootFS, report: dict[str, Any], product: dict[st
     _fail("symlink loop in interpreter path: " + interpreter)
 
 
+def _verify_executable_in_rootfs(rootfs: RootFS, path: str, label: str) -> tuple[str, Node]:
+    current = rootfs.resolve(path)
+    for _ in range(40):
+        node = rootfs.nodes.get(current)
+        if current not in rootfs.nodes or node is None:
+            _fail(f"{label} {path} is missing in image: /{current}")
+        if node.kind == "file":
+            if node.mode & 0o111 == 0:
+                _fail(f"{label} {path} is not executable: /{current}")
+            return current, node
+        if node.kind != "symlink" or not node.link:
+            _fail(f"{label} {path} is not a regular file: /{current}")
+        target = node.link if node.link.startswith("/") else posixpath.join(posixpath.dirname("/" + current), node.link)
+        current = rootfs.resolve(target)
+    _fail(f"{label} {path} symlink loop: {path}")
+
+
 def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str, Any],
                       source: SourceArchive, wheels: dict[str, dict[str, str]],
                       wheel_hashes: dict[str, str],
@@ -1580,10 +1613,19 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         if any(path.startswith(p) for p in ("app/scripts/", "app/src/", "app/build/")):
             if path.endswith((".pyc", ".pyo")) or "__pycache__" in path.split("/"):
                 _fail("unexpected bytecode in app directory: " + path)
-        if (path.startswith("app/scripts/") or path.startswith("app/src/")) and path.endswith(".py"):
+        if (path.startswith("app/scripts/") or path.startswith("app/src/")) and node.kind == "file":
             rel = path[4:]
-            if rel not in source.files or source.files[rel][1] != node.sha256:
-                _fail("unverified Python file in /app: " + path)
+            if _generated_egg_info(path):
+                if rel.endswith(".py") or node.mode & 0o111:
+                    _fail("unverified or modified file in /app: /" + path)
+            elif rel not in source.files or source.files[rel][1] != node.sha256:
+                _fail("unverified or modified file in /app: /" + path)
+        if path.startswith("app/build/") and node.kind == "file":
+            if not path.startswith("app/build/lib/"):
+                _fail("unverified or modified file in /app/build: /" + path)
+            src_rel = "src/" + path[len("app/build/lib/"):]
+            if src_rel not in source.files or source.files[src_rel][1] != node.sha256:
+                _fail("unverified or modified file in /app/build: /" + path)
     verified_bin_scripts: set[str] = set()
     names = [p["name"] for p in report["packages"]]
     if names != sorted(set(names)):
@@ -1683,6 +1725,13 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
         if (dist_info + "/entry_points.txt") in rootfs.nodes:
             if package["name"] == "wuwaterm-telegram" and console_scripts.get("wuwaterm-telegram") != "wuwaterm_telegram.cli:main":
                 _fail("unexpected console script entry point for wuwaterm-telegram")
+            if package["name"] == "wuwaterm":
+                expected_wuwaterm_scripts = {
+                    "wuwaterm": "wuwaterm.cli:main",
+                    "wuwaterm-api": "wuwaterm_api.cli:main",
+                }
+                if not console_scripts or any(expected_wuwaterm_scripts.get(k) != v for k, v in console_scripts.items()):
+                    _fail("unexpected console script entry point for wuwaterm")
         if package["name"] in wheels:
             if wheel_versions is not None and package["version"] != wheel_versions.get(package["name"]):
                 _fail("installed distribution version differs from wheel: " + package["name"])
@@ -1779,6 +1828,13 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
                     for p in source.files
                     if p.startswith(root + "/") and "/" in p[len(root) + 1:] and not _skipped(p)
                 }
+            if package["name"] == "wuwaterm" and product.get("probe") == "core":
+                if "src/wuwaterm/cli.py" in source.files and "wuwaterm/cli.py" not in installed:
+                    _fail("missing required cli module for entrypoint.sh")
+                if ("src/wuwaterm_api/cli.py" in source.files
+                        and "wuwaterm_api" in expected_source_tops
+                        and "wuwaterm_api/cli.py" not in installed):
+                    _fail("missing required cli module for entrypoint.sh")
             setuptools = tool.get("setuptools") if isinstance(tool.get("setuptools"), dict) else {}
             st_packages = setuptools.get("packages") if isinstance(setuptools.get("packages"), dict) else {}
             st_find = st_packages.get("find") if isinstance(st_packages.get("find"), dict) else {}
@@ -1886,33 +1942,25 @@ def _verify_installed(image: OciImage, report: dict[str, Any], product: dict[str
             _fail("extra file is not executable: " + item["path"])
         if not rootfs.read(item["path"]).startswith(b"#!/bin/sh\n"):
             _fail("extra file has invalid shebang: " + item["path"])
-        if "bin/sh" in rootfs.nodes or "bin" in rootfs.nodes:
-            current = rootfs.resolve("bin/sh")
-            if current not in rootfs.nodes:
-                _fail("shell is missing in the image: bin/sh")
-            for _ in range(40):
-                node = rootfs.nodes.get(current)
-                if node is None:
-                    _fail("shell symlink target is missing in the image: bin/sh")
-                if node.kind == "file":
-                    if node.mode & 0o111 == 0:
-                        _fail("shell in the image is not executable: bin/sh")
-                    break
-                if node.kind != "symlink" or not node.link:
-                    _fail("shell in the image is not a regular file: bin/sh")
-                target = node.link if node.link.startswith("/") else posixpath.join(posixpath.dirname("/" + current), node.link)
-                current = rootfs.resolve(target)
-            else:
-                _fail("symlink loop in shell path: bin/sh")
+        _verify_executable_in_rootfs(rootfs, "/bin/sh", "entrypoint shell")
     entrypoint = (image.config.get("config") or {}).get("Entrypoint")
     if isinstance(entrypoint, list) and entrypoint and isinstance(entrypoint[0], str):
         if entrypoint[0].startswith("/"):
-            try:
-                _, ep_node = rootfs.regular(entrypoint[0])
-            except ArtifactError:
-                _fail("image Entrypoint is missing or not executable: " + entrypoint[0])
-            if ep_node.mode & 0o111 == 0:
-                _fail("image Entrypoint is missing or not executable: " + entrypoint[0])
+            ep_target, _ = _verify_executable_in_rootfs(rootfs, entrypoint[0], "image Entrypoint")
+            ep_raw = rootfs.read(ep_target)
+            if ep_raw.startswith(b"#!"):
+                first_line = ep_raw.split(b"\n", 1)[0]
+                shebang_body = first_line[2:].strip()
+                tokens = shebang_body.split()
+                if not tokens:
+                    _fail("image Entrypoint shebang interpreter is missing: " + entrypoint[0])
+                try:
+                    interp = tokens[0].decode("utf-8")
+                except UnicodeDecodeError:
+                    _fail("image Entrypoint shebang interpreter is not valid utf-8: " + entrypoint[0])
+                if not interp.startswith("/") or posixpath.normpath(interp) != interp:
+                    _fail("image Entrypoint shebang interpreter must be a normalized absolute path: " + interp)
+                _verify_executable_in_rootfs(rootfs, interp, "image Entrypoint shebang interpreter")
         else:
             ep_script = posixpath.normpath(posixpath.join(posixpath.dirname(report["interpreter"]), entrypoint[0]))
             if ep_script not in verified_bin_scripts:
