@@ -64,46 +64,55 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "2ebb32594c6ed61c0de6827768de3b34c297e7d6",
-        "tree": "d3a42a7e1ac60227990cfd2addf408406e0c2189",
+        "commit": "c1d6843ed4707ac7844294c0e912a33075f00cd2",
+        "tree": "68af3a6c6da73ffb9a344e07ecccd02f652606c5",
         "status": "merged"
       },
-      "source_version": "0.7.0",
-      "pending_source": {
-        "version": "0.7.1",
-        "status": "unreleased",
-        "includes": [
-          "4a7e0048a909f4795be0fdbe086c2fe3cfc29ef2"
-        ],
-        "note": "The source after v0.7.0 installs the published WuwaTerm-Web v0.1.0 package (4a7e0048) and adds the installer adoption-state fix, the state-web backup and migration steps, and the review-v2 single-character source admission aligned with the translator's reference set. No v0.7.1 tag, assets or release exist yet; source_version stays 0.7.0 because that is what the recorded main commit declares."
-      },
+      "source_version": "0.7.1",
       "release": {
+        "version": "0.7.1",
+        "tag": "v0.7.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.1",
+        "published_at": "2026-11-09T07:39:36Z",
+        "source_commit": "c1d6843ed4707ac7844294c0e912a33075f00cd2",
+        "source_tree": "68af3a6c6da73ffb9a344e07ecccd02f652606c5",
+        "assets": [
+          "wuwaterm-0.7.1-py3-none-any.whl",
+          "wuwaterm-0.7.1.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.7.1-py3-none-any.whl": "4f7307a1e22e2bea8d44481dd6d9a2f26173ca3d936c649e3e9c5bf5c4c887f2",
+          "wuwaterm-0.7.1.tar.gz": "f196815351d8e9cb988a2a5caa7517d8493b13a76d3d7dd5857acb688fe865c2",
+          "release-manifest.json": "0b41c04d1908c90988981a7e89d2feec12384bb76d765656e54a235412cbc392",
+          "SHA256SUMS": "2fa065c6c1a6a77a9011a4cc60fb6ddb76a19ca3bc2dc1ed0fca36ab5c41a0c2"
+        },
+        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision. It names the images by sha-c1d6843 tag while the release images are also published under v0.7.1, which is the tag deploy/setup.sh pulls.",
+        "note": "v0.7.1 installs the published WuwaTerm-Web v0.1.0 package (4a7e0048), fixes the installer adoption-state reading, adds the state-web backup and migration steps and the review-v2 single-character source admission, and mounts the Web database outside the read-only bundle so Docker does not have to create a nested mountpoint. v0.7.0 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.7.0",
         "tag": "v0.7.0",
-        "status": "released",
         "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.0",
         "published_at": "2026-11-08T22:31:40Z",
         "source_commit": "2ebb32594c6ed61c0de6827768de3b34c297e7d6",
         "source_tree": "d3a42a7e1ac60227990cfd2addf408406e0c2189",
-        "assets": [
-          "wuwaterm-0.7.0-py3-none-any.whl",
-          "wuwaterm-0.7.0.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
         "asset_sha256": {
           "wuwaterm-0.7.0-py3-none-any.whl": "721b825e9d87c433ff4e72385f234a11feaed02b0903d6dd3740c4459ccef171",
           "wuwaterm-0.7.0.tar.gz": "9ee7b5db4186dbda613d0bace9b8eaf580fb1e3ee687a186f5946df4785a5ff0",
           "release-manifest.json": "5d8521cd9c4d796d73cbd5c6549adfaf7ee4d9166d77f5e40c077e0344f4e419",
           "SHA256SUMS": "25af6a5e200c49d12a8f1c63412895a1bc8f999164955ddacdfa6419e1c13802"
-        }
+        },
+        "note": "Kept as history after v0.7.1; the release and its assets are still published. The Telegram product still pins this Core wheel."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
         "base_commit": "dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39",
         "version": "0.7.0",
         "state": "merged_and_released",
-        "note": "The 0.7.0 source adds contextual term references and deploy/setup.sh. It was merged as 2ebb3259 and published as v0.7.0; the candidate wheel below belongs to an earlier candidate checkout and is not this source. Kept as history after the release."
+        "note": "The 0.7.0 source adds contextual term references and deploy/setup.sh. It was merged as 2ebb3259 and published as v0.7.0; the candidate wheel below belongs to an earlier candidate checkout and is not that source. Kept as history after the release."
       },
       "candidate_wheel": {
         "version": "0.7.0.dev1",
@@ -118,8 +127,8 @@
       "adoption": "unknown",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/2ebb32594c6ed61c0de6827768de3b34c297e7d6/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/2ebb32594c6ed61c0de6827768de3b34c297e7d6/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/c1d6843ed4707ac7844294c0e912a33075f00cd2/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/c1d6843ed4707ac7844294c0e912a33075f00cd2/docs/data-refresh.md"
       ]
     },
     {

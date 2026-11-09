@@ -71,9 +71,10 @@ does not distribute generated game data or generated SQLite databases.
   carries an `心 -> Hsin` hint. The `matcher_revision` value changes, which is
   what makes a stored resolution context stale rather than silently reused.
 - Source version is `0.7.1`; `uv.lock` and the OpenAPI snapshot are regenerated
-  with it, and `contracts/products.json` / `docs/products.md` record `0.7.1` as
-  an unreleased source version. `v0.7.0` remains the published Core release and
-  is still recorded as such.
+  with it. `v0.7.0` was the published Core release while this source was being
+  written; `v0.7.1` was published from commit `c1d6843`, and
+  `contracts/products.json` / `docs/products.md` record that release with its
+  asset digests.
 - The Web workbench remains a separately released product. This release ships
   the installer and verification path for its published `v0.1.0` package, not a
   Web package.
