@@ -29,6 +29,7 @@ case "$*" in
   "inspect -f {{.State.Status}} wuwaterm-bot") printf '%s\\n' "${STUB_BOT_STATE:-running}" ;;
   "inspect -f {{.State.Status}} wuwaterm-web") printf '%s\\n' "${STUB_WEB_STATE:-running}" ;;
   "inspect -f {{.State.Status}} wuwaterm-api") printf '%s\\n' "running" ;;
+  *"com.docker.compose.project"*) printf '%s\\n' "${STUB_COMPOSE_PROJECT-wuwaterm}" ;;
 esac
 exit 0
 """
@@ -531,3 +532,98 @@ def test_web_origin_must_be_an_origin(install_root):
         assert "--web-origin" in result.stderr
 
     assert not (install_root / "state-web" / "web.env").exists()
+
+
+# deploy/product-update.sh creates .deployments/ and its lock file BEFORE the
+# adopt transaction runs, so an existing directory proves nothing about
+# adoption. These stubs reproduce both outcomes: one records the deployment
+# pointers together with the manifest they name, the other refuses with nothing
+# but an empty directory left behind.
+ADOPT_RECORDED = """#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+deployment_id=20260101T000000Z-0123456789abcdef0123456789abcdef
+( umask 077
+  mkdir -p "$root/.deployments/products"
+  printf '{"deployment_id": "%s"}\\n' "$deployment_id" \
+    > "$root/.deployments/products/$deployment_id.json"
+  printf '%s\\n' "0123456789abcdef0123456789abcdef01234567" > "$root/.deploy_commit"
+  printf '%s\\n' "$deployment_id" > "$root/.deploy_current"
+)
+printf '%s\\n' "$deployment_id"
+"""
+
+ADOPT_REFUSED = """#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+( umask 077; mkdir -p "$root/.deployments"; : >> "$root/.deployments/.deployment.lock" )
+printf '%s\\n' "adopt: no legacy .deploy_commit to record" >&2
+exit 1
+"""
+
+COMPOSE_STUB = """#!/bin/sh
+exit 0
+"""
+
+
+def install_adopt_stub(root: pathlib.Path, script: str) -> None:
+    """Give the checkout a product-update.sh and the verified Compose binary it wants."""
+    target = root / "deploy" / "product-update.sh"
+    target.write_text(script, encoding="utf-8")
+    target.chmod(0o755)
+    compose = root / "bin" / "docker-compose"
+    compose.write_text(COMPOSE_STUB, encoding="utf-8")
+    compose.chmod(0o755)
+    (root / "bin" / "docker-compose.sha256").write_text(
+        f"{'0' * 64}  docker-compose\n", encoding="utf-8"
+    )
+
+
+def test_status_reads_the_deployment_pointer_not_the_directory(install_root):
+    write_env(install_root)
+    (install_root / ".deployments").mkdir()
+
+    result = run_setup(install_root, "--status")
+
+    assert result.returncode == 0
+    assert "updates:      not adopted" in result.stdout
+
+
+def test_failed_adoption_is_reported_and_retried_instead_of_called_adopted(install_root):
+    write_env(install_root)
+    install_adopt_stub(install_root, ADOPT_REFUSED)
+
+    first = run_setup(install_root)
+
+    assert first.returncode == 0, first.stderr
+    assert "setup: adoption failed" in first.stderr
+    assert "updates:      not adopted" in first.stdout
+    assert "updates:      adopted (" not in first.stdout
+    # The failed product-update.sh adopt left its directory and lock behind.
+    assert (install_root / ".deployments").is_dir()
+    assert not (install_root / ".deploy_current").exists()
+
+    second = run_setup(install_root)
+
+    assert second.returncode == 0, second.stderr
+    assert "already adopted" not in second.stdout
+    assert "setup: adoption failed" in second.stderr
+    assert "updates:      not adopted" in second.stdout
+
+
+def test_recorded_adoption_is_reported_and_not_repeated(install_root):
+    write_env(install_root)
+    install_adopt_stub(install_root, ADOPT_RECORDED)
+
+    first = run_setup(install_root)
+
+    assert first.returncode == 0, first.stderr
+    assert "setup: adopted the installed topology" in first.stdout
+    assert "updates:      adopted (deploy/product-update.sh)" in first.stdout
+
+    second = run_setup(install_root)
+
+    assert second.returncode == 0, second.stderr
+    assert "deployment metadata already adopted" in second.stdout
+    assert "adoption failed" not in second.stderr
+    assert "updates:      adopted (deploy/product-update.sh)" in second.stdout

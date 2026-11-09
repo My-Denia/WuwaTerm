@@ -62,6 +62,15 @@ The Compose file has two image roles across three services:
 The runtime image refuses every command except `bot`, `api` and `device`
 (exit 64 otherwise), and still ships without the data-build toolchain.
 
+This Compose file does not know about `state-web/`. A Web workbench added by
+`deploy/setup.sh --with-web` runs as its own container with its own state under
+`state-web/`: `web.env` (origin, URL prefix, `X-WuwaTerm-Edge` secret),
+`device.token` (its Core device credential), `web.port`, and the admission pool
+at `state-web/data/pool.sqlite3`. Those four paths are part of the host's
+persistent state and have to travel with `.env`, `state/` and `state-api/` when
+a deployment moves; the backup, restore and cross-host steps are in
+[Backup And Restore](self-hosting.md#backup-and-restore).
+
 Prepare and verify a candidate without changing the serving database:
 
 ```bash
@@ -744,6 +753,13 @@ provider is reliable or establish the cause of an earlier LLM failure.
 Older deployments stored `chat_settings.json` and `channel_replies.json` in
 `data/` beside `terms.db`. The current runtime keeps `terms.db` read-only under
 `data/` and writes runtime state under `state/`.
+
+A host's state is therefore spread over `.env`, `state/`, `state-api/` and —
+only where `deploy/setup.sh --with-web` installed a workbench — `state-web/`.
+`state-web/data/pool.sqlite3` is a SQLite database written by the Web process,
+so it needs the same stop-or-online-backup treatment as `state-api/devices.db`.
+The backup, restore and cross-host migration procedure that covers all four is
+in [Backup And Restore](self-hosting.md#backup-and-restore).
 
 For a normal live upgrade, run `deploy/vps-update.sh` from the deploy root:
 

@@ -589,10 +589,30 @@ enable_web() {
     printf 'setup: Web workbench is running at http://127.0.0.1:%s%s/ behind your authenticated proxy.\n' "$web_port" "$web_prefix"
 }
 
+is_adopted() {
+    # Adopted means a transaction can actually be named: the pointer holds a
+    # deployment id and the manifest that id refers to is on disk. The
+    # .deployments DIRECTORY says nothing — deploy/product-update.sh creates it
+    # together with its lock file BEFORE adopt runs, so a first install with no
+    # legacy .deploy_commit is left with an empty directory when adoption fails.
+    # Reading the directory as "adopted" reported updates as adopted on a
+    # clean install and skipped the retry that would have adopted it.
+    [ -s "$code_root/.deploy_current" ] || return 1
+    [ -s "$code_root/.deploy_commit" ] || return 1
+    deployment_id=$(cat "$code_root/.deploy_current" 2>/dev/null) || return 1
+    case "$deployment_id" in
+        ''|*[!0-9A-Za-z-]*) return 1 ;;
+    esac
+    # A product deployment writes .deployments/products/<id>.json; a
+    # runtime-only deployment updates the component journal in place.
+    [ -s "$code_root/.deployments/products/$deployment_id.json" ] \
+        || [ -s "$code_root/.deployments/.component-runtime-transaction.json" ]
+}
+
 maybe_adopt() {
     [ "$do_adopt" = 1 ] || return 0
     [ -f "$code_root/deploy/product-update.sh" ] || return 0
-    if [ -d "$code_root/.deployments" ]; then
+    if is_adopted; then
         printf 'setup: deployment metadata already adopted.\n'
         return 0
     fi
@@ -704,7 +724,7 @@ print(
     else
         printf 'web:          not configured\n'
     fi
-    if [ -d "$code_root/.deployments" ]; then
+    if is_adopted; then
         printf 'updates:      adopted (deploy/product-update.sh)\n'
     else
         printf 'updates:      not adopted\n'

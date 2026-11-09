@@ -93,7 +93,7 @@ lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
-[WuwaTerm-Web v0.1.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.0)
+[WuwaTerm-Web v0.1.1](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1)
 package, verifies it against the release checksums, and needs the HTTPS origin
 your proxy serves (`--web-origin`).
 

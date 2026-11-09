@@ -15,7 +15,12 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .cjk_span import (MATCHER_REVISION, crosses_cjk_word_boundary, single_character_compound_at)
+from .cjk_span import (
+    MATCHER_REVISION,
+    crosses_cjk_word_boundary,
+    single_character_compound_at,
+    single_character_name_mention_at,
+)
 from .constants import (
     CATEGORY_ORDER,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
@@ -432,24 +437,6 @@ def _is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
 
 
-def _single_character_name_context_ok(text: str, start: int, end: int) -> bool:
-    """Admit bounded Chinese name mentions, avoiding compounds like 香椿/椿树.
-
-    Verbatim copy of sentence._single_character_name_context_ok. Only
-    one-character resonators use it. Unlisted contexts (for example 欢迎椿)
-    stay ineligible. This function does not decide multi-character spans.
-    """
-    if start and _is_cjk_character(text[start - 1]):
-        if text[start - 1] not in "和与让给由是用有":
-            return False
-    return (
-        end == len(text)
-        or not _is_cjk_character(text[end])
-        or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
-                            "加入", "离开", "登场", "使用", "说"), end)
-    )
-
-
 def _v2_one_character_eligible(
     text: str,
     start: int,
@@ -457,12 +444,22 @@ def _v2_one_character_eligible(
     surface: str,
     entries: Sequence[TermEntry],
 ) -> bool:
-    """Match sentence locking: ordinary one-character surfaces are not terms.
+    """Qualify a one-character source mention the way the translator referenced it.
 
     The winning entry is the lowest CATEGORY_ORDER record for this surface,
     which is the record entries() yields first. A one-character span stays
-    only when that record is the surface's own Chinese resonator name and
-    the surrounding characters look like a name mention.
+    only when that record is the surface's own Chinese resonator name and the
+    character is a name mention — the same question sentence.py asks before it
+    hands the character to the model as a term reference. So a name the
+    translator was told about is not silently unreviewed: 欢迎椿 and 快找椿 are
+    references and are reviewed, while the tree 椿 in 香椿拌豆腐 is neither.
+
+    The narrow sentence-lock whitelist is deliberately not reused here. It
+    admitted 给椿 and dropped 欢迎椿, which is the gap this replaces: a model
+    that mistranslated the referenced name got no finding at all. It does
+    survive for the everyday standalone character 心 through
+    single_character_name_mention_at, because widening it there would make
+    心很重要 and 她的心很痛 findings about the resonator Hsin.
     """
     if len(surface) != 1:
         return True
@@ -473,7 +470,7 @@ def _v2_one_character_eligible(
         surface == winner.zh
         and winner.category == "resonator"
         and _is_cjk_character(surface)
-        and _single_character_name_context_ok(text, start, end)
+        and single_character_name_mention_at(text, start, end)
     )
 
 

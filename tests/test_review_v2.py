@@ -671,7 +671,11 @@ def test_review_v2_one_character_mentions_follow_sentence_locking(tmp_path):
     assert _v2_surfaces(service, "角色提到香椿和声骸。") == {"声骸"}
     assert _v2_surfaces(service, "香椿") == set()
     assert _v2_surfaces(service, "椿树") == set()
-    assert _v2_surfaces(service, "欢迎椿") == set()
+    # A single-character name is a mention unless an ordinary word covers it:
+    # these are the same contexts sentence.py hands the model as references.
+    assert _v2_surfaces(service, "欢迎椿") == {"椿"}
+    assert _v2_surfaces(service, "快找椿") == {"椿"}
+    assert _v2_surfaces(service, "给椿。") == {"椿"}
     assert _v2_surfaces(service, "A joins the party.") == set()
 
 
@@ -1192,3 +1196,94 @@ def test_review_v1_ignores_bounded_english_plurals(tmp_path):
         service, "Collect Type-S Restoratives.", "收集并交付。", "zh"
     )
     assert source.findings == ()
+
+
+def test_review_v2_single_character_compounds_are_not_source_mentions(tmp_path):
+    # The alignment that makes 欢迎椿 a mention must not turn every occurrence of
+    # the character into one: an ordinary word covering it still wins, including
+    # the plant names the jieba frequency slice leaves out.
+    service = _one_character_service(tmp_path)
+    for source in (
+        "香椿拌豆腐。",
+        "院子里的臭椿长高了。",
+        "老椿树发芽了。",
+        "春椿茶庄开业了。",
+        "椿芽很香。",
+        "椿木很硬。",
+        "椿皮可以入药。",
+    ):
+        assert _v2_surfaces(service, source) == set(), source
+
+
+def test_review_v2_everyday_heart_is_not_a_resonator_finding(tmp_path):
+    # 心 is a 3.7 resonator (Hsin) and the ordinary word for heart, mind or
+    # core, so widening one-character admission must not turn everyday prose
+    # into term constraints. These sentences name nothing, so review reports
+    # nothing at all.
+    service = _one_character_service(tmp_path)
+    for source in ("心很重要。", "她的心很痛。", "和心一起。"):
+        report = review_pair(
+            service, source, "placeholder", "en", review_version=RULE_VERSION_V2
+        )
+        assert report.findings == (), source
+    # 心情 is an ordinary compound and 心里 is one too; only 今汐 is a mention.
+    assert _v2_surfaces(service, "心里想着今汐。") == {"今汐"}
+    assert _v2_surfaces(service, "心情很好。") == set()
+
+
+def test_review_v2_bounded_heart_name_is_still_reviewed(tmp_path):
+    # The narrow context rule is a context test, not a ban on the character: a
+    # bounded mention of Hsin is still a term constraint with both verdicts.
+    service = _one_character_service(tmp_path)
+    missing = _finding_for(
+        review_pair(
+            service, "心加入队伍。", "A joins the party.", "en",
+            review_version=RULE_VERSION_V2,
+        ),
+        "心",
+    )
+    assert missing.verdict == VERDICT_NEEDS_REVIEW
+    assert missing.target_span is None
+
+    found = _finding_for(
+        review_pair(
+            service, "心加入队伍。", "Hsin joins the party.", "en",
+            review_version=RULE_VERSION_V2,
+        ),
+        "心",
+    )
+    assert found.verdict == VERDICT_VERIFIED
+    assert found.target_span.text == "Hsin"
+
+
+@pytest.mark.parametrize(
+    ("source", "translated", "mistranslated"),
+    [
+        ("欢迎椿来到黑海岸。", "Welcome Camellya to the Black Shores.",
+         "Welcome Chun to the Black Shores."),
+        ("快找椿商量对策。", "Find Camellya quickly to discuss the plan.",
+         "Find Chun quickly to discuss the plan."),
+        ("给椿。", "Give it to Camellya.", "Give it to Chun."),
+    ],
+)
+def test_review_v2_single_character_name_mentions_are_reviewed(
+    tmp_path, source, translated, mistranslated
+):
+    # These are the contexts sentence.py already referenced for the model, while
+    # review-v2's narrower whitelist dropped them: a mistranslation produced no
+    # finding at all. Both verdicts are asserted so the fix cannot pass by
+    # flagging everything.
+    service = _one_character_service(tmp_path)
+    missing = _finding_for(
+        review_pair(service, source, mistranslated, "en", review_version=RULE_VERSION_V2),
+        "椿",
+    )
+    assert missing.verdict == VERDICT_NEEDS_REVIEW
+    assert missing.target_span is None
+
+    found = _finding_for(
+        review_pair(service, source, translated, "en", review_version=RULE_VERSION_V2),
+        "椿",
+    )
+    assert found.verdict == VERDICT_VERIFIED
+    assert found.target_span.text == "Camellya"

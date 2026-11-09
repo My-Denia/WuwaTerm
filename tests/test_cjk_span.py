@@ -16,9 +16,11 @@ from wuwaterm.cjk_span import (
     LEXICON_FILTER,
     MATCHER_REVISION,
     MAX_WORD_LEN,
+    _EVERYDAY_STANDALONE_CHARS,
     _WORDS,
     _SINGLE_NAME_COMPOUNDS,
     single_character_compound_at,
+    single_character_name_mention_at,
     crosses_cjk_word_boundary,
 )
 from wuwaterm.lookup import TermService
@@ -74,7 +76,7 @@ def test_lexicon_is_the_pinned_jieba_slice():
     for word in REQUIRED_WORDS:
         assert word in _WORDS
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v4", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS)],
+        ["wuwaterm-cjk-matcher-v5", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -158,7 +160,9 @@ def test_derived_lexicon_retains_full_upstream_mit_notice():
 @pytest.mark.parametrize(
     ("text", "name", "compound"),
     [("香椿炒蛋。", "椿", True), ("椿树很好看。", "椿", True),
-     ("这是一棵臭椿。", "椿", True),
+     ("这是一棵臭椿。", "椿", True), ("椿芽很香。", "椿", True),
+     ("春椿茶庄开业了。", "椿", True), ("椿木很硬。", "椿", True),
+     ("椿皮可以入药。", "椿", True),
      ("与椿组队。", "椿", False), ("椿加入队伍。", "椿", False),
      ("心情不错。", "心", True), ("与心组队。", "心", False)],
 )
@@ -167,3 +171,35 @@ def test_target_single_character_compound_qualification(text, name, compound):
     assert single_character_compound_at(text, start, start + 1) is compound
     # The new helper is NOT a change to source/sentence CJK admission.
     assert crosses_cjk_word_boundary(text, start, start + 1) is False
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "mention"),
+    [
+        # A one-character resonator name counts unless an ordinary word
+        # covers it, which is what review-v2 source admission now asks too.
+        ("欢迎椿来到黑海岸。", "椿", True),
+        ("快找椿商量对策。", "椿", True),
+        ("给椿。", "椿", True),
+        ("香椿拌豆腐。", "椿", False),
+        ("院子里的臭椿长高了。", "椿", False),
+        ("老椿树发芽了。", "椿", False),
+        ("春椿茶庄开业了。", "椿", False),
+        ("椿芽很香。", "椿", False),
+        ("椿木很硬。", "椿", False),
+        ("椿皮可以入药。", "椿", False),
+        # 心 is a resonator (Hsin) and the ordinary word for heart, so it
+        # keeps the narrow name context: 心很重要 is not a name mention.
+        ("心很重要。", "心", False),
+        ("她的心很痛。", "心", False),
+        ("和心一起。", "心", False),
+        ("心里想着今汐。", "心", False),
+        ("心，你回来了。", "心", True),
+        ("心加入队伍。", "心", True),
+        ("和心加入队伍。", "心", True),
+        ("心", "心", True),
+    ],
+)
+def test_single_character_name_mention_qualification(text, name, mention):
+    start = text.index(name)
+    assert single_character_name_mention_at(text, start, start + 1) is mention

@@ -69,6 +69,14 @@
         "status": "merged"
       },
       "source_version": "0.7.0",
+      "pending_source": {
+        "version": "0.7.1",
+        "status": "unreleased",
+        "includes": [
+          "4a7e0048a909f4795be0fdbe086c2fe3cfc29ef2"
+        ],
+        "note": "The source after v0.7.0 installs the published WuwaTerm-Web v0.1.0 package (4a7e0048) and adds the installer adoption-state fix, the state-web backup and migration steps, and the review-v2 single-character source admission aligned with the translator's reference set. No v0.7.1 tag, assets or release exist yet; source_version stays 0.7.0 because that is what the recorded main commit declares."
+      },
       "release": {
         "version": "0.7.0",
         "tag": "v0.7.0",
@@ -214,41 +222,59 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
-        "tree": "72e0245bbdfd7b66172ab28c4765f244d91ec473",
+        "commit": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
+        "tree": "b0a752656dd0cb2234ba970db4b16ed95a6e8169",
         "status": "merged"
       },
-      "source_version": "0.1.0",
+      "source_version": "0.1.1",
       "release": {
-        "version": "0.1.0",
-        "tag": "v0.1.0",
+        "version": "0.1.1",
+        "tag": "v0.1.1",
         "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.0",
-        "published_at": "2026-11-08T22:50:52Z",
-        "source_commit": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
-        "source_tree": "72e0245bbdfd7b66172ab28c4765f244d91ec473",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1",
+        "published_at": "2026-11-09T07:05:49Z",
+        "source_commit": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
+        "source_tree": "b0a752656dd0cb2234ba970db4b16ed95a6e8169",
         "builds": {
           "root": {
             "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz",
+            "archive": "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz",
             "entry": "bundle/start.mjs",
             "base_path": ""
           },
           "prefix": {
             "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.1.0-linux-x64-prefix-71708eb255bc.tar.gz",
+            "archive": "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz",
             "entry": "bundle/start.mjs",
             "base_path": "/private"
           }
         },
         "assets": [
-          "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz",
+          "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz",
           "manifest-root.json",
           "SHA256SUMS-root",
-          "wuwaterm-web-v0.1.0-linux-x64-prefix-71708eb255bc.tar.gz",
+          "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz",
           "manifest-prefix.json",
           "SHA256SUMS-prefix"
         ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz": "9f88dd717e6bd13ff6e9edb2ff4b49a7c8bab27fa44bff4958cc24f558bef043",
+          "manifest-root.json": "17f10574a277bd01cdd84d914c433c9952cf4d083aaf33b4c65f08d064dbb8ba",
+          "SHA256SUMS-root": "3f7d6d4b487f826c5637195eb283792370e2957729a4c8d5c6252764172d861a",
+          "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz": "32b52a3a751b192a3d4a1536e50f4a4f9dc3ba83153245c6f497b59da3bc8070",
+          "manifest-prefix.json": "5aff6270c25b773c7962f7d802e2d52fdd3afdbb19e286b7ade407d99c5d39ab",
+          "SHA256SUMS-prefix": "5ece536650c46970e2561473eb44687b6d5a3681cdb8cc9ae57d492a4cd5fc35"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
+        "note": "v0.1.1 supersedes v0.1.0; the earlier release and its recorded assets remain published under previous_release."
+      },
+      "previous_release": {
+        "version": "0.1.0",
+        "tag": "v0.1.0",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.0",
+        "published_at": "2026-11-08T22:50:52Z",
+        "source_commit": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
+        "source_tree": "72e0245bbdfd7b66172ab28c4765f244d91ec473",
         "asset_sha256": {
           "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz": "4e5e9ba8b4c14b0501b9336b3f46ef90204f127e1a48c7a416d68f3dc4e9eeac",
           "manifest-root.json": "3a59ccdd9816a1f76113063038e91ac03c412f423477f772a153c2b41158e9f2",
@@ -257,8 +283,7 @@
           "manifest-prefix.json": "416fea4885b08c08898ab1efc0bc992e1865911a1bd4edac6911052d8bac5f07",
           "SHA256SUMS-prefix": "216c19215fbba275854b50f86d59288b909c54e39c77235aa1fce5dd0339e0c0"
         },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
-        "note": "The release publishes the two Actions candidates recorded before it, unchanged; the earlier candidate list is superseded."
+        "note": "Kept as history after v0.1.1; the release and its assets are still published."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -294,13 +319,13 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/9f738e717c1b1c1b0fb099247bb4db6e8e811148/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/9f738e717c1b1c1b0fb099247bb4db6e8e811148/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/31fdc14b1a14563990d0acaf89dc302f024cebdc/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/31fdc14b1a14563990d0acaf89dc302f024cebdc/docs/self-hosting.md"
       ]
     }
   ],
   "ci_pins": {
-    "core_tests_web": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
+    "core_tests_web": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
     "core_tests_windows": "cda93f01bf7803efe66ca695701cae678b320ef1",
     "web_tests_core": "3c51ca340f0e5c1dc0c0cf4e32ff6703af9ba841",
     "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs."

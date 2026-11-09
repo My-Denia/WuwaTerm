@@ -8,7 +8,7 @@
   "consumers": {
     "web_repository": "My-Denia/WuwaTerm-Web",
     "legacy_web_revision": "6cbba41bb934d44d1dde1b94f1b50d6d845af599",
-    "split_web_revision": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
+    "split_web_revision": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
     "windows_repository": "My-Denia/WuwaTerm-Windows",
     "split_windows_revision": "cda93f01bf7803efe66ca695701cae678b320ef1",
     "windows_recipe_workflow": ".github/workflows/legacy-core-validation.yml",

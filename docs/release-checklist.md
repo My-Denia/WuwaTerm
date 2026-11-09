@@ -12,10 +12,10 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.7.0`, the contextual-term and
-  installer batch; `v0.6.1` is the previous-release baseline. Set
-  `NEXT_VERSION` to the derived tag explicitly before any release command
-  below.
+  published tag. The current Core version is `0.7.1`, the installer and
+  review-correctness patch on top of `0.7.0`; `v0.7.0` remains the published
+  baseline and `v0.6.1` the one before it. Set `NEXT_VERSION` to the derived
+  tag explicitly before any release command below.
 - Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -102,15 +102,25 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.7.0 specifically, also confirm:
+For 0.7.1 specifically, also confirm:
 
-- `./deploy/setup.sh --help`, an API-only install, and the
-  `--with-telegram` refusal without a token behave as the installer tests
-  describe. These exercise Docker and curl through stubs; they do not replace
-  the clean-host install described below.
-- A pull request run shows the `pytest` matrix at 3.11 and 3.14 only, while the
-  `main` push or dispatch run for the released commit shows all four versions.
-  The release receipt binds the main run, not the pull request.
+- On a clean host with a verified standalone Compose binary, `deploy/setup.sh`
+  reports `updates: not adopted` when `adopt` refuses, and retries on the next
+  run instead of claiming the metadata is already there. `--status` reads the
+  same pointer. This is what a first install now says, so check the wording
+  before quoting it in the release notes.
+- `--with-web` against the published WuwaTerm-Web `v0.1.0` assets installs the
+  `archive.name` archive, runs `bundle/start.mjs` and passes the edge-gated
+  readiness probe. The installer tests cover this with fixtures; a real host
+  still has to be checked once per release.
+- `review-v2` reports a one-character Chinese resonator name in a context the
+  translation step referenced (`欢迎椿`, `快找椿`) and still ignores an ordinary
+  word covering it (`香椿`, `臭椿`, `椿树`, `椿芽`). A `心` mention still needs a
+  name-like context, so `心很重要` is neither referenced nor reported. The
+  canonical matcher label is `wuwaterm-cjk-matcher-v5`, so resolution contexts
+  carrying the older hash are stale by design, not by accident.
+- `docs/self-hosting.md`'s backup and restore steps still match what
+  `./deploy/setup.sh --with-web` writes under `state-web/`.
 - `docs/api/openapi.json` matches the generated document after the version and
   description changes (`python scripts/check_api_contract.py`).
 - The Web workbench is still a separate product with its own release. This
