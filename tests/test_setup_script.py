@@ -340,6 +340,9 @@ def test_with_web_local_package_writes_private_credentials(install_root):
     assert values["WUWATERM_WEB_BASE_PATH"] == ""
     assert values["WUWATERM_TRANSLATION_ENABLED"] == "true"
     assert values["WUWATERM_API_BASE_URL"] == "http://127.0.0.1:8788"
+    # The admission database lives outside the read-only /app bundle mount, so
+    # Docker never has to create a mountpoint below it.
+    assert values["WUWATERM_LOCAL_DB_PATH"] == "/var/lib/wuwaterm-web/pool.sqlite3"
     assert values["WUWATERM_SITE_DEVICE_TOKEN"].startswith("wtd1.dev123.")
     # The Web runtime rejects anything outside its edge-secret alphabet.
     edge = values["WUWATERM_WEB_EDGE_SECRET"]
@@ -352,7 +355,8 @@ def test_with_web_local_package_writes_private_credentials(install_root):
     assert "device issue --name web --scopes translate,meta" in log
     assert "run -d --name wuwaterm-web" in log
     assert f"-v {package / 'bundle'}:/app:ro" in log
-    assert f"-v {install_root / 'state-web' / 'data'}:/app/data:rw" in log
+    assert f"-v {install_root / 'state-web' / 'data'}:/var/lib/wuwaterm-web:rw" in log
+    assert not (package / "bundle" / "data").exists()
     assert "PORT=3000" in log
     assert "sh -c node start.mjs" in log
     assert mode_of(install_root / "state-web" / "data") == 0o700
@@ -362,6 +366,75 @@ def test_with_web_local_package_writes_private_credentials(install_root):
     assert "-o /dev/null http://127.0.0.1:3000/" in curl_log
     assert "http://127.0.0.1:3000/api/pool" in curl_log
     assert edge not in curl_log
+
+
+def test_web_env_with_the_old_app_data_path_gets_its_mountpoint(install_root):
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    state.mkdir()
+    (state / "web.env").write_text(
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_API_BASE_URL=http://127.0.0.1:8788\n"
+        "WUWATERM_SITE_DEVICE_TOKEN=wtd1.dev123.secret\n"
+        "WUWATERM_TRANSLATION_ENABLED=true\n"
+        "WUWATERM_LOCAL_DB_PATH=/app/data/pool.sqlite3\n",
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = docker_log(install_root)
+    # Docker refuses to create a mountpoint below the read-only /app mount, so
+    # an installation that still names /app/data keeps that path only with the
+    # directory already present in the bundle.
+    assert f"-v {package / 'bundle'}:/app:ro" in log
+    assert f"-v {install_root / 'state-web' / 'data'}:/app/data:rw" in log
+    assert (package / "bundle" / "data").is_dir()
+    assert "WUWATERM_LOCAL_DB_PATH=/app/data/pool.sqlite3" in (state / "web.env").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_web_env_with_a_relative_database_path_is_refused(install_root):
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    state.mkdir()
+    (state / "web.env").write_text(
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_LOCAL_DB_PATH=pool.sqlite3\n",
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "WUWATERM_LOCAL_DB_PATH" in result.stderr
+    assert "must be an absolute path" in result.stderr
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 
 def test_web_package_archive_with_the_published_layout(install_root):

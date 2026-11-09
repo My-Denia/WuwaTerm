@@ -540,6 +540,29 @@ wait_for_web() {
     fail "wuwaterm-web did not serve an authenticated page and /api/pool at $base/; check docker logs wuwaterm-web, the edge secret and the Core device credential"
 }
 
+# The Web runtime creates its SQLite admission database at
+# WUWATERM_LOCAL_DB_PATH, so the host data directory is mounted at that file's
+# directory and the container needs no writable path of its own. The default
+# sits outside the read-only /app bundle mount because Docker refuses to create
+# a mountpoint below a read-only parent ("create mountpoint for /app/data ...
+# read-only file system", Docker 29.1.3). An installation whose web.env still
+# names /app/data keeps that path and gets its mountpoint created instead.
+web_db_dir() {
+    db_path=$(file_value "$1" WUWATERM_LOCAL_DB_PATH || true)
+    [ -n "$db_path" ] || db_path=/var/lib/wuwaterm-web/pool.sqlite3
+    case "$db_path" in
+        /*) ;;
+        *) fail "WUWATERM_LOCAL_DB_PATH in $1 must be an absolute path: $db_path" ;;
+    esac
+    case "$db_path" in
+        */|*/../*|*/..) fail "WUWATERM_LOCAL_DB_PATH in $1 must name a file below a directory: $db_path" ;;
+    esac
+    db_dir=$(dirname "$db_path")
+    [ "$db_dir" != "/" ] \
+        || fail "WUWATERM_LOCAL_DB_PATH in $1 must name a file below a directory: $db_path"
+    printf '%s' "$db_dir"
+}
+
 enable_web() {
     [ "$with_web" = 1 ] || return 0
     web_env="$code_root/state-web/web.env"
@@ -564,7 +587,7 @@ enable_web() {
                 printf 'WUWATERM_API_BASE_URL=http://127.0.0.1:%s\n' "$(api_port)"
                 printf 'WUWATERM_SITE_DEVICE_TOKEN=%s\n' "$web_token"
                 printf 'WUWATERM_TRANSLATION_ENABLED=true\n'
-                printf 'WUWATERM_LOCAL_DB_PATH=/app/data/pool.sqlite3\n'
+                printf 'WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/pool.sqlite3\n'
             } >"$web_env"
         )
         chmod 600 "$web_env"
@@ -577,11 +600,24 @@ enable_web() {
     esac
     [ "${#edge_secret}" -ge 32 ] && [ "${#edge_secret}" -le 128 ] \
         || fail "WUWATERM_WEB_EDGE_SECRET in $web_env must be 32-128 characters; change it there and in the reverse proxy."
+    web_data_dir=$(web_db_dir "$web_env")
+    case "$web_data_dir" in
+        /app|/app/*)
+            # Docker will not create a bind mountpoint below a read-only
+            # mount, so a Web database inside /app needs the directory to
+            # exist in the extracted bundle before the container starts.
+            web_data_target="$web_bundle${web_data_dir#/app}"
+            if ! mkdir -p "$web_data_target" 2>/dev/null \
+                || [ ! -d "$web_data_target" ]; then
+                fail "cannot create $web_data_target so Docker can mount $web_data_dir; set WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/pool.sqlite3 in $web_env, or use a Web package directory this account can write"
+            fi
+            ;;
+    esac
     node_image=${WUWATERM_WEB_NODE_IMAGE:-node:24-alpine}
     docker rm -f wuwaterm-web >/dev/null 2>&1 || true
     docker run -d --name wuwaterm-web --restart unless-stopped --network host \
         --env-file "$web_env" -e "PORT=$web_port" \
-        -v "$web_bundle:/app:ro" -v "$data_dir:/app/data:rw" \
+        -v "$web_bundle:/app:ro" -v "$data_dir:$web_data_dir:rw" \
         -w /app "$node_image" sh -c "$web_start" >/dev/null \
         || fail "could not start the Web workbench"
     (umask 077; printf '%s\n' "$web_port" >"$code_root/state-web/web.port")

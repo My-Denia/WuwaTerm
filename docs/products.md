@@ -17,7 +17,7 @@ WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责�
 
 | 产品 | 已合并源码快照 | 独立发布状态 | 本次新交付的实际采用 |
 | --- | --- | --- | --- |
-| Core / API | `4a7e0048`，源码版本 `0.7.1`（未发布） | [v0.7.0](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.0) 已发布（wheel `721b825e…`，sdist `9ee7b5db…`），来源 `2ebb3259`；`0.7.1` 尚未打 tag | 未确认 |
+| Core / API | `c1d6843`，源码版本 `0.7.1` | [v0.7.1](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.1) 已发布（wheel `4f7307a1…`，sdist `f1968153…`），来源 `c1d6843`；`v0.7.0`（wheel `721b825e…`）仍保留在发布页上 | 未确认 |
 | Telegram | `b0e126ee`，`0.1.1` | [v0.1.1](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.1.1) 已发布（wheel `07f4ffcf…`，sdist、bundle、镜像与安装探针齐全），依赖 Core `v0.7.0` 正式 wheel；`v0.1.0` 仍保留 | 未确认 |
 | Windows | `974160e7`，后续仅增加历史 Core 验证配方 | [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0) 已发布，来源 `cda93f01` | 未确认 |
 | Web | `31fdc14b`，源码版本 `0.1.1` | [v0.1.1](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1) 已发布：root（归档 `9f88dd71…`）与 `/private`（归档 `32b52a3a…`）两套包，各自带 `manifest-{root|prefix}.json` 和 `SHA256SUMS`；`v0.1.0` 的 root `4e5e9ba8…` 与 `/private` `2dc6d722…` 仍在发布页上 | 未确认 |
