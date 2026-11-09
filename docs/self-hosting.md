@@ -71,12 +71,12 @@ Both paths need the source, because the Compose files, the entrypoints, the
 data-build commands and the verification scripts all live in it.
 
 ```bash
-git clone --branch vX.Y.Z --depth 1 https://github.com/My-Denia/wuwa-translate-bot.git
-cd wuwa-translate-bot
+git clone --branch vX.Y.Z --depth 1 https://github.com/My-Denia/WuwaTerm.git
+cd WuwaTerm
 ```
 
 Replace `vX.Y.Z` with a published tag from
-[Releases](https://github.com/My-Denia/wuwa-translate-bot/releases). Deploying
+[Releases](https://github.com/My-Denia/WuwaTerm/releases). Deploying
 from a moving branch is possible and is a worse idea than it looks: the data pin
 and the schema version travel with the source, so a tag is what makes a working
 install describable later.

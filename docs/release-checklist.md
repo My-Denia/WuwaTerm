@@ -12,10 +12,10 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.7.1`, the installer and
-  review-correctness patch on top of `0.7.0`; `v0.7.0` remains the published
-  baseline and `v0.6.1` the one before it. Set `NEXT_VERSION` to the derived
-  tag explicitly before any release command below.
+  published tag. The current Core version is `0.7.2`, the Web database mount
+  fix on top of `0.7.1`; `v0.7.1` is the published release it corrects and
+  `v0.7.0` the one before it. Set `NEXT_VERSION` to the derived tag explicitly
+  before any release command below.
 - Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -102,8 +102,19 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.7.1 specifically, also confirm:
+For 0.7.2 specifically, also confirm:
 
+- `./deploy/setup.sh --with-web` starts the Web workbench on Docker 29.1.3
+  with the default `WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/pool.sqlite3`:
+  the host `state-web/data/` is mounted at `/var/lib/wuwaterm-web`, not below
+  the read-only `/app`, so the daemon creates no mountpoint inside the bundle.
+- A `state-web/web.env` that still names `/app/data/pool.sqlite3` keeps
+  working, and a relative `WUWATERM_LOCAL_DB_PATH` is refused before any
+  container starts.
+- `v0.7.1` is not offered as the `--with-web` tag in the release notes or
+  `docs/self-hosting.md`; it was published from `c1d6843`, which predates the
+  mount fix, and `contracts/products.json` / `docs/products.md` no longer
+  attribute that fix to it.
 - On a clean host with a verified standalone Compose binary, `deploy/setup.sh`
   reports `updates: not adopted` when `adopt` refuses, and retries on the next
   run instead of claiming the metadata is already there. `--status` reads the

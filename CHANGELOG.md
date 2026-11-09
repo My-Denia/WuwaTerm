@@ -3,6 +3,49 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.7.2
+
+### Highlights
+
+- `--with-web` starts on the first attempt on a host whose Docker refuses to
+  create a mountpoint inside a read-only mount. The installer mounted the
+  bundle at `/app:ro` and the Web data directory at `/app/data:rw`, and the
+  extracted bundle has no `data/` directory of its own, so Docker 29.1.3 had
+  to create that mountpoint inside the read-only parent and failed with
+  `create mountpoint for /app/data ... read-only file system`. The Web runtime
+  reads `WUWATERM_LOCAL_DB_PATH`, so the host data directory is now mounted at
+  that file's directory: the default is
+  `/var/lib/wuwaterm-web/pool.sqlite3`, outside `/app`, and it matches the path
+  the published bundle's own self-hosting guide uses. A full cold run of
+  `./deploy/setup.sh --with-web` exits 0 and reports `web health: ready`,
+  including the upstream data build, the API image pull, the Web package
+  download and the container start.
+
+### Fixed
+
+- `deploy/setup.sh` derives the Web data mount from `WUWATERM_LOCAL_DB_PATH`
+  instead of assuming `/app/data/pool.sqlite3`. A `web.env` written by an
+  earlier installer still names that path and keeps working, because a path
+  under `/app` gets its mountpoint created inside the extracted bundle before
+  the container starts. A value that is not absolute, or that names no file
+  below a directory, is refused rather than mounted somewhere unintended.
+  The host directory is unchanged: it stays `state-web/data/`.
+
+### Compatibility and distribution
+
+- `/v1`, `review-v1`, `review-v2` and `wuwaterm-manuscript-v1` are unchanged;
+  nothing in this release changes a request or response shape.
+- Source version is `0.7.2`; `uv.lock` and the OpenAPI snapshot are regenerated
+  with it. `v0.7.1` was published from commit `c1d6843` and does not contain
+  this fix, so `--with-web` from that tag meets the mountpoint failure on a
+  host that refuses the nested mount. `v0.7.2` is published from the commit
+  that carries it, which is what checking out the newest published tag
+  installs; `contracts/products.json` / `docs/products.md` record both
+  releases with their asset digests.
+- The Web workbench remains a separately released product. This release ships
+  the installer fix and the verification path for the published
+  `manifest-{root|prefix}.json` package, not a Web package.
+
 ## 0.7.1
 
 ### Highlights
