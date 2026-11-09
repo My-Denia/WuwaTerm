@@ -3,6 +3,81 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.7.1
+
+### Highlights
+
+- `--with-web` installs the package WuwaTerm-Web actually publishes. The path
+  was written before that project had a release, so it read `start`, `port` and
+  `health_path` fields the published `manifest-{root|prefix}.json` does not
+  contain, and probed an endpoint the bundle does not serve. It now reads
+  `archive.name`, verifies the manifest and archive digests against
+  `SHA256SUMS-{root|prefix}`, runs the bundle's `bundle/start.mjs`, refuses a
+  package built for another URL prefix, and probes readiness through the edge
+  gate it is actually behind (`X-WuwaTerm-Edge`, then `/api/pool`).
+- `deploy/setup.sh` no longer reports a first install as adopted when adoption
+  failed. A clean host has no legacy `.deploy_commit`, so
+  `deploy/product-update.sh adopt` refuses — after creating `.deployments/` and
+  its lock file. The installer read that directory as proof of adoption and
+  said `updates: adopted`, then skipped the retry on every later run; it now
+  reads the deployment pointer and the manifest it names.
+- The self-hosting backup, restore and cross-host steps cover `state-web/`. A
+  self-hosted Web workbench keeps its origin, edge secret, device token and
+  admission pool there and records the port it started on, so a host moved
+  without those lost its edge gate, its Core credential and its quota pool
+  while the backup looked complete.
+
+### Fixed
+
+- `deploy/setup.sh` decides adoption from state, not from a directory:
+  `is_adopted()` requires a `.deploy_current` deployment id, `.deploy_commit`,
+  and the product manifest `.deployments/products/<id>.json` (or the runtime
+  journal) that id names, both in `maybe_adopt()` and in `report_status()`.
+  `--status` on a host whose adopt never completed now reports
+  `updates: not adopted`, and re-running the installer retries instead of
+  claiming the metadata is already there.
+- `review-v2` qualifies a single-character source mention with the same test
+  the translator applies before it hands the character to the model: unless an
+  ordinary word covers the character, it is a term mention. `欢迎椿` and
+  `快找椿` were how a model was given `椿 -> Camellya` to use, and a
+  mistranslation there produced no finding at all because review reused the
+  narrower sentence-locking whitelist. `香椿`, `臭椿`, `椿树`, `椿芽`, `春椿`,
+  `椿木` and `椿皮` remain ordinary words on both sides, and the target-side
+  rule is unchanged. The widening stops at `心` (`Hsin`), the 3.7 dictionary's
+  other single-character resonator and also the everyday word for heart, mind
+  or core: it keeps the narrow name-context rule, so `心很重要` and `她的心很痛`
+  are neither referenced to the model nor reported. The canonical matcher label
+  becomes `wuwaterm-cjk-matcher-v5` on the same lexicon slice, so stored opt-in
+  resolution contexts carrying the v4 hash go stale by the existing freshness
+  rule and need confirmation; legacy three-key contexts and `review-v1`
+  judgments are unchanged.
+- `docs/self-hosting.md` and `docs/deployment.md` name `state-web/web.env`,
+  `state-web/device.token`, `state-web/web.port` and
+  `state-web/data/pool.sqlite3` where they describe where state lives, back it
+  up — the pool through SQLite's own online backup, like the credential store —
+  and restore it, including the archive that carries a host's state to a new
+  machine and the `--with-web` re-run that keeps the existing edge secret and
+  device credential valid.
+
+### Compatibility and distribution
+
+- `/v1`, `review-v1`, `review-v2` request and response shapes and
+  `wuwaterm-manuscript-v1` are unchanged. `review-v2` verdicts can differ for a
+  one-character Chinese resonator name in a context the narrow lock whitelist
+  used to drop: it can now be `needs_review` where it was previously not
+  reported at all. `心` keeps its name-like-context requirement, so ordinary
+  prose containing the character is still not reported; the same rule now
+  decides whether it reaches the model as a reference, so `心很重要` no longer
+  carries an `心 -> Hsin` hint. The `matcher_revision` value changes, which is
+  what makes a stored resolution context stale rather than silently reused.
+- Source version is `0.7.1`; `uv.lock` and the OpenAPI snapshot are regenerated
+  with it, and `contracts/products.json` / `docs/products.md` record `0.7.1` as
+  an unreleased source version. `v0.7.0` remains the published Core release and
+  is still recorded as such.
+- The Web workbench remains a separately released product. This release ships
+  the installer and verification path for its published `v0.1.0` package, not a
+  Web package.
+
 ## 0.7.0
 
 ### Highlights

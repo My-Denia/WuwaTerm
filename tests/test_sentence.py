@@ -1556,6 +1556,28 @@ def test_ordinary_plant_words_are_not_offered_as_name_references(
     assert locked.references == ()
 
 
+def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
+    # 心 is a 3.7 resonator (Hsin) and the ordinary word for heart, mind or
+    # core. Telling the model 心 = Hsin in ordinary prose would invite the very
+    # rendering review then reports, so an everyday standalone character keeps
+    # the narrow name rule before it becomes a reference.
+    with connect(single_name_db) as conn:
+        insert_records(
+            conn, [TermRecord("resonator", "fixture", "5", "5", "心", "Hsin")]
+        )
+        conn.commit()
+    translator = SentenceTranslator(single_name_db)
+    for text in ("心很重要。", "她的心很痛。", "和心一起。", "心情很好。"):
+        locked = translator._lock_terms_with_references(text, to_chinese=False)
+        assert locked.locks == ()
+        assert locked.references == (), text
+    # A bounded name context still reaches the model, so this is a context
+    # rule rather than a ban on the character.
+    locked = translator._lock_terms_with_references("心加入队伍。", to_chinese=False)
+    assert locked.locks == ()
+    assert ("心", "心", "Hsin", "resonator") in locked.references
+
+
 def test_single_character_speaker_and_english_name_boundaries(single_name_db):
     translator = SentenceTranslator(single_name_db)
     locked = translator.lock_terms("椿：椿加入队伍。")

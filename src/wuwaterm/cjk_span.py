@@ -51,6 +51,23 @@ en->zh source mention may appear as its orthodox plural, and a zh->en target
 may answer with one. The lexicon slice, the CJK boundary policy and every
 other MATCHER_REVISION input are unchanged; stored resolution contexts
 carrying an older matcher hash become stale by the existing freshness rule.
+
+wuwaterm-cjk-matcher-v5 aligns review-v2 source admission for single-character
+resonator names with the reference set the translator is given: a character
+counts as a mention unless an ordinary word covers it, instead of also
+requiring the narrow sentence lock whitelist. 欢迎椿 and 快找椿 are referenced
+in translation and were dropped from review, so a mistranslation there produced
+no finding; 香椿, 臭椿, 椿树, 椿芽, 春椿, 椿木 and 椿皮 stay ordinary words on
+both sides.
+
+That widening holds only where the character is not an everyday standalone
+noun. The 3.7 dictionary ships two single-character resonators, 椿 (Camellya)
+and 心 (Hsin), and 心 is also the ordinary word for heart, mind or core. It
+keeps the narrow name-context rule on both paths, so 心很重要 and 她的心很痛 are
+neither referenced to the model nor reported by review. The everyday-character
+set joins the compound supplement in the MATCHER_REVISION payload; the lexicon
+slice is unchanged, and stored resolution contexts carrying v4 go stale by the
+existing freshness rule.
 """
 
 from __future__ import annotations
@@ -65,11 +82,42 @@ JIEBA_DICT_PATH = "jieba/dict.txt"
 LEXICON_FILTER = "U+3400-U+9FFF; length 2-8; frequency >= 24"
 
 
-# The frequency-filtered slice omits two ordinary plant names that end in
-# the resonator character 椿: 香椿 (toon) and 臭椿 (tree of heaven). This
-# explicit supplement is hashed with the target matcher contract; it does
-# not change the pinned lexicon or source/sentence locking.
-_SINGLE_NAME_COMPOUNDS = frozenset({"香椿", "臭椿"})
+# The frequency-filtered slice omits ordinary plant and material names that
+# end in the resonator character 椿: 香椿 (toon), 臭椿 (tree of heaven), 椿芽,
+# 春椿, 椿木 and 椿皮. This explicit supplement is hashed with the target
+# matcher contract; it does not change the pinned lexicon or source/sentence
+# locking.
+_SINGLE_NAME_COMPOUNDS = frozenset({"香椿", "臭椿", "椿芽", "春椿", "椿木", "椿皮"})
+
+# A single-character dictionary surface that is also an everyday standalone
+# noun. 心 (Hsin) names a resonator and is also the ordinary word for heart,
+# mind or core, so it keeps the narrow name-context rule that the sentence
+# lock has always applied; 心情 is an ordinary compound and 心很重要 is not a
+# mention. Hashed with the compound supplement because it decides the same
+# admission question.
+_EVERYDAY_STANDALONE_CHARS = frozenset({"心"})
+
+
+def _is_cjk_character(char: str) -> bool:
+    return "\u3400" <= char <= "\u9fff"
+
+
+def single_character_name_context_ok(text: str, start: int, end: int) -> bool:
+    """Whether a one-character span sits in a bounded Chinese name context.
+
+    Only newly eligible one-character surfaces use this conservative rule.
+    Unlisted contexts (for example 欢迎椿) may remain unlocked; multi-character
+    names retain the existing matching policy.
+    """
+    if start and _is_cjk_character(text[start - 1]):
+        if text[start - 1] not in "和与让给由是用有":
+            return False
+    return (
+        end == len(text)
+        or not _is_cjk_character(text[end])
+        or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
+                            "加入", "离开", "登场", "使用", "说"), end)
+    )
 
 
 def single_character_compound_at(text: str, start: int, end: int) -> bool:
@@ -77,9 +125,9 @@ def single_character_compound_at(text: str, start: int, end: int) -> bool:
 
     Called only for one-character resonator candidates, never as a global
     ban on one-character official forms. A 2..8-char ordinary word covering
-    this span extends at least one edge (香椿 or 臭椿 at its end, 椿树 at its
-    start). It is not a general Chinese word segmenter or a sentence-meaning
-    check.
+    this span extends at least one edge (香椿, 臭椿, 椿芽 and 春椿 end with the
+    character; 椿树, 椿木 and 椿皮 begin with it). It is not a general Chinese
+    word segmenter or a sentence-meaning check.
     """
     if not (0 <= start < end <= len(text) and end - start == 1):
         return False
@@ -91,6 +139,27 @@ def single_character_compound_at(text: str, start: int, end: int) -> bool:
             if word in _WORDS or word in _SINGLE_NAME_COMPOUNDS:
                 return True
     return False
+
+
+def single_character_name_mention_at(text: str, start: int, end: int) -> bool:
+    """Whether a one-character official name at this span is a name mention.
+
+    Both callers ask the same question: sentence.py before it offers the
+    character to the model as a reference, review.py before it turns the
+    mention into a finding. An ordinary word covering the character (香椿,
+    臭椿, 椿芽, 春椿, 椿木, 椿皮, 椿树) makes it that word, not a name. A
+    character that is also an everyday standalone noun (心) additionally needs
+    the narrow name context the sentence lock has always required, so 心很重要
+    and 她的心很痛 are neither references nor findings. This is not a general
+    Chinese word segmenter or a sentence-meaning check.
+    """
+    if end - start != 1 or start < 0 or end > len(text):
+        return False
+    if single_character_compound_at(text, start, end):
+        return False
+    if text[start:end] in _EVERYDAY_STANDALONE_CHARS:
+        return single_character_name_context_ok(text, start, end)
+    return True
 
 
 def crosses_cjk_word_boundary(text: str, start: int, end: int) -> bool:
@@ -66443,7 +66512,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v4", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS)],
+        ["wuwaterm-cjk-matcher-v5", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

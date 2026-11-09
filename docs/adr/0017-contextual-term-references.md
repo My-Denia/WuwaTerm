@@ -61,8 +61,14 @@ The model path keeps dictionary terms as **contextual references**:
    are references; other terms keep the hard placeholder, so ordinary official
    nouns still cannot be paraphrased.
 3. A single-character resonator name the narrow lock whitelist skips
-   (`欢迎椿`, `院子里的椿`) is still offered as a reference unless an ordinary
-   word covers the character (`香椿`, `臭椿`, `椿树`).
+   (`欢迎椿`, `院子里的椿`) is also offered as a reference unless an ordinary
+   word covers the character (`香椿`, `臭椿`, `椿芽`, `春椿`, `椿木`, `椿皮`,
+   `椿树`). A character that is also an everyday standalone noun keeps the
+   narrow name rule: `心` (`Hsin`) is the 3.7 dictionary's other
+   single-character resonator and also the ordinary word for heart, mind or
+   core, so `心很重要` is neither referenced to the model nor reviewed. Review
+   asks the same question before it reports a one-character finding, so the set
+   the translator was given and the set review constrains cannot drift apart.
 4. Deterministic paths are untouched: `lock_terms`/`_lock_terms` still produce
    placeholders, `restore()` is still strict for the locks it receives, the
    no-model path still substitutes official terms locally, and exact hits
@@ -82,3 +88,20 @@ The model path keeps dictionary terms as **contextual references**:
   a coverage signal or a narrower reference set with evidence, not a return to
   unconditional substitution; the owner's 2026-11-09 ruling rejects per-word
   exceptions as the mechanism.
+
+## Amendment: everyday standalone characters (2026-11-09)
+
+Review asks the same single-character question as #3 before it reports a
+finding; that alignment is the point of the amendment, not a new substitute.
+The generalization in #3 was measured on the 3.7 official Chinese text map
+before it shipped: of 13,605 `心` occurrences, 3,978 are not covered by an
+ordinary word, but only 159 of those also sit in a name context. The compound
+test alone would therefore have turned ordinary prose such as `心很重要` and
+`她的心很痛` into resonator findings about `Hsin`, and into `心 -> Hsin` hints
+the model could follow. The narrow context rule applies to `心` only; `椿`
+keeps the widened reference admission this record describes. The plant
+supplement covers seven surfaces (`香椿`, `臭椿`, `椿树`, `椿芽`, `春椿`,
+`椿木`, `椿皮`); none of them occurs in the official 3.7 text map, so it
+guards free user text, not official lines. This is a narrower reference and
+reporting set with measured evidence, which the Consequences above name as the
+permitted response, not a per-word exception to forced substitution.

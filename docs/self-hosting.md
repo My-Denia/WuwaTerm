@@ -129,8 +129,9 @@ counterpart in one idempotent script. From the checkout:
 What it does, in this order:
 
 1. Creates `data/`, `state/` and `state-api/` with `state*` at mode `0700`
-   (`state-web/` is created too when `--with-web` is given), and copies
-   `deploy/env.example` to `.env` at mode `0600` if `.env` is missing.
+   (`state-web/` and `state-web/data/` are created too when `--with-web` is
+   given), and copies `deploy/env.example` to `.env` at mode `0600` if `.env`
+   is missing.
 2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
    `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
    `TELEGRAM_BOT_TOKEN` only when `--with-telegram` is given. The bot is never
@@ -149,6 +150,9 @@ What it does, in this order:
    `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the
    API base URL, the URL prefix and the admission database path, then starts
    the Web bundle and waits until an edge-marked page and `/api/pool` answer.
+   The issued token is kept in `state-web/device.token` (mode `0600`), the
+   chosen port in `state-web/web.port`, and the Web workbench's own SQLite
+   state under `state-web/data/` — `pool.sqlite3` for the shared quota pool.
 7. Adopts the installed topology into `deploy/product-update.sh` metadata when
    a standalone `docker-compose` binary and its `.sha256` receipt are present,
    so later upgrades use the transactional path. Pass `--no-adopt` to skip it;
@@ -156,7 +160,13 @@ What it does, in this order:
 
 Re-running a command is how a surface is added later: existing `.env` values,
 the database, the credential store and `state-web/web.env` are reused, and only
-the missing pieces are created.
+the missing pieces are created. The Web state a host has to carry over lives in
+four places, all of them under `state-web/`: `web.env` (origin, edge secret,
+prefix, API address), `device.token` (the Core device credential the Web
+process presents), `web.port` (the port the last run started on; the next run
+recomputes it from the package), and `data/pool.sqlite3` (the Web workbench's
+own admission pool). [Backup And Restore](#backup-and-restore) copies all four
+when that flag is installed.
 
 **The Web option installs the published WuwaTerm-Web package.**
 `--with-web` reads `manifest-{root|prefix}.json` and
@@ -728,13 +738,15 @@ section of [Deployment](deployment.md).
 
 ## Backup And Restore
 
-Three things are worth backing up, and one is not.
+Five things are worth backing up, and one is not.
 
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
 | `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
+| `state-web/` | The self-hosted Web workbench, installed by `--with-web`. `web.env` holds the runtime mode, the external origin, the URL prefix and the `X-WuwaTerm-Edge` secret; `device.token` is the Core API device credential the Web process presents; `web.port` is the port it was started on. Two `0600` files in a `0700` directory, so the copy needs the privileges they were written with. Carry them over or the new host loses its edge gate and has to recreate the Web device. |
+| `state-web/data/pool.sqlite3` | The Web workbench's shared quota pool — the only database under `state-web/`, also in write-ahead-log mode and written by the Web process. Same choice as the credential store: stop the Web container, or take an online backup. |
 | `data/terms.db` | **Not worth backing up.** It is regenerable from the pinned upstream source with the build commands above, and rebuilding it is the only way to be sure of what is in it. |
 
 An online backup of the credential store, without stopping anything, using
@@ -830,15 +842,81 @@ Verify a restored credential store by a business count — `device list` should
 show the devices you expect — rather than by an integrity check alone: an
 integrity check passes on a database that is intact but stale.
 
-To restore: stop the services, put `.env`, `state/` and `state-api/` back with
-their original permissions (`.env` at `600`, `state-api/` at `700`), rebuild
-`data/terms.db` from the pinned source if it is missing, and start again. On an
-API-only install there is nothing in `state/` to restore: that directory belongs
-to the bot process, and a bot that never ran wrote nothing into it. On the
-source path it will usually not exist at all; on the container path it exists
-and is **empty**, because the build step above pre-creates it along with the
-other bind mounts. Either way, restore `.env` and `state-api/` and skip it — an
-absent or empty `state/` on an API-only install is the expected state, not a
+**With `--with-web` installed, the Web pool takes the same online backup.**
+The source-path form, run from the checkout, writes `backup/pool.sqlite3`:
+
+```bash
+mkdir -p backup
+chmod 700 backup
+rm -f backup/pool.sqlite3.new
+( umask 077 && .venv/bin/python -c "import sqlite3; src=sqlite3.connect('file:state-web/data/pool.sqlite3?mode=ro', uri=True); dst=sqlite3.connect('backup/pool.sqlite3.new'); src.backup(dst); dst.close(); src.close()" ) \
+  && chmod 600 backup/pool.sqlite3.new \
+  && mv backup/pool.sqlite3.new backup/pool.sqlite3
+```
+
+With the `sqlite3` shell instead, the same call is
+`( umask 077 && sqlite3 -readonly state-web/data/pool.sqlite3 ".backup 'backup/pool.sqlite3.new'" )`
+followed by the same `chmod` and `mv`. On the container path the Web process
+runs as root too, so run either form with the privileges that created the
+file, exactly as for `state-api/` above. Skip this block only when `--with-web`
+was never installed; an empty or missing pool is then the expected state, not a
+lost backup.
+
+**Assemble one archive.** The staging directory mirrors the checkout, so the
+paths below are the paths a restore needs — no untangling of a flat archive:
+
+```bash
+stage=backup/stage
+rm -rf "$stage"
+mkdir -p "$stage/state-api" "$stage/state-web/data"
+chmod 700 "$stage" "$stage/state-api" "$stage/state-web" "$stage/state-web/data"
+cp -p .env "$stage/.env"
+[ -e state ] && cp -a state "$stage/state"
+cp -p backup/devices.db "$stage/state-api/devices.db"
+if [ -f state-web/web.env ]; then
+    cp -p state-web/web.env state-web/device.token state-web/web.port "$stage/state-web/"
+    cp -p backup/pool.sqlite3 "$stage/state-web/data/pool.sqlite3"
+fi
+( umask 077 && tar -czf "backup/wuwaterm-state-$(date +%Y%m%d).tar.gz" -C "$stage" . ) \
+  && rm -rf "$stage"
+```
+
+The archive holds `.env`, `state/`, `state-api/devices.db` and, when the Web
+workbench is installed, `state-web/web.env`, `state-web/device.token`,
+`state-web/web.port` and `state-web/data/pool.sqlite3` — both databases as the
+consistent online backups taken above, not as live copies.
+
+To restore, including on a different machine or VPS, stop the services and put
+the state back where it was:
+
+1. Extract the archive at the top of the new checkout, so `./.env`,
+   `./state`, `./state-api` and `./state-web` land in the paths the services
+   read. Keep `.env` at `600`.
+2. Restore the directory and file modes: `chmod 700 state-api` (and `state`
+   when it exists), `chmod 700 state-web state-web/data`, and
+   `chmod 600 state-web/web.env state-web/device.token`.
+3. Both databases are already in place from step 1: the archive stores each
+   online backup under the path its service reads, so
+   `state-api/devices.db` and `state-web/data/pool.sqlite3` need no renaming.
+   If you copied `backup/pool.sqlite3` by hand instead, move it to
+   `state-web/data/pool.sqlite3` and `chmod 600` it.
+4. Rebuild `data/terms.db` from the pinned source if it is missing.
+5. Start again. On the Web host, re-run `./deploy/setup.sh --with-web` with the
+   same `--web-origin` and `--web-prefix`: it finds `state-web/web.env` and
+   keeps the edge secret and the device token, so the existing reverse-proxy
+   configuration and the device credential stay valid. A new edge secret or a
+   reissued device token means changing both ends. The port is not a kept
+   value: it comes from the installed package's manifest (`port`, default
+   `3000`), and the installer rewrites `state-web/web.port` with the port it
+   started on. Point the reverse proxy at the port `./deploy/setup.sh --status`
+   reports, and re-check it when the Web package changes.
+
+On an API-only install there is nothing in `state/` to restore: that directory
+belongs to the bot process, and a bot that never ran wrote nothing into it. On
+the source path it will usually not exist at all; on the container path it
+exists and is **empty**, because the build step above pre-creates it along with
+the other bind mounts. Either way, restore `.env` and `state-api/` and skip it —
+an absent or empty `state/` on an API-only install is the expected state, not a
 missing backup.
 
 ## Rollback
@@ -861,10 +939,11 @@ The first block is the container path, the second the source path. The builder
 is named here for the same reason as in the upgrade above: it is behind a
 profile, a bare build skips it, and the database you are about to rebuild at
 the previous tag's pin has to be built by that tag's builder code.
-Restore `state/` and `state-api/` from the backup taken before the upgrade,
-rebuild and verify the database at that tag's pin, then start and re-check
-`/readyz`. Rolling the source back without rolling the database back is the
-mistake to avoid: the schema version travels with the source.
+Restore `state/`, `state-api/` and, when the Web workbench is installed,
+`state-web/` from the backup taken before the upgrade, rebuild and verify the
+database at that tag's pin, then start and re-check `/readyz`. Rolling the
+source back without rolling the database back is the mistake to avoid: the
+schema version travels with the source.
 
 ## Troubleshooting
 

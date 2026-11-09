@@ -23,7 +23,11 @@ from typing import Any
 
 import httpx
 
-from .cjk_span import crosses_cjk_word_boundary, single_character_compound_at
+from .cjk_span import (
+    crosses_cjk_word_boundary,
+    single_character_name_context_ok,
+    single_character_name_mention_at,
+)
 from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
@@ -264,24 +268,6 @@ def _is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
 
 
-def _single_character_name_context_ok(text: str, start: int, end: int) -> bool:
-    """Admit bounded Chinese name mentions, avoiding compounds like 香椿/椿树.
-
-    Only newly eligible one-character resonators use this conservative rule.
-    Unlisted contexts (for example 欢迎椿) may remain unlocked; multi-character
-    names retain the existing matching policy.
-    """
-    if start and _is_cjk_character(text[start - 1]):
-        if text[start - 1] not in "和与让给由是用有":
-            return False
-    return (
-        end == len(text)
-        or not _is_cjk_character(text[end])
-        or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
-                            "加入", "离开", "登场", "使用", "说"), end)
-    )
-
-
 def _is_ascii_word_char(char: str) -> bool:
     return char.isascii() and char.isalnum()
 
@@ -490,7 +476,7 @@ def select_term_spans(
                 )
                 and (
                     len(source) > 1
-                    or _single_character_name_context_ok(
+                    or single_character_name_context_ok(
                         context_text, context_offset + start, context_offset + end
                     )
                 )
@@ -549,7 +535,7 @@ def select_term_spans(
                         )
                         and (
                             len(source) > 1
-                            or _single_character_name_context_ok(
+                            or single_character_name_context_ok(
                                 context_text,
                                 context_offset + start,
                                 context_offset + end,
@@ -797,8 +783,11 @@ class SentenceTranslator:
         if to_chinese is not None:
             # Single-character resonator names the narrow lock whitelist
             # skipped (欢迎椿, 院子里的椿) still reach the model as references,
-            # unless an ordinary word covers the character (香椿, 臭椿, 椿树).
-            # The reference is the hint that was missing, not a forced name.
+            # unless an ordinary word covers the character (香椿, 臭椿, 椿芽)
+            # or it is an everyday standalone noun without a name context
+            # (心很重要 is not Hsin). The reference is the hint that was
+            # missing, not a forced name; review-v2 asks the same question
+            # before it reports a finding.
             for source, official in lockable:
                 if len(source) != 1 or not _is_cjk_character(source):
                     continue
@@ -811,7 +800,7 @@ class SentenceTranslator:
                 start = text.find(source)
                 while start != -1:
                     end = start + 1
-                    if not single_character_compound_at(
+                    if single_character_name_mention_at(
                         context_text, context_offset + start, context_offset + end
                     ):
                         seen_references.add(reference)
