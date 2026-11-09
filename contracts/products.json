@@ -64,11 +64,21 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "c1d6843ed4707ac7844294c0e912a33075f00cd2",
-        "tree": "68af3a6c6da73ffb9a344e07ecccd02f652606c5",
+        "commit": "6533a89e056fb0d4b989974ee30906669563834e",
+        "tree": "3466bafe92dbc5e22414d8f4e037bfba4fa4b22e",
         "status": "merged"
       },
-      "source_version": "0.7.1",
+      "source_version": "0.7.2",
+      "pending_release": {
+        "version": "0.7.2",
+        "status": "release_prepared",
+        "source_commit": "6533a89e056fb0d4b989974ee30906669563834e",
+        "source_tree": "3466bafe92dbc5e22414d8f4e037bfba4fa4b22e",
+        "includes": [
+          "6533a89e056fb0d4b989974ee30906669563834e"
+        ],
+        "note": "The merged source this release is built on. It carries the Web database mount fix from 6533a89; its pyproject still declares 0.7.1, and the 0.7.2 version bump, lockfile, OpenAPI snapshot and the corrected 0.7.1 attribution travel in the release pull request. v0.7.1 does not contain that fix. The published 0.7.2 assets and their SHA-256 are recorded here after publication."
+      },
       "release": {
         "version": "0.7.1",
         "tag": "v0.7.1",
@@ -90,7 +100,7 @@
           "SHA256SUMS": "2fa065c6c1a6a77a9011a4cc60fb6ddb76a19ca3bc2dc1ed0fca36ab5c41a0c2"
         },
         "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision. It names the images by sha-c1d6843 tag while the release images are also published under v0.7.1, which is the tag deploy/setup.sh pulls.",
-        "note": "v0.7.1 installs the published WuwaTerm-Web v0.1.0 package (4a7e0048), fixes the installer adoption-state reading, adds the state-web backup and migration steps and the review-v2 single-character source admission, and mounts the Web database outside the read-only bundle so Docker does not have to create a nested mountpoint. v0.7.0 and its assets remain published under previous_release."
+        "note": "v0.7.1 installs the published WuwaTerm-Web v0.1.0 package (4a7e0048), fixes the installer adoption-state reading, adds the state-web backup and migration steps and the review-v2 single-character source admission. It does not include the Web database mount fix; that fix is 0.7.2 (6533a89), so --with-web from this release still mounts its data directory inside the read-only bundle. v0.7.0 and its assets remain published under previous_release."
       },
       "previous_release": {
         "version": "0.7.0",
@@ -127,8 +137,8 @@
       "adoption": "unknown",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/c1d6843ed4707ac7844294c0e912a33075f00cd2/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/c1d6843ed4707ac7844294c0e912a33075f00cd2/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/6533a89e056fb0d4b989974ee30906669563834e/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/6533a89e056fb0d4b989974ee30906669563834e/docs/data-refresh.md"
       ]
     },
     {
