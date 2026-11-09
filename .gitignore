@@ -12,6 +12,7 @@ htmlcov/
 data/
 state/
 state-api/
+state-web/
 goal-runs/
 .deployments/
 .deploy_commit

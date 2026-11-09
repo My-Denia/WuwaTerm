@@ -83,7 +83,8 @@ One command does the first install and each later addition:
 ```bash
 ./deploy/setup.sh                  # shared translation service (Core API)
 ./deploy/setup.sh --with-telegram  # add the bot
-./deploy/setup.sh --with-web       # add WuwaTerm-Web
+./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+                                   # add WuwaTerm-Web behind your proxy
 ./deploy/setup.sh --status         # versions, components and health
 ```
 
@@ -91,8 +92,10 @@ The [self-hosting guide](docs/self-hosting.md) explains what each step does and
 lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
-option needs a published WuwaTerm-Web package; that project has no release yet,
-and the command says so instead of pretending otherwise.
+option installs the published
+[WuwaTerm-Web v0.1.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.0)
+package, verifies it against the release checksums, and needs the HTTPS origin
+your proxy serves (`--web-origin`).
 
 ### Windows client
 
