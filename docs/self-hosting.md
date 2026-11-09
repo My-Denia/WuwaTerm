@@ -120,15 +120,17 @@ counterpart in one idempotent script. From the checkout:
 ```bash
 ./deploy/setup.sh                     # shared translation service (Core API) only
 ./deploy/setup.sh --with-telegram     # also start the Telegram bot
-./deploy/setup.sh --with-web          # also install WuwaTerm-Web
+./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+                                      # also install WuwaTerm-Web
 ./deploy/setup.sh --status            # what is installed, its data version, health
 ./deploy/setup.sh --check             # same, exit non-zero when the API is not ready
 ```
 
 What it does, in this order:
 
-1. Creates `data/`, `state/` and `state-api/` with `state*` at mode `0700`, and
-   copies `deploy/env.example` to `.env` at mode `0600` if `.env` is missing.
+1. Creates `data/`, `state/` and `state-api/` with `state*` at mode `0700`
+   (`state-web/` is created too when `--with-web` is given), and copies
+   `deploy/env.example` to `.env` at mode `0600` if `.env` is missing.
 2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
    `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
    `TELEGRAM_BOT_TOKEN` only when `--with-telegram` is given. The bot is never
@@ -142,10 +144,11 @@ What it does, in this order:
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
 5. `--with-telegram` starts `wuwaterm-bot` and fails if it is not running.
-6. `--with-web` writes `state-web/web.env` (mode `0600`) with a dedicated
+6. `--with-web` writes `state-web/web.env` (mode `0600`) with the runtime
+   mode, the external HTTPS origin (`--web-origin`), a dedicated
    `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the
-   API base URL and the URL prefix, then starts the Web package and waits for
-   its `/api/readyz`.
+   API base URL, the URL prefix and the admission database path, then starts
+   the Web bundle and waits until an edge-marked page and `/api/pool` answer.
 7. Adopts the installed topology into `deploy/product-update.sh` metadata when
    a standalone `docker-compose` binary and its `.sha256` receipt are present,
    so later upgrades use the transactional path. Pass `--no-adopt` to skip it;
@@ -155,19 +158,34 @@ Re-running a command is how a surface is added later: existing `.env` values,
 the database, the credential store and `state-web/web.env` are reused, and only
 the missing pieces are created.
 
-**The Web option needs a published package, and WuwaTerm-Web has none yet.**
+**The Web option installs the published WuwaTerm-Web package.**
 `--with-web` reads `manifest-{root|prefix}.json` and
 `SHA256SUMS-{root|prefix}` from the latest
 [WuwaTerm-Web release](https://github.com/My-Denia/WuwaTerm-Web/releases),
-verifies the archive, extracts it, and runs it with the Node image named by
-`WUWATERM_WEB_NODE_IMAGE` (default `node:24-alpine`). A package is a directory
-whose `manifest-{root|prefix}.json` names `artifact`, `start` (a shell command),
-`port` and `health_path`; `--web-package` accepts such a directory or a
-`.tar.gz`/`.tgz` archive built locally. Until the Web project publishes those
-assets, the command stops with that fact before building any data; keep Web on
-its own host or use the package you built. The in-process owner-private layer
-described later in [The owner-private web presentation layer](web-presentation-layer.md)
-is a different surface and is not installed by this flag.
+checks the manifest digest, downloads the archive that `archive.name` names,
+verifies it against the sums, extracts it, and runs the bundle's
+`bundle/start.mjs` with the Node image named by `WUWATERM_WEB_NODE_IMAGE`
+(default `node:24-alpine`). The manifest and the bundle's `BUILD-INFO.json`
+both record the path prefix the package was built for; a package built for
+another prefix is refused instead of started. `--web-package` accepts an
+extracted directory (with `manifest-{root|prefix}.json`, or just
+`bundle/start.mjs`) or a `.tar.gz`/`.tgz` archive.
+
+`--web-origin https://wuwaterm.example` is the external HTTPS origin the
+reverse proxy serves, without the prefix. The Web process issues a `Secure`
+session cookie and accepts unsafe requests only from that origin, so it cannot
+derive one itself; the value is reused from `state-web/web.env` on later runs,
+and the `WUWATERM_WEB_ORIGIN` environment variable is accepted instead. It is
+not read from `.env`, which belongs to the Core services.
+Readiness is a real authenticated request: the probe sends `X-WuwaTerm-Edge`
+to `GET /` (or `/<prefix>`), expects the session cookie, then sends
+`GET /api/pool`. The edge secret has to be 32–128 letters, digits,
+underscores or hyphens, and the same value belongs in the proxy's
+`proxy_set_header X-WuwaTerm-Edge "..."` directive.
+
+The in-process owner-private layer described later in
+[The owner-private web presentation layer](web-presentation-layer.md) is a
+different surface and is not installed by this flag.
 
 The script does not do TLS, reverse-proxy authentication, the Telegram token,
 or the model key for you. Those are the inputs described in

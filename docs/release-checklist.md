@@ -113,11 +113,11 @@ For 0.7.0 specifically, also confirm:
   The release receipt binds the main run, not the pull request.
 - `docs/api/openapi.json` matches the generated document after the version and
   description changes (`python scripts/check_api_contract.py`).
-- The Web workbench is still a separate product. This release carries the
-  installer and verification path for `--with-web`; it does not carry a Web
-  package, and the release notes say so rather than implying that
-  `./deploy/setup.sh --with-web` works before WuwaTerm-Web publishes
-  `manifest-{root|prefix}.json` and `SHA256SUMS-{root|prefix}`.
+- The Web workbench is still a separate product with its own release. This
+  repository carries the installer and verification path for `--with-web`,
+  which installs the published `manifest-{root|prefix}.json` and
+  `SHA256SUMS-{root|prefix}` package; the Core release notes link that package
+  instead of shipping it.
 
 For a locally built release candidate database, also run:
 

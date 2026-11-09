@@ -100,6 +100,89 @@ def docker_log(root: pathlib.Path) -> str:
 def mode_of(path: pathlib.Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
+# The published WuwaTerm-Web v0.1.0 assets, copied field for field. The
+# archive name lives under archive; start, port and health are properties of
+# the bundle, so a manifest that only records the archive still installs.
+WEB_ROOT_MANIFEST = {
+    "format": "wuwaterm-web-selfhost-v1",
+    "tag": "v0.1.0",
+    "tag_status": "proposed",
+    "version": "0.1.0",
+    "source_sha": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
+    "source_base_sha": None,
+    "source_tree": "72e0245bbdfd7b66172ab28c4765f244d91ec473",
+    "source_export_excludes": [
+        ".openai",
+        ".env*",
+        "**/.env*",
+        ".dev.vars*",
+        "**/.dev.vars*",
+    ],
+    "build_node": "v24.22.2",
+    "platform": "linux-x64",
+    "base_path": "",
+    "ci": {
+        "workflow": "Web CI",
+        "run_id": "42531510475",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/actions/runs/42531510475",
+    },
+    "archive": {
+        "name": "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz",
+        "sha256": "4e5e9ba8b4c14b0501b9336b3f46ef90204f127e1a48c7a416d68f3dc4e9eeac",
+    },
+}
+
+WEB_PREFIX_MANIFEST = {
+    **WEB_ROOT_MANIFEST,
+    "base_path": "/private",
+    "archive": {
+        "name": "wuwaterm-web-v0.1.0-linux-x64-prefix-71708eb255bc.tar.gz",
+        "sha256": "2dc6d7222a57a037c1351067cc34b657126e2031a93c946246270f860bcd485d",
+    },
+}
+
+START_MJS = """// The downloaded bundle keeps this launcher beside the generated server.
+process.env.PORT ||= '3000';
+await import('./server.js');
+"""
+
+
+def write_web_package(root: pathlib.Path, manifest_name: str, manifest: dict) -> pathlib.Path:
+    """A package shaped like the published archive: bundle/start.mjs plus a manifest."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    bundle = root / "bundle"
+    bundle.mkdir(exist_ok=True)
+    (bundle / "start.mjs").write_text(START_MJS, encoding="utf-8")
+    (bundle / "server.js").write_text("// fixture server\n", encoding="utf-8")
+    (bundle / "BUILD-INFO.json").write_text(
+        json.dumps(
+            {
+                "format": manifest["format"],
+                "tag": manifest["tag"],
+                "version": manifest["version"],
+                "source_sha": manifest["source_sha"],
+                "source_tree": manifest["source_tree"],
+                "build_node": manifest["build_node"],
+                "platform": manifest["platform"],
+                "base_path": manifest["base_path"],
+                "ci": manifest["ci"],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def web_env_values(root: pathlib.Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in (root / "state-web" / "web.env").read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+
 
 def test_help_lists_the_three_surfaces_and_changes_nothing(install_root):
     result = run_setup(install_root, "--help")
@@ -195,6 +278,8 @@ def test_with_web_without_a_package_stops_before_building_data(install_root):
     result = run_setup(
         install_root,
         "--with-web",
+        "--web-origin",
+        "https://wuwaterm.example",
         "--no-adopt",
         env={"STUB_CURL_FAIL_MATCH": "releases/latest"},
     )
@@ -207,52 +292,130 @@ def test_with_web_without_a_package_stops_before_building_data(install_root):
     assert "wuwaterm-api" not in log
 
 
-def test_with_web_local_package_writes_private_credentials(install_root):
+def test_with_web_needs_the_external_origin(install_root):
     write_env(install_root)
-    package = install_root / "web-package"
-    package.mkdir()
-    (package / "manifest-root.json").write_text(
-        json.dumps(
-            {
-                "package": "wuwaterm-web",
-                "version": "0.1.0",
-                "artifact": "wuwaterm-web-0.1.0-root.tar.gz",
-                "start": "node server.js",
-                "port": 3999,
-                "health_path": "/api/readyz",
-            }
-        ),
-        encoding="utf-8",
-    )
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
 
     result = run_setup(
         install_root, "--with-web", "--web-package", str(package), "--no-adopt"
     )
 
+    assert result.returncode == 1
+    assert "--web-origin" in result.stderr
+    assert not (install_root / "data" / "terms.db").exists()
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
+def test_with_web_local_package_writes_private_credentials(install_root):
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
     assert result.returncode == 0, result.stderr
     web_env = install_root / "state-web" / "web.env"
     assert mode_of(web_env) == 0o600
-    values = dict(
-        line.split("=", 1)
-        for line in web_env.read_text(encoding="utf-8").splitlines()
-        if "=" in line
-    )
+    values = web_env_values(install_root)
     assert set(values) == {
-        "WUWATERM_API_BASE_URL",
-        "WUWATERM_SITE_DEVICE_TOKEN",
+        "WUWATERM_RUNTIME_MODE",
+        "WUWATERM_WEB_ORIGIN",
         "WUWATERM_WEB_EDGE_SECRET",
         "WUWATERM_WEB_BASE_PATH",
+        "WUWATERM_API_BASE_URL",
+        "WUWATERM_SITE_DEVICE_TOKEN",
+        "WUWATERM_TRANSLATION_ENABLED",
+        "WUWATERM_LOCAL_DB_PATH",
     }
+    assert values["WUWATERM_RUNTIME_MODE"] == "selfhost"
+    assert values["WUWATERM_WEB_ORIGIN"] == "https://wuwaterm.example"
+    assert values["WUWATERM_WEB_BASE_PATH"] == ""
+    assert values["WUWATERM_TRANSLATION_ENABLED"] == "true"
     assert values["WUWATERM_API_BASE_URL"] == "http://127.0.0.1:8788"
     assert values["WUWATERM_SITE_DEVICE_TOKEN"].startswith("wtd1.dev123.")
-    assert values["WUWATERM_WEB_EDGE_SECRET"] not in result.stdout
+    # The Web runtime rejects anything outside its edge-secret alphabet.
+    edge = values["WUWATERM_WEB_EDGE_SECRET"]
+    assert re.fullmatch(r"[A-Za-z0-9_-]{32,128}", edge)
+    assert edge not in result.stdout
+    assert edge not in result.stderr
     web_token = (install_root / "state-web" / "device.token").read_text(encoding="utf-8")
     assert "wtd1.dev123." in web_token
     log = docker_log(install_root)
     assert "device issue --name web --scopes translate,meta" in log
     assert "run -d --name wuwaterm-web" in log
-    assert "PORT=3999" in log
-    assert "curl" in (install_root / "curl.log").read_text(encoding="utf-8")
+    assert f"-v {package / 'bundle'}:/app:ro" in log
+    assert f"-v {install_root / 'state-web' / 'data'}:/app/data:rw" in log
+    assert "PORT=3000" in log
+    assert "sh -c node start.mjs" in log
+    assert mode_of(install_root / "state-web" / "data") == 0o700
+    # Readiness is an authenticated request: page mints the cookie, then pool.
+    curl_log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert "-H @-" in curl_log
+    assert "-o /dev/null http://127.0.0.1:3000/" in curl_log
+    assert "http://127.0.0.1:3000/api/pool" in curl_log
+    assert edge not in curl_log
+
+
+def test_web_package_archive_with_the_published_layout(install_root):
+    write_env(install_root)
+    package = write_web_package(install_root / "web-archive-src", "manifest-root.json", WEB_ROOT_MANIFEST)
+    archive = install_root / "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz"
+    subprocess.run(
+        ["tar", "-czf", str(archive), "-C", str(package), "bundle"], check=True
+    )
+
+    result = run_setup(
+        install_root,
+        "--web-package",
+        str(archive),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 0, result.stderr
+    extracted = install_root / "state-web" / "package" / "bundle"
+    assert (extracted / "start.mjs").exists()
+    assert f"-v {extracted}:/app:ro" in docker_log(install_root)
+
+    # A re-run keeps the installed bundle and the stored origin; it needs
+    # neither --web-package nor --web-origin and never reaches the network.
+    (install_root / "curl.log").unlink()
+    again = run_setup(install_root, "--with-web", "--no-adopt")
+
+    assert again.returncode == 0, again.stderr
+    assert "reusing the installed Web package" in again.stdout
+    assert not (install_root / "state-web" / "manifest-root.json").exists()
+    curl_log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert "releases/latest" not in curl_log
+
+
+def test_web_package_built_for_another_prefix_is_refused(install_root):
+    write_env(install_root)
+    package = write_web_package(
+        install_root / "web-prefix-package", "manifest-prefix.json", WEB_PREFIX_MANIFEST
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "built for base path /private" in result.stderr
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 
 def test_status_reports_without_creating_anything(install_root):
@@ -298,24 +461,37 @@ def test_existing_active_device_is_not_reissued(install_root):
     assert not (install_root / "state-api" / "first-device.token").exists()
 
 
+def test_status_probes_the_edge_gated_web_page(install_root):
+    write_env(install_root)
+    state = install_root / "state-web"
+    state.mkdir()
+    edge = "a" * 64
+    (state / "web.env").write_text(
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={edge}\n"
+        "WUWATERM_WEB_BASE_PATH=/private\n",
+        encoding="utf-8",
+    )
+    (state / "web.port").write_text("3100\n", encoding="utf-8")
+
+    result = run_setup(install_root, "--status")
+
+    assert result.returncode == 0
+    assert "web health:   ready (http://127.0.0.1:3100/private/)" in result.stdout
+    curl_log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert "-H @-" in curl_log
+    assert "http://127.0.0.1:3100/private/" in curl_log
+    assert edge not in curl_log
+    assert docker_log(install_root) != ""
+
+
 def test_web_prefix_selects_the_prefix_package_and_base_path(install_root):
     write_env(install_root)
     (install_root / "data").mkdir()
     (install_root / "data" / "terms.db").write_text("fixture", encoding="utf-8")
-    package = install_root / "web-prefix-package"
-    package.mkdir()
-    (package / "manifest-prefix.json").write_text(
-        json.dumps(
-            {
-                "package": "wuwaterm-web",
-                "version": "0.1.0",
-                "artifact": "wuwaterm-web-0.1.0-prefix.tar.gz",
-                "start": "node server.js",
-                "port": 3998,
-                "health_path": "/api/readyz",
-            }
-        ),
-        encoding="utf-8",
+    package = write_web_package(
+        install_root / "web-prefix-package", "manifest-prefix.json", WEB_PREFIX_MANIFEST
     )
 
     result = run_setup(
@@ -324,12 +500,34 @@ def test_web_prefix_selects_the_prefix_package_and_base_path(install_root):
         str(package),
         "--web-prefix",
         "/private",
+        "--web-origin",
+        "https://wuwaterm.example",
         "--no-adopt",
     )
 
     assert result.returncode == 0, result.stderr
-    web_env = (install_root / "state-web" / "web.env").read_text(encoding="utf-8")
-    assert "WUWATERM_WEB_BASE_PATH=/private" in web_env
-    log = docker_log(install_root)
-    assert "PORT=3998" in log
-    assert "WUWATERM_WEB_BASE_PATH=/private" in log
+    values = web_env_values(install_root)
+    assert values["WUWATERM_WEB_BASE_PATH"] == "/private"
+    assert values["WUWATERM_WEB_ORIGIN"] == "https://wuwaterm.example"
+    curl_log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:3000/private/" in curl_log
+    assert "http://127.0.0.1:3000/private/api/pool" in curl_log
+
+
+def test_web_origin_must_be_an_origin(install_root):
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+
+    for origin in ("http://wuwaterm.example", "https://wuwaterm.example/private", "https://wuwaterm.example?x=1"):
+        result = run_setup(
+            install_root,
+            "--web-package",
+            str(package),
+            "--web-origin",
+            origin,
+            "--no-adopt",
+        )
+        assert result.returncode == 1, origin
+        assert "--web-origin" in result.stderr
+
+    assert not (install_root / "state-web" / "web.env").exists()
