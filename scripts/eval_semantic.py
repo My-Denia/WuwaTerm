@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import fcntl
 import datetime as _dt
 import hashlib
 import json
@@ -47,6 +49,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -216,13 +219,39 @@ def verify_frozen(run_dir: Path, corpus_dir: Path, ledger: Mapping[str, Any]) ->
 
 
 class Ledger:
-    """The single call ledger. Every write is atomic and happens before a send."""
+    """The single call ledger, shared by every process that spends calls.
+
+    Each change takes an exclusive lock, re-reads the file, changes only its
+    own record and the total, and writes the file atomically. A second process,
+    or an operator correcting a record by hand, is therefore never overwritten
+    by a stale in-memory copy. A charge happens before the call is sent.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.data = load_json(path)
-        self.data.setdefault("records", [])
-        self.data.setdefault("model_calls_total", 0)
+        self.lock_path = path.with_name(path.name + ".lock")
+        self.data = self._read()
+
+    def _read(self) -> dict[str, Any]:
+        data = load_json(self.path)
+        data.setdefault("records", [])
+        data.setdefault("model_calls_total", 0)
+        return data
+
+    @contextlib.contextmanager
+    def _locked(self):
+        with self.lock_path.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                self.data = self._read()
+                yield self.data
+                write_json_atomic(self.path, self.data)
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def refresh(self) -> dict[str, Any]:
+        self.data = self._read()
+        return self.data
 
     @property
     def total(self) -> int:
@@ -235,75 +264,96 @@ class Ledger:
             if record.get("purpose") == "eval"
         )
 
-    def save(self) -> None:
-        write_json_atomic(self.path, self.data)
+    @staticmethod
+    def _find(data: dict[str, Any], record_id: str) -> dict[str, Any]:
+        for record in data["records"]:
+            if record.get("record_id") == record_id:
+                return record
+        raise Refused(f"ledger record {record_id} is missing")
 
-    def open_record(self, **fields: Any) -> dict[str, Any]:
-        record = {"time": now_iso(), "calls": 0, **fields}
-        self.data["records"].append(record)
-        self.save()
-        return record
+    def record(self, record_id: str) -> dict[str, Any]:
+        return self._find(self.refresh(), record_id)
 
-    def charge(self, record: dict[str, Any]) -> None:
+    def open_record(self, **fields: Any) -> str:
+        with self._locked() as data:
+            record_id = f"rec-{len(data['records']) + 1:03d}-{os.getpid()}"
+            data["records"].append(
+                {"record_id": record_id, "time": now_iso(), "calls": 0, **fields}
+            )
+        return record_id
+
+    def update(self, record_id: str, **fields: Any) -> None:
+        with self._locked() as data:
+            self._find(data, record_id).update(fields)
+
+    def charge(self, record_id: str) -> None:
         """Count one HTTP attempt before it is sent, or refuse it."""
-        if self.total + 1 > STOP_LINE_TOTAL:
+        refused = False
+        with self._locked() as data:
+            record = self._find(data, record_id)
+            cap = record.get("max_calls")
+            if self.total + 1 > STOP_LINE_TOTAL:
+                refused = True
+            elif record.get("purpose") == "eval" and self.eval_total() + 1 > EVAL_SELF_LIMIT:
+                refused = True
+            elif cap is not None and int(record.get("calls", 0)) + 1 > int(cap):
+                record["cap_reached"] = True
+                refused = True
+            else:
+                record["calls"] = int(record.get("calls", 0)) + 1
+                data["model_calls_total"] = self.total + 1
+        if refused:
             raise llm_transport.LLMTranslationError(
                 llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
             )
-        if record.get("purpose") == "eval" and self.eval_total() + 1 > EVAL_SELF_LIMIT:
-            raise llm_transport.LLMTranslationError(
-                llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
-            )
-        cap = record.get("max_calls")
-        if cap is not None and int(record.get("calls", 0)) + 1 > int(cap):
-            record["cap_reached"] = True
-            raise llm_transport.LLMTranslationError(
-                llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
-            )
-        record["calls"] = int(record.get("calls", 0)) + 1
-        self.data["model_calls_total"] = self.total + 1
-        self.save()
 
     def reserve(self, purpose: str, max_calls: int, note: str) -> dict[str, Any]:
         if purpose not in ("w2", "deploy-probe"):
             raise Refused("purpose must be w2 or deploy-probe")
         if max_calls <= 0:
             raise Refused("max-calls must be positive")
-        if self.total + max_calls > STOP_LINE_TOTAL:
-            raise Refused(
-                f"reservation of {max_calls} would take the ledger past {STOP_LINE_TOTAL}"
-            )
-        rid = f"res-{len(self.data['records']) + 1:03d}"
-        record = self.open_record(
-            purpose=purpose,
-            round=None,
-            is_retry=False,
-            reused_samples=False,
-            reservation_id=rid,
-            reserved=max_calls,
-            settled=False,
-            note=note,
-        )
-        record["calls"] = max_calls
-        self.data["model_calls_total"] = self.total + max_calls
-        self.save()
+        with self._locked() as data:
+            if self.total + max_calls > STOP_LINE_TOTAL:
+                refusal = f"reservation of {max_calls} would take the ledger past {STOP_LINE_TOTAL}"
+            else:
+                refusal = None
+                rid = f"res-{len(data['records']) + 1:03d}"
+                record = {
+                    "record_id": rid,
+                    "time": now_iso(),
+                    "purpose": purpose,
+                    "round": None,
+                    "is_retry": False,
+                    "reused_samples": False,
+                    "reservation_id": rid,
+                    "reserved": max_calls,
+                    "settled": False,
+                    "note": note,
+                    "calls": max_calls,
+                }
+                data["records"].append(record)
+                data["model_calls_total"] = self.total + max_calls
+        if refusal:
+            raise Refused(refusal)
         return record
 
     def settle(self, rid: str, actual: int) -> dict[str, Any]:
-        for record in self.data["records"]:
-            if record.get("reservation_id") == rid:
-                if record.get("settled"):
-                    raise Refused(f"{rid} is already settled")
-                if actual < 0:
-                    raise Refused("actual must be >= 0")
-                delta = actual - int(record["calls"])
-                record["calls"] = actual
-                record["settled"] = True
-                record["settled_at"] = now_iso()
-                self.data["model_calls_total"] = self.total + delta
-                self.save()
-                return record
-        raise Refused(f"no reservation {rid}")
+        if actual < 0:
+            raise Refused("actual must be >= 0")
+        problem = None
+        with self._locked() as data:
+            found = next((r for r in data["records"] if r.get("reservation_id") == rid), None)
+            if found is None:
+                problem = f"no reservation {rid}"
+            elif found.get("settled"):
+                problem = f"{rid} is already settled"
+            else:
+                delta = actual - int(found["calls"])
+                found.update(calls=actual, settled=True, settled_at=now_iso())
+                data["model_calls_total"] = self.total + delta
+        if problem:
+            raise Refused(problem)
+        return found
 
 
 # --------------------------------------------------------------------------
@@ -439,7 +489,7 @@ class Runner:
     inputs: Inputs
     out_dir: Path
     ledger: Ledger
-    record: dict[str, Any]
+    record_id: str
     translator: SentenceTranslator
     service: Any
     explain_language: str = "zh"
@@ -753,6 +803,64 @@ async def _run_layers(runner: Runner, layers: Sequence[str], include_supplementa
         await runner.translator.aclose()
 
 
+RUN_LOCK = "run.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def live_run_pid(out_dir: Path) -> int | None:
+    """The pid of a run still writing into ``out_dir``, if any."""
+    path = out_dir / RUN_LOCK
+    if not path.is_file():
+        return None
+    try:
+        pid = int(load_json(path)["pid"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return pid if _pid_alive(pid) else None
+
+
+def acquire_run_lock(out_dir: Path) -> None:
+    pid = live_run_pid(out_dir)
+    if pid is not None:
+        raise Refused(f"a run (pid {pid}) is still writing into {out_dir}")
+    # The Python pid itself: stopping a run means signalling this process,
+    # not the shell that started it.
+    write_json_atomic(out_dir / RUN_LOCK, {"pid": os.getpid(), "started_at": now_iso()})
+
+
+def release_run_lock(out_dir: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        (out_dir / RUN_LOCK).unlink()
+
+
+def _raise_interrupt(signum, frame):  # noqa: ARG001
+    raise KeyboardInterrupt
+
+
+def _interrupt_on_terminate():
+    """SIGTERM/SIGHUP stop a run the same way Ctrl-C does: recorded, not lost."""
+    previous = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            previous[sig] = signal.signal(sig, _raise_interrupt)
+    return previous
+
+
+def _restore_handlers(previous) -> None:
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
+
+
 _GATEWAY_ENV = (
     "WUWATERM_OPENAI_BASE_URL",
     "WUWATERM_OPENAI_API_KEY",
@@ -840,7 +948,8 @@ def _command_run(args: argparse.Namespace) -> int:
             "runs": history,
         },
     )
-    record = ledger.open_record(
+    acquire_run_lock(out_dir)
+    record_id = ledger.open_record(
         purpose="eval",
         round=args.round,
         is_retry=bool(args.retry),
@@ -854,7 +963,7 @@ def _command_run(args: argparse.Namespace) -> int:
         dry_run=bool(args.fake_transport),
         status="running",
     )
-    remove_hook = llm_transport.add_pre_send_hook(lambda purpose: ledger.charge(record))
+    remove_hook = llm_transport.add_pre_send_hook(lambda purpose: ledger.charge(record_id))
     observed: list[dict[str, Any]] = []
     remove_observer = llm_transport.add_call_observer(
         lambda rec: observed.append(
@@ -865,20 +974,27 @@ def _command_run(args: argparse.Namespace) -> int:
     translator, service, db_copy = build_runtime(
         inputs, out_dir, fake=bool(args.fake_transport), llm_timeout=llm_timeout
     )
-    runner = Runner(inputs, out_dir, ledger, record, translator, service, resume=bool(args.resume))
+    runner = Runner(inputs, out_dir, ledger, record_id, translator, service, resume=bool(args.resume))
     status = "complete"
+    previous_handlers = _interrupt_on_terminate()
     try:
         asyncio.run(_run_layers(runner, layers, args.include_supplementary))
     except Refused as exc:
-        status = "capped by --max-calls" if record.get("cap_reached") else f"stopped: {exc}"
+        cap = ledger.record(record_id).get("cap_reached")
+        status = "capped by --max-calls" if cap else f"stopped: {exc}"
+    except KeyboardInterrupt:
+        status = "interrupted"
     finally:
+        _restore_handlers(previous_handlers)
         remove_hook()
         remove_observer()
-        record["status"] = status
-        record["finished_at"] = now_iso()
-        ledger.save()
-        write_json_atomic(out_dir / "calls.json", observed)
+        ledger.update(record_id, status=status, finished_at=now_iso())
+        # calls.json is cumulative across the attempts of one round.
+        calls_path = out_dir / "calls.json"
+        earlier = load_json(calls_path) if args.resume and calls_path.is_file() else []
+        write_json_atomic(calls_path, [*earlier, *observed])
         shutil.rmtree(db_copy.parent, ignore_errors=True)
+        release_run_lock(out_dir)
     after = verify_frozen(run_dir, corpus_dir, load_json(real_ledger_path))
     if after:
         print("frozen inputs changed during the run: " + "; ".join(after), file=sys.stderr)
@@ -891,7 +1007,7 @@ def _command_run(args: argparse.Namespace) -> int:
             {
                 "status": status,
                 "layers": list(layers),
-                "calls_this_run": record["calls"],
+                "calls_this_run": ledger.record(record_id)["calls"],
                 "ledger_total": ledger.total,
                 "ledger": str(ledger_path),
                 "out_dir": str(out_dir),
@@ -1044,8 +1160,11 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
     per_direction: dict[str, dict[str, Any]] = {}
     worklist: list[dict[str, Any]] = []
     multi_class = 0
+    covered: dict[str, set[str]] = {"zh->en": set(), "en->zh": set()}
     for result in _load_dir(out_dir / "P"):
         direction = result["direction"]
+        if result.get("body") and result["body"]["status"] == "complete":
+            covered[direction].add(result["unit_id"])
         unit = units[result["unit_id"]]
         source, target = (
             (unit["zh_text"], unit["en_text"]) if direction == "zh->en" else (unit["en_text"], unit["zh_text"])
@@ -1103,9 +1222,19 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
             continue
         lower = bucket["on_allowed_mh"] + bucket["offlist_fp_mh"]
         upper = lower + bucket["offlist_pending_mh"]
-        state = bounded_gate(lower, upper, lambda value: value <= limit)
+        missing = sorted(set(units) - covered[direction])
+        if lower > limit:
+            # Unreviewed units can only add false positives: already decided.
+            state = NOT_MET
+        elif missing:
+            state = UNDECIDABLE
+        else:
+            state = bounded_gate(lower, upper, lambda value: value <= limit)
         gates[f"P_false_positives_{direction}"] = gate(
             state,
+            units_expected=len(units),
+            units_reviewed=len(covered[direction]),
+            units_missing=missing,
             numerator_lower=lower,
             numerator_upper=upper,
             limit=round(limit, 3),
@@ -1116,8 +1245,11 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
         )
     n_real = len(real_items)
     recall = (len(real_hit) / n_real) if n_real else None
+    complete_p = all(covered[d] == set(units) for d in covered)
     gates["P_real_error_recall"] = gate(
-        UNDECIDABLE if n_real < P_REAL_ERROR_MIN_SAMPLE else (MET if recall >= P_REAL_ERROR_RECALL_MIN else NOT_MET),
+        UNDECIDABLE
+        if n_real < P_REAL_ERROR_MIN_SAMPLE or not complete_p
+        else (MET if recall >= P_REAL_ERROR_RECALL_MIN else NOT_MET),
         n=n_real,
         min_sample=P_REAL_ERROR_MIN_SAMPLE,
         hit=len(real_hit),
@@ -1135,9 +1267,12 @@ def score_e(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
     category_match: dict[str, bool] = {}
     non_injected = {"on_allowed_mh": 0, "on_undecidable": 0, "offlist": 0, "on_real": 0}
     ran = False
+    reviewed: set[str] = set()  # injection ids inside a successfully reviewed variant
     for result in _load_dir(out_dir / "E"):
         ran = True
         variant = variants[result["variant_id"]]
+        if result.get("body") and result["body"]["status"] == "complete":
+            reviewed.update(i["injection_id"] for i in variant["injections"])
         issues = stats.add(result, variant["source_text"], variant["target_text"])
         for injection in variant["injections"]:
             iid = injection["injection_id"]
@@ -1180,11 +1315,22 @@ def score_e(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
             continue
         n = len(ids)
         hit = sum(1 for iid in ids if hits.get(iid))
+        missing = sorted(iid for iid in ids if iid not in reviewed)
         recall = hit / n if n else 0.0
+        upper = (hit + len(missing)) / n if n else 0.0
         enough = n >= E_MIN_PER_CATEGORY and len(groups) >= E_MIN_GROUPS
+        if not enough:
+            state = UNDECIDABLE
+        elif recall >= minimum:
+            state = MET  # even counting every unreviewed injection as missed
+        elif upper < minimum:
+            state = NOT_MET  # even counting every unreviewed injection as found
+        else:
+            state = UNDECIDABLE
         gates[f"E_recall_{category}"] = gate(
-            (MET if recall >= minimum else NOT_MET) if enough else UNDECIDABLE,
+            state,
             n=n,
+            injections_unreviewed=missing,
             groups=len(groups),
             hit=hit,
             recall=round(recall, 3),
@@ -1262,6 +1408,27 @@ def _verified_count(service: Any, source: str, target: str) -> int | None:
     return sum(1 for finding in report.findings if finding.verdict == VERDICT_VERIFIED)
 
 
+def ensure_blind_key(path: Path, docs: Sequence[str]) -> dict[str, list[str]]:
+    """A/B assignment per document, kept for good once made.
+
+    A document that first appears in a later scoring (a resumed round) gets an
+    assignment of its own; the key file is saved again. Existing assignments
+    never change, so verdicts already given stay valid.
+    """
+    blind_key = load_json(path) if path.is_file() else {}
+    missing = [name for name in docs if name not in blind_key]
+    if missing:
+        if not blind_key:
+            rng = random.Random(20261110)
+            draws = {name: rng.random() for name in missing}
+        else:
+            draws = {name: random.Random(f"20261110:{name}").random() for name in missing}
+        for name in missing:
+            blind_key[name] = ["old", "new"] if draws[name] < 0.5 else ["new", "old"]
+        write_json_atomic(path, blind_key)
+    return blind_key
+
+
 def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | None) -> dict[str, Any]:
     precision_verdicts = _adjudication(out_dir, "m-precision.json")
     translation_verdicts = _adjudication(out_dir, "m-translation.json")
@@ -1334,12 +1501,7 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
 
     # Blind translation judging: A/B assignment per document is random and
     # stored apart from the packet the judge reads.
-    if blind_key_path.is_file():
-        blind_key = load_json(blind_key_path)
-    else:
-        rng = random.Random(20261110)
-        blind_key = {doc["doc"]: ("old", "new") if rng.random() < 0.5 else ("new", "old") for doc in docs}
-        write_json_atomic(blind_key_path, blind_key)
+    blind_key = ensure_blind_key(blind_key_path, [doc["doc"] for doc in docs])
     packet = []
     for doc in docs:
         a_side, b_side = blind_key[doc["doc"]]
@@ -1355,6 +1517,10 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         )
     write_json_atomic(out_dir / "worklists" / "m-translation-packet.json", packet)
     gates.update(_score_m_translation(inputs, translation_verdicts, blind_key, {doc["doc"] for doc in docs}))
+    missing_docs = sorted(set(inputs.m_gold["docs"]) - {doc["doc"] for doc in docs})
+    if missing_docs:
+        for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number", "M_precision", "separator_fidelity"):
+            gates[name] = {**gates[name], "state": UNDECIDABLE, "reason": "incomplete", "docs_missing": missing_docs}
     return {"gates": gates, "verified_constraint_diagnostic": verified, "m_review_pairs": pair_counts}
 
 
@@ -1487,6 +1653,23 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
         min_sample=MPRIME_MIN_DIFF, automatic_upper_bound=upper, judged_led_astray=judged_astray,
         unresolved=unresolved,
     )
+    expected_targets = {
+        (e["experiment"], t["para"])
+        for e in inputs.mprime["experiments"]
+        if not e.get("supplementary")
+        for t in e["targets"]
+    }
+    usable = {
+        key
+        for key, r in results.items()
+        if (r.get("with_precedent") or {}).get("text") and (r.get("without_precedent") or {}).get("text")
+    }
+    missing_targets = sorted(f"{e}-P{para}" for e, para in expected_targets - usable)
+    if missing_targets:
+        for name in ("Mprime_same_sense", "Mprime_led_astray"):
+            if not (name == "Mprime_led_astray" and gates[name]["state"] == NOT_MET):
+                gates[name] = {**gates[name], "state": UNDECIDABLE, "reason": "incomplete", "targets_missing": missing_targets}
+        state_same, state_diff = gates["Mprime_same_sense"]["state"], gates["Mprime_led_astray"]["state"]
     default = "on" if state_same == MET and state_diff == MET else "off"
     packet = [
         {
@@ -1570,10 +1753,22 @@ def command_score(args: argparse.Namespace) -> int:
     corpus_dir = Path(args.corpus_dir).resolve()
     out_dir = Path(args.out_dir).resolve() if args.out_dir else run_dir / "rounds" / f"round-{args.round}"
     dry_run = bool(args.dry_run)
+    pid = live_run_pid(out_dir)
+    if pid is not None:
+        raise Refused(f"a run (pid {pid}) is still writing into {out_dir}; score it when it ends")
     ledger_path = out_dir / "ledger.dry-run.json" if dry_run else run_dir / "ledger.json"
     inputs = load_inputs(run_dir, corpus_dir)
-    receipt = score_round(inputs, out_dir, ledger=load_json(ledger_path), dry_run=dry_run)
+    ledger_data = load_json(ledger_path)
+    receipt = score_round(inputs, out_dir, ledger=ledger_data, dry_run=dry_run)
     receipt["round"] = args.round
+    # What actually ran, straight from the ledger: no hand-written history.
+    receipt["ledger_records"] = [
+        {k: record.get(k) for k in (
+            "record_id", "time", "finished_at", "calls", "status", "resumed",
+            "is_retry", "run_parameters", "note", "max_calls")}
+        for record in ledger_data.get("records", [])
+        if record.get("purpose") == "eval" and str(record.get("round")) == str(args.round)
+    ]
     meta_path = out_dir / "run-meta.json"
     if meta_path.is_file():
         meta = load_json(meta_path)
@@ -1584,13 +1779,14 @@ def command_score(args: argparse.Namespace) -> int:
         receipt["config_sha256"] = meta["config"]["config_sha256"]
         receipt["run_parameters"] = meta.get("runs", [])
     target = out_dir / "receipt.dry-run.json" if dry_run else run_dir / "receipt.json"
-    if not dry_run and target.is_file():
-        existing = load_json(target)
-        rounds = existing.get("rounds", {}) if isinstance(existing, dict) else {}
-    else:
-        rounds = {}
+    existing = load_json(target) if (not dry_run and target.is_file()) else {}
+    if not isinstance(existing, dict):
+        existing = {}
+    # Only this round is replaced; other rounds and top-level records
+    # (owner decisions, premise checks) are kept as they are.
+    rounds = dict(existing.get("rounds", {}))
     rounds[str(args.round)] = receipt
-    write_json_atomic(target, {"run": run_dir.name, "rounds": rounds})
+    write_json_atomic(target, {**existing, "run": run_dir.name, "rounds": rounds})
     print(receipt["headline"])
     print(str(target))
     return 0
@@ -1602,17 +1798,17 @@ def command_freeze_config(args: argparse.Namespace) -> int:
         print("refused: config_freeze already present", file=sys.stderr)
         return 1
     fingerprint = config_fingerprint()
-    previous = ledger.data.get("config_freeze")
-    if previous:
-        # A replaced freeze stays on record next to the rounds that used it.
-        ledger.data.setdefault("config_freeze_history", []).append(previous)
-    ledger.data["config_freeze"] = {
-        **fingerprint,
-        "frozen_at": now_iso(),
-        "git_commit": args.git_commit,
-        "note": args.note or "",
-    }
-    ledger.save()
+    with ledger._locked() as data:
+        previous = data.get("config_freeze")
+        if previous:
+            # A replaced freeze stays on record next to the rounds that used it.
+            data.setdefault("config_freeze_history", []).append(previous)
+        data["config_freeze"] = {
+            **fingerprint,
+            "frozen_at": now_iso(),
+            "git_commit": args.git_commit,
+            "note": args.note or "",
+        }
     print(json.dumps({"config_sha256": fingerprint["config_sha256"], **fingerprint["options"]}, ensure_ascii=False))
     return 0
 

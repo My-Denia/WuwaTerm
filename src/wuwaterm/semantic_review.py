@@ -336,12 +336,25 @@ def _strip_fence(content: str) -> str:
     return text
 
 
+def _text(value: object, key: str) -> str:
+    """Model text that can be served: a str with no isolated surrogate.
+
+    JSON may carry a lone surrogate escape (``"\\ud800"``); such a string
+    cannot be encoded as UTF-8, so it must fail here, as invalid model output,
+    rather than later while the response is serialized.
+    """
+    if not isinstance(value, str):
+        raise InvalidModelOutput(f"{key} is not text")
+    if any("\ud800" <= char <= "\udfff" for char in value):
+        raise InvalidModelOutput(f"{key} contains an isolated surrogate")
+    return value
+
+
 def _optional_text(item: dict[str, Any], key: str) -> str | None:
     value = item.get(key)
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise InvalidModelOutput(f"{key} is not text")
+    value = _text(value, key)
     return None if _is_blank(value) else value
 
 
@@ -364,16 +377,13 @@ def parse_model_output(content: str) -> list[ModelIssue]:
             raise InvalidModelOutput("unknown category")
         if confidence not in contract.CONFIDENCES:
             raise InvalidModelOutput("unknown confidence")
-        if not isinstance(rationale, str):
-            raise InvalidModelOutput("rationale is not text")
+        rationale = _text(rationale, "rationale")
         suggestion = raw.get("suggestion")
         suggestion_quote = replacement = None
         if suggestion is not None:
             if not isinstance(suggestion, dict):
                 raise InvalidModelOutput("suggestion is not an object")
-            replacement = suggestion.get("replacement")
-            if not isinstance(replacement, str):
-                raise InvalidModelOutput("replacement is not text")
+            replacement = _text(suggestion.get("replacement"), "replacement")
             suggestion_quote = _optional_text(suggestion, "target_quote")
         issues.append(
             ModelIssue(

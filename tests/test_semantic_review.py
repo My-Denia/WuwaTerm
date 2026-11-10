@@ -287,3 +287,23 @@ def test_application_refuses_an_over_long_side_without_calling(sample_db, monkey
     job = SemanticReviewJob(source="源" * 10, target="x" * 2001, direction="en", explain_language="zh")
     outcome = asyncio.run(application.semantic_review_async(service, translator, job, request_id="r"))
     assert outcome.error_code == "input_too_long"
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        _issue(target_quote="人群高喊安可", rationale="bad \ud800 text"),
+        _issue(target_quote="人群高喊安可", suggestion={"replacement": "返\udfff场"}),
+        _issue(target_quote="人群高喊安可", suggestion={"replacement": "返场"}, alternative="x\ud83dy"),
+    ],
+    ids=["rationale", "replacement", "alternative"],
+)
+def test_isolated_surrogate_in_model_text_is_not_reviewed(sample_db, issue):
+    # json.dumps writes the lone surrogate as an escape, as a model could.
+    content = json.dumps({"issues": [issue]})
+    calls: list = []
+    result = _run(sample_db, ENCORE_JOB, content, calls)
+    assert len(calls) == 1
+    assert result.response.body["status"] == "not_reviewed"
+    assert result.response.body["status_reason"] == "invalid_model_output"
+    result.response.data.decode("utf-8")  # the served bytes are valid UTF-8

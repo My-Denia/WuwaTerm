@@ -1041,3 +1041,16 @@ def test_disabled_semantic_review_does_not_spend_the_shared_budget(tmp_path, sam
 
     assert_error(review(app, token), 503, "llm_unavailable")
     assert translate(app, token).status_code == 200  # the one budgeted call is still there
+
+
+def test_isolated_surrogate_from_the_model_is_200_not_reviewed_not_500(tmp_path, sample_db, monkeypatch):
+    configure_llm(monkeypatch)
+    raw = '{"issues": [{"category": "negation_change", "confidence": "high", "source_quote": "不会", "target_quote": "will", "rationale": "\\ud800", "suggestion": null, "alternative": null}]}'
+    model = FakeModel(raw)
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    response = review(app, token)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "not_reviewed"
+    assert model.calls == 1

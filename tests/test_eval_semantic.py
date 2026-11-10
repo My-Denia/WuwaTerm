@@ -335,3 +335,164 @@ def test_a_timeout_is_recorded_and_resume_reruns_only_unfinished_items(ev, run_d
     assert again["error_code"] is None
 
     assert ev.main(["score", "--run-dir", str(run), "--corpus-dir", str(corpus), "--out-dir", str(out), "--dry-run"]) == 0
+
+
+# --------------------------------------------------------------------------
+# Interrupt -> resume -> rescore -> receipt (review findings and their kin)
+# --------------------------------------------------------------------------
+
+
+def _inputs(ev, tmp_path, units=("U1", "U2")):
+    alignment = {
+        "zh_char_denominator": 1000,
+        "units": [{"unit_id": u, "zh_text": "甲乙丙丁戊。", "en_text": "Alpha beta gamma."} for u in units],
+    }
+    freeze = {"items": [
+        {"id": f"D-{u}", "unit_id": u, "class": "allowed_rewrite",
+         "zh": {"unit_range": [0, 2]}, "en": {"unit_range": [0, 5]}} for u in units
+    ]}
+    return ev.Inputs(run_dir=tmp_path, corpus_dir=tmp_path, alignment=alignment, freeze=freeze,
+                     injections={"injections": []}, variants={"variants": []},
+                     m_gold={"docs": {}, "items": []}, mprime={"experiments": [], "occurrences": []})
+
+
+def _p_result(unit, direction, *, status="complete", issues=(), error=None, timeout=False):
+    body = None if error else {"status": status, "dropped_unanchored": 0, "omitted_issues": 0, "issues": list(issues)}
+    out = {"layer": "P", "unit_id": unit, "direction": direction, "latency_s": 1.0,
+           "error_code": error, "bytes": 100, "body": body}
+    if timeout:
+        out["timeout"] = True
+    return out
+
+
+def _fp_issue(n=0):
+    return {"id": f"{n:032x}", "category": "meaning_shift", "confidence": "high",
+            "source_span": {"start": 0, "end": 2, "text": "甲乙"}, "target_span": None, "rationale": "r"}
+
+
+def _write_p(ev, out, results):
+    for r in results:
+        ev.write_json_atomic(out / "P" / f"{r['unit_id']}.{r['direction']}.{id(r)}.json", r)
+
+
+@pytest.mark.parametrize("case", ["one_unit", "all_not_reviewed", "all_timeouts"])
+def test_p_gate_is_undecidable_without_full_coverage(ev, tmp_path, case):
+    inputs, out = _inputs(ev, tmp_path), tmp_path / "round"
+    results = []
+    for d in ("zh->en", "en->zh"):
+        if case == "one_unit":
+            results.append(_p_result("U1", d))
+        elif case == "all_not_reviewed":
+            results += [_p_result(u, d, status="not_reviewed") for u in ("U1", "U2")]
+        else:
+            results += [_p_result(u, d, error="llm_unavailable", timeout=True) for u in ("U1", "U2")]
+    _write_p(ev, out, results)
+    gates = ev.score_p(inputs, out, ev.ReviewStats())["gates"]
+    for d in ("zh->en", "en->zh"):
+        assert gates[f"P_false_positives_{d}"]["state"] == "undecidable"
+        assert gates[f"P_false_positives_{d}"]["units_missing"]
+
+
+def test_p_gate_is_not_met_on_partial_coverage_once_the_limit_is_passed(ev, tmp_path):
+    inputs, out = _inputs(ev, tmp_path), tmp_path / "round"  # limit 1.0 per direction
+    _write_p(ev, out, [_p_result("U1", d, issues=[_fp_issue(1), _fp_issue(2)]) for d in ("zh->en", "en->zh")])
+    gates = ev.score_p(inputs, out, ev.ReviewStats())["gates"]
+    assert gates["P_false_positives_zh->en"]["state"] == "not_met"
+
+
+def test_p_gate_is_met_only_with_every_unit_reviewed(ev, tmp_path):
+    inputs, out = _inputs(ev, tmp_path), tmp_path / "round"
+    _write_p(ev, out, [_p_result(u, d) for u in ("U1", "U2") for d in ("zh->en", "en->zh")])
+    gates = ev.score_p(inputs, out, ev.ReviewStats())["gates"]
+    assert gates["P_false_positives_zh->en"]["state"] == "met"
+
+
+def test_blind_key_keeps_old_assignments_and_adds_new_documents(ev, tmp_path):
+    path = tmp_path / "m-blind-key.json"
+    first = ev.ensure_blind_key(path, ["A1"])
+    second = ev.ensure_blind_key(path, ["A1", "B2"])
+    assert second["A1"] == first["A1"]
+    assert set(second) == {"A1", "B2"}
+    assert json.loads(path.read_text(encoding="utf-8")) == second  # persisted
+
+
+def test_ledger_writes_never_drop_a_concurrent_change(ev, run_dirs):
+    run, _ = run_dirs
+    a = ev.Ledger(run / "ledger.json")
+    rid = a.open_record(purpose="eval", round=9, status="running")
+    b = ev.Ledger(run / "ledger.json")  # another process, or an operator
+    b.update(rid, status="corrected by hand")
+    a.charge(rid)  # the first holder's stale copy must not undo the correction
+    record = ev.Ledger(run / "ledger.json").record(rid)
+    assert record["status"] == "corrected by hand"
+    assert record["calls"] == 1
+
+
+def test_scoring_refuses_while_a_run_is_still_writing(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "dry"
+    ev.acquire_run_lock(out if out.mkdir(parents=True) is None else out)  # this test's live pid
+    try:
+        code = ev.main(["score", "--run-dir", str(run), "--corpus-dir", str(corpus), "--out-dir", str(out), "--dry-run"])
+        assert code == 1
+    finally:
+        ev.release_run_lock(out)
+
+
+def test_rescoring_keeps_other_rounds_and_top_level_records(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = run / "rounds" / "round-3"
+    out.mkdir(parents=True)
+    (run / "receipt.json").write_text(
+        json.dumps({"run": "x", "owner_session_1": {"kept": True}, "rounds": {"1": {"headline": "old"}}}),
+        encoding="utf-8",
+    )
+    assert ev.main(["score", "--run-dir", str(run), "--corpus-dir", str(corpus), "--round", "3"]) == 0
+    receipt = json.loads((run / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["owner_session_1"] == {"kept": True}
+    assert receipt["rounds"]["1"] == {"headline": "old"}
+    assert "3" in receipt["rounds"] and receipt["rounds"]["3"]["ledger_records"] == []
+
+
+def test_an_interrupted_run_is_recorded_and_releases_its_lock(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+
+    def interrupt(request):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ev, "fake_gateway", interrupt)
+    out = tmp_path / "dry"
+    code = ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+                    "--fake-transport", "--out-dir", str(out)])
+    assert code == 1
+    dry = json.loads((out / "ledger.dry-run.json").read_text(encoding="utf-8"))
+    assert dry["records"][-1]["status"] == "interrupted"
+    assert not (out / "run.lock").exists()
+
+
+def test_e_recall_with_unreviewed_variants_is_decided_only_by_its_bounds(ev, tmp_path):
+    inputs = _inputs(ev, tmp_path)
+    inj = [{"id": f"N{i:02d}", "category": "negation_change", "doc": f"G{i % 3}"} for i in range(10)]
+    inputs.injections = {"injections": inj}
+    inputs.variants = {"variants": [
+        {"variant_id": f"V{i}", "source_text": "甲乙", "target_text": "ab",
+         "injections": [{"injection_id": f"N{i:02d}", "category": "negation_change",
+                         "source_range": [0, 1], "target_injected_range": [0, 1]}]}
+        for i in range(10)
+    ]}
+    out = tmp_path / "round"
+    hit = {"id": "0" * 32, "category": "negation_change", "confidence": "high",
+           "source_span": {"start": 0, "end": 1, "text": "甲"}, "target_span": None, "rationale": "r"}
+
+    def write(n_reviewed, with_hit):
+        for i in range(n_reviewed):
+            ev.write_json_atomic(out / "E" / f"V{i}.json", {
+                "layer": "E", "variant_id": f"V{i}", "latency_s": 1.0, "error_code": None, "bytes": 10,
+                "body": {"status": "complete", "dropped_unanchored": 0, "omitted_issues": 0,
+                         "issues": [hit] if with_hit else []}})
+
+    write(7, True)  # 7 of 10 found, 3 unreviewed: 70%..100% straddles 80%
+    gate = ev.score_e(inputs, out, ev.ReviewStats())["gates"]["E_recall_negation_change"]
+    assert gate["state"] == "undecidable" and len(gate["injections_unreviewed"]) == 3
+    write(8, True)  # 8 found: met even if the other 2 were missed
+    assert ev.score_e(inputs, out, ev.ReviewStats())["gates"]["E_recall_negation_change"]["state"] == "met"
