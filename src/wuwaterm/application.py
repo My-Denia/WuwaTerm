@@ -1026,6 +1026,10 @@ async def semantic_review_async(
     """
     if not llm_configured():
         return SemanticReviewOutcome(error_code=ERROR_LLM_UNAVAILABLE)
+    if max(len(job.source), len(job.target)) > _semantic_contract.MAX_SIDE_SCALARS:
+        # The HTTP adapter refuses this before it gets here; an in-process
+        # caller gets the same answer instead of an exception.
+        return SemanticReviewOutcome(error_code=ERROR_INPUT_TOO_LONG)
     snapshot = _SnapshotOnce(service)
 
     def term_reviewer(source: str, target: str, direction: str) -> ReviewReport:

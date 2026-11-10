@@ -269,3 +269,20 @@ def test_build_messages_omits_empty_sections():
     payload = json.loads(messages[1]["content"].split("\n", 1)[1])
     assert set(payload) == {"source_language", "target_language", "source", "target"}
     assert payload["source_language"] == "Chinese"
+
+
+def test_application_refuses_an_over_long_side_without_calling(sample_db, monkeypatch):
+    from wuwaterm import application
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "k")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "m")
+    service, translator = TermService(sample_db), application.build_translator(sample_db)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("no model call for an over-long side")
+
+    monkeypatch.setattr(translator, "complete_chat_async", forbidden)
+    job = SemanticReviewJob(source="源" * 10, target="x" * 2001, direction="en", explain_language="zh")
+    outcome = asyncio.run(application.semantic_review_async(service, translator, job, request_id="r"))
+    assert outcome.error_code == "input_too_long"

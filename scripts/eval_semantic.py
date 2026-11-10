@@ -62,7 +62,7 @@ import httpx  # noqa: E402
 from wuwaterm import application as app_layer  # noqa: E402
 from wuwaterm import llm_transport  # noqa: E402
 from wuwaterm.review import VERDICT_VERIFIED, review_pair  # noqa: E402
-from wuwaterm.segmentation import WHITESPACE, segment_text  # noqa: E402
+from wuwaterm.segmentation import WHITESPACE, pair_segments, segment_text  # noqa: E402
 from wuwaterm.semantic_review import (  # noqa: E402
     Precedent,
     SemanticReviewJob,
@@ -575,56 +575,94 @@ class Runner:
             # The old path prepares the whole text (blank lines folded away);
             # the new path cuts the text as written, like Core does.
             prepared = self.translator.prepare_text(raw)
-            started = time.perf_counter()
-            try:
-                old_pairs = await legacy_translate_plain(self.translator, prepared)
-            except llm_transport.LLMTranslationError as exc:
-                raise Refused(f"old-path translation failed in {doc}: {exc.reason}") from exc
-            old_latency = time.perf_counter() - started
-            # The new path is Core's own long-text path (segmentation-v1,
-            # previous segment as context, context prompt rules), observed
-            # per segment so its pairs can be reviewed and its assembly checked.
-            segments_out: list[dict[str, Any]] = []
+            partial_rel = f"M/{doc}.translations.json"
+            if self.resume and (self.out_dir / partial_rel).is_file():
+                # Translations finished in an earlier attempt are reused, not re-bought.
+                partial = load_json(self.out_dir / partial_rel)
+                old_pairs = [(c["source"], c["translation"]) for c in partial["old"]["chunks"]]
+                old_latency = partial["old"]["latency_s"]
+                segments_out = partial["new"]["segments"]
+                new_text = partial["new"]["text"]
+                new_latency = partial["new"]["latency_s"]
+            else:
+                started = time.perf_counter()
+                try:
+                    old_pairs = await legacy_translate_plain(self.translator, prepared)
+                except llm_transport.LLMTranslationError as exc:
+                    raise Refused(f"old-path translation failed in {doc}: {exc.reason}") from exc
+                old_latency = time.perf_counter() - started
+                # The new path is Core's own long-text path (segmentation-v1,
+                # previous segment as context, context prompt rules), observed
+                # per segment so its pairs can be reviewed and its assembly checked.
+                segments_out = []
 
-            def observe(segment: Any, translated: str) -> None:
-                segments_out.append(
-                    {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "core_start": segment.core_start,
-                        "core_end": segment.core_end,
-                        "hard_cut": segment.hard_cut,
-                        "translation": translated,
-                    }
+                def observe(segment: Any, translated: str) -> None:
+                    segments_out.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "core_start": segment.core_start,
+                            "core_end": segment.core_end,
+                            "hard_cut": segment.hard_cut,
+                            "translation": translated,
+                        }
+                    )
+
+                started = time.perf_counter()
+                outcome = await app_layer._translate_long_plain_text(
+                    self.translator,
+                    raw,
+                    to_chinese=False,
+                    context=app_layer.TranslationContext(),
+                    on_segment=observe,
                 )
-
-            started = time.perf_counter()
-            outcome = await app_layer._translate_long_plain_text(
-                self.translator,
-                raw,
-                to_chinese=False,
-                context=app_layer.TranslationContext(),
-                on_segment=observe,
-            )
-            new_latency = time.perf_counter() - started
-            if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
-                raise Refused(f"budget stop in {doc}")
-            if outcome.error_code is not None:
-                raise Refused(f"new-path translation failed in {doc}: {outcome.error_code}")
+                new_latency = time.perf_counter() - started
+                if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
+                    raise Refused(f"budget stop in {doc}")
+                if outcome.error_code is not None:
+                    raise Refused(f"new-path translation failed in {doc}: {outcome.error_code}")
+                new_text = outcome.text
+                self.save(
+                    partial_rel,
+                    {
+                        "old": {
+                            "chunks": [{"source": c, "translation": t} for c, t in old_pairs],
+                            "latency_s": round(old_latency, 3),
+                        },
+                        "new": {"text": new_text, "segments": segments_out, "latency_s": round(new_latency, 3)},
+                    },
+                )
+            # Each translated segment is paired with its source the way a
+            # client pairs a manuscript (segmentation-v1 bilingual pairing):
+            # an English translation of 1,800 Chinese scalars is often longer
+            # than one review side may be.
             reviews = []
             for index, seg in enumerate(segments_out):
                 core = raw[seg["core_start"] : seg["core_end"]]
-                reviews.append(
-                    await self.review(
-                        f"M:{doc}:seg{index}",
+                for pair in pair_segments(core, seg["translation"]):
+                    pair_source = core[pair.source.core_start : pair.source.core_end]
+                    pair_target = seg["translation"][pair.target.core_start : pair.target.core_end]
+                    entry = {
+                        "segment": index,
+                        "pair": pair.index,
+                        "pair_status": pair.status,
+                        "hard_cut": pair.hard_cut,
+                        "pair_source": pair_source,
+                        "pair_target": pair_target,
+                    }
+                    if pair.status != "ready":
+                        reviews.append({**entry, "skipped": True})
+                        continue
+                    result = await self.review(
+                        f"M:{doc}:seg{index}:pair{pair.index}",
                         SemanticReviewJob(
-                            source=core,
-                            target=seg["translation"],
+                            source=pair_source,
+                            target=pair_target,
                             direction="en",
                             explain_language=self.explain_language,
                         ),
                     )
-                )
+                    reviews.append({**entry, **result})
             self.save(
                 f"M/{doc}.json",
                 {
@@ -638,7 +676,7 @@ class Runner:
                         "latency_s": round(old_latency, 3),
                     },
                     "new": {
-                        "text": outcome.text,
+                        "text": new_text,
                         "segments": segments_out,
                         "latency_s": round(new_latency, 3),
                     },
@@ -1196,6 +1234,19 @@ def separator_fidelity(source: str, segments: Sequence[Mapping[str, Any]], new_t
 
 
 def _verified_count(service: Any, source: str, target: str) -> int | None:
+    """review-v2 verified findings; long sides are paired with segmentation-v1 first."""
+    if len(source) > 2000 or len(target) > 2000:
+        total = 0
+        for pair in pair_segments(source, target):
+            if pair.status != "ready":
+                continue
+            count = _verified_count(
+                service,
+                source[pair.source.core_start : pair.source.core_end],
+                target[pair.target.core_start : pair.target.core_end],
+            )
+            total += count or 0
+        return total
     try:
         report = review_pair(service, source, target, "en", review_version="review-v2")
     except Exception:  # noqa: BLE001 - a diagnostic only
@@ -1207,7 +1258,8 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     precision_verdicts = _adjudication(out_dir, "m-precision.json")
     translation_verdicts = _adjudication(out_dir, "m-translation.json")
     blind_key_path = out_dir / "worklists" / "m-blind-key.json"
-    docs = _load_dir(out_dir / "M")
+    # M/<doc>.translations.json are resume caches, not results.
+    docs = [doc for doc in _load_dir(out_dir / "M") if doc.get("layer") == "M"]
     gates: dict[str, Any] = {}
     if not docs:
         for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number", "M_precision", "separator_fidelity"):
@@ -1216,17 +1268,25 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     fidelity = {}
     mh_issues: list[dict[str, Any]] = []
     verified = {"old": 0, "new": 0}
+    pair_counts: dict[str, dict[str, int]] = {}
     for doc in docs:
         fidelity[doc["doc"]] = separator_fidelity(doc["raw"], doc["new"]["segments"], doc["new"]["text"])
-        for index, (seg, review) in enumerate(zip(doc["new"]["segments"], doc["reviews"], strict=False)):
-            core = doc["raw"][seg["core_start"] : seg["core_end"]]
-            for issue in stats.add(review, core, seg["translation"]):
+        pair_counts[doc["doc"]] = {}
+        for review in doc["reviews"]:
+            status = review.get("pair_status", "ready")
+            pair_counts[doc["doc"]][status] = pair_counts[doc["doc"]].get(status, 0) + 1
+            if review.get("skipped"):
+                continue
+            for issue in stats.add(review, review["pair_source"], review["pair_target"]):
                 if issue["confidence"] in ("medium", "high"):
                     mh_issues.append(
                         {
-                            "key": _issue_key(f"M:{doc['doc']}:seg{index}", issue),
+                            "key": _issue_key(f"M:{doc['doc']}:seg{review['segment']}:pair{review['pair']}", issue),
                             "doc": doc["doc"],
-                            "segment": index,
+                            "segment": review["segment"],
+                            "pair": review["pair"],
+                            "pair_source": review["pair_source"],
+                            "pair_target": review["pair_target"],
                             "category": issue["category"],
                             "confidence": issue["confidence"],
                             "source_span": issue["source_span"],
@@ -1235,7 +1295,9 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
                             "suggestion": issue["suggestion"],
                         }
                     )
-            if service is not None:
+        if service is not None:
+            for seg in doc["new"]["segments"]:
+                core = doc["raw"][seg["core_start"] : seg["core_end"]]
                 verified["new"] += _verified_count(service, core, seg["translation"]) or 0
         if service is not None:
             for chunk in doc["old"]["chunks"]:
@@ -1285,7 +1347,7 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         )
     write_json_atomic(out_dir / "worklists" / "m-translation-packet.json", packet)
     gates.update(_score_m_translation(inputs, translation_verdicts, blind_key, {doc["doc"] for doc in docs}))
-    return {"gates": gates, "verified_constraint_diagnostic": verified}
+    return {"gates": gates, "verified_constraint_diagnostic": verified, "m_review_pairs": pair_counts}
 
 
 def _verdict(verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]], item: Mapping[str, Any], side: str) -> str | None:
@@ -1479,6 +1541,7 @@ def score_round(inputs: Inputs, out_dir: Path, *, ledger: Mapping[str, Any], dry
             "p_multi_class_hits": p["multi_class_hits"],
             "e_non_injected_issues": e["non_injected_issues"],
             "verified_constraint": m.get("verified_constraint_diagnostic"),
+            "m_review_pairs": m.get("m_review_pairs"),
             "precedents_default": mp["precedents_default"],
         },
         "ledger": {
