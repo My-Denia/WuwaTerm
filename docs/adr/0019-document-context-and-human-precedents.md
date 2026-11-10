@@ -1,7 +1,6 @@
 # ADR 0019: Document context and human precedents for model calls
 
-- Status: Accepted (contract); the translation-context engine is not part of
-  this change
+- Status: Accepted (contract and engine)
 - Date: 2026-11-10
 - Supplements: [ADR 0017](0017-contextual-term-references.md). The reference
   mechanism of ADR 0017 is unchanged.
@@ -28,6 +27,11 @@ name as X". Those decisions are lost on the next model call.
    trailing whitespace is a separator copied verbatim; only the core is
    translated. The output is `Σ (leading_i + translate(core_i) + trailing_i)`,
    which also removes the extra line break of the current hard-cut path.
+   The text is cut as submitted, before the per-line preparation that folds
+   blank lines away, so the separators are the source's own; a context-mode
+   request prepares each paragraph separately and keeps one blank line
+   between paragraphs inside a core. A request without `context` keeps the
+   old preparation.
 2. **Read-only context.** Each segment carries the previous segment's source
    and translation, at most 400 scalars each, marked read-only. Nothing else
    crosses segments.
@@ -58,8 +62,20 @@ name as X". Those decisions are lost on the next model call.
    semantic review, and an unchanged response. Older servers silently ignore
    unknown translation fields, so a client sends `context` only when
    `GET /v1/capabilities` lists `translation-context-v1`. The `context` model
-   refuses unknown keys. This field ships with the engine, not with the
-   contract change that introduces this ADR.
+   refuses unknown keys. Unlike semantic review, both members are optional:
+   the first segment of a document has nothing before it, so it sends
+   `context: {}`.
+   - A present `context`, even `{}`, switches on three prompt rules, and only
+     then: keep each pronoun and elided subject pointing at what the source
+     points at; keep every negation and every number, unit, date and version
+     as the source states it; the context is read-only and is not translated,
+     repeated or continued. A request without `context` gets the original
+     prompt byte for byte (a test pins it), which is also the evaluation's
+     "old path".
+   - Core's own long-text path (decision 1) always runs with context, so a
+     long text gets the rules and the previous segment on every segment.
+     `translate_request_async`'s `splitter` hook is still accepted and no
+     longer used; segmentation-v1 is the one long-text rule.
 6. **Precedents are off by default until the M′ gates pass** (below). A client
    keeps the option; by default it sends no precedents.
 

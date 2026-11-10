@@ -8,18 +8,16 @@ take the number and article the sentence needs.
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import secrets
 import re
-import json
 import asyncio
 import inspect
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import httpx
 
@@ -37,155 +35,36 @@ from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
 )
+from . import llm_transport
+from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_transport.X)
+    BUDGET_EXHAUSTED_NOTICE,
+    TRANSLATION_UNAVAILABLE_NOTICE,
+    LLMFailureDiagnostic,
+    LLMTranslationError,
+    _extract_llm_content,
+    _has_structured_budget_signal,
+    _llm_error_from_response,
+    _require_nonblank_llm_output,
+    _safe_llm_failure_diagnostic,
+    _structured_llm_error_text,
+)
 from .lookup import TermService
 from .models import TermEntry
 from .normalize import normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
+from .semantic_review_contract import PRECEDENT_WORDING
 
 
 LOGGER = logging.getLogger(__name__)
+# A blank line: two line breaks with only non-newline whitespace between.
+_PARAGRAPH_BREAK_RE = re.compile(r"\n[^\S\n]*\n\s*")
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
-# Bilingual user-facing notices: Chinese line first, then English (single "\n").
-BUDGET_EXHAUSTED_NOTICE = (
-    "本月翻译额度已用完,请稍后再试。\n"
-    "This month's translation quota is used up. Please try again later."
-)
-TRANSLATION_UNAVAILABLE_NOTICE = (
-    "翻译服务暂时不可用，请稍后再试。\n"
-    "Translation service is temporarily unavailable. Please try again later."
-)
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
     "event loop; use translate_async() or translate_html_async() instead."
 )
-
-
-_LLM_FAILURE_REASONS = frozenset(
-    {
-        "budget",
-        "rate_limit",
-        "upstream",
-        "timeout",
-        "connect",
-        "request",
-        "http",
-        "invalid_api_response",
-        "invalid_response",
-        "protected_text_integrity",
-        "html_integrity",
-        "stale_before_llm",
-        "authorization_changed_before_llm",
-        "translation_unavailable",
-        "unknown",
-    }
-)
-_LLM_FAILURE_DETAILS = frozenset(
-    {
-        "empty_output",
-        "non_text_output",
-        "missing_placeholder",
-        "duplicate_placeholder",
-        "unspecified",
-    }
-)
-_MAX_LLM_DIAGNOSTIC_COUNT = 2_147_483_647
-
-
-def _safe_diagnostic_value(value: object, allowed: frozenset[str], fallback: str) -> str:
-    # Require a builtin str so a hostile subclass cannot retain custom string
-    # behavior in an object that crosses into logging code.
-    if type(value) is str and value in allowed:
-        return value
-    return fallback
-
-
-def _safe_diagnostic_count(value: object) -> int | None:
-    # bool is an int subclass; the diagnostic contract accepts exact ints only.
-    if type(value) is int and 0 <= value <= _MAX_LLM_DIAGNOSTIC_COUNT:
-        return value
-    return None
-
-
-@dataclass(frozen=True)
-class LLMFailureDiagnostic:
-    """Safe, bounded metadata for one failed LLM translation attempt."""
-
-    reason: str
-    detail: str = "unspecified"
-    expected_count: int | None = None
-    actual_count: int | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "reason",
-            _safe_diagnostic_value(
-                self.reason, _LLM_FAILURE_REASONS, "unknown"
-            ),
-        )
-        object.__setattr__(
-            self,
-            "detail",
-            _safe_diagnostic_value(
-                self.detail, _LLM_FAILURE_DETAILS, "unspecified"
-            ),
-        )
-        object.__setattr__(
-            self, "expected_count", _safe_diagnostic_count(self.expected_count)
-        )
-        object.__setattr__(
-            self, "actual_count", _safe_diagnostic_count(self.actual_count)
-        )
-
-
-class LLMTranslationError(RuntimeError):
-    def __init__(
-        self,
-        user_message: str,
-        *,
-        reason: str = "translation_unavailable",
-        detail: str = "unspecified",
-        expected_count: int | None = None,
-        actual_count: int | None = None,
-    ):
-        super().__init__(user_message)
-        self.user_message = user_message
-        self.diagnostic = LLMFailureDiagnostic(
-            reason,
-            detail=detail,
-            expected_count=expected_count,
-            actual_count=actual_count,
-        )
-        # Keep the legacy attribute's original semantics. Consumers that
-        # cross a logging or protocol boundary use ``diagnostic`` instead.
-        self.reason = reason
-
-
-def _safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
-    """Project an exception onto a safe diagnostic tied to its legacy reason."""
-
-    try:
-        original_reason = getattr(exc, "reason", "translation_unavailable")
-    except Exception:
-        original_reason = "translation_unavailable"
-    base = LLMFailureDiagnostic(original_reason)
-
-    try:
-        attached = getattr(exc, "diagnostic", None)
-        if type(attached) is not LLMFailureDiagnostic:
-            return base
-        if type(attached.reason) is not str or attached.reason != base.reason:
-            return base
-        return LLMFailureDiagnostic(
-            base.reason,
-            detail=attached.detail,
-            expected_count=attached.expected_count,
-            actual_count=attached.actual_count,
-        )
-    except Exception:
-        return base
 
 
 _CJK_PUNCTUATION = "，。！？、；：（）《》【】“”‘’·…—"
@@ -245,23 +124,6 @@ class _TermSpan:
     source: str
     official: tuple[str, str]
     order: int
-
-
-def _require_nonblank_llm_output(content: str) -> str:
-    if not isinstance(content, str):
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE,
-            reason="invalid_response",
-            detail="non_text_output",
-        )
-    normalized = content.strip()
-    if not normalized:
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE,
-            reason="invalid_response",
-            detail="empty_output",
-        )
-    return normalized
 
 
 def _is_cjk_character(char: str) -> bool:
@@ -663,6 +525,18 @@ class SentenceTranslator:
             return ""
         return "\n".join(self._resolve_speaker_prefix(line) for line in text.splitlines())
 
+    def prepare_text_keeping_paragraphs(self, text: str) -> str:
+        """``prepare_text`` per paragraph, keeping one blank line between them.
+
+        ``prepare_text`` folds blank lines away. A context-mode request
+        (translation-context-v1) is one segment of a document, where a blank
+        line is structure the translation should keep, so each paragraph is
+        prepared on its own and the paragraphs are joined with a blank line.
+        """
+        unified = text.replace("\r\n", "\n").replace("\r", "\n")
+        parts = (self.prepare_text(part) for part in _PARAGRAPH_BREAK_RE.split(unified))
+        return "\n\n".join(part for part in parts if part)
+
     def lock_terms(
         self, text: str, *, allow_plural_inflection: bool = False
     ) -> LockedSentence:
@@ -980,8 +854,19 @@ class SentenceTranslator:
         to_chinese: bool = False,
         before_llm_call=None,
         propagate_errors: bool = False,
+        context=None,
     ) -> str:
-        prepared = self.prepare_text(text)
+        """Translate plain text; ``context`` opts into translation-context-v1.
+
+        ``context`` is any object with ``before`` (``source``/``target`` or
+        None) and ``precedents``. ``None`` keeps the original preparation and
+        prompt; a context also keeps paragraph breaks in the text sent.
+        """
+        prepared = (
+            self.prepare_text(text)
+            if context is None
+            else self.prepare_text_keeping_paragraphs(text)
+        )
         if not prepared:
             return ""
         exact = self.service.lookup_exact(prepared, limit=5)
@@ -1003,6 +888,7 @@ class SentenceTranslator:
                     to_chinese=True,
                     references=locked.references,
                     before_llm_call=before_llm_call,
+                    context=context,
                 )
             else:
                 translated = await self._call_llm_async_limited(
@@ -1010,6 +896,7 @@ class SentenceTranslator:
                     locked.locks,
                     references=locked.references,
                     before_llm_call=before_llm_call,
+                    context=context,
                 )
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
@@ -1096,6 +983,7 @@ class SentenceTranslator:
         to_chinese: bool = False,
         references: tuple[tuple[str, str, str, str], ...] = (),
         before_llm_call=None,
+        context=None,
     ) -> str:
         async with self._current_llm_slots():
             kwargs: dict[str, object] = {}
@@ -1115,6 +1003,10 @@ class SentenceTranslator:
             ):
                 if name in supported:
                     kwargs[name] = value
+            # Only an opted-in request passes ``context``, so a replacement
+            # transport that predates it keeps working for every other call.
+            if context is not None and "context" in supported:
+                kwargs["context"] = context
             if before_llm_call is not None:
                 guarded = before_llm_call()
                 if inspect.isawaitable(guarded):
@@ -1123,6 +1015,41 @@ class SentenceTranslator:
                 locked_text,
                 locks,
                 **kwargs,
+            )
+
+    async def complete_chat_async(
+        self,
+        messages: list[dict],
+        *,
+        purpose: str,
+        max_tokens: int | None = None,
+        response_format: dict | None = None,
+        model_env: str | None = None,
+        before_llm_call=None,
+        extra_body: dict | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        """Run one chat completion under the shared LLM slot and client.
+
+        ``timeout_seconds`` replaces the translator's own timeout for this
+        request only.
+        """
+
+        async with self._current_llm_slots():
+            client = await self._current_llm_client()
+            if before_llm_call is not None:
+                guarded = before_llm_call()
+                if inspect.isawaitable(guarded):
+                    await guarded
+            return await llm_transport.post_chat_completion(
+                client,
+                messages,
+                purpose=purpose,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                model_env=model_env,
+                extra_body=extra_body,
+                timeout_seconds=timeout_seconds,
             )
 
     def _call_llm_sync(
@@ -1277,11 +1204,7 @@ class SentenceTranslator:
 
 
 def _llm_configured() -> bool:
-    return bool(
-        (os.getenv("WUWATERM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").strip()
-        and (os.getenv("WUWATERM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
-        and os.getenv("WUWATERM_OPENAI_MODEL", "").strip()
-    )
+    return llm_transport.llm_configured()
 
 
 _HTML_MODE_INSTRUCTION = (
@@ -1310,6 +1233,49 @@ _CONTEXTUAL_REFERENCE_INSTRUCTION = (
     "number and article the sentence needs: Resonators, Echoes, a Resonator, "
     "the Echo.\n"
 )
+
+
+# translation-context-v1 (ADR 0019): added only when a request opts in, so a
+# request without context keeps the original prompt byte for byte.
+_CONTEXT_RULES_INSTRUCTION = (
+    "\nContext rules: keep every pronoun and elided subject pointing at the same "
+    "person or thing as in the source text. Keep every negation and every "
+    "number, unit, date and version exactly as the source text states it. "
+    "Read-only context below only helps you understand the source text: do not "
+    "translate, repeat or continue it, and return only the translation of the "
+    "user message.\n"
+)
+
+
+def _context_instruction(context) -> str:
+    """Render a TranslationContext-like object; texts go in as JSON strings."""
+    text = _CONTEXT_RULES_INSTRUCTION
+    before = getattr(context, "before", None)
+    if before is not None:
+        text += "Read-only previous segment (JSON, never translate it):\n" + json.dumps(
+            {"source": before.source, "translation": before.target},
+            ensure_ascii=False,
+        ) + "\n"
+    precedents = tuple(getattr(context, "precedents", ()) or ())
+    if precedents:
+        text += (
+            PRECEDENT_WORDING
+            + "\nHuman precedents (JSON):\n"
+            + json.dumps(
+                [
+                    {
+                        "surface": item.surface,
+                        "choice": item.choice,
+                        "rendering": item.rendering,
+                        "snippet": item.snippet,
+                    }
+                    for item in precedents
+                ],
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    return text
 
 
 def _ensure_sync_llm_outside_running_loop() -> None:
@@ -1360,6 +1326,7 @@ async def _call_llm_async(
     client: httpx.AsyncClient | None = None,
     en_zh_protocol: bool = False,
     references: tuple[tuple[str, str, str, str], ...] = (),
+    context=None,
 ) -> str:
     if client is not None:
         return await _call_llm_async_with_client(
@@ -1370,6 +1337,7 @@ async def _call_llm_async(
             to_chinese=to_chinese,
             references=references,
             en_zh_protocol=en_zh_protocol,
+            context=context,
         )
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds), transport=transport
@@ -1382,6 +1350,7 @@ async def _call_llm_async(
             to_chinese=to_chinese,
             references=references,
             en_zh_protocol=en_zh_protocol,
+            context=context,
         )
 
 
@@ -1393,18 +1362,8 @@ async def _call_llm_async_with_client(
     to_chinese: bool = False,
     en_zh_protocol: bool = False,
     references: tuple[tuple[str, str, str, str], ...] = (),
+    context=None,
 ) -> str:
-    base_url = (
-        os.getenv("WUWATERM_OPENAI_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or ""
-    ).strip().rstrip("/")
-    api_key = (
-        os.getenv("WUWATERM_OPENAI_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or ""
-    ).strip()
-    model = os.getenv("WUWATERM_OPENAI_MODEL", "").strip()
     # locks are (placeholder, zh_official, en_official); show the model the
     # official term in the TARGET language so the locked placeholder maps to
     # the right side on restore.
@@ -1446,123 +1405,12 @@ async def _call_llm_async_with_client(
         system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION + (
             f"Dictionary term references:\n{reference_lines}"
         )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": locked_text},
-        ],
-        "temperature": 0,
-    }
-    try:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise _llm_error_from_response(exc.response) from exc
-        data = response.json()
-        return _extract_llm_content(data)
-    except LLMTranslationError:
-        raise
-    except httpx.TimeoutException as exc:
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout"
-        ) from exc
-    except httpx.ConnectError as exc:
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="connect"
-        ) from exc
-    except httpx.RequestError as exc:
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="request"
-        ) from exc
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
-        # Response ENVELOPE failure (malformed JSON, wrong schema): a gateway
-        # or schema outage, not model content drift. Distinct from
-        # "invalid_response" (blank output / broken placeholders) so the HTML
-        # paths do not burn a plain-retry call on an outage that would fail
-        # identically.
-        raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_api_response"
-        ) from exc
-
-
-def _extract_llm_content(data: Any) -> str:
-    if not isinstance(data, dict):
-        raise ValueError("LLM response is not an object")
-    choices = data["choices"]
-    if not isinstance(choices, list) or not choices:
-        raise ValueError("LLM response has no choices")
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise ValueError("LLM choice is not an object")
-    message = first["message"]
-    if not isinstance(message, dict):
-        raise ValueError("LLM message is not an object")
-    content = message["content"]
-    if not isinstance(content, str):
-        raise ValueError("LLM content is not text")
-    return _require_nonblank_llm_output(content)
-
-
-def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
-    if response.status_code >= 500:
-        return LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="upstream"
-        )
-    if response.status_code == 429:
-        reason = "budget" if _has_structured_budget_signal(response) else "rate_limit"
-        return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason=reason)
-    if _has_structured_budget_signal(response):
-        return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason="budget")
-    return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="http")
-
-
-def _has_structured_budget_signal(response: httpx.Response) -> bool:
-    text = _structured_llm_error_text(response)
-    if not text:
-        return False
-    # Do not match generic "exceeded": context-length errors commonly use that
-    # word but are ordinary translation failures, not quota exhaustion.
-    return any(
-        marker in text
-        for marker in (
-            "budget",
-            "max_budget",
-            "quota",
-            "insufficient_quota",
-            "billing",
-            "rate limit",
-            "rate_limit",
-            "rate-limit",
-        )
+    if context is not None:
+        system_content += _context_instruction(context)
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": locked_text},
+    ]
+    return await llm_transport.post_chat_completion(
+        client, messages, purpose="translation"
     )
-
-
-def _structured_llm_error_text(response: httpx.Response) -> str:
-    try:
-        data = response.json()
-    except ValueError:
-        return ""
-    parts: list[str] = []
-
-    def collect(value: Any) -> None:
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, dict):
-            for key in ("code", "type", "message", "detail", "error", "param"):
-                if key in value:
-                    collect(value[key])
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-
-    if isinstance(data, dict) and "error" in data:
-        collect(data["error"])
-    else:
-        collect(data)
-    return " ".join(parts).casefold()

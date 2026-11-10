@@ -63,15 +63,29 @@ model-backed path, and it sends more than translation does:
 
 The server does not write any of these texts, the model output, or the issues
 to disk, and never logs them. Its log line for a semantic review carries the
-redacted device, the request id and the two input lengths; once the engine
-exists it adds the issue count and the status. A client decides per
-segment whether to send; segments that are blank, unpaired or need a manual
-split are never sent ([segmentation-v1](segmentation-v1.md)).
+redacted device, the request id, the two input lengths, the issue count, the
+unanchored-drop count and the status. A client decides per segment whether to
+send; segments that are blank, unpaired or need a manual split are never sent
+([segmentation-v1](segmentation-v1.md)).
 
-The endpoint and its contract ship before the engine. Until a server lists
-`semantic-review-v1` in `GET /v1/capabilities`, the endpoint validates the
-request and answers `llm_unavailable` without calling a model or sending any
-text anywhere.
+Semantic review is experimental and off by default
+(`WUWATERM_SEMANTIC_REVIEW_ENABLED`). A server lists `semantic-review-v1` in
+`GET /v1/capabilities` only when it is switched on and a model is configured;
+`translation-context-v1` needs only a model. While semantic review is off the
+endpoint validates the request and answers `llm_unavailable` without calling a
+model or sending any text anywhere.
+
+Translation context (`translation-context-v1`, [ADR 0019](adr/0019-document-context-and-human-precedents.md))
+is opt-in per request: a `POST /v1/translations` body without `context` sends
+exactly what it sent before. With `context`, the previous segment's source and
+translation (at most 400 scalars each) and the listed precedents go into the
+same model request. Long texts that Core cuts itself (Telegram channel posts
+over the per-call limit) carry the previous segment the same way.
+
+Every HTTP attempt to the model gateway, from any path, writes one log line
+with its purpose (`translation` or `semantic_review`), outcome class, HTTP
+status and elapsed time: no URL, key, model name, prompt or output. It exists
+so that call counts can be reconciled against a budget ledger.
 
 Evaluation corpora used to accept this feature stay outside every repository.
 Contract fixtures are synthetic and quote no corpus text.

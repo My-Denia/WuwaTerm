@@ -1,6 +1,6 @@
 # ADR 0018: Semantic review keeps model findings and dictionary constraints apart
 
-- Status: Accepted (contract); the engine is not part of this change
+- Status: Accepted (contract and engine); semantic review is experimental and off by default
 - Date: 2026-11-10
 - Related: [ADR 0006](0006-dictionary-first-before-llm.md),
   [ADR 0017](0017-contextual-term-references.md),
@@ -45,11 +45,10 @@ Semantic review is a separate, opt-in, model-backed path:
    A server without the path answers 404, which a client reads as "no optional
    capabilities". `/v1/meta` is unchanged.
 
-The endpoint and its full contract ship first, without the engine. Until the
-engine lands, `GET /v1/capabilities` lists nothing and
-`POST /v1/semantic-reviews` validates the request and answers
-`llm_unavailable` (503) without calling a model. Clients develop against the
-contract fixtures in the meantime.
+The contract shipped first; the engine (`wuwaterm.semantic_review`) is wired
+in behind it. With no model configured, `GET /v1/capabilities` lists nothing
+and `POST /v1/semantic-reviews` validates the request and answers
+`llm_unavailable` (503) without calling a model.
 
 ## Contract
 
@@ -90,10 +89,17 @@ section records the rules a schema cannot express.
   `omission`, `unsupported_addition`, `meaning_shift`, `negation_change`,
   `quantity_change`, `reference_inconsistency`, `term_sense`.
 - **Anchoring.** The model returns quotes; the server locates them in the
-  segment. An issue whose quote is missing or not unique is dropped and
-  counted in `dropped_unanchored`. Span offsets are Unicode scalars within the
-  segment; the client adds the segment start. At most one of the two spans
-  may be null.
+  segment. A quote is placed when it occurs exactly once in its side; if it
+  does not occur verbatim, a second pass ignores differences in whitespace
+  runs (segmentation-v1 whitespace) and again needs exactly one match. Either
+  way the span is a slice of the submitted text, never the model's text. An
+  issue with a quote that cannot be placed, or with no quote at all, is
+  dropped and counted in `dropped_unanchored`. A suggestion may quote its own
+  replaced range (`suggestion.target_quote`, default: the issue's target
+  quote); a suggestion that cannot be placed, or that replaces a range with
+  the same text, is dropped and the issue kept. Span offsets are Unicode
+  scalars within the segment; the client adds the segment start. At most one
+  of the two spans may be null.
 - **Executable text is never shortened.** `source_span.text`,
   `target_span.text` and `suggestion.target_span.text` are always the complete
   slice of the submitted side. `source_excerpt`/`target_excerpt` are display
@@ -168,8 +174,50 @@ real proxy route once Web pins this contract.
 
 ### Calls and logging
 
-- At most one model call per request, with a `max_tokens` bound; the engine
-  must keep the per-segment P95 under the 45 s model timeout. Semantic review
+- At most one model call per request (none when both sides are blank), with
+  `max_tokens` 4,096 and `response_format: json_object`
+  (`WUWATERM_SEMANTIC_REVIEW_JSON_MODE=0` leaves the latter out for a gateway
+  that refuses it); the engine must keep the per-segment P95 under the 45 s
+  model timeout. Blank output, output that is not the agreed JSON object, an
+  unknown category or confidence, or a mistyped field makes the whole answer
+  `not_reviewed`; nothing is retried.
+- Provider reasoning is set explicitly. The production model (DeepSeek)
+  thinks by default at high effort, and `max_tokens` also pays for that
+  hidden reasoning: in the first smoke run every 4,096 tokens went to
+  reasoning, `finish_reason` was `length` and the content was empty, about
+  28 s per call. The default is now `thinking: {"type": "enabled"}` with
+  `reasoning_effort: low` and `max_tokens` 16,384. On a debug round over one
+  reused unit (both directions plus three debug-only injected errors), low
+  effort reported 1-2 medium/high issues on allowed localization rewrites per
+  direction against 6-10 with thinking disabled, with the same 3/3 recall, at
+  12-25 s and 1,900-3,400 completion tokens per call against 5-7 s and
+  870-1,210. `WUWATERM_SEMANTIC_REVIEW_THINKING` picks `low` (default),
+  `high`, `disabled` (`max_tokens` 4,096) or `omit` (send neither field, for
+  a gateway that refuses them). Translation requests are unchanged.
+- Semantic review has its own model timeout, 75 s
+  (`WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS`, 0 < value ≤ 600); translation
+  keeps the 45 s translator timeout. Low-effort thinking took 12-26 s per
+  segment in the evaluation and one segment ran past 45 s. 75 s stays under
+  the API's default 90 s request budget, so a slow model is reported as
+  `llm_unavailable` rather than cut off by the request budget; raising the
+  semantic timeout past the request budget needs the budget raised too.
+- The prompt states one rule for what to report: a difference that changes
+  what a reader learns (a checkable fact, a number, a negation or modality,
+  a referent, how a statement is meant). Ordinary localization (restructured
+  sentences, added or dropped greetings and headings, a changed point of
+  view, condensed description, adapted names, near-synonyms, figures of
+  speech with a different image) is not an issue unless it changes one of
+  those. Before reporting, the model must name the specific thing a reader
+  of the translation would believe wrongly or miss, and drop the candidate
+  if it cannot; it reports one difference once rather than as an omission
+  on one side and an addition on the other. The rules are general; they name
+  no corpus content, and confidence definitions are unchanged. The prompt text and thinking setting used for
+  an evaluation are frozen by SHA-256 in its ledger before the run.
+- The prompt gives the model the dictionary facts of `review-v2` for the same
+  pair, worded as surface matches ("the corresponding region contains the
+  official form X; this is only a surface match"), and the human precedents
+  with the fixed wording of ADR 0019. All texts go in as JSON string values,
+  so a text cannot close or reopen a prompt section. Semantic review
   shares the translation path's per-process call budget, concurrency limit and
   per-device rate limit; there is no new budget mechanism.
   `WUWATERM_SEMANTIC_REVIEW_MODEL` may name a different model and defaults to
@@ -177,8 +225,10 @@ real proxy route once Web pins this contract.
 - The untrusted-source instruction of the translation prompt applies; every
   text field is plain text to every client.
 - Nothing is written to disk and no text is logged. The log line carries the
-  redacted device, the request id and the two input lengths; with the engine
-  it also carries the issue count and the status
+  redacted device, the request id, the two input lengths, the issue count, the
+  unanchored-drop count and the status. Every HTTP attempt to the gateway also
+  logs one line with its purpose, outcome class, status and elapsed time, so a
+  call ledger can be reconciled
   ([privacy](../privacy-and-llm.md#semantic-review-sends-both-texts)).
 
 ## Pre-frozen acceptance criteria
@@ -263,6 +313,39 @@ The translation-context gates are in ADR 0019. These rules cover both:
   It supports an internal acceptance, not a quality claim about independent
   human translations.
 
+## Experimental and off by default
+
+Decided by the owner on 2026-11-10 after two evaluation rounds.
+
+- **Evidence.** Round 1 (prompt v2, low-effort thinking): 14 gates met,
+  3 not met, 3 undecidable. Not met: P-layer false positives (39 zh→en, 32
+  en→zh medium/high issues on frozen "allowed rewrite" items, against about
+  8.6 per direction) and review latency (P95 47.5 s against 30 s). Met: E
+  recall in all six categories (67-100%), the M-layer translation gates, both
+  M′ precedent gates, anchoring, size and separator fidelity. Round 2 (prompt
+  v3, one general self-check) stopped after the P layer with 31 and 26 false
+  positives; the debug gain on two documents did not carry over, and
+  run-to-run variance was about as large as the prompt change.
+- **Boundary of that evidence.** Most of the issues counted as false
+  positives point at real meaning differences that the official localization
+  made on purpose, which the frozen list classes as allowed. Whether such
+  issues help a user was judged by the owner, not measured.
+- **Decision.** The P false-positive gate stays "not met". The owner accepts
+  it only in this form: semantic review ships as an experimental server
+  switch, `WUWATERM_SEMANTIC_REVIEW_ENABLED`, off by default. Off, the
+  capability is not listed and the endpoint answers `llm_unavailable` without
+  a model call or any spending, the same answer as a server without a model,
+  so existing clients hide the feature. Production and the public Sites keep
+  it off; a self-hosted server may turn it on. The owner also accepted the
+  latency with low-effort thinking and the 75 s timeout, and accepted three
+  undecidable gates (P real-error recall n=6, M precision n=0, G without a
+  frozen set) as limited evidence; the gold labels were accepted without a
+  spot check. Noise reduction is follow-up work.
+- `translation-context-v1` is not behind this switch: its gates (M, M′) were
+  met in round 1, and round 2 changed only the semantic review prompt (the
+  frozen hashes of the translation prompt, context rules, precedent wording
+  and request options are identical in both rounds).
+
 ## Consequences
 
 - Clients show two groups: "term constraints (surface match, deterministic)"
@@ -280,5 +363,10 @@ The translation-context gates are in ADR 0019. These rules cover both:
   `tests/test_semantic_review_contract.py`,
   `scripts/build_semantic_review_fixtures.py`,
   `contracts/semantic-review-v1/`
+- `src/wuwaterm/semantic_review.py` (prompt, parsing, anchoring,
+  `term_effect`), `src/wuwaterm/llm_transport.py`,
+  `application.semantic_review_async`, `tests/test_semantic_review.py`
 - `src/wuwaterm_api/app.py` (`/v1/capabilities`, `/v1/semantic-reviews`),
   `tests/test_api_semantic_review.py`
+- `scripts/eval_semantic.py`: runs and scores the evaluation above against the
+  frozen run directory; counts every gateway attempt before it is sent

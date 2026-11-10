@@ -68,8 +68,12 @@ from wuwaterm.application import (
     SEMANTIC_PRECEDENT_SCOPES,
     SEMANTIC_REVIEW_VERSION,
     SEMANTIC_TERM_EFFECTS,
+    ContextBefore,
     LLMFailureDiagnostic,
     LlmCallBudget,
+    Precedent,
+    SemanticReviewJob,
+    TranslationContext,
     LlmCallGuard,
     ReviewRequestError,
     SlidingWindowRateLimiter,
@@ -81,6 +85,7 @@ from wuwaterm.application import (
     probe_database,
     project_review_report,
     review_pair,
+    semantic_review_async,
     service_capabilities,
     service_metadata,
     translate_request_async,
@@ -242,6 +247,15 @@ class TranslationRequestBody(BaseModel):
         description=(
             "Force the target language. Omit or send null to auto-detect from "
             "the source text."
+        ),
+    )
+    context: "TranslationContextBody | None" = Field(
+        default=None,
+        description=(
+            "translation-context-v1, opt-in. Send it only when GET "
+            "/v1/capabilities lists translation-context-v1: older servers "
+            "ignore it silently. A present context, even {}, applies the "
+            "context rules to this request; the response shape is unchanged."
         ),
     )
 
@@ -562,6 +576,61 @@ class SemanticPrecedentBody(BaseModel):
         return self
 
 
+class TranslationContextBody(BaseModel):
+    """Read-only context and occurrence-scoped human precedents (ADR 0019)."""
+
+    model_config = ConfigDict(extra="forbid")
+    before: SemanticContextSideBody | None = Field(
+        default=None,
+        description=(
+            "The previous segment and its translation, read-only. Omit it for "
+            "the first segment of a document."
+        ),
+    )
+    precedents: list[SemanticPrecedentBody] = Field(
+        default_factory=list,
+        max_length=SEMANTIC_MAX_PRECEDENTS,
+        description="Human choices made elsewhere in the same manuscript.",
+    )
+
+    @model_validator(mode="after")
+    def reject_isolated_surrogates(self) -> "TranslationContextBody":
+        texts: list[str] = []
+        if self.before is not None:
+            texts += [self.before.source, self.before.target]
+        for item in self.precedents:
+            texts += [item.surface, item.snippet, item.rendering or ""]
+        if any(_has_isolated_surrogate(text) for text in texts):
+            raise ValueError("text contains an isolated surrogate")
+        return self
+
+
+def _precedents(items: list[SemanticPrecedentBody]) -> tuple[Precedent, ...]:
+    return tuple(
+        Precedent(
+            surface=item.surface,
+            choice=item.choice,
+            rendering=item.rendering,
+            snippet=item.snippet,
+            segment_index=item.anchor.segment_index,
+            source_start=item.anchor.source_start,
+            source_end=item.anchor.source_end,
+        )
+        for item in items
+    )
+
+
+def _translation_context(body: TranslationContextBody | None) -> TranslationContext | None:
+    if body is None:
+        return None
+    before = (
+        None
+        if body.before is None
+        else ContextBefore(source=body.before.source, target=body.before.target)
+    )
+    return TranslationContext(before=before, precedents=_precedents(body.precedents))
+
+
 class SemanticReviewRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: str = Field(
@@ -668,6 +737,9 @@ class SemanticReviewResponseBody(BaseModel):
     truncated: bool
     truncated_reason: Literal["issue_limit", "byte_limit"] | None
     omitted_issues: int = Field(ge=0)
+
+
+TranslationRequestBody.model_rebuild()
 
 
 # The wire vocabulary, spelled out so a generated client can model every
@@ -1736,7 +1808,11 @@ def _register_routes(app: FastAPI) -> None:
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
-            TranslationJob(text=body.text, forced_to_chinese=forced_to_chinese),
+            TranslationJob(
+                text=body.text,
+                forced_to_chinese=forced_to_chinese,
+                context=_translation_context(body.context),
+            ),
             before_llm_call=_device_llm_guard(request, device),
             # The dictionary stage opens SQLite and can score every term row.
             # This process serves many requests on one loop, so that work runs
@@ -1745,10 +1821,11 @@ def _register_routes(app: FastAPI) -> None:
             offload=asyncio.to_thread,
         )
         LOGGER.info(
-            "translation device=%s kind=%s direction=%s request_id=%s",
+            "translation device=%s kind=%s direction=%s context=%s request_id=%s",
             redact_id(device.device_id),
             outcome.kind,
             outcome.direction,
+            "off" if body.context is None else "on",
             _request_id(request),
         )
         if outcome.kind == KIND_ERROR:
@@ -1944,7 +2021,7 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         body: SemanticReviewRequestBody,
         device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
-    ) -> JSONResponse:
+    ) -> Response:
         """Model-backed semantic issues for one paired segment (semantic-review-v1).
 
         Separate from `/v1/reviews`: it never returns a verdict and never
@@ -1952,6 +2029,11 @@ def _register_routes(app: FastAPI) -> None:
         scalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.
         Use it only when `GET /v1/capabilities` lists `semantic-review-v1`;
         otherwise it answers `llm_unavailable` (503) without calling a model.
+        Semantic review is experimental and off by default
+        (`WUWATERM_SEMANTIC_REVIEW_ENABLED`). At most one model call per request, counted against the same budget,
+        concurrency limit and per-device limit as translation. Model output
+        that fails validation is not retried: HTTP 200 with
+        `status: not_reviewed`.
         """
         for name, text in (("source", body.source), ("target", body.target)):
             if len(text) > SEMANTIC_MAX_SIDE_SCALARS:
@@ -1960,15 +2042,48 @@ def _register_routes(app: FastAPI) -> None:
                     f"{name} exceeds {SEMANTIC_MAX_SIDE_SCALARS} Unicode scalars",
                 )
         await _require_active_device(request, device)
+        before = (
+            None
+            if body.context is None
+            else ContextBefore(
+                source=body.context.before.source, target=body.context.before.target
+            )
+        )
+        job = SemanticReviewJob(
+            source=body.source,
+            target=body.target,
+            direction=body.direction,
+            explain_language=body.explain_language,
+            context_before=before,
+            precedents=_precedents(body.precedents),
+        )
+        outcome = await semantic_review_async(
+            request.app.state.term_service,
+            request.app.state.translator,
+            job,
+            request_id=_request_id(request),
+            before_llm_call=_device_llm_guard(request, device),
+            offload=asyncio.to_thread,
+        )
+        # Lengths, counts and status only: neither text is ever logged.
         LOGGER.info(
-            "semantic review unavailable device=%s source_len=%s target_len=%s"
-            " review_version=%s request_id=%s",
+            "semantic review device=%s source_len=%s target_len=%s status=%s"
+            " issues=%s dropped_unanchored=%s error=%s review_version=%s"
+            " request_id=%s",
             redact_id(device.device_id),
             len(body.source),
             len(body.target),
+            outcome.status or "-",
+            outcome.issue_count,
+            outcome.dropped_unanchored,
+            outcome.error_code or "-",
             SEMANTIC_REVIEW_VERSION,
             _request_id(request),
         )
-        raise ApiError(
-            ERROR_LLM_UNAVAILABLE, "semantic review is not available on this server"
-        )
+        if outcome.error_code is not None or outcome.data is None:
+            _log_llm_failure_diagnostic(request, outcome)
+            raise ApiError(outcome.error_code or ERROR_INTERNAL)
+        await _require_active_device(request, device, serve_on_store_error=True)
+        # The engine measured these exact bytes against the byte budget, so
+        # they are served as they are rather than re-encoded.
+        return Response(content=outcome.data, media_type="application/json")

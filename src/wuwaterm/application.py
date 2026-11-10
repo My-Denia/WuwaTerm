@@ -18,9 +18,10 @@ callers that use this pipeline, the two adapter-specific steps are injected:
   markup payload (Telegram HTML today) while preserving its structure. The
   Telegram command adapter injects one; the HTTP API deliberately injects none
   and is therefore plain-text only.
-* ``splitter`` — how oversized text is cut into LLM-sized chunks. The default
-  splits on plain line boundaries; the Telegram adapter injects its UTF-16
-  aware splitter so message limits keep their existing meaning.
+* ``splitter`` — accepted for adapter compatibility and no longer used. Text
+  longer than one model request is cut with segmentation-v1 (ADR 0019): each
+  segment's whitespace separators are copied verbatim and only its core is
+  translated, with the previous segment as read-only context.
 
 Pipeline callers receive a :class:`TranslationOutcome` and decide how to
 render it.
@@ -56,6 +57,22 @@ from .review import (
     review_pair as _review_pair,
 )
 from . import semantic_review_contract as _semantic_contract
+from .segmentation import WHITESPACE as _SEGMENT_WHITESPACE
+from .segmentation import segment_text as _segment_text
+from .semantic_review import (
+    SEMANTIC_MODEL_ENV,
+    SEMANTIC_THINKING_DEFAULT,
+    SEMANTIC_THINKING_ENV,
+    SEMANTIC_TIMEOUT_ENV,
+    SEMANTIC_PURPOSE,
+    SEMANTIC_RESPONSE_FORMAT,
+    ContextBefore,
+    Precedent,
+    SemanticReviewJob,
+    review_segment as _review_segment,
+    semantic_timeout_seconds as _semantic_timeout_seconds,
+    thinking_request_options as _thinking_request_options,
+)
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -156,17 +173,33 @@ def _safe_business_reason(value: object) -> str | None:
 
 
 @dataclass(frozen=True)
+class TranslationContext:
+    """Explicit document context for one translation (translation-context-v1).
+
+    ``before`` is the previous segment and its translation, read-only.
+    ``precedents`` are human choices scoped to one earlier occurrence
+    (ADR 0019). A present context, even an empty one, also switches on the
+    context prompt rules; ``None`` keeps the original prompt byte for byte.
+    """
+
+    before: ContextBefore | None = None
+    precedents: tuple[Precedent, ...] = ()
+
+
+@dataclass(frozen=True)
 class TranslationJob:
     """One protocol-neutral translation request.
 
     ``markup`` carries an optional adapter-specific rich-text payload that only
     a matching ``markup_translator`` understands. Adapters without markup pass
-    ``None`` and always get plain text back.
+    ``None`` and always get plain text back. ``context`` is opt-in and applies
+    to the plain-text model path only.
     """
 
     text: str
     markup: str | None = None
     forced_to_chinese: bool | None = None
+    context: TranslationContext | None = None
 
 
 @dataclass(frozen=True)
@@ -313,7 +346,8 @@ def _should_append_dict_miss(
 def split_plain_text(text: str, limit: int = LLM_INPUT_CHAR_LIMIT) -> list[str]:
     """Split ``text`` into <= ``limit`` character chunks on line boundaries.
 
-    Protocol-neutral default splitter. Lines are kept whole when they fit; a
+    The pre-segmentation-v1 splitter. The pipeline no longer uses it; it stays
+    importable for adapters and as the evaluation baseline of the old path. Lines are kept whole when they fit; a
     single line longer than ``limit`` is hard-wrapped so no chunk can exceed
     the LLM input bound.
 
@@ -431,29 +465,67 @@ def _llm_failure_outcome(
     )
 
 
+CONTEXT_BEFORE_SCALARS = _semantic_contract.MAX_CONTEXT_SCALARS
+
+
+def _tail(text: str, limit: int = CONTEXT_BEFORE_SCALARS) -> str:
+    return text[-limit:] if len(text) > limit else text
+
+
+def _strip_separators(text: str) -> str:
+    start, end = 0, len(text)
+    while start < end and text[start] in _SEGMENT_WHITESPACE:
+        start += 1
+    while end > start and text[end - 1] in _SEGMENT_WHITESPACE:
+        end -= 1
+    return text[start:end]
+
+
 async def _translate_long_plain_text(
     translator: SentenceTranslator,
     text: str,
     *,
     to_chinese: bool,
-    splitter: TextSplitter,
+    context: TranslationContext | None = None,
     before_llm_call: LlmCallGuard | None = None,
+    on_segment: Callable[[object, str], None] | None = None,
 ) -> TranslationOutcome:
-    translated_chunks: list[str] = []
-    for chunk in splitter(text, LLM_INPUT_CHAR_LIMIT):
+    """Translate segment by segment, keeping every separator verbatim.
+
+    Output is ``Σ (leading_i + translate(core_i) + trailing_i)`` over the
+    segmentation-v1 segments of ``text``. Each segment is sent with the one
+    before it (at most 400 scalars per side, the end nearest this segment) as
+    read-only context; nothing else crosses segments. A request's explicit
+    context seeds the first segment and its precedents go with every one.
+    """
+    pieces: list[str] = []
+    before = context.before if context is not None else None
+    precedents = context.precedents if context is not None else ()
+    for segment in _segment_text(text):
+        core = text[segment.core_start : segment.core_end]
+        if not core:
+            pieces.append(text[segment.start : segment.end])
+            continue
         try:
             translated = await translator.translate_async(
-                chunk,
+                core,
                 to_chinese=to_chinese,
                 propagate_errors=True,
                 before_llm_call=before_llm_call,
+                context=TranslationContext(before=before, precedents=precedents),
             )
         except LLMTranslationError as exc:
             return _llm_failure_outcome(exc, to_chinese)
-        translated_chunks.append(translated)
-    return TranslationOutcome(
-        kind=KIND_LLM, text="\n".join(translated_chunks), to_chinese=to_chinese
-    )
+        translated = _strip_separators(translated)
+        if on_segment is not None:
+            on_segment(segment, translated)
+        pieces.append(
+            text[segment.start : segment.core_start]
+            + translated
+            + text[segment.core_end : segment.end]
+        )
+        before = ContextBefore(source=_tail(core), target=_tail(translated))
+    return TranslationOutcome(kind=KIND_LLM, text="".join(pieces), to_chinese=to_chinese)
 
 
 async def _translate_plain_async(
@@ -462,14 +534,25 @@ async def _translate_plain_async(
     *,
     to_chinese: bool,
     before_llm_call: LlmCallGuard | None = None,
+    context: TranslationContext | None = None,
+    source_text: str | None = None,
 ) -> TranslationOutcome:
     try:
-        translated = await translator.translate_async(
-            prepared,
-            to_chinese=to_chinese,
-            propagate_errors=True,
-            before_llm_call=before_llm_call,
-        )
+        if context is None:
+            translated = await translator.translate_async(
+                prepared,
+                to_chinese=to_chinese,
+                propagate_errors=True,
+                before_llm_call=before_llm_call,
+            )
+        else:
+            translated = await translator.translate_async(
+                prepared if source_text is None else source_text,
+                to_chinese=to_chinese,
+                propagate_errors=True,
+                before_llm_call=before_llm_call,
+                context=context,
+            )
     except LLMTranslationError as exc:
         return _llm_failure_outcome(exc, to_chinese)
     return TranslationOutcome(
@@ -507,15 +590,18 @@ async def translate_request_async(
     # Only trusted callers get an input_limit above LLM_INPUT_CHAR_LIMIT.
     # Split internally so every LLM call keeps the public per-call bound.
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
+        # ``splitter`` is ignored: segmentation-v1 is the one long-text rule.
+        # It cuts the text as submitted, so every separator, blank lines
+        # included, is the source's own; each core is prepared on its own.
         return await _translate_long_plain_text(
             translator,
-            prepared,
+            request.text,
             to_chinese=to_chinese,
-            splitter=splitter or split_plain_text,
+            context=request.context,
             before_llm_call=before_llm_call,
         )
 
-    if request.markup and markup_translator is not None:
+    if request.markup and markup_translator is not None and request.context is None:
         if before_llm_call is None:
             # Existing two-argument adapter hooks remain supported for callers
             # which did not request a pre-call guard.
@@ -563,6 +649,10 @@ async def translate_request_async(
         prepared,
         to_chinese=to_chinese,
         before_llm_call=before_llm_call,
+        context=request.context,
+        # A context-mode request keeps its paragraph breaks (see
+        # SentenceTranslator.prepare_text_keeping_paragraphs).
+        source_text=request.text if request.context is not None else None,
     )
 
 
@@ -854,16 +944,162 @@ SEMANTIC_RESPONSE_BYTE_BUDGET = _semantic_contract.SEMANTIC_RESPONSE_BYTE_BUDGET
 SEMANTIC_TERM_EFFECTS = _semantic_contract.TERM_EFFECTS
 
 
+SEMANTIC_REVIEW_ENABLED_ENV = "WUWATERM_SEMANTIC_REVIEW_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def semantic_review_enabled() -> bool:
+    """Semantic review is experimental and off unless the operator turns it on.
+
+    The evaluation's P-layer false-positive gate was not met (ADR 0018); the
+    owner accepted the feature as experimental and off by default. Production
+    and the public Sites leave it off; a self-hosted server may opt in.
+    """
+    import os
+
+    return os.getenv(SEMANTIC_REVIEW_ENABLED_ENV, "").strip().casefold() in _TRUTHY
+
+
 def service_capabilities() -> tuple[str, ...]:
     """Optional capabilities this process can serve right now.
 
     A capability is listed only when it actually works, so a client can turn a
-    feature on from this list alone. The semantic review engine is not part of
-    this build: ``POST /v1/semantic-reviews`` exists with its contract but
-    answers ``llm_unavailable``, so neither ``semantic-review-v1`` nor
-    ``translation-context-v1`` is listed, with or without a configured model.
+    feature on from this list alone. Both need a configured model; semantic
+    review also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
     """
-    return ()
+    if not llm_configured():
+        return ()
+    if not semantic_review_enabled():
+        return (_semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,)
+    return (
+        _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
+        _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
+    )
+
+
+@dataclass(frozen=True)
+class SemanticReviewOutcome:
+    """Result of one semantic review request.
+
+    On success ``data`` is the exact response body (already within the byte
+    budget) and ``body`` its decoded form; on failure ``error_code`` is one of
+    :data:`TRANSLATION_ERROR_CODES` and nothing else is set.
+    """
+
+    body: dict[str, object] | None = None
+    data: bytes | None = None
+    error_code: str | None = None
+    model_calls: int = 0
+    dropped_unanchored: int = 0
+    llm_failure: LLMFailureDiagnostic | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    @property
+    def status(self) -> str | None:
+        return None if self.body is None else self.body["status"]  # type: ignore[return-value]
+
+    @property
+    def issue_count(self) -> int:
+        return 0 if self.body is None else len(self.body["issues"])  # type: ignore[arg-type]
+
+
+class _SnapshotOnce:
+    """Hands review-v2 the same dictionary snapshot for every check of one request.
+
+    One request runs review-v2 once for the submitted pair and once per
+    suggestion; a single snapshot keeps them on one dictionary view and reads
+    the terms once.
+    """
+
+    def __init__(self, service: TermService) -> None:
+        self._service = service
+        self._snapshot = None
+
+    def review_snapshot(self):
+        if self._snapshot is None:
+            self._snapshot = self._service.review_snapshot()
+        return self._snapshot
+
+
+def _semantic_json_mode() -> bool:
+    import os
+
+    return os.getenv("WUWATERM_SEMANTIC_REVIEW_JSON_MODE", "1").strip() != "0"
+
+
+async def semantic_review_async(
+    service: TermService,
+    translator: SentenceTranslator,
+    job: SemanticReviewJob,
+    *,
+    request_id: str,
+    before_llm_call: LlmCallGuard | None = None,
+    offload: Offload | None = None,
+) -> SemanticReviewOutcome:
+    """Protocol-neutral semantic review of one paired segment (ADR 0018).
+
+    At most one model call, sharing the translator's concurrency slots, HTTP
+    client and ``before_llm_call`` budget guard. No model configured is
+    ``llm_unavailable`` without a call.
+    """
+    if not semantic_review_enabled() or not llm_configured():
+        # Off (the default) answers exactly like a server without a model:
+        # no model call and nothing spent.
+        return SemanticReviewOutcome(error_code=ERROR_LLM_UNAVAILABLE)
+    if max(len(job.source), len(job.target)) > _semantic_contract.MAX_SIDE_SCALARS:
+        # The HTTP adapter refuses this before it gets here; an in-process
+        # caller gets the same answer instead of an exception.
+        return SemanticReviewOutcome(error_code=ERROR_INPUT_TOO_LONG)
+    snapshot = _SnapshotOnce(service)
+
+    def term_reviewer(source: str, target: str, direction: str) -> ReviewReport:
+        return _review_pair(snapshot, source, target, direction, review_version="review-v2")  # type: ignore[arg-type]
+
+    response_format = SEMANTIC_RESPONSE_FORMAT if _semantic_json_mode() else None
+    import os
+
+    try:
+        max_tokens, extra_body = _thinking_request_options(
+            os.getenv(SEMANTIC_THINKING_ENV, "").strip() or SEMANTIC_THINKING_DEFAULT
+        )
+    except ValueError:
+        # A typo must not turn an advertised capability into a stream of 503s.
+        LOGGER.warning("unknown %s; using %s", SEMANTIC_THINKING_ENV, SEMANTIC_THINKING_DEFAULT)
+        max_tokens, extra_body = _thinking_request_options(SEMANTIC_THINKING_DEFAULT)
+    timeout_seconds = _semantic_timeout_seconds(os.getenv(SEMANTIC_TIMEOUT_ENV))
+
+    async def complete(messages: list[dict[str, str]]) -> str:
+        return await translator.complete_chat_async(
+            messages,
+            purpose=SEMANTIC_PURPOSE,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            model_env=SEMANTIC_MODEL_ENV,
+            before_llm_call=before_llm_call,
+            extra_body=extra_body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    try:
+        result = await _review_segment(
+            job,
+            request_id=request_id,
+            complete=complete,
+            term_reviewer=term_reviewer,
+            offload=offload,
+        )
+    except LLMTranslationError as exc:
+        failure = _llm_failure_outcome(exc, job.direction == DIRECTION_TO_CHINESE)
+        return SemanticReviewOutcome(
+            error_code=failure.error_code, model_calls=1, llm_failure=failure.llm_failure
+        )
+    return SemanticReviewOutcome(
+        body=result.response.body,
+        data=result.response.data,
+        model_calls=result.model_calls,
+        dropped_unanchored=result.dropped_unanchored,
+    )
 
 
 def project_review_report(report: ReviewReport, request_id: str) -> dict[str, object]:
