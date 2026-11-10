@@ -230,16 +230,18 @@ def test_trusted_input_limit_splits_instead_of_rejecting(monkeypatch, sample_db)
     assert outcome.text == "\n".join(["chunk"] * len(calls))
 
 
-def test_custom_splitter_is_used_for_long_text(monkeypatch, sample_db):
+def test_long_text_ignores_a_custom_splitter_and_never_adds_line_breaks(monkeypatch, sample_db):
+    """Regression for the old hard cut: pieces were joined with an extra "\\n"."""
     service, translator = build_pair(sample_db)
     calls: list[tuple[str, object]] = []
-    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: locked_text)
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: f"<{len(locked_text)}>")
     seen: list[int] = []
 
     def splitter(text: str, limit: int) -> list[str]:
         seen.append(limit)
         return ["alpha", "beta"]
 
+    # One line, no whitespace or punctuation: segmentation-v1 hard-cuts it.
     outcome = asyncio.run(
         translate_request_async(
             service,
@@ -250,9 +252,41 @@ def test_custom_splitter_is_used_for_long_text(monkeypatch, sample_db):
         )
     )
 
-    assert seen == [LLM_INPUT_CHAR_LIMIT]
+    assert seen == []
     assert outcome.kind == KIND_LLM
-    assert outcome.text == "alpha\nbeta"
+    assert [len(text) for text, _ in calls] == [1800, 205]
+    assert outcome.text == "<1800><205>"
+    assert "\n" not in outcome.text
+
+
+def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypatch, sample_db):
+    service, translator = build_pair(sample_db)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    seen: list[tuple[str, object]] = []
+
+    async def fake_call(locked_text, locks, html_mode=False, to_chinese=False,
+                        timeout_seconds=30.0, transport=None, references=(), context=None):
+        seen.append((locked_text, context))
+        return f"  T{len(seen)}\n"  # stray whitespace must not leak into the output
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    # prepare_text already folds blank lines away, so the separators that
+    # reach segmentation are line breaks; each must survive verbatim.
+    text = "甲" * 1000 + "\n" + "乙" * 1000 + "\n" + "丙" * 300
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service, translator, TranslationJob(text=text), input_limit=LLM_INPUT_CHAR_LIMIT * 4
+        )
+    )
+
+    assert outcome.text == "T1\nT2"
+    assert [len(locked) for locked, _ in seen] == [1000, 1301]
+    assert seen[0][1].before is None
+    assert seen[1][1].before.source == "甲" * 400
+    assert seen[1][1].before.target == "T1"
 
 
 # --------------------------------------------------------------------------

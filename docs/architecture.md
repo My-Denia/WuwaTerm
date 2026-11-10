@@ -303,7 +303,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
 | Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Domain + provider | `sentence` | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
+| Domain + provider | `sentence`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
@@ -472,7 +472,8 @@ Channel path is always auto-detected direction; it does not accept command
 |------|-------------------------|-------|
 | `/tr`, Telegram command and reply translation, `POST /v1/translations`, private web translation | The source text (up to 2,000 characters per request) with official terms as contextual references | One shared pipeline, only after a dictionary miss |
 | Linked-channel auto-translation | The channel post text | Channel admission and budget apply first |
-| `POST /v1/semantic-reviews` (`semantic-review-v1`) | Both the source segment **and** the translation, plus read-only context and human precedents | Registered with its request and response contract; until the engine lands it answers `llm_unavailable` without calling a model, and `GET /v1/capabilities` does not list it. At most one model call per request. See [ADR 0018](adr/0018-semantic-review.md) |
+| `POST /v1/semantic-reviews` (`semantic-review-v1`) | Both the source segment **and** the translation, plus read-only context and human precedents | At most one model call per request (none for two blank sides), sharing the translation budget, concurrency limit and per-device limit. Listed in `GET /v1/capabilities` only when a model is configured. See [ADR 0018](adr/0018-semantic-review.md) |
+| `POST /v1/translations` with `context` (`translation-context-v1`) | The text, plus the previous segment and human precedents the request names | Opt-in per request; without `context` the request and prompt are unchanged. Core's own long-text path sends the previous segment the same way. See [ADR 0019](adr/0019-document-context-and-human-precedents.md) |
 
 `review-v1` and `review-v2` stay deterministic: `POST /v1/reviews` never calls
 the model, costs nothing per request, and returns the same report for the same

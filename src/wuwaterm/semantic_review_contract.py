@@ -64,6 +64,14 @@ WITHHELD_SPAN_TOO_LONG = "span_too_long"
 WITHHELD_REPLACEMENT_TOO_LONG = "replacement_too_long"
 ORIGIN_MODEL = "model"
 
+# Fixed wording for human precedents in every model prompt (ADR 0019).
+PRECEDENT_WORDING = (
+    "The following are human judgments made at one earlier place. They state "
+    "the meaning and rendering at that place only. The same surface may mean "
+    "something else in this segment; judge it from this segment's context, "
+    "and reuse the rendering when the meaning is the same."
+)
+
 # Request limits (Unicode scalars unless noted).
 MAX_SIDE_SCALARS = 2000
 MAX_CONTEXT_SCALARS = 400

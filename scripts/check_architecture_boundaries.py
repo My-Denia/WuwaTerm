@@ -5,7 +5,9 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract
-  domain+LLM:      sentence (three lazy Telegram compatibility bridges only)
+  domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
+                   llm_transport (HTTP transport for chat completions),
+                   semantic_review (semantic-review-v1 engine)
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
                    or builder modules)
@@ -77,7 +79,7 @@ DOMAIN_CORE = frozenset(
         "semantic_review_contract",
     }
 )
-DOMAIN_LLM = frozenset({"sentence"})
+DOMAIN_LLM = frozenset({"sentence", "llm_transport", "semantic_review"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
 # orchestration while sharing lower-level term and sentence primitives. This

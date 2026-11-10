@@ -1,6 +1,6 @@
 # ADR 0018: Semantic review keeps model findings and dictionary constraints apart
 
-- Status: Accepted (contract); the engine is not part of this change
+- Status: Accepted (contract and engine)
 - Date: 2026-11-10
 - Related: [ADR 0006](0006-dictionary-first-before-llm.md),
   [ADR 0017](0017-contextual-term-references.md),
@@ -45,11 +45,10 @@ Semantic review is a separate, opt-in, model-backed path:
    A server without the path answers 404, which a client reads as "no optional
    capabilities". `/v1/meta` is unchanged.
 
-The endpoint and its full contract ship first, without the engine. Until the
-engine lands, `GET /v1/capabilities` lists nothing and
-`POST /v1/semantic-reviews` validates the request and answers
-`llm_unavailable` (503) without calling a model. Clients develop against the
-contract fixtures in the meantime.
+The contract shipped first; the engine (`wuwaterm.semantic_review`) is wired
+in behind it. With no model configured, `GET /v1/capabilities` lists nothing
+and `POST /v1/semantic-reviews` validates the request and answers
+`llm_unavailable` (503) without calling a model.
 
 ## Contract
 
@@ -90,10 +89,17 @@ section records the rules a schema cannot express.
   `omission`, `unsupported_addition`, `meaning_shift`, `negation_change`,
   `quantity_change`, `reference_inconsistency`, `term_sense`.
 - **Anchoring.** The model returns quotes; the server locates them in the
-  segment. An issue whose quote is missing or not unique is dropped and
-  counted in `dropped_unanchored`. Span offsets are Unicode scalars within the
-  segment; the client adds the segment start. At most one of the two spans
-  may be null.
+  segment. A quote is placed when it occurs exactly once in its side; if it
+  does not occur verbatim, a second pass ignores differences in whitespace
+  runs (segmentation-v1 whitespace) and again needs exactly one match. Either
+  way the span is a slice of the submitted text, never the model's text. An
+  issue with a quote that cannot be placed, or with no quote at all, is
+  dropped and counted in `dropped_unanchored`. A suggestion may quote its own
+  replaced range (`suggestion.target_quote`, default: the issue's target
+  quote); a suggestion that cannot be placed, or that replaces a range with
+  the same text, is dropped and the issue kept. Span offsets are Unicode
+  scalars within the segment; the client adds the segment start. At most one
+  of the two spans may be null.
 - **Executable text is never shortened.** `source_span.text`,
   `target_span.text` and `suggestion.target_span.text` are always the complete
   slice of the submitted side. `source_excerpt`/`target_excerpt` are display
@@ -168,8 +174,18 @@ real proxy route once Web pins this contract.
 
 ### Calls and logging
 
-- At most one model call per request, with a `max_tokens` bound; the engine
-  must keep the per-segment P95 under the 45 s model timeout. Semantic review
+- At most one model call per request (none when both sides are blank), with
+  `max_tokens` 4,096 and `response_format: json_object`
+  (`WUWATERM_SEMANTIC_REVIEW_JSON_MODE=0` leaves the latter out for a gateway
+  that refuses it); the engine must keep the per-segment P95 under the 45 s
+  model timeout. Blank output, output that is not the agreed JSON object, an
+  unknown category or confidence, or a mistyped field makes the whole answer
+  `not_reviewed`; nothing is retried.
+- The prompt gives the model the dictionary facts of `review-v2` for the same
+  pair, worded as surface matches ("the corresponding region contains the
+  official form X; this is only a surface match"), and the human precedents
+  with the fixed wording of ADR 0019. All texts go in as JSON string values,
+  so a text cannot close or reopen a prompt section. Semantic review
   shares the translation path's per-process call budget, concurrency limit and
   per-device rate limit; there is no new budget mechanism.
   `WUWATERM_SEMANTIC_REVIEW_MODEL` may name a different model and defaults to
@@ -177,8 +193,10 @@ real proxy route once Web pins this contract.
 - The untrusted-source instruction of the translation prompt applies; every
   text field is plain text to every client.
 - Nothing is written to disk and no text is logged. The log line carries the
-  redacted device, the request id and the two input lengths; with the engine
-  it also carries the issue count and the status
+  redacted device, the request id, the two input lengths, the issue count, the
+  unanchored-drop count and the status. Every HTTP attempt to the gateway also
+  logs one line with its purpose, outcome class, status and elapsed time, so a
+  call ledger can be reconciled
   ([privacy](../privacy-and-llm.md#semantic-review-sends-both-texts)).
 
 ## Pre-frozen acceptance criteria
@@ -280,5 +298,10 @@ The translation-context gates are in ADR 0019. These rules cover both:
   `tests/test_semantic_review_contract.py`,
   `scripts/build_semantic_review_fixtures.py`,
   `contracts/semantic-review-v1/`
+- `src/wuwaterm/semantic_review.py` (prompt, parsing, anchoring,
+  `term_effect`), `src/wuwaterm/llm_transport.py`,
+  `application.semantic_review_async`, `tests/test_semantic_review.py`
 - `src/wuwaterm_api/app.py` (`/v1/capabilities`, `/v1/semantic-reviews`),
   `tests/test_api_semantic_review.py`
+- `scripts/eval_semantic.py`: runs and scores the evaluation above against the
+  frozen run directory; counts every gateway attempt before it is sent
