@@ -547,3 +547,68 @@ def test_fingerprint_v2_sees_a_translation_model_change_v1_frozen_hashes_still_c
     assert ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P", "--round", "1",
                     "--out-dir", str(tmp_path / "r")]) == 1
     assert len(json.loads((run / "ledger.json").read_text(encoding="utf-8"))["records"]) == before
+
+
+def _mprime_inputs(ev, tmp_path):
+    inputs = _inputs(ev, tmp_path)
+    targets = [{"para": i, "text": f"椿{i}"} for i in range(5)]
+    inputs.mprime = {
+        "experiments": [{"experiment": "X", "supplementary": False, "targets": targets,
+                         "precedent": {"rendering": "Camellya"}}],
+        "occurrences": (
+            [{"id": f"S{i}", "experiment": "X", "target_para": i % 5, "relation": "same"} for i in range(10)]
+            + [{"id": f"D{i}", "experiment": "X", "target_para": i, "relation": "diff"} for i in range(5)]
+        ),
+    }
+    out = tmp_path / "round"
+    for t in targets:
+        text = {"text": "Camellya came.", "error_code": None}
+        ev.write_json_atomic(out / "Mprime" / f"X-P{t['para']}.json", {
+            "layer": "Mprime", "experiment": "X", "target_para": t["para"], "source": t["text"],
+            "with_precedent": text, "without_precedent": text})
+    return inputs, out
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [{}, {"with_precedent": "correct"}, {"with_precedent": "correct", "without_precedent": "fine"}],
+    ids=["empty", "one_side_missing", "illegal_value"],
+)
+def test_incomplete_mprime_verdicts_never_pass_the_gates(ev, tmp_path, verdict):
+    inputs, out = _mprime_inputs(ev, tmp_path)
+    ids = [o["id"] for o in inputs.mprime["occurrences"]]
+    ev.write_json_atomic(out / "adjudication" / "mprime.json", {i: verdict for i in ids})
+    result = ev.score_mprime(inputs, out)
+    assert result["gates"]["Mprime_same_sense"]["state"] == "pending_adjudication"
+    assert result["gates"]["Mprime_led_astray"]["state"] == "pending_adjudication"
+    assert result["precedents_default"] == "off"
+    assert len(json.loads((out / "worklists" / "mprime.json").read_text(encoding="utf-8"))) == len(ids)
+
+
+def test_complete_mprime_verdicts_still_decide(ev, tmp_path):
+    inputs, out = _mprime_inputs(ev, tmp_path)
+    good = {"with_precedent": "correct", "without_precedent": "correct"}
+    ev.write_json_atomic(out / "adjudication" / "mprime.json", {o["id"]: good for o in inputs.mprime["occurrences"]})
+    result = ev.score_mprime(inputs, out)
+    assert result["gates"]["Mprime_same_sense"]["state"] == "met"
+    assert result["gates"]["Mprime_led_astray"]["state"] == "met"
+
+
+def test_illegal_offlist_and_m_verdicts_stay_pending(ev, tmp_path):
+    inputs, out = _inputs(ev, tmp_path, units=("U1",)), tmp_path / "round"
+    off = {"id": "1" * 32, "category": "omission", "confidence": "high",
+           "source_span": {"start": 3, "end": 5, "text": "丁戊"}, "target_span": None, "rationale": "r"}
+    _write_p(ev, out, [_p_result("U1", d, issues=[off]) for d in ("zh->en", "en->zh")])
+    keys = [f"P:U1:{d}:{'1' * 32}" for d in ("zh->en", "en->zh")]
+    ev.write_json_atomic(out / "adjudication" / "p-offlist.json", {k: "looks fine" for k in keys})
+    gates = ev.score_p(inputs, out, ev.ReviewStats())["gates"]
+    # zh->en: the span is off-list on the Chinese side; an invalid verdict keeps it pending.
+    assert gates["P_false_positives_zh->en"]["offlist_pending_mh"] == 1
+    assert gates["P_false_positives_zh->en"]["offlist_fp_mh"] == 0
+    worklist = json.loads((out / "worklists" / "p-offlist.json").read_text(encoding="utf-8"))
+    assert [item["key"] for item in worklist] == [keys[0]]
+    blind = {"B9": ["old", "new"]}
+    item = {"id": "M1", "doc": "B9"}
+    assert ev._verdict({"M1": {"A": "ok", "B": "wrong"}}, blind, item, "old") is None
+    assert ev._verdict({"M1": {"A": "ok", "B": "wrong"}}, blind, item, "new") == "wrong"
+    assert ev._verdict({"M1": {}}, blind, item, "new") is None

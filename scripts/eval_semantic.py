@@ -1229,6 +1229,8 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
             else:
                 key = _issue_key(f"P:{result['unit_id']}:{direction}", issue)
                 verdict = offlist_verdicts.get(key)
+                if verdict not in P_OFFLIST_LABELS:
+                    verdict = None
                 if mh:
                     bucket["offlist_mh"] += 1
                     if verdict in ("allowed_rewrite", "model_misread"):
@@ -1515,9 +1517,9 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         MET if all(item["ok"] for item in fidelity.values()) else NOT_MET,
         per_doc=fidelity,
     )
-    judged = [item for item in mh_issues if item["key"] in precision_verdicts]
+    judged = [item for item in mh_issues if precision_verdicts.get(item["key"]) in M_PRECISION_LABELS]
     true_count = sum(1 for item in judged if precision_verdicts[item["key"]] == "true")
-    pending = [item for item in mh_issues if item["key"] not in precision_verdicts]
+    pending = [item for item in mh_issues if precision_verdicts.get(item["key"]) not in M_PRECISION_LABELS]
     if len(mh_issues) < M_PRECISION_MIN_SAMPLE:
         state = UNDECIDABLE
     elif pending:
@@ -1558,13 +1560,33 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     return {"gates": gates, "verified_constraint_diagnostic": verified, "m_review_pairs": pair_counts}
 
 
+# A verdict counts only when it is present and one of these labels; anything
+# else (missing, empty object, typo) leaves the item pending.
+P_OFFLIST_LABELS = frozenset({"real_error", "allowed_rewrite", "model_misread", "undecidable"})
+M_PRECISION_LABELS = frozenset({"true", "false", "undecidable"})
+M_TRANSLATION_LABELS = frozenset({"correct", "wrong", "undecidable"})
+MPRIME_LABELS = frozenset({"correct", "wrong", "led_astray", "undecidable"})
+MPRIME_CONDITIONS = ("with_precedent", "without_precedent")
+
+
+def mprime_verdict(verdicts: Mapping[str, Any], occurrence_id: str) -> Mapping[str, str] | None:
+    """Both condition verdicts, each a valid label, or None (still pending)."""
+    entry = verdicts.get(occurrence_id)
+    if not isinstance(entry, Mapping):
+        return None
+    if any(entry.get(name) not in MPRIME_LABELS for name in MPRIME_CONDITIONS):
+        return None
+    return entry
+
+
 def _verdict(verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]], item: Mapping[str, Any], side: str) -> str | None:
     entry = verdicts.get(item["id"])
     if not isinstance(entry, Mapping):
         return None
     a_side, _ = blind_key[item["doc"]]
     letter = "A" if a_side == side else "B"
-    return entry.get(letter)
+    value = entry.get(letter)
+    return value if value in M_TRANSLATION_LABELS else None
 
 
 def _score_m_translation(
@@ -1638,8 +1660,8 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
     wrong = {"with_precedent": 0, "without_precedent": 0}
     pending = 0
     for occ in same:
-        entry = verdicts.get(occ["id"])
-        if not isinstance(entry, Mapping):
+        entry = mprime_verdict(verdicts, occ["id"])
+        if entry is None:
             pending += 1
             continue
         for condition in wrong:
@@ -1666,10 +1688,10 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
         rendering = experiments[exp_id]["precedent"]["rendering"]
         text = result["with_precedent"].get("text") or ""
         bound = min(len(diff_here), _count_rendering(text, rendering))
-        undecided = [o for o in diff_here if not isinstance(verdicts.get(o["id"]), Mapping)]
+        undecided = [o for o in diff_here if mprime_verdict(verdicts, o["id"]) is None]
         judged_astray += sum(
             1 for o in diff_here
-            if isinstance(verdicts.get(o["id"]), Mapping) and verdicts[o["id"]].get("with_precedent") == "led_astray"
+            if (mprime_verdict(verdicts, o["id"]) or {}).get("with_precedent") == "led_astray"
         )
         if bound and undecided:
             unresolved += min(bound, len(undecided))
@@ -1713,7 +1735,7 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
             "without_precedent": results[(o["experiment"], o["target_para"])]["without_precedent"].get("text"),
         }
         for o in occurrences
-        if not isinstance(verdicts.get(o["id"]), Mapping)
+        if mprime_verdict(verdicts, o["id"]) is None
     ]
     write_json_atomic(out_dir / "worklists" / "mprime.json", packet)
     return {"gates": gates, "precedents_default": default}
