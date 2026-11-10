@@ -135,6 +135,21 @@ Use exactly these category names:
 - reference_inconsistency: a pronoun, name or subject points at a different person or thing than in the source.
 - term_sense: a word is translated with the wrong sense, for example an ordinary word rendered as a game name, or a game name rendered as an ordinary word.
 
+Check every candidate before you report it. Name the specific thing a reader \
+who has only the translation would now believe wrongly or would not learn: a \
+fact, a number, a condition, a rule, an instruction, who did what. If you \
+cannot name one, or the only difference is wording, emphasis, level of \
+detail, imagery or tone, do not report it. A passage that one version adds or \
+drops as a whole because it addresses its own readers differently (a \
+greeting, a closing remark, the writer's framing, a heading) is localization, \
+not an omission or an addition, unless the reader of the translation then \
+lacks a fact the rest of the text relies on. Added information that only \
+makes explicit what the source implies or states elsewhere is not an \
+unsupported addition; dropped information is not an omission when the \
+translation still gives the reader the same facts. Report one difference \
+once: do not report the same difference again as an omission on one side and \
+an addition on the other.
+
 Answer with one JSON object and nothing else:
 {{"issues": [{{"category": "...", "confidence": "high|medium|low", \
 "source_quote": "..." or null, "target_quote": "..." or null, \
@@ -158,7 +173,9 @@ suggestion.target_quote and give that text with the missing information added.
 optional second replacement for the same passage.
 Confidence: high = a clear error a careful bilingual reader would confirm; \
 medium = a likely error; low = possible but uncertain.
-Write every rationale in {explain_language}, at most two short sentences.
+Write every rationale in {explain_language}, at most two short sentences, \
+and say in it what the reader of the translation would believe wrongly or \
+miss.
 Return {{"issues": []}} when you find nothing to report."""
 
 

@@ -294,6 +294,10 @@ def test_formal_round_needs_the_frozen_config_and_refuses_a_changed_one(ev, run_
     assert frozen["options"]["thinking_mode"] == "low"
     assert "never-sent" not in json.dumps(frozen)
     assert ev.main(["freeze-config", "--run-dir", str(run), "--git-commit", "abc"]) == 1  # no silent overwrite
+    assert ev.main(["freeze-config", "--run-dir", str(run), "--git-commit", "def", "--replace"]) == 0
+    replaced = json.loads((run / "ledger.json").read_text(encoding="utf-8"))
+    assert replaced["config_freeze"]["git_commit"] == "def"
+    assert replaced["config_freeze_history"][0]["git_commit"] == "abc"
 
     monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "disabled")
     assert ev.main(args) == 1  # options changed after the freeze

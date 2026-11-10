@@ -207,8 +207,11 @@ real proxy route once Web pins this contract.
   sentences, added or dropped greetings and headings, a changed point of
   view, condensed description, adapted names, near-synonyms, figures of
   speech with a different image) is not an issue unless it changes one of
-  those. The rule is general; it names no corpus content, and confidence
-  definitions are unchanged. The prompt text and thinking setting used for
+  those. Before reporting, the model must name the specific thing a reader
+  of the translation would believe wrongly or miss, and drop the candidate
+  if it cannot; it reports one difference once rather than as an omission
+  on one side and an addition on the other. The rules are general; they name
+  no corpus content, and confidence definitions are unchanged. The prompt text and thinking setting used for
   an evaluation are frozen by SHA-256 in its ledger before the run.
 - The prompt gives the model the dictionary facts of `review-v2` for the same
   pair, worded as surface matches ("the corresponding region contains the

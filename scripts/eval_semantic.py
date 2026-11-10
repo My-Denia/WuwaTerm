@@ -1594,6 +1594,10 @@ def command_freeze_config(args: argparse.Namespace) -> int:
         print("refused: config_freeze already present", file=sys.stderr)
         return 1
     fingerprint = config_fingerprint()
+    previous = ledger.data.get("config_freeze")
+    if previous:
+        # A replaced freeze stays on record next to the rounds that used it.
+        ledger.data.setdefault("config_freeze_history", []).append(previous)
     ledger.data["config_freeze"] = {
         **fingerprint,
         "frozen_at": now_iso(),
