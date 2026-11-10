@@ -1578,6 +1578,67 @@ def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
     assert ("心", "心", "Hsin", "resonator") in locked.references
 
 
+def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_reference(
+    single_name_db,
+):
+    with connect(single_name_db) as conn:
+        insert_records(
+            conn,
+            [
+                TermRecord("resonator", "fixture", "5", "5", "心", "Hsin"),
+                TermRecord("speaker", "fixture", "6", "6", "「心」", '"Hsin"'),
+            ],
+        )
+        conn.commit()
+    translator = SentenceTranslator(single_name_db)
+
+    # 1. Quoted speaker span already selected: inner single character must not
+    # inject an overlapping naked resonator reference.
+    text_speaker_only = "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」。"
+    locked = translator._lock_terms_with_references(text_speaker_only, to_chinese=False)
+    assert locked.locks == ()
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked.references
+    assert ("心", "心", "Hsin", "resonator") not in locked.references
+
+    # 2. Subsequent independent uncovered name mention still gets naked reference.
+    text_with_subsequent_name = (
+        "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，心加入队伍。"
+    )
+    locked_subsequent = translator._lock_terms_with_references(
+        text_with_subsequent_name, to_chinese=False
+    )
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_subsequent.references
+    assert ("心", "心", "Hsin", "resonator") in locked_subsequent.references
+
+    # 3. Version title / ordinary compound without name mention triggers no reference.
+    text_title_only = "全新3.7版本「心照红尘」即将开启！"
+    locked_title = translator._lock_terms_with_references(
+        text_title_only, to_chinese=False
+    )
+    assert locked_title.references == ()
+
+    # 4. A3 first segment variant (version title + quoted resonator speaker).
+    text_a3_head = (
+        "亲爱的漂泊者：为了提供全新游戏内容，我们将在近期进行3.7版本「镜锁妄世，心照红尘」"
+        "的更新维护。5星共鸣者「心」可通过角色活动唤取获得。"
+    )
+    locked_a3 = translator._lock_terms_with_references(text_a3_head, to_chinese=False)
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_a3.references
+    assert ("心", "心", "Hsin", "resonator") not in locked_a3.references
+
+    # 5. Protected text / markup keeps coordinate mapping intact without naked injection.
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    protected = protect_telegram_html(
+        "<b>全新3.7版本「心照红尘」即将开启！</b>完成任务可结识「心」。"
+    )
+    locked_protected = translator._lock_protected_terms_with_references(
+        protected.neutral, to_chinese=False
+    )
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_protected.references
+    assert ("心", "心", "Hsin", "resonator") not in locked_protected.references
+
+
 def test_single_character_speaker_and_english_name_boundaries(single_name_db):
     translator = SentenceTranslator(single_name_db)
     locked = translator.lock_terms("椿：椿加入队伍。")

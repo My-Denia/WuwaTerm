@@ -674,7 +674,9 @@ class SentenceTranslator:
                 start = text.find(source)
                 while start != -1:
                     end = start + 1
-                    if single_character_name_mention_at(
+                    if not any(
+                        span.start <= start < span.end for span in selected
+                    ) and single_character_name_mention_at(
                         context_text, context_offset + start, context_offset + end
                     ):
                         seen_references.add(reference)
