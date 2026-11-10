@@ -93,6 +93,7 @@ CORE_TERM_KEYS = {
     "LoadingTipsText_1005_Title": "core_term",  # 共鸣者 -> Resonator
     "Term850082_Title": "core_term",  # 声骸 -> Echo
     "OccupationConfig_漂泊者_Name": "core_term",  # 漂泊者 -> Rover
+    "ItemType_ChatCharm": "core_term",  # 飞讯摆件 -> WavesLine Decor
 }
 
 # Free-text lock exclusions. The builder counts how often each English
