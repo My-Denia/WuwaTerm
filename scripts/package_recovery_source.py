@@ -28,9 +28,17 @@ TOOLS = {
     "full": ("deploy/vps-update.sh", "deploy/docker-compose.yml",
              "scripts/deployment_manifest.py", "scripts/full_update.py"),
 }
+# Each kind needs its case label and one of its exec lines. Older sources exec
+# `python3`; newer ones exec the 3.11+ interpreter vps-update.sh selected.
 ENTRYPOINTS = {
-    "runtime": (b"--recover-runtime)", b"exec python3 scripts/runtime_update.py --recover-runtime"),
-    "full": (b"--recover-full)", b"exec python3 scripts/full_update.py recover"),
+    "runtime": (b"--recover-runtime)", (
+        b"exec python3 scripts/runtime_update.py --recover-runtime",
+        b'exec "$deploy_python" scripts/runtime_update.py --recover-runtime',
+    )),
+    "full": (b"--recover-full)", (
+        b"exec python3 scripts/full_update.py recover",
+        b'exec "$deploy_python" scripts/full_update.py recover',
+    )),
 }
 FINGERPRINT_MARKER_PREFIX = b"# WUWATERM-LEGACY-ADMISSION-FINGERPRINT:"
 FINGERPRINT_V2_MARKER = FINGERPRINT_MARKER_PREFIX + b" v2"
@@ -220,7 +228,8 @@ def inspect_archive(path: Path, files: dict[str, dict[str, Any]], *, extract: Pa
     fingerprints = {}
     for kind, paths in TOOLS.items():
         shell = contents.get("deploy/vps-update.sh", b"")
-        if not all(marker in shell for marker in ENTRYPOINTS[kind]):
+        label, exec_lines = ENTRYPOINTS[kind]
+        if label not in shell or not any(line in shell for line in exec_lines):
             fingerprints[kind] = None
             continue
         digest = hashlib.sha256()

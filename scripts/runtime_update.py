@@ -805,7 +805,8 @@ def _pointer(path: Path) -> str:
 def _publish_pointer(commit: str) -> None:
     _run(
         [
-            "python3",
+            # deploy/vps-update.sh exports the 3.11+ interpreter it selected.
+            os.environ.get("WUWATERM_DEPLOY_PYTHON") or "python3",
             "scripts/deployment_manifest.py",
             "publish-pointer",
             "--path",

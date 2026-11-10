@@ -1031,8 +1031,12 @@ def test_runtime_only_lock_blocks_a_second_transaction(runtime_harness):
         second = _run_runtime(root, env)
         assert second.returncode != 0
         assert "already in progress" in second.stderr
+        # The interpreter version probe and the read-only precheck are all
+        # the refused second process may run.
         assert (root / "actions.log").read_text(encoding="utf-8") == (
-            before + "python3 -B scripts/deployment_admission.py legacy-precheck\n"
+            before
+            + "python3 -c import sys; raise SystemExit(sys.version_info < (3, 11))\n"
+            + "python3 -B scripts/deployment_admission.py legacy-precheck\n"
         )
         (root / "start-release").write_text("release\n", encoding="ascii")
         first_returncode = first.wait(timeout=30)

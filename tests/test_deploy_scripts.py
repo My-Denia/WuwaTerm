@@ -1880,3 +1880,63 @@ def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
     assert "sends nothing it can act on, so that case leaves no record here" in flat
     # ...and the cost claim is scoped to requests that reach the model.
     assert "A dictionary hit returns before the model stage" in flat
+
+
+def _interpreter_bin(tmp_path: Path, scripts: dict[str, str]) -> Path:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in scripts.items():
+        path = fake_bin / name
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+    return fake_bin
+
+
+def _run_vps_update_with_path(tmp_path: Path, fake_bin: Path) -> subprocess.CompletedProcess:
+    root = tmp_path / "deploy-root"
+    root.mkdir()
+    return subprocess.run(
+        ["/bin/sh", str(ROOT / "deploy" / "vps-update.sh"), "--runtime-only"],
+        cwd=root,
+        env={"PATH": str(fake_bin), "WUWATERM_DEPLOY_ROOT": str(root)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_vps_update_uses_python311_when_system_python3_is_older(tmp_path: Path) -> None:
+    # Production incident: Debian 11's python3 is 3.9, and admission died with
+    # a TypeError until someone put a newer interpreter first on PATH by hand.
+    log = tmp_path / "calls.log"
+    fake_bin = _interpreter_bin(tmp_path, {
+        "python3": f'echo "python3 $*" >> {shlex.quote(str(log))}\nexit 1\n',
+        "python3.11": (
+            f'echo "python3.11 $*" >> {shlex.quote(str(log))}\n'
+            'case "$*" in *legacy-precheck*) exit 3 ;; esac\nexit 0\n'
+        ),
+    })
+
+    result = _run_vps_update_with_path(tmp_path, fake_bin)
+
+    assert result.returncode == 3
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert calls[-1] == "python3.11 -B scripts/deployment_admission.py legacy-precheck"
+    assert not any(call.startswith("python3 -B") for call in calls)
+
+
+def test_vps_update_refuses_clearly_without_python311(tmp_path: Path) -> None:
+    log = tmp_path / "calls.log"
+    fake_bin = _interpreter_bin(tmp_path, {
+        "python3": f'echo "python3 $*" >> {shlex.quote(str(log))}\nexit 1\n',
+    })
+
+    result = _run_vps_update_with_path(tmp_path, fake_bin)
+
+    assert result.returncode == 1
+    assert "no Python 3.11 or newer found" in result.stderr
+    assert "WUWATERM_DEPLOY_PYTHON" in result.stderr
+    # Only the version probe ran; admission never started.
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "python3 -c import sys; raise SystemExit(sys.version_info < (3, 11))"
+    ]
