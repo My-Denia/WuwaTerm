@@ -12,10 +12,11 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.7.2`, the Web database mount
-  fix on top of `0.7.1`; `v0.7.1` is the published release it corrects and
-  `v0.7.0` the one before it. Set `NEXT_VERSION` to the derived tag explicitly
-  before any release command below.
+  published tag. The current Core version is `0.8.0`, which adds
+  `semantic-review-v1`, `segmentation-v1` and `translation-context-v1`;
+  `v0.7.2` is the latest published release before it, then `v0.7.1` and
+  `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly before any release
+  command below.
 - Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -102,7 +103,29 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.7.2 specifically, also confirm:
+For 0.8.0 specifically, also confirm:
+
+- `docs/api/openapi.json` matches the generated document at version `0.8.0`
+  (`python scripts/check_api_contract.py`), and `uv.lock` carries the same
+  version.
+- With no `context`, a translation request body is byte-for-byte what 0.7.x
+  sent (the golden tests in `tests/test_llm_transport.py` and the sentence
+  suites).
+- `WUWATERM_SEMANTIC_REVIEW_ENABLED` is unset by default in `deploy/env.example`
+  and `.env.example`; with it unset, `GET /v1/capabilities` does not list
+  `semantic-review-v1` and `POST /v1/semantic-reviews` answers
+  `llm_unavailable` (503) without a model call. The release notes say the
+  feature is experimental and that public deployments keep it off.
+- Long texts are cut by `segmentation-v1` and keep their separators; the old
+  hard cut no longer inserts a `\n`.
+- The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
+  against the existing pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`);
+  this release does not move them.
+- Release notes carry no evaluation internals, corpus text or private paths.
+- Telegram pins an exact Core wheel; do not claim it works with this release
+  until its own lock is moved and released.
+
+The installer and Web checks from 0.7.x still apply to this release:
 
 - `./deploy/setup.sh --with-web` starts the Web workbench on Docker 29.1.3
   with the default `WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/pool.sqlite3`:
