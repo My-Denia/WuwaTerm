@@ -1,6 +1,38 @@
 {
   "components": {
     "schemas": {
+      "CapabilitiesResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "title": "Api Version",
+            "type": "string"
+          },
+          "capabilities": {
+            "description": "Optional capabilities this server can serve right now. A client turns a feature on only when it is listed. A server that predates this endpoint answers 404; treat that as an empty list.",
+            "items": {
+              "enum": [
+                "semantic-review-v1",
+                "translation-context-v1"
+              ],
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "capabilities",
+          "request_id"
+        ],
+        "title": "CapabilitiesResponseBody",
+        "type": "object"
+      },
       "ErrorDetailBody": {
         "properties": {
           "code": {
@@ -683,6 +715,557 @@
         "title": "ReviewSpanBody",
         "type": "object"
       },
+      "SemanticAlternativeBody": {
+        "additionalProperties": false,
+        "properties": {
+          "replacement": {
+            "maxLength": 240,
+            "title": "Replacement",
+            "type": "string"
+          },
+          "term_effect": {
+            "enum": [
+              "none",
+              "alters_official_match",
+              "introduces_official_form",
+              "not_checked"
+            ],
+            "title": "Term Effect",
+            "type": "string"
+          }
+        },
+        "required": [
+          "replacement",
+          "term_effect"
+        ],
+        "title": "SemanticAlternativeBody",
+        "type": "object"
+      },
+      "SemanticContextBody": {
+        "additionalProperties": false,
+        "properties": {
+          "before": {
+            "$ref": "#/components/schemas/SemanticContextSideBody",
+            "description": "The previous segment, read-only: it is never reviewed."
+          }
+        },
+        "required": [
+          "before"
+        ],
+        "title": "SemanticContextBody",
+        "type": "object"
+      },
+      "SemanticContextSideBody": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "maxLength": 400,
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 400,
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "SemanticContextSideBody",
+        "type": "object"
+      },
+      "SemanticIssueBody": {
+        "additionalProperties": false,
+        "properties": {
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticAlternativeBody"
+            },
+            "maxItems": 1,
+            "title": "Alternatives",
+            "type": "array"
+          },
+          "category": {
+            "enum": [
+              "omission",
+              "unsupported_addition",
+              "meaning_shift",
+              "negation_change",
+              "quantity_change",
+              "reference_inconsistency",
+              "term_sense"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "fingerprint": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "origin": {
+            "const": "model",
+            "title": "Origin",
+            "type": "string"
+          },
+          "rationale": {
+            "maxLength": 240,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "source_excerpt": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Display only. Locate, highlight and replace with the span.",
+            "title": "Source Excerpt"
+          },
+          "source_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticSuggestionBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suggestion_withheld": {
+            "anyOf": [
+              {
+                "enum": [
+                  "span_too_long",
+                  "replacement_too_long"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion Withheld"
+          },
+          "target_excerpt": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Excerpt"
+          },
+          "target_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "fingerprint",
+          "category",
+          "origin",
+          "confidence",
+          "source_span",
+          "target_span",
+          "source_excerpt",
+          "target_excerpt",
+          "rationale",
+          "suggestion",
+          "suggestion_withheld",
+          "alternatives"
+        ],
+        "title": "SemanticIssueBody",
+        "type": "object"
+      },
+      "SemanticPrecedentAnchorBody": {
+        "additionalProperties": false,
+        "properties": {
+          "segment_index": {
+            "minimum": 0.0,
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "source_end": {
+            "minimum": 0.0,
+            "title": "Source End",
+            "type": "integer"
+          },
+          "source_start": {
+            "description": "Half-open start in Unicode scalars of that segment's source.",
+            "minimum": 0.0,
+            "title": "Source Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "segment_index",
+          "source_start",
+          "source_end"
+        ],
+        "title": "SemanticPrecedentAnchorBody",
+        "type": "object"
+      },
+      "SemanticPrecedentBody": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "$ref": "#/components/schemas/SemanticPrecedentAnchorBody"
+          },
+          "choice": {
+            "enum": [
+              "official_pair",
+              "not_a_term",
+              "user_rendering"
+            ],
+            "title": "Choice",
+            "type": "string"
+          },
+          "rendering": {
+            "anyOf": [
+              {
+                "maxLength": 48,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null exactly when choice is not_a_term.",
+            "title": "Rendering"
+          },
+          "scope": {
+            "const": "occurrence",
+            "description": "A precedent states what one occurrence meant, nothing wider.",
+            "title": "Scope",
+            "type": "string"
+          },
+          "snippet": {
+            "maxLength": 80,
+            "title": "Snippet",
+            "type": "string"
+          },
+          "surface": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Surface",
+            "type": "string"
+          }
+        },
+        "required": [
+          "surface",
+          "choice",
+          "rendering",
+          "snippet",
+          "anchor",
+          "scope"
+        ],
+        "title": "SemanticPrecedentBody",
+        "type": "object"
+      },
+      "SemanticReviewRequestBody": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticContextBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "direction": {
+            "description": "Target language of the submitted translation.",
+            "enum": [
+              "en",
+              "zh"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "explain_language": {
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "title": "Explain Language",
+            "type": "string"
+          },
+          "precedents": {
+            "description": "Human choices made elsewhere in the same manuscript.",
+            "items": {
+              "$ref": "#/components/schemas/SemanticPrecedentBody"
+            },
+            "maxItems": 12,
+            "title": "Precedents",
+            "type": "array"
+          },
+          "review_version": {
+            "const": "semantic-review-v1",
+            "title": "Review Version",
+            "type": "string"
+          },
+          "source": {
+            "description": "One paired source segment. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "description": "The translation of that segment. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target",
+          "direction",
+          "review_version",
+          "explain_language"
+        ],
+        "title": "SemanticReviewRequestBody",
+        "type": "object"
+      },
+      "SemanticReviewResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "checked": {
+            "items": {
+              "enum": [
+                "omission",
+                "unsupported_addition",
+                "meaning_shift",
+                "negation_change",
+                "quantity_change",
+                "reference_inconsistency",
+                "term_sense"
+              ],
+              "type": "string"
+            },
+            "title": "Checked",
+            "type": "array"
+          },
+          "dropped_unanchored": {
+            "minimum": 0.0,
+            "title": "Dropped Unanchored",
+            "type": "integer"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticIssueBody"
+            },
+            "maxItems": 16,
+            "title": "Issues",
+            "type": "array"
+          },
+          "omitted_issues": {
+            "minimum": 0.0,
+            "title": "Omitted Issues",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "review_version": {
+            "const": "semantic-review-v1",
+            "title": "Review Version",
+            "type": "string"
+          },
+          "source_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Revision",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "not_reviewed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_reason": {
+            "anyOf": [
+              {
+                "const": "invalid_model_output",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Reason"
+          },
+          "target_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Target Revision",
+            "type": "string"
+          },
+          "term_basis": {
+            "$ref": "#/components/schemas/SemanticTermBasisBody"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "truncated_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "issue_limit",
+                  "byte_limit"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Truncated Reason"
+          }
+        },
+        "required": [
+          "request_id",
+          "review_version",
+          "source_revision",
+          "target_revision",
+          "term_basis",
+          "status",
+          "status_reason",
+          "dropped_unanchored",
+          "checked",
+          "issues",
+          "truncated",
+          "truncated_reason",
+          "omitted_issues"
+        ],
+        "title": "SemanticReviewResponseBody",
+        "type": "object"
+      },
+      "SemanticSpanBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "Half-open end in Unicode scalars.",
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "description": "Half-open start in Unicode scalars of this segment's side.",
+            "title": "Start",
+            "type": "integer"
+          },
+          "text": {
+            "description": "The complete text of [start, end). Never shortened; it equals the submitted side sliced at [start, end).",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "text"
+        ],
+        "title": "SemanticSpanBody",
+        "type": "object"
+      },
+      "SemanticSuggestionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "replacement": {
+            "maxLength": 240,
+            "title": "Replacement",
+            "type": "string"
+          },
+          "target_span": {
+            "$ref": "#/components/schemas/SemanticSpanBody",
+            "description": "At most 200 scalars. Replaced as a whole by replacement."
+          },
+          "term_effect": {
+            "enum": [
+              "none",
+              "alters_official_match",
+              "introduces_official_form",
+              "not_checked"
+            ],
+            "title": "Term Effect",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_span",
+          "replacement",
+          "term_effect"
+        ],
+        "title": "SemanticSuggestionBody",
+        "type": "object"
+      },
+      "SemanticTermBasisBody": {
+        "additionalProperties": false,
+        "properties": {
+          "dictionary_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Dictionary Revision",
+            "type": "string"
+          },
+          "matcher_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Matcher Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dictionary_revision",
+          "matcher_revision"
+        ],
+        "title": "SemanticTermBasisBody",
+        "type": "object"
+      },
       "TermMatchBody": {
         "properties": {
           "category": {
@@ -1142,6 +1725,123 @@
         ]
       }
     },
+    "/v1/capabilities": {
+      "get": {
+        "description": "Optional capabilities this server can serve right now.\n\nNeeds the meta scope and does not spend the business allowance; probes\nhave their own per-device limit of 120 per minute. A server without\nthis path answers 404, which a client treats as no optional\ncapabilities. `/v1/meta` is unchanged.",
+        "operationId": "read_capabilities_v1_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Capabilities",
+        "tags": [
+          "service"
+        ]
+      }
+    },
     "/v1/meta": {
       "get": {
         "description": "Service and data provenance. No paths, no secrets, no chat ids.",
@@ -1381,6 +2081,133 @@
           }
         ],
         "summary": "Create Review",
+        "tags": [
+          "review"
+        ]
+      }
+    },
+    "/v1/semantic-reviews": {
+      "post": {
+        "description": "Model-backed semantic issues for one paired segment (semantic-review-v1).\n\nSeparate from `/v1/reviews`: it never returns a verdict and never\nproduces `verified_constraint`. Each side is at most 2,000 Unicode\nscalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.\nUse it only when `GET /v1/capabilities` lists `semantic-review-v1`;\notherwise it answers `llm_unavailable` (503) without calling a model.",
+        "operationId": "create_semantic_review_v1_semantic_reviews_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SemanticReviewRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticReviewResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Semantic Review",
         "tags": [
           "review"
         ]

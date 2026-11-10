@@ -1,0 +1,124 @@
+{
+  "version": "semantic-review-v1",
+  "generator": "scripts/build_semantic_review_fixtures.py",
+  "request_byte_limit": 32768,
+  "response_byte_budget": 57344,
+  "encoding": "UTF-8 JSON, ensure_ascii=false, separators (',', ':'), no trailing newline; the response files are the exact bytes the server sends",
+  "cases": [
+    {
+      "name": "minimal",
+      "description": "Two anchored issues with suggestions and one source-only issue; context and one precedent in the request.",
+      "request": "minimal-request.json",
+      "request_bytes": 546,
+      "response": "minimal-response.json",
+      "response_bytes": 2252,
+      "status": "complete",
+      "issues": 3,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "dropped-unanchored",
+      "description": "Complete review where three model issues could not be anchored and were dropped.",
+      "request": "dropped-unanchored-request.json",
+      "request_bytes": 242,
+      "response": "dropped-unanchored-response.json",
+      "response_bytes": 1120,
+      "status": "complete",
+      "issues": 1,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "not-reviewed",
+      "description": "The model output failed validation: status not_reviewed, nothing checked, no issues.",
+      "request": "not-reviewed-request.json",
+      "request_bytes": 242,
+      "response": "not-reviewed-response.json",
+      "response_bytes": 607,
+      "status": "not_reviewed",
+      "issues": 0,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "issue-limit",
+      "description": "Twenty small issues: sorted by confidence then position, sixteen kept, four omitted (issue_limit).",
+      "request": "issue-limit-request.json",
+      "request_bytes": 510,
+      "response": "issue-limit-response.json",
+      "response_bytes": 7251,
+      "status": "complete",
+      "issues": 16,
+      "truncated_reason": "issue_limit",
+      "omitted_issues": 4
+    },
+    {
+      "name": "suggestion-span-too-long",
+      "description": "A 300-scalar executable range: the issue and its complete span stay, the suggestion and alternatives are withheld (span_too_long).",
+      "request": "suggestion-span-too-long-request.json",
+      "request_bytes": 880,
+      "response": "suggestion-span-too-long-response.json",
+      "response_bytes": 1839,
+      "status": "complete",
+      "issues": 1,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "suggestion-replacement-too-long",
+      "description": "A 241-scalar replacement: the suggestion is withheld (replacement_too_long); the span is complete.",
+      "request": "suggestion-replacement-too-long-request.json",
+      "request_bytes": 660,
+      "response": "suggestion-replacement-too-long-response.json",
+      "response_bytes": 1404,
+      "status": "complete",
+      "issues": 1,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "suggestion-boundary",
+      "description": "Exactly 200 scalars of range with exactly 240 scalars of replacement and alternative: kept.",
+      "request": "suggestion-boundary-request.json",
+      "request_bytes": 1070,
+      "response": "suggestion-boundary-response.json",
+      "response_bytes": 2445,
+      "status": "complete",
+      "issues": 1,
+      "truncated_reason": null,
+      "omitted_issues": 0
+    },
+    {
+      "name": "byte-limit",
+      "description": "Four issues spanning both whole 2,000-scalar sides with escape-heavy text: three fit the byte budget, the fourth is omitted whole (byte_limit). The spans are never shortened.",
+      "request": "byte-limit-request.json",
+      "request_bytes": 16123,
+      "response": "byte-limit-response.json",
+      "response_bytes": 56935,
+      "status": "complete",
+      "issues": 3,
+      "truncated_reason": "byte_limit",
+      "omitted_issues": 1
+    },
+    {
+      "name": "max",
+      "description": "The largest legal response the fixtures carry: its final serialized size, counters included, is within 1 KiB below the 57,344-byte budget, one more issue would exceed it, and omitted_issues has two digits.",
+      "request": "max-request.json",
+      "request_bytes": 12114,
+      "response": "max-response.json",
+      "response_bytes": 56651,
+      "status": "complete",
+      "issues": 8,
+      "truncated_reason": "byte_limit",
+      "omitted_issues": 20
+    },
+    {
+      "name": "near-limit-request",
+      "description": "A valid request at every scalar limit whose compact UTF-8 encoding is just under the 32 KiB request limit.",
+      "request": "near-limit-request.json",
+      "request_bytes": 32766,
+      "response": null
+    }
+  ]
+}

@@ -302,7 +302,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence` | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -459,12 +459,31 @@ Channel path is always auto-detected direction; it does not accept command
 |------|-----|
 | Exact dictionary hit (`lookup_exact` + early returns in the shared pipeline, channel exact branch) | Official string from SQLite |
 | Fuzzy dictionary short answers (`_fuzzy_dictionary_answer`) | DB-only |
-| `GET /v1/terms`, `GET /v1/meta`, `POST /v1/reviews`, `/healthz`, `/readyz` | Dictionary reads, pair review, and probes only |
+| `GET /v1/terms`, `GET /v1/meta`, `GET /v1/capabilities`, `POST /v1/reviews`, `/healthz`, `/readyz` | Dictionary reads, deterministic pair review, and probes only |
 | Invalid leading `--to` | Usage reply only |
 | Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
 | LLM env incomplete | The bot restores deterministic term substitutions without inventing terms; the API refuses with `llm_unavailable` |
 | `/about`, `/status`, grant/revoke/public membership housekeeping | No translation |
+
+### Paths that call the LLM
+
+| Path | What leaves the process | Notes |
+|------|-------------------------|-------|
+| `/tr`, Telegram command and reply translation, `POST /v1/translations`, private web translation | The source text (up to 2,000 characters per request) with official terms as contextual references | One shared pipeline, only after a dictionary miss |
+| Linked-channel auto-translation | The channel post text | Channel admission and budget apply first |
+| `POST /v1/semantic-reviews` (`semantic-review-v1`) | Both the source segment **and** the translation, plus read-only context and human precedents | Registered with its request and response contract; until the engine lands it answers `llm_unavailable` without calling a model, and `GET /v1/capabilities` does not list it. At most one model call per request. See [ADR 0018](adr/0018-semantic-review.md) |
+
+`review-v1` and `review-v2` stay deterministic: `POST /v1/reviews` never calls
+the model, costs nothing per request, and returns the same report for the same
+input and dictionary. Model findings never become a `verified_constraint`; the
+two kinds of result are separate tracks that a client requests separately.
+
+The response contract of the model path lives in
+`semantic_review_contract` (domain core, no model code): field limits, display
+excerpts, withheld suggestions, ordering and the 56 KiB byte budget. Long-text
+segmentation and bilingual pairing for clients follow
+[segmentation-v1](segmentation-v1.md), implemented in `segmentation`.
 
 ## Data model: immutable vs mutable
 

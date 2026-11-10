@@ -1230,8 +1230,10 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/healthz",
         "/readyz",
         "/v1/auth/status",
+        "/v1/capabilities",
         "/v1/meta",
         "/v1/reviews",
+        "/v1/semantic-reviews",
         "/v1/terms",
         "/v1/translations",
     ]
