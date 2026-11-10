@@ -68,8 +68,10 @@ unanchored-drop count and the status. A client decides per segment whether to
 send; segments that are blank, unpaired or need a manual split are never sent
 ([segmentation-v1](segmentation-v1.md)).
 
-A server lists `semantic-review-v1` and `translation-context-v1` in
-`GET /v1/capabilities` only when a model is configured. Without one the
+Semantic review is experimental and off by default
+(`WUWATERM_SEMANTIC_REVIEW_ENABLED`). A server lists `semantic-review-v1` in
+`GET /v1/capabilities` only when it is switched on and a model is configured;
+`translation-context-v1` needs only a model. While semantic review is off the
 endpoint validates the request and answers `llm_unavailable` without calling a
 model or sending any text anywhere.
 

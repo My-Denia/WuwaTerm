@@ -2127,7 +2127,7 @@
     },
     "/v1/semantic-reviews": {
       "post": {
-        "description": "Model-backed semantic issues for one paired segment (semantic-review-v1).\n\nSeparate from `/v1/reviews`: it never returns a verdict and never\nproduces `verified_constraint`. Each side is at most 2,000 Unicode\nscalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.\nUse it only when `GET /v1/capabilities` lists `semantic-review-v1`;\notherwise it answers `llm_unavailable` (503) without calling a model.\nAt most one model call per request, counted against the same budget,\nconcurrency limit and per-device limit as translation. Model output\nthat fails validation is not retried: HTTP 200 with\n`status: not_reviewed`.",
+        "description": "Model-backed semantic issues for one paired segment (semantic-review-v1).\n\nSeparate from `/v1/reviews`: it never returns a verdict and never\nproduces `verified_constraint`. Each side is at most 2,000 Unicode\nscalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.\nUse it only when `GET /v1/capabilities` lists `semantic-review-v1`;\notherwise it answers `llm_unavailable` (503) without calling a model.\nSemantic review is experimental and off by default\n(`WUWATERM_SEMANTIC_REVIEW_ENABLED`). At most one model call per request, counted against the same budget,\nconcurrency limit and per-device limit as translation. Model output\nthat fails validation is not retried: HTTP 200 with\n`status: not_reviewed`.",
         "operationId": "create_semantic_review_v1_semantic_reviews_post",
         "requestBody": {
           "content": {

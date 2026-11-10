@@ -277,6 +277,7 @@ def test_application_refuses_an_over_long_side_without_calling(sample_db, monkey
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "k")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "m")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", "1")
     service, translator = TermService(sample_db), application.build_translator(sample_db)
 
     async def forbidden(*args, **kwargs):

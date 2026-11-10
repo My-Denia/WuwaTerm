@@ -944,14 +944,33 @@ SEMANTIC_RESPONSE_BYTE_BUDGET = _semantic_contract.SEMANTIC_RESPONSE_BYTE_BUDGET
 SEMANTIC_TERM_EFFECTS = _semantic_contract.TERM_EFFECTS
 
 
+SEMANTIC_REVIEW_ENABLED_ENV = "WUWATERM_SEMANTIC_REVIEW_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def semantic_review_enabled() -> bool:
+    """Semantic review is experimental and off unless the operator turns it on.
+
+    The evaluation's P-layer false-positive gate was not met (ADR 0018); the
+    owner accepted the feature as experimental and off by default. Production
+    and the public Sites leave it off; a self-hosted server may opt in.
+    """
+    import os
+
+    return os.getenv(SEMANTIC_REVIEW_ENABLED_ENV, "").strip().casefold() in _TRUTHY
+
+
 def service_capabilities() -> tuple[str, ...]:
     """Optional capabilities this process can serve right now.
 
     A capability is listed only when it actually works, so a client can turn a
-    feature on from this list alone. Both need a configured model.
+    feature on from this list alone. Both need a configured model; semantic
+    review also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
     """
     if not llm_configured():
         return ()
+    if not semantic_review_enabled():
+        return (_semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,)
     return (
         _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
         _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
@@ -1024,7 +1043,9 @@ async def semantic_review_async(
     client and ``before_llm_call`` budget guard. No model configured is
     ``llm_unavailable`` without a call.
     """
-    if not llm_configured():
+    if not semantic_review_enabled() or not llm_configured():
+        # Off (the default) answers exactly like a server without a model:
+        # no model call and nothing spent.
         return SemanticReviewOutcome(error_code=ERROR_LLM_UNAVAILABLE)
     if max(len(job.source), len(job.target)) > _semantic_contract.MAX_SIDE_SCALARS:
         # The HTTP adapter refuses this before it gets here; an in-process

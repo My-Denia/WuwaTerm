@@ -1,6 +1,6 @@
 # ADR 0018: Semantic review keeps model findings and dictionary constraints apart
 
-- Status: Accepted (contract and engine)
+- Status: Accepted (contract and engine); semantic review is experimental and off by default
 - Date: 2026-11-10
 - Related: [ADR 0006](0006-dictionary-first-before-llm.md),
   [ADR 0017](0017-contextual-term-references.md),
@@ -312,6 +312,39 @@ The translation-context gates are in ADR 0019. These rules cover both:
   injected errors and a small set of machine translations of community texts.
   It supports an internal acceptance, not a quality claim about independent
   human translations.
+
+## Experimental and off by default
+
+Decided by the owner on 2026-11-10 after two evaluation rounds.
+
+- **Evidence.** Round 1 (prompt v2, low-effort thinking): 14 gates met,
+  3 not met, 3 undecidable. Not met: P-layer false positives (39 zh→en, 32
+  en→zh medium/high issues on frozen "allowed rewrite" items, against about
+  8.6 per direction) and review latency (P95 47.5 s against 30 s). Met: E
+  recall in all six categories (67-100%), the M-layer translation gates, both
+  M′ precedent gates, anchoring, size and separator fidelity. Round 2 (prompt
+  v3, one general self-check) stopped after the P layer with 31 and 26 false
+  positives; the debug gain on two documents did not carry over, and
+  run-to-run variance was about as large as the prompt change.
+- **Boundary of that evidence.** Most of the issues counted as false
+  positives point at real meaning differences that the official localization
+  made on purpose, which the frozen list classes as allowed. Whether such
+  issues help a user was judged by the owner, not measured.
+- **Decision.** The P false-positive gate stays "not met". The owner accepts
+  it only in this form: semantic review ships as an experimental server
+  switch, `WUWATERM_SEMANTIC_REVIEW_ENABLED`, off by default. Off, the
+  capability is not listed and the endpoint answers `llm_unavailable` without
+  a model call or any spending, the same answer as a server without a model,
+  so existing clients hide the feature. Production and the public Sites keep
+  it off; a self-hosted server may turn it on. The owner also accepted the
+  latency with low-effort thinking and the 75 s timeout, and accepted three
+  undecidable gates (P real-error recall n=6, M precision n=0, G without a
+  frozen set) as limited evidence; the gold labels were accepted without a
+  spot check. Noise reduction is follow-up work.
+- `translation-context-v1` is not behind this switch: its gates (M, M′) were
+  met in round 1, and round 2 changed only the semantic review prompt (the
+  frozen hashes of the translation prompt, context rules, precedent wording
+  and request options are identical in both rounds).
 
 ## Consequences
 

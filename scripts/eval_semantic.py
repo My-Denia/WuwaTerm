@@ -753,7 +753,12 @@ async def _run_layers(runner: Runner, layers: Sequence[str], include_supplementa
         await runner.translator.aclose()
 
 
-_GATEWAY_ENV = ("WUWATERM_OPENAI_BASE_URL", "WUWATERM_OPENAI_API_KEY", "WUWATERM_OPENAI_MODEL")
+_GATEWAY_ENV = (
+    "WUWATERM_OPENAI_BASE_URL",
+    "WUWATERM_OPENAI_API_KEY",
+    "WUWATERM_OPENAI_MODEL",
+    "WUWATERM_SEMANTIC_REVIEW_ENABLED",
+)
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -812,6 +817,9 @@ def _command_run(args: argparse.Namespace) -> int:
         if frozen.get("config_sha256") != fingerprint["config_sha256"]:
             raise Refused("prompt or request options differ from the frozen config_sha256")
     from wuwaterm.semantic_review import SEMANTIC_TIMEOUT_ENV, semantic_timeout_seconds
+
+    # The evaluation measures the experimental feature, which is off by default.
+    os.environ.setdefault(app_layer.SEMANTIC_REVIEW_ENABLED_ENV, "1")
 
     llm_timeout = float(args.llm_timeout or os.getenv("WUWATERM_LLM_TIMEOUT_SECONDS") or 45.0)
     run_parameters = {

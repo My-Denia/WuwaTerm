@@ -259,6 +259,18 @@ own secrets, which is what the Compose file already does for the container path.
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
 plus the timeout and concurrency bounds beside them.
 
+**For semantic review (experimental, off by default):**
+`WUWATERM_SEMANTIC_REVIEW_ENABLED=1` turns on `POST /v1/semantic-reviews` and
+lists `semantic-review-v1` in `GET /v1/capabilities`; it also needs a model.
+Off, the endpoint answers `llm_unavailable` without calling a model and clients
+hide the feature. Its evaluation did not meet the false-positive gate: on the
+official Chinese/English pairs it flagged 31-39 medium/high issues per direction
+on differences the frozen list classes as allowed localization rewrites, against
+a limit of about 9 ([ADR 0018](adr/0018-semantic-review.md#experimental-and-off-by-default)).
+Turn it on only if your users want model-flagged meaning differences and accept
+that noise; each review takes about 10-30 s. Translation context
+(`translation-context-v1`) is not affected by this switch.
+
 **For the owner-private web layer (optional, off by default):**
 `WUWATERM_API_WEB_ENABLED`, `WUWATERM_API_WEB_DEVICE_TOKEN`,
 `WUWATERM_API_WEB_EDGE_SECRET`, `WUWATERM_API_WEB_SESSION_TTL_SECONDS`,

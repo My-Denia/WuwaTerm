@@ -2029,7 +2029,8 @@ def _register_routes(app: FastAPI) -> None:
         scalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.
         Use it only when `GET /v1/capabilities` lists `semantic-review-v1`;
         otherwise it answers `llm_unavailable` (503) without calling a model.
-        At most one model call per request, counted against the same budget,
+        Semantic review is experimental and off by default
+        (`WUWATERM_SEMANTIC_REVIEW_ENABLED`). At most one model call per request, counted against the same budget,
         concurrency limit and per-device limit as translation. Model output
         that fails validation is not retried: HTTP 200 with
         `status: not_reviewed`.

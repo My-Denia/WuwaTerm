@@ -41,11 +41,15 @@ BODY_BUDGET = 57_344
 TRANSLATE_TEXT = "需要翻译的一个句子"
 
 
-def configure_llm(monkeypatch) -> None:
+def configure_llm(monkeypatch, *, semantic_enabled: bool = True) -> None:
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", API_KEY)
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
     monkeypatch.delenv("WUWATERM_SEMANTIC_REVIEW_MODEL", raising=False)
+    if semantic_enabled:
+        monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", "1")
+    else:
+        monkeypatch.delenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", raising=False)
 
 
 def unconfigure_llm(monkeypatch) -> None:
@@ -987,3 +991,53 @@ def test_semantic_review_has_its_own_model_timeout(tmp_path, sample_db, monkeypa
     translate_timeout = model.requests[1].extensions["timeout"]
     assert review_timeout["read"] == expected
     assert translate_timeout["read"] == SentenceTranslator(sample_db).llm_timeout_seconds
+
+
+# --------------------------------------------------------------------------
+# Experimental switch: semantic review is off unless the operator enables it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "false", "off", "no"])
+def test_semantic_review_is_off_by_default_but_translation_context_stays(
+    tmp_path, sample_db, monkeypatch, value
+):
+    configure_llm(monkeypatch, semantic_enabled=False)
+    if value is not None:
+        monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", value)
+    model = FakeModel(issues_answer(), "译文")
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    caps = run(call(app, "GET", "/v1/capabilities", headers=bearer(token))).json()
+    assert caps["capabilities"] == ["translation-context-v1"]
+
+    response = review(app, token)
+    assert_error(response, 503, "llm_unavailable")
+    assert model.calls == 0  # no model call, nothing spent
+
+    assert translate(app, token, context={}).status_code == 200
+    assert model.calls == 1
+    assert "Context rules" in model.system()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_enabled_semantic_review_is_listed_and_served(tmp_path, sample_db, monkeypatch, value):
+    configure_llm(monkeypatch)
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", value)
+    model = FakeModel(issues_answer(model_issue()))
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    caps = run(call(app, "GET", "/v1/capabilities", headers=bearer(token))).json()
+    assert caps["capabilities"] == ["semantic-review-v1", "translation-context-v1"]
+    body = review(app, token).json()
+    assert body["status"] == "complete" and model.calls == 1
+    assert model.body()["reasoning_effort"] == "low"
+
+
+def test_disabled_semantic_review_does_not_spend_the_shared_budget(tmp_path, sample_db, monkeypatch):
+    configure_llm(monkeypatch, semantic_enabled=False)
+    model = FakeModel("译文")
+    app, _, token = semantic_app(tmp_path, sample_db, model, llm_calls_per_minute=1)
+
+    assert_error(review(app, token), 503, "llm_unavailable")
+    assert translate(app, token).status_code == 200  # the one budgeted call is still there
