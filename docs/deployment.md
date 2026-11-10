@@ -24,7 +24,11 @@ The VPS target uses Docker Compose because the current system Python there is
 older than the project target. `/opt/wuwaterm/current` must be a clean Git
 checkout with an `origin` remote and a `main` ref; the updater fetches and
 requires `HEAD == origin/main`, so an exported source copy without `.git` is
-intentionally not deployable. Create `/opt/wuwaterm/current/.env` from
+intentionally not deployable. The updater's own host-side tools still need
+Python 3.11 or newer: `deploy/vps-update.sh` runs them, recovery included,
+under `WUWATERM_DEPLOY_PYTHON` when that is set, otherwise under the first of
+`python3`, `python3.13`, `python3.12` and `python3.11` on `PATH` that is new
+enough, and refuses with a clear message when there is none. Create `/opt/wuwaterm/current/.env` from
 `.env.example` or `deploy/env.example`, and set it to mode `600`. These two
 template files are intentionally identical and tested for drift.
 

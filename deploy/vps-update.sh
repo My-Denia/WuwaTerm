@@ -33,6 +33,40 @@ FAIL_STEP="${WUWATERM_FAIL_STEP:-}"
 
 cd "$DEPLOY_ROOT"
 
+# These tools need Python 3.11 or newer, and a host's system python3 can be
+# older (Debian 11 ships 3.9, which fails admission with a TypeError rather
+# than a clear message). Choose the interpreter once, before anything runs:
+# WUWATERM_DEPLOY_PYTHON when set, otherwise the first of python3, python3.13,
+# python3.12 and python3.11 on PATH that is new enough. Every python3 call
+# below, the exec'd helpers included, then runs that interpreter.
+select_deploy_python() {
+  if [ -n "${WUWATERM_DEPLOY_PYTHON:-}" ]; then
+    set -- "$WUWATERM_DEPLOY_PYTHON"
+  else
+    set -- python3 python3.13 python3.12 python3.11
+  fi
+  for candidate in "$@"; do
+    resolved=$(command -v "$candidate" 2>/dev/null) || continue
+    if "$resolved" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' \
+        >/dev/null 2>&1; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+deploy_python=$(select_deploy_python) || {
+  echo "refusing deployment: no Python 3.11 or newer found" \
+    "(tried ${WUWATERM_DEPLOY_PYTHON:-python3 python3.13 python3.12 python3.11});" \
+    "install one or set WUWATERM_DEPLOY_PYTHON" >&2
+  exit 1
+}
+WUWATERM_DEPLOY_PYTHON=$deploy_python
+export WUWATERM_DEPLOY_PYTHON
+python3() {
+  "$deploy_python" "$@"
+}
+
 # Read-only rejection avoids creating the lock directory when a newer
 # deployment is already recorded. Repeat the check under FD 9 below.
 python3 -B scripts/deployment_admission.py legacy-precheck
@@ -115,13 +149,13 @@ python3 -B scripts/deployment_admission.py legacy
 
 case "$mode" in
   runtime-only)
-    exec python3 scripts/runtime_update.py --runtime-only
+    exec "$deploy_python" scripts/runtime_update.py --runtime-only
     ;;
   recover-runtime)
-    exec python3 scripts/runtime_update.py --recover-runtime
+    exec "$deploy_python" scripts/runtime_update.py --recover-runtime
     ;;
   recover-full)
-    exec python3 scripts/full_update.py recover
+    exec "$deploy_python" scripts/full_update.py recover
     ;;
 esac
 
