@@ -4,7 +4,7 @@
 Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
-                   english_plural
+                   english_plural, segmentation, semantic_review_contract
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only)
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
@@ -64,7 +64,19 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
     {"application", "models", "translation_policy", "logging_utils"}
 )
 
-DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review", "cjk_span", "protected_text", "english_plural"})
+DOMAIN_CORE = frozenset(
+    {
+        "lookup",
+        "normalize",
+        "models",
+        "review",
+        "cjk_span",
+        "protected_text",
+        "english_plural",
+        "segmentation",
+        "semantic_review_contract",
+    }
+)
 DOMAIN_LLM = frozenset({"sentence"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel

@@ -46,6 +46,36 @@ The shared beta is first-come, has no per-visitor fairness guarantee and no SLA;
 see [Public Beta Site](sites.md) and the live
 [privacy notice](https://wuwaterm.denia-official.chatgpt.site/privacy).
 
+## Semantic Review Sends Both Texts
+
+Pair review (`POST /v1/reviews`, `review-v1`/`review-v2`) is dictionary-only:
+nothing leaves the process. Semantic review (`POST /v1/semantic-reviews`,
+`semantic-review-v1`, [ADR 0018](adr/0018-semantic-review.md)) is a separate,
+model-backed path, and it sends more than translation does:
+
+- the source segment **and** the submitted translation of that segment, each
+  at most 2,000 Unicode scalars;
+- optional read-only context: the previous segment's source and translation,
+  each at most 400 scalars;
+- optional human precedents: up to 12 earlier choices the user made in the
+  same manuscript, each with a surface, a rendering and an 80-scalar snippet of
+  the sentence it came from.
+
+The server does not write any of these texts, the model output, or the issues
+to disk, and never logs them. Its log line for a semantic review carries the
+redacted device, the request id and the two input lengths; once the engine
+exists it adds the issue count and the status. A client decides per
+segment whether to send; segments that are blank, unpaired or need a manual
+split are never sent ([segmentation-v1](segmentation-v1.md)).
+
+The endpoint and its contract ship before the engine. Until a server lists
+`semantic-review-v1` in `GET /v1/capabilities`, the endpoint validates the
+request and answers `llm_unavailable` without calling a model or sending any
+text anywhere.
+
+Evaluation corpora used to accept this feature stay outside every repository.
+Contract fixtures are synthetic and quote no corpus text.
+
 ## LLM Configuration
 
 Optional LLM environment variables:

@@ -55,6 +55,7 @@ from .review import (
     ReviewRequestError,
     review_pair as _review_pair,
 )
+from . import semantic_review_contract as _semantic_contract
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -824,6 +825,45 @@ def _trim_finding_payload(finding: dict[str, object]) -> bool:
     candidates.pop()
     finding["candidates_truncated"] = True
     return True
+
+
+# --------------------------------------------------------------------------
+# Optional capabilities and semantic review (contract only; ADR 0018)
+# --------------------------------------------------------------------------
+
+# Re-exported for the HTTP adapter, which may import only this module.
+SEMANTIC_CATEGORIES = _semantic_contract.CATEGORIES
+SEMANTIC_CONFIDENCES = _semantic_contract.CONFIDENCES
+SEMANTIC_EXPLAIN_LANGUAGES = _semantic_contract.EXPLAIN_LANGUAGES
+SEMANTIC_MAX_ALTERNATIVES = _semantic_contract.MAX_ALTERNATIVES
+SEMANTIC_MAX_CONTEXT_SCALARS = _semantic_contract.MAX_CONTEXT_SCALARS
+SEMANTIC_MAX_EXCERPT_SCALARS = _semantic_contract.MAX_EXCERPT_SCALARS
+SEMANTIC_MAX_ISSUES = _semantic_contract.MAX_ISSUES
+SEMANTIC_MAX_PRECEDENT_RENDERING_SCALARS = _semantic_contract.MAX_PRECEDENT_RENDERING_SCALARS
+SEMANTIC_MAX_PRECEDENT_SNIPPET_SCALARS = _semantic_contract.MAX_PRECEDENT_SNIPPET_SCALARS
+SEMANTIC_MAX_PRECEDENT_SURFACE_SCALARS = _semantic_contract.MAX_PRECEDENT_SURFACE_SCALARS
+SEMANTIC_MAX_PRECEDENTS = _semantic_contract.MAX_PRECEDENTS
+SEMANTIC_MAX_RATIONALE_SCALARS = _semantic_contract.MAX_RATIONALE_SCALARS
+SEMANTIC_MAX_REPLACEMENT_SCALARS = _semantic_contract.MAX_REPLACEMENT_SCALARS
+SEMANTIC_MAX_SIDE_SCALARS = _semantic_contract.MAX_SIDE_SCALARS
+SEMANTIC_MAX_SUGGESTION_SPAN_SCALARS = _semantic_contract.MAX_SUGGESTION_SPAN_SCALARS
+SEMANTIC_PRECEDENT_CHOICES = _semantic_contract.PRECEDENT_CHOICES
+SEMANTIC_PRECEDENT_SCOPES = _semantic_contract.PRECEDENT_SCOPES
+SEMANTIC_REVIEW_VERSION = _semantic_contract.REVIEW_VERSION
+SEMANTIC_RESPONSE_BYTE_BUDGET = _semantic_contract.SEMANTIC_RESPONSE_BYTE_BUDGET
+SEMANTIC_TERM_EFFECTS = _semantic_contract.TERM_EFFECTS
+
+
+def service_capabilities() -> tuple[str, ...]:
+    """Optional capabilities this process can serve right now.
+
+    A capability is listed only when it actually works, so a client can turn a
+    feature on from this list alone. The semantic review engine is not part of
+    this build: ``POST /v1/semantic-reviews`` exists with its contract but
+    answers ``llm_unavailable``, so neither ``semantic-review-v1`` nor
+    ``translation-context-v1`` is listed, with or without a configured model.
+    """
+    return ()
 
 
 def project_review_report(report: ReviewReport, request_id: str) -> dict[str, object]:

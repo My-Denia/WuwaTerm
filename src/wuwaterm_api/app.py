@@ -40,6 +40,7 @@ from starlette.requests import ClientDisconnect
 
 from wuwaterm.application import (
     ERROR_FORBIDDEN,
+    ERROR_INPUT_TOO_LONG,
     ERROR_LLM_UNAVAILABLE,
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
@@ -49,6 +50,24 @@ from wuwaterm.application import (
     KIND_ERROR,
     KIND_LLM,
     REVIEW_MAX_SIDE_SCALARS,
+    SEMANTIC_CATEGORIES,
+    SEMANTIC_CONFIDENCES,
+    SEMANTIC_EXPLAIN_LANGUAGES,
+    SEMANTIC_MAX_ALTERNATIVES,
+    SEMANTIC_MAX_CONTEXT_SCALARS,
+    SEMANTIC_MAX_EXCERPT_SCALARS,
+    SEMANTIC_MAX_ISSUES,
+    SEMANTIC_MAX_PRECEDENT_RENDERING_SCALARS,
+    SEMANTIC_MAX_PRECEDENT_SNIPPET_SCALARS,
+    SEMANTIC_MAX_PRECEDENT_SURFACE_SCALARS,
+    SEMANTIC_MAX_PRECEDENTS,
+    SEMANTIC_MAX_RATIONALE_SCALARS,
+    SEMANTIC_MAX_REPLACEMENT_SCALARS,
+    SEMANTIC_MAX_SIDE_SCALARS,
+    SEMANTIC_PRECEDENT_CHOICES,
+    SEMANTIC_PRECEDENT_SCOPES,
+    SEMANTIC_REVIEW_VERSION,
+    SEMANTIC_TERM_EFFECTS,
     LLMFailureDiagnostic,
     LlmCallBudget,
     LlmCallGuard,
@@ -62,6 +81,7 @@ from wuwaterm.application import (
     probe_database,
     project_review_report,
     review_pair,
+    service_capabilities,
     service_metadata,
     translate_request_async,
 )
@@ -458,6 +478,196 @@ class ReviewResponseBody(BaseModel):
     coverage: ReviewCoverageBody
     findings: list[ReviewFindingBody]
     truncated: bool
+
+
+# --------------------------------------------------------------------------
+# Optional capabilities and semantic review (semantic-review-v1, ADR 0018)
+# --------------------------------------------------------------------------
+
+CapabilityName = Literal["semantic-review-v1", "translation-context-v1"]
+SemanticCategory = Literal[SEMANTIC_CATEGORIES]  # type: ignore[valid-type]
+SemanticConfidence = Literal[SEMANTIC_CONFIDENCES]  # type: ignore[valid-type]
+SemanticTermEffect = Literal[SEMANTIC_TERM_EFFECTS]  # type: ignore[valid-type]
+_HEX64_PATTERN = r"^[0-9a-f]{64}$"
+_ISSUE_HEX_PATTERN = r"^[0-9a-f]{32}$"
+
+
+def _has_isolated_surrogate(text: str) -> bool:
+    return any("\ud800" <= char <= "\udfff" for char in text)
+
+
+class CapabilitiesResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_version: str
+    capabilities: list[CapabilityName] = Field(
+        description=(
+            "Optional capabilities this server can serve right now. A client "
+            "turns a feature on only when it is listed. A server that predates "
+            "this endpoint answers 404; treat that as an empty list."
+        )
+    )
+    request_id: str
+
+
+class SemanticContextSideBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str = Field(max_length=SEMANTIC_MAX_CONTEXT_SCALARS)
+    target: str = Field(max_length=SEMANTIC_MAX_CONTEXT_SCALARS)
+
+
+class SemanticContextBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    before: SemanticContextSideBody = Field(
+        description="The previous segment, read-only: it is never reviewed."
+    )
+
+
+class SemanticPrecedentAnchorBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    segment_index: int = Field(strict=True, ge=0)
+    source_start: int = Field(
+        strict=True,
+        ge=0,
+        description="Half-open start in Unicode scalars of that segment's source.",
+    )
+    source_end: int = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "SemanticPrecedentAnchorBody":
+        if self.source_start >= self.source_end:
+            raise ValueError("precedent anchor must be a non-empty range")
+        return self
+
+
+class SemanticPrecedentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    surface: str = Field(min_length=1, max_length=SEMANTIC_MAX_PRECEDENT_SURFACE_SCALARS)
+    choice: Literal[SEMANTIC_PRECEDENT_CHOICES]  # type: ignore[valid-type]
+    rendering: str | None = Field(
+        max_length=SEMANTIC_MAX_PRECEDENT_RENDERING_SCALARS,
+        description="Null exactly when choice is not_a_term.",
+    )
+    snippet: str = Field(max_length=SEMANTIC_MAX_PRECEDENT_SNIPPET_SCALARS)
+    anchor: SemanticPrecedentAnchorBody
+    scope: Literal[SEMANTIC_PRECEDENT_SCOPES] = Field(  # type: ignore[valid-type]
+        description="A precedent states what one occurrence meant, nothing wider."
+    )
+
+    @model_validator(mode="after")
+    def validate_rendering(self) -> "SemanticPrecedentBody":
+        if (self.choice == "not_a_term") != (self.rendering is None):
+            raise ValueError("rendering is null exactly for not_a_term")
+        if self.rendering == "":
+            raise ValueError("rendering must not be empty")
+        return self
+
+
+class SemanticReviewRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str = Field(
+        description="One paired source segment. At most 2,000 Unicode scalars.",
+        json_schema_extra={"maxLength": SEMANTIC_MAX_SIDE_SCALARS},
+    )
+    target: str = Field(
+        description="The translation of that segment. At most 2,000 Unicode scalars.",
+        json_schema_extra={"maxLength": SEMANTIC_MAX_SIDE_SCALARS},
+    )
+    direction: Literal["en", "zh"] = Field(
+        description="Target language of the submitted translation."
+    )
+    review_version: Literal["semantic-review-v1"]
+    explain_language: Literal[SEMANTIC_EXPLAIN_LANGUAGES]  # type: ignore[valid-type]
+    context: SemanticContextBody | None = None
+    precedents: list[SemanticPrecedentBody] = Field(
+        default_factory=list,
+        max_length=SEMANTIC_MAX_PRECEDENTS,
+        description="Human choices made elsewhere in the same manuscript.",
+    )
+
+    @model_validator(mode="after")
+    def reject_isolated_surrogates(self) -> "SemanticReviewRequestBody":
+        texts = [self.source, self.target]
+        if self.context is not None:
+            texts += [self.context.before.source, self.context.before.target]
+        for item in self.precedents:
+            texts += [item.surface, item.snippet, item.rendering or ""]
+        if any(_has_isolated_surrogate(text) for text in texts):
+            raise ValueError("text contains an isolated surrogate")
+        return self
+
+
+class SemanticSpanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: int = Field(
+        description="Half-open start in Unicode scalars of this segment's side."
+    )
+    end: int = Field(description="Half-open end in Unicode scalars.")
+    text: str = Field(
+        description=(
+            "The complete text of [start, end). Never shortened; it equals the "
+            "submitted side sliced at [start, end)."
+        )
+    )
+
+
+class SemanticSuggestionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_span: SemanticSpanBody = Field(
+        description="At most 200 scalars. Replaced as a whole by replacement."
+    )
+    replacement: str = Field(max_length=SEMANTIC_MAX_REPLACEMENT_SCALARS)
+    term_effect: SemanticTermEffect
+
+
+class SemanticAlternativeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    replacement: str = Field(max_length=SEMANTIC_MAX_REPLACEMENT_SCALARS)
+    term_effect: SemanticTermEffect
+
+
+class SemanticIssueBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_ISSUE_HEX_PATTERN)
+    fingerprint: str = Field(pattern=_ISSUE_HEX_PATTERN)
+    category: SemanticCategory
+    origin: Literal["model"]
+    confidence: SemanticConfidence
+    source_span: SemanticSpanBody | None
+    target_span: SemanticSpanBody | None
+    source_excerpt: str | None = Field(
+        max_length=SEMANTIC_MAX_EXCERPT_SCALARS,
+        description="Display only. Locate, highlight and replace with the span.",
+    )
+    target_excerpt: str | None = Field(max_length=SEMANTIC_MAX_EXCERPT_SCALARS)
+    rationale: str = Field(max_length=SEMANTIC_MAX_RATIONALE_SCALARS)
+    suggestion: SemanticSuggestionBody | None
+    suggestion_withheld: Literal["span_too_long", "replacement_too_long"] | None
+    alternatives: list[SemanticAlternativeBody] = Field(
+        max_length=SEMANTIC_MAX_ALTERNATIVES
+    )
+
+
+class SemanticTermBasisBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dictionary_revision: str = Field(pattern=_HEX64_PATTERN)
+    matcher_revision: str = Field(pattern=_HEX64_PATTERN)
+
+
+class SemanticReviewResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    review_version: Literal["semantic-review-v1"]
+    source_revision: str = Field(pattern=_HEX64_PATTERN)
+    target_revision: str = Field(pattern=_HEX64_PATTERN)
+    term_basis: SemanticTermBasisBody
+    status: Literal["complete", "not_reviewed"]
+    status_reason: Literal["invalid_model_output"] | None
+    dropped_unanchored: int = Field(ge=0)
+    checked: list[SemanticCategory]
+    issues: list[SemanticIssueBody] = Field(max_length=SEMANTIC_MAX_ISSUES)
+    truncated: bool
+    truncated_reason: Literal["issue_limit", "byte_limit"] | None
+    omitted_issues: int = Field(ge=0)
 
 
 # The wire vocabulary, spelled out so a generated client can model every
@@ -1120,13 +1330,36 @@ async def status_device(
     ] = None,
 ) -> Device:
     """Verify a meta-scoped device without spending its business allowance."""
+    return await _probe_device(
+        request, presented, request.app.state.auth_status_rate_limiter, "auth status"
+    )
+
+
+async def capabilities_device(
+    request: Request,
+    presented: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(BEARER_SCHEME)
+    ] = None,
+) -> Device:
+    """Same probe rules as auth status, with an independent per-device window."""
+    return await _probe_device(
+        request, presented, request.app.state.capabilities_rate_limiter, "capabilities"
+    )
+
+
+async def _probe_device(
+    request: Request,
+    presented: HTTPAuthorizationCredentials | None,
+    limiter: SlidingWindowRateLimiter,
+    label: str,
+) -> Device:
     device = await _verified_device(request, presented)
     if not device.has_scope(SCOPE_META):
         raise ApiError(ERROR_FORBIDDEN)
-    limiter: SlidingWindowRateLimiter = request.app.state.auth_status_rate_limiter
     if not limiter.allow(device.device_id):
         LOGGER.info(
-            "auth status rate limited device=%s request_id=%s",
+            "%s rate limited device=%s request_id=%s",
+            label,
             redact_id(device.device_id),
             _request_id(request),
         )
@@ -1296,6 +1529,9 @@ def create_app(
         limit=resolved.rate_limit_per_minute
     )
     app.state.auth_status_rate_limiter = SlidingWindowRateLimiter(
+        limit=DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
+    )
+    app.state.capabilities_rate_limiter = SlidingWindowRateLimiter(
         limit=DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
@@ -1674,3 +1910,65 @@ def _register_routes(app: FastAPI) -> None:
         )
         await _require_active_device(request, device, serve_on_store_error=True)
         return JSONResponse(content=projected)
+
+    @app.get(
+        f"{prefix}/capabilities",
+        response_model=CapabilitiesResponseBody,
+        tags=["service"],
+        responses=ERROR_RESPONSES,
+    )
+    async def read_capabilities(
+        request: Request,
+        device: Annotated[Device, Depends(capabilities_device)],
+    ) -> CapabilitiesResponseBody:
+        """Optional capabilities this server can serve right now.
+
+        Needs the meta scope and does not spend the business allowance; probes
+        have their own per-device limit of 120 per minute. A server without
+        this path answers 404, which a client treats as no optional
+        capabilities. `/v1/meta` is unchanged.
+        """
+        return CapabilitiesResponseBody(
+            api_version=API_VERSION,
+            capabilities=list(service_capabilities()),
+            request_id=_request_id(request),
+        )
+
+    @app.post(
+        f"{prefix}/semantic-reviews",
+        response_model=SemanticReviewResponseBody,
+        tags=["review"],
+        responses=ERROR_RESPONSES,
+    )
+    async def create_semantic_review(
+        request: Request,
+        body: SemanticReviewRequestBody,
+        device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
+    ) -> JSONResponse:
+        """Model-backed semantic issues for one paired segment (semantic-review-v1).
+
+        Separate from `/v1/reviews`: it never returns a verdict and never
+        produces `verified_constraint`. Each side is at most 2,000 Unicode
+        scalars; a longer side is `input_too_long` (422), as on `/v1/reviews`.
+        Use it only when `GET /v1/capabilities` lists `semantic-review-v1`;
+        otherwise it answers `llm_unavailable` (503) without calling a model.
+        """
+        for name, text in (("source", body.source), ("target", body.target)):
+            if len(text) > SEMANTIC_MAX_SIDE_SCALARS:
+                raise ApiError(
+                    ERROR_INPUT_TOO_LONG,
+                    f"{name} exceeds {SEMANTIC_MAX_SIDE_SCALARS} Unicode scalars",
+                )
+        await _require_active_device(request, device)
+        LOGGER.info(
+            "semantic review unavailable device=%s source_len=%s target_len=%s"
+            " review_version=%s request_id=%s",
+            redact_id(device.device_id),
+            len(body.source),
+            len(body.target),
+            SEMANTIC_REVIEW_VERSION,
+            _request_id(request),
+        )
+        raise ApiError(
+            ERROR_LLM_UNAVAILABLE, "semantic review is not available on this server"
+        )
