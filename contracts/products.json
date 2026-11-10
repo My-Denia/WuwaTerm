@@ -64,59 +64,48 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
-        "tree": "085f0fc5da164690d713c9a1f70e14de047dfc83",
+        "commit": "3e07413e0c8542725f7aab996783da12a7ddc47b",
+        "tree": "7f4f760e37f5757cc8e02467c8369d09cfea675c",
         "status": "merged"
       },
       "source_version": "0.8.0",
-      "pending_release": {
-        "version": "0.8.0",
-        "status": "release_prepared",
-        "source_commit": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
-        "source_tree": "085f0fc5da164690d713c9a1f70e14de047dfc83",
-        "includes": [
-          "7122ea7cb41e5987aac80b23fc27bd071fcfa22b",
-          "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45"
-        ],
-        "note": "The merged source this release is built on. It carries the semantic-review-v1 and segmentation-v1 contracts (#198) and the semantic review engine, translation context and separator-preserving segmentation (#199); its pyproject still declares 0.7.2, and the 0.8.0 version bump, lockfile, OpenAPI snapshot and changelog travel in the release pull request. Semantic review ships off by default. The published 0.8.0 assets and their SHA-256 are recorded here after publication."
-      },
       "release": {
+        "version": "0.8.0",
+        "tag": "v0.8.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.0",
+        "published_at": "2026-11-10T11:44:55Z",
+        "source_commit": "3e07413e0c8542725f7aab996783da12a7ddc47b",
+        "source_tree": "7f4f760e37f5757cc8e02467c8369d09cfea675c",
+        "assets": [
+          "wuwaterm-0.8.0-py3-none-any.whl",
+          "wuwaterm-0.8.0.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.8.0-py3-none-any.whl": "06233748f069fbc2ccd8f7341d501a89747231fc3ae2e4231a631a6fcadf9644",
+          "wuwaterm-0.8.0.tar.gz": "92a2d3f126ad5784ef5da6b5475b3c7cea75eb3229ff1276b9d3ac84e06bdf93",
+          "release-manifest.json": "6373c04d24eea5275c94eac0cbce615b6299c4132e916f6b8f4a6a19fe4c6f12",
+          "SHA256SUMS": "60f0d590fcacc1c5086ee645cd3b14ab924c163286f58615fe9a6516ec6fd43a"
+        },
+        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:df506fd1748718e6bde05fd73af9569eefff570ea9dbf0fc894f272e0ed3ad82 and builder sha256:5274d6d6b22b2bff39cc59c6d422517003977e4a88499adf4032c0495830376e, first pushed as sha-3e07413 and retagged by promote-images as v0.8.0 and 0.8, which is the tag deploy/setup.sh pulls.",
+        "note": "v0.8.0 adds the semantic-review-v1 and segmentation-v1 contracts, GET /v1/capabilities, translation-context-v1 and separator-preserving long-text segmentation. Semantic review is experimental and off by default (WUWATERM_SEMANTIC_REVIEW_ENABLED); its evaluation did not meet the false-positive gate, so public deployments keep it off. A translation request without context is byte-identical to 0.7.x. v0.7.2 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.7.2",
         "tag": "v0.7.2",
-        "status": "released",
         "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.2",
         "published_at": "2026-11-09T14:01:01Z",
         "source_commit": "086dcf5f48ca64cc25e003ff65b32b7bd7c0072c",
         "source_tree": "423cb478ca6c468652aec3358ef54861c6b3efa7",
-        "assets": [
-          "wuwaterm-0.7.2-py3-none-any.whl",
-          "wuwaterm-0.7.2.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
         "asset_sha256": {
           "wuwaterm-0.7.2-py3-none-any.whl": "1faea9afb1aaaf5dc4888b344807917afa8b4168cd9be0e714a4be955e164985",
           "wuwaterm-0.7.2.tar.gz": "787fd10fd80c2917946e42264948f4c05716ec84e4795e88d1f91bbf39167866",
           "release-manifest.json": "0698548c4498979915f2ed288e97ff3a8f5bf5832dadb4c296bfa527ca0e0645",
           "SHA256SUMS": "454a5a1b2316ed385208b0373c022c52291fdc46983485921d6d4584a7534c11"
         },
-        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:75fb909f497595490d727381e38631c0b2952cb63e0801eb4d7083d428ef6763 and builder sha256:80693d19736dd030979e41aee3394f71b3915d372c79b7dcce93afb2f1f589ac, first pushed as sha-086dcf5 and retagged by promote-images as v0.7.2 and 0.7, which is the tag deploy/setup.sh pulls.",
-        "note": "v0.7.2 carries the Web database mount fix from 6533a89: --with-web mounts the host state-web/data at the directory of WUWATERM_LOCAL_DB_PATH (default /var/lib/wuwaterm-web/pool.sqlite3) instead of nesting /app/data inside the read-only bundle, still accepts an older web.env that names /app/data/pool.sqlite3, and refuses a relative path. It is the first published tag without the mountpoint failure, so the clone example in docs/self-hosting.md installs a working --with-web. v0.7.1 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.7.1",
-        "tag": "v0.7.1",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.7.1",
-        "published_at": "2026-11-09T07:39:36Z",
-        "source_commit": "c1d6843ed4707ac7844294c0e912a33075f00cd2",
-        "source_tree": "68af3a6c6da73ffb9a344e07ecccd02f652606c5",
-        "asset_sha256": {
-          "wuwaterm-0.7.1-py3-none-any.whl": "4f7307a1e22e2bea8d44481dd6d9a2f26173ca3d936c649e3e9c5bf5c4c887f2",
-          "wuwaterm-0.7.1.tar.gz": "f196815351d8e9cb988a2a5caa7517d8493b13a76d3d7dd5857acb688fe865c2",
-          "release-manifest.json": "0b41c04d1908c90988981a7e89d2feec12384bb76d765656e54a235412cbc392",
-          "SHA256SUMS": "2fa065c6c1a6a77a9011a4cc60fb6ddb76a19ca3bc2dc1ed0fca36ab5c41a0c2"
-        },
-        "note": "Kept as history after v0.7.2; the release and its assets are still published. It installs the published WuwaTerm-Web v0.1.0 package (4a7e0048), fixes the installer adoption-state reading, adds the state-web backup and migration steps and the review-v2 single-character source admission. It does not include the Web database mount fix; that fix is v0.7.2 (6533a89), so --with-web from this release still mounts its data directory inside the read-only bundle. v0.7.0 and its assets remain published on the release page, and the Telegram product records the Core wheel it pins."
+        "note": "Kept as history after v0.8.0; the release and its assets are still published. It carries the Web database mount fix from 6533a89 (--with-web mounts the host state-web/data at the directory of WUWATERM_LOCAL_DB_PATH instead of nesting /app/data inside the read-only bundle). v0.7.1 and v0.7.0 and their assets remain published on the release page, and the Telegram product records the Core wheel it pins."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -138,8 +127,8 @@
       "adoption": "unknown",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/086dcf5f48ca64cc25e003ff65b32b7bd7c0072c/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/086dcf5f48ca64cc25e003ff65b32b7bd7c0072c/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/3e07413e0c8542725f7aab996783da12a7ddc47b/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/3e07413e0c8542725f7aab996783da12a7ddc47b/docs/data-refresh.md"
       ]
     },
     {
