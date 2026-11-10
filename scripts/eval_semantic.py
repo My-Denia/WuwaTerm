@@ -110,6 +110,54 @@ class Refused(RuntimeError):
     """A precondition failed; nothing further is run."""
 
 
+def config_fingerprint() -> dict[str, Any]:
+    """SHA-256 of everything that shapes a model request in this evaluation.
+
+    Prompt texts, the code that assembles them, and the request options as
+    this process's environment resolves them. Model name and gateway host are
+    recorded as plain values (no credential is part of them).
+    """
+    import inspect
+
+    from wuwaterm import semantic_review, sentence
+    from wuwaterm.semantic_review_contract import PRECEDENT_WORDING
+
+    def h(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    thinking = (
+        os.getenv(semantic_review.SEMANTIC_THINKING_ENV, "").strip()
+        or semantic_review.SEMANTIC_THINKING_DEFAULT
+    )
+    max_tokens, extra_body = semantic_review.thinking_request_options(thinking)
+    json_mode = os.getenv("WUWATERM_SEMANTIC_REVIEW_JSON_MODE", "1").strip() != "0"
+    base_url, _key, model = llm_transport.resolve_llm_config(semantic_review.SEMANTIC_MODEL_ENV)
+    parts = {
+        "semantic_system_prompt": h(semantic_review.SYSTEM_PROMPT_TEMPLATE),
+        "semantic_term_fact_wording": h(semantic_review.TERM_FACT_WORDING),
+        "precedent_wording": h(PRECEDENT_WORDING),
+        "semantic_message_builder": h(
+            inspect.getsource(semantic_review.build_messages)
+            + inspect.getsource(semantic_review.term_facts)
+        ),
+        "translation_context_rules": h(sentence._CONTEXT_RULES_INSTRUCTION),
+        "translation_prompt_builder": h(
+            inspect.getsource(sentence._call_llm_async_with_client)
+            + inspect.getsource(sentence._context_instruction)
+        ),
+    }
+    options = {
+        "thinking_mode": thinking,
+        "semantic_max_tokens": max_tokens,
+        "semantic_extra_body": extra_body,
+        "semantic_response_format": "json_object" if json_mode else None,
+        "model": model,
+        "gateway_host": httpx.URL(base_url).host if base_url else None,
+    }
+    combined = h(json.dumps({"parts": parts, "options": options}, sort_keys=True))
+    return {"config_sha256": combined, "parts": parts, "options": options}
+
+
 # --------------------------------------------------------------------------
 # Files, hashes, ledger
 # --------------------------------------------------------------------------
@@ -682,12 +730,25 @@ def _command_run(args: argparse.Namespace) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         ledger_path = real_ledger_path
     ledger = Ledger(ledger_path)
+    fingerprint = config_fingerprint()
+    frozen = ledger.data.get("config_freeze")
+    if not args.fake_transport and args.round >= 1:
+        if not frozen:
+            raise Refused("no config_freeze in the ledger: run freeze-config before a formal round")
+        if frozen.get("config_sha256") != fingerprint["config_sha256"]:
+            raise Refused("prompt or request options differ from the frozen config_sha256")
+    write_json_atomic(
+        out_dir / "run-meta.json",
+        {"round": args.round, "reused_units": list(args.reused_units or []), "config": fingerprint},
+    )
     record = ledger.open_record(
         purpose="eval",
         round=args.round,
         is_retry=bool(args.retry),
         reused_samples=args.round > 1 or bool(args.reused_samples),
         layers=list(layers),
+        reused_units=list(args.reused_units or []),
+        config_sha256=fingerprint["config_sha256"],
         max_calls=args.max_calls,
         dry_run=bool(args.fake_transport),
         status="running",
@@ -901,6 +962,9 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
                 bucket["on_undecidable"] += 1
             elif cls == "allowed_rewrite":
                 bucket["on_allowed_mh"] += int(mh)
+                if mh:
+                    per_unit = bucket.setdefault("per_unit_on_allowed_mh", {})
+                    per_unit[result["unit_id"]] = per_unit.get(result["unit_id"], 0) + 1
             else:
                 key = _issue_key(f"P:{result['unit_id']}:{direction}", issue)
                 verdict = offlist_verdicts.get(key)
@@ -1377,6 +1441,14 @@ def command_score(args: argparse.Namespace) -> int:
     inputs = load_inputs(run_dir, corpus_dir)
     receipt = score_round(inputs, out_dir, ledger=load_json(ledger_path), dry_run=dry_run)
     receipt["round"] = args.round
+    meta_path = out_dir / "run-meta.json"
+    if meta_path.is_file():
+        meta = load_json(meta_path)
+        receipt["reused_samples"] = {
+            "units": meta.get("reused_units", []),
+            "note": "tuned on before this round; their numbers are optimistic and are also shown separately",
+        }
+        receipt["config_sha256"] = meta["config"]["config_sha256"]
     target = out_dir / "receipt.dry-run.json" if dry_run else run_dir / "receipt.json"
     if not dry_run and target.is_file():
         existing = load_json(target)
@@ -1387,6 +1459,23 @@ def command_score(args: argparse.Namespace) -> int:
     write_json_atomic(target, {"run": run_dir.name, "rounds": rounds})
     print(receipt["headline"])
     print(str(target))
+    return 0
+
+
+def command_freeze_config(args: argparse.Namespace) -> int:
+    ledger = Ledger(Path(args.run_dir).resolve() / "ledger.json")
+    if ledger.data.get("config_freeze") and not args.replace:
+        print("refused: config_freeze already present", file=sys.stderr)
+        return 1
+    fingerprint = config_fingerprint()
+    ledger.data["config_freeze"] = {
+        **fingerprint,
+        "frozen_at": now_iso(),
+        "git_commit": args.git_commit,
+        "note": args.note or "",
+    }
+    ledger.save()
+    print(json.dumps({"config_sha256": fingerprint["config_sha256"], **fingerprint["options"]}, ensure_ascii=False))
     return 0
 
 
@@ -1448,6 +1537,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retry", action="store_true", help="mark this run as a manual retry in the ledger")
     p.add_argument("--max-calls", type=int, help="stop this run after this many gateway attempts")
     p.add_argument("--reused-samples", action="store_true")
+    p.add_argument("--reused-units", nargs="*", default=[], help="units already used for tuning; marked in the receipt")
+    p = sub.add_parser("freeze-config", help="record the prompt/request-option SHA-256 in the ledger")
+    common(p, corpus=False)
+    p.add_argument("--git-commit", required=True)
+    p.add_argument("--note")
+    p.add_argument("--replace", action="store_true")
     p = sub.add_parser("score")
     common(p)
     p.add_argument("--round", type=int, default=1)
@@ -1479,6 +1574,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return command_run(args)
         if args.command == "score":
             return command_score(args)
+        if args.command == "freeze-config":
+            return command_freeze_config(args)
         return command_ledger(args)
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)

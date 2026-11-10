@@ -61,6 +61,7 @@ from .segmentation import WHITESPACE as _SEGMENT_WHITESPACE
 from .segmentation import segment_text as _segment_text
 from .semantic_review import (
     SEMANTIC_MODEL_ENV,
+    SEMANTIC_THINKING_DEFAULT,
     SEMANTIC_THINKING_ENV,
     SEMANTIC_PURPOSE,
     SEMANTIC_RESPONSE_FORMAT,
@@ -1033,12 +1034,12 @@ async def semantic_review_async(
 
     try:
         max_tokens, extra_body = _thinking_request_options(
-            os.getenv(SEMANTIC_THINKING_ENV, "disabled").strip() or "disabled"
+            os.getenv(SEMANTIC_THINKING_ENV, "").strip() or SEMANTIC_THINKING_DEFAULT
         )
     except ValueError:
         # A typo must not turn an advertised capability into a stream of 503s.
-        LOGGER.warning("unknown %s; using disabled", SEMANTIC_THINKING_ENV)
-        max_tokens, extra_body = _thinking_request_options("disabled")
+        LOGGER.warning("unknown %s; using %s", SEMANTIC_THINKING_ENV, SEMANTIC_THINKING_DEFAULT)
+        max_tokens, extra_body = _thinking_request_options(SEMANTIC_THINKING_DEFAULT)
 
     async def complete(messages: list[dict[str, str]]) -> str:
         return await translator.complete_chat_async(

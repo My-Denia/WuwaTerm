@@ -181,17 +181,28 @@ real proxy route once Web pins this contract.
   model timeout. Blank output, output that is not the agreed JSON object, an
   unknown category or confidence, or a mistyped field makes the whole answer
   `not_reviewed`; nothing is retried.
-- Provider reasoning is switched off by default: the request carries
-  `thinking: {"type": "disabled"}`. The production model (DeepSeek) thinks by
-  default at high effort, and `max_tokens` also pays for that hidden
-  reasoning: in the first smoke run every 4,096 tokens went to reasoning,
-  `finish_reason` was `length` and the content was empty, about 28 s per
-  call. With thinking off the same segment answered valid JSON in about 4 s;
-  with `reasoning_effort: low` in about 15 s.
-  `WUWATERM_SEMANTIC_REVIEW_THINKING` picks `disabled` (default), `low` or
-  `high` (thinking on at that effort, `max_tokens` 16,384), or `omit` (send
-  neither field, for a gateway that refuses them). Translation requests are
-  unchanged.
+- Provider reasoning is set explicitly. The production model (DeepSeek)
+  thinks by default at high effort, and `max_tokens` also pays for that
+  hidden reasoning: in the first smoke run every 4,096 tokens went to
+  reasoning, `finish_reason` was `length` and the content was empty, about
+  28 s per call. The default is now `thinking: {"type": "enabled"}` with
+  `reasoning_effort: low` and `max_tokens` 16,384. On a debug round over one
+  reused unit (both directions plus three debug-only injected errors), low
+  effort reported 1-2 medium/high issues on allowed localization rewrites per
+  direction against 6-10 with thinking disabled, with the same 3/3 recall, at
+  12-25 s and 1,900-3,400 completion tokens per call against 5-7 s and
+  870-1,210. `WUWATERM_SEMANTIC_REVIEW_THINKING` picks `low` (default),
+  `high`, `disabled` (`max_tokens` 4,096) or `omit` (send neither field, for
+  a gateway that refuses them). Translation requests are unchanged.
+- The prompt states one rule for what to report: a difference that changes
+  what a reader learns (a checkable fact, a number, a negation or modality,
+  a referent, how a statement is meant). Ordinary localization (restructured
+  sentences, added or dropped greetings and headings, a changed point of
+  view, condensed description, adapted names, near-synonyms, figures of
+  speech with a different image) is not an issue unless it changes one of
+  those. The rule is general; it names no corpus content, and confidence
+  definitions are unchanged. The prompt text and thinking setting used for
+  an evaluation are frozen by SHA-256 in its ledger before the run.
 - The prompt gives the model the dictionary facts of `review-v2` for the same
   pair, worded as surface matches ("the corresponding region contains the
   official form X; this is only a surface match"), and the human precedents

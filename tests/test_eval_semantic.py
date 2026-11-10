@@ -276,3 +276,26 @@ def test_max_calls_caps_a_smoke_run(ev, run_dirs, tmp_path):
     assert dry["model_calls_total"] == 1
     assert dry["records"][-1]["status"] == "capped by --max-calls"
     assert (out / "P" / "S1-u1.zh->en.json").is_file()
+
+
+def test_formal_round_needs_the_frozen_config_and_refuses_a_changed_one(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "m")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "low")
+    args = ["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P", "--round", "1",
+            "--out-dir", str(tmp_path / "r1")]
+    assert ev.main(args) == 1  # no freeze yet: refused before any call
+    assert json.loads((run / "ledger.json").read_text(encoding="utf-8"))["model_calls_total"] == 0
+
+    assert ev.main(["freeze-config", "--run-dir", str(run), "--git-commit", "abc"]) == 0
+    frozen = json.loads((run / "ledger.json").read_text(encoding="utf-8"))["config_freeze"]
+    assert frozen["options"]["thinking_mode"] == "low"
+    assert "never-sent" not in json.dumps(frozen)
+    assert ev.main(["freeze-config", "--run-dir", str(run), "--git-commit", "abc"]) == 1  # no silent overwrite
+
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "disabled")
+    assert ev.main(args) == 1  # options changed after the freeze
+    ledger = json.loads((run / "ledger.json").read_text(encoding="utf-8"))
+    assert ledger["model_calls_total"] == 0 and ledger["records"] == []

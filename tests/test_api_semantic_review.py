@@ -895,7 +895,7 @@ def _deepseek_response(content: str, *, finish_reason: str, reasoning_tokens: in
     )
 
 
-def test_default_request_switches_provider_thinking_off(tmp_path, sample_db, monkeypatch):
+def test_default_request_asks_for_low_effort_thinking_with_room_for_it(tmp_path, sample_db, monkeypatch):
     configure_llm(monkeypatch)
     monkeypatch.delenv("WUWATERM_SEMANTIC_REVIEW_THINKING", raising=False)
     model = FakeModel(issues_answer())
@@ -904,9 +904,10 @@ def test_default_request_switches_provider_thinking_off(tmp_path, sample_db, mon
     assert review(app, token).status_code == 200
 
     body = model.body()
-    assert body["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in body
-    assert body["max_tokens"] == 4096
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "low"
+    # 4,096 was all spent on reasoning in the first smoke run.
+    assert body["max_tokens"] == 16384
     assert body["response_format"] == {"type": "json_object"}
 
 
@@ -941,8 +942,9 @@ def test_reasoning_content_beside_a_json_answer_is_ignored(tmp_path, sample_db, 
     [
         ("low", 16384, {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}),
         ("high", 16384, {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}),
+        ("disabled", 4096, {"thinking": {"type": "disabled"}}),
         ("omit", 16384, {}),
-        ("bogus", 4096, {"thinking": {"type": "disabled"}}),
+        ("bogus", 16384, {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}),
     ],
 )
 def test_thinking_mode_setting_shapes_the_request(tmp_path, sample_db, monkeypatch, mode, max_tokens, extra):
