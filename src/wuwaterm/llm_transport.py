@@ -343,7 +343,13 @@ async def post_chat_completion(
     max_tokens: int | None = None,
     response_format: dict | None = None,
     model_env: str | None = None,
+    extra_body: dict | None = None,
 ) -> str:
+    """POST one chat completion and return the message content.
+
+    ``extra_body`` adds provider-specific top-level fields (for example
+    DeepSeek's ``thinking``); it may not replace the fields built here.
+    """
     base_url, api_key, resolved_model = resolve_llm_config(model_env)
     payload: dict[str, Any] = {
         "model": model if model is not None else resolved_model,
@@ -354,6 +360,10 @@ async def post_chat_completion(
         payload["max_tokens"] = max_tokens
     if response_format is not None:
         payload["response_format"] = response_format
+    for key, value in (extra_body or {}).items():
+        if key in payload:
+            raise ValueError(f"extra_body may not replace {key}")
+        payload[key] = value
     for hook in tuple(_PRE_SEND_HOOKS):
         hook(purpose)
     outcome = "request"

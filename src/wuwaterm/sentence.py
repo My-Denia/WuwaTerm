@@ -1026,6 +1026,7 @@ class SentenceTranslator:
         response_format: dict | None = None,
         model_env: str | None = None,
         before_llm_call=None,
+        extra_body: dict | None = None,
     ) -> str:
         """Run one chat completion under the shared LLM slot and client."""
 
@@ -1042,6 +1043,7 @@ class SentenceTranslator:
                 max_tokens=max_tokens,
                 response_format=response_format,
                 model_env=model_env,
+                extra_body=extra_body,
             )
 
     def _call_llm_sync(

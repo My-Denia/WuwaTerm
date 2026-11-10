@@ -364,3 +364,34 @@ def test_translation_request_body_is_byte_identical_to_pre_extraction(index):
     assert seen["body"].decode() == GOLDEN_BODIES[index]
     assert seen["url"] == "https://llm.example.test/v1/chat/completions"
     assert seen["auth"] == f"Bearer {API_KEY}"
+
+
+def test_extra_body_adds_fields_but_cannot_replace_built_ones():
+    import asyncio
+
+    import httpx
+    import pytest
+
+    from wuwaterm import llm_transport
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def go(extra):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await llm_transport.post_chat_completion(
+                client, [{"role": "user", "content": "x"}], purpose="t", extra_body=extra
+            )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("WUWATERM_OPENAI_BASE_URL", "http://gw.test/v1")
+        mp.setenv("WUWATERM_OPENAI_API_KEY", "k")
+        mp.setenv("WUWATERM_OPENAI_MODEL", "m")
+        assert asyncio.run(go({"thinking": {"type": "disabled"}})) == "ok"
+        assert json.loads(seen[-1].content)["thinking"] == {"type": "disabled"}
+        with pytest.raises(ValueError):
+            asyncio.run(go({"model": "other"}))
+    assert len(seen) == 1

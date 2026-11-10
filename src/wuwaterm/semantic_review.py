@@ -39,6 +39,35 @@ SEMANTIC_MODEL_ENV = "WUWATERM_SEMANTIC_REVIEW_MODEL"
 # Sixteen issues with two quotes, a rationale and a suggestion each stay well
 # under this; a truncated answer is invalid JSON and becomes not_reviewed.
 SEMANTIC_MAX_OUTPUT_TOKENS = 4096
+# With provider reasoning switched on, max_tokens also pays for the hidden
+# reasoning: DeepSeek at its default high effort spent all 4,096 on reasoning
+# and returned empty content (smoke round 0, 2026-11-10).
+SEMANTIC_MAX_OUTPUT_TOKENS_REASONING = 16384
+SEMANTIC_THINKING_ENV = "WUWATERM_SEMANTIC_REVIEW_THINKING"
+SEMANTIC_THINKING_MODES = ("disabled", "low", "high", "omit")
+
+
+def thinking_request_options(mode: str) -> tuple[int, dict[str, Any]]:
+    """(max_tokens, extra body fields) for a ``WUWATERM_SEMANTIC_REVIEW_THINKING`` mode.
+
+    * ``disabled`` (default): ``thinking: {"type": "disabled"}``. Measured on
+      the production model: valid JSON in about 4 s.
+    * ``low`` / ``high``: thinking on at that ``reasoning_effort``, with room
+      for the reasoning tokens. ``low`` took about 15 s on one P unit.
+    * ``omit``: send neither field, for a gateway that refuses them; the
+      provider default then decides, which on DeepSeek is high-effort
+      thinking.
+    """
+    if mode == "disabled":
+        return SEMANTIC_MAX_OUTPUT_TOKENS, {"thinking": {"type": "disabled"}}
+    if mode in ("low", "high"):
+        return SEMANTIC_MAX_OUTPUT_TOKENS_REASONING, {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": mode,
+        }
+    if mode == "omit":
+        return SEMANTIC_MAX_OUTPUT_TOKENS_REASONING, {}
+    raise ValueError(f"{SEMANTIC_THINKING_ENV} must be one of {', '.join(SEMANTIC_THINKING_MODES)}")
 SEMANTIC_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 # Facts beyond this many are left out of the prompt; the prompt says so.
 MAX_TERM_FACTS = 40

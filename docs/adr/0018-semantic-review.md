@@ -181,6 +181,17 @@ real proxy route once Web pins this contract.
   model timeout. Blank output, output that is not the agreed JSON object, an
   unknown category or confidence, or a mistyped field makes the whole answer
   `not_reviewed`; nothing is retried.
+- Provider reasoning is switched off by default: the request carries
+  `thinking: {"type": "disabled"}`. The production model (DeepSeek) thinks by
+  default at high effort, and `max_tokens` also pays for that hidden
+  reasoning: in the first smoke run every 4,096 tokens went to reasoning,
+  `finish_reason` was `length` and the content was empty, about 28 s per
+  call. With thinking off the same segment answered valid JSON in about 4 s;
+  with `reasoning_effort: low` in about 15 s.
+  `WUWATERM_SEMANTIC_REVIEW_THINKING` picks `disabled` (default), `low` or
+  `high` (thinking on at that effort, `max_tokens` 16,384), or `omit` (send
+  neither field, for a gateway that refuses them). Translation requests are
+  unchanged.
 - The prompt gives the model the dictionary facts of `review-v2` for the same
   pair, worded as surface matches ("the corresponding region contains the
   official form X; this is only a surface match"), and the human precedents

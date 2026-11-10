@@ -868,3 +868,100 @@ def test_each_upstream_attempt_logs_one_line_and_no_text_or_key_is_logged(
     assert "error=llm_unavailable" in route_lines[1]
     for text in (SECRET_SOURCE, SECRET_TARGET, "暗号", "marker", API_KEY):
         assert text not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Provider reasoning (DeepSeek thinking mode). Response shapes below are the
+# ones the production model returned in the 2026-11-10 smoke and diagnostic
+# calls (texts replaced, structure and counts kept).
+# --------------------------------------------------------------------------
+
+
+def _deepseek_response(content: str, *, finish_reason: str, reasoning_tokens: int | None) -> httpx.Response:
+    message = {"role": "assistant", "content": content}
+    usage = {"prompt_tokens": 1320, "completion_tokens": 4096, "total_tokens": 5416}
+    if reasoning_tokens is not None:
+        message["reasoning_content"] = "思考" * 4000
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    return httpx.Response(
+        200,
+        json={
+            "id": "x",
+            "object": "chat.completion",
+            "model": "test-model",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": usage,
+        },
+    )
+
+
+def test_default_request_switches_provider_thinking_off(tmp_path, sample_db, monkeypatch):
+    configure_llm(monkeypatch)
+    monkeypatch.delenv("WUWATERM_SEMANTIC_REVIEW_THINKING", raising=False)
+    model = FakeModel(issues_answer())
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    assert review(app, token).status_code == 200
+
+    body = model.body()
+    assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
+    assert body["max_tokens"] == 4096
+    assert body["response_format"] == {"type": "json_object"}
+
+
+def test_reasoning_that_uses_up_max_tokens_is_not_reviewed(tmp_path, sample_db, monkeypatch):
+    """The round-0 failure: all 4,096 tokens spent on reasoning, empty content."""
+    configure_llm(monkeypatch)
+    model = FakeModel(_deepseek_response("", finish_reason="length", reasoning_tokens=4096))
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    response = review(app, token)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "not_reviewed"
+    assert response.json()["status_reason"] == "invalid_model_output"
+    assert model.calls == 1
+
+
+def test_reasoning_content_beside_a_json_answer_is_ignored(tmp_path, sample_db, monkeypatch):
+    configure_llm(monkeypatch)
+    answer = json.dumps(issues_answer(model_issue()), ensure_ascii=False)
+    model = FakeModel(_deepseek_response(answer, finish_reason="stop", reasoning_tokens=1742))
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    body = review(app, token).json()
+
+    assert body["status"] == "complete"
+    assert [issue["category"] for issue in body["issues"]] == ["negation_change"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "max_tokens", "extra"),
+    [
+        ("low", 16384, {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}),
+        ("high", 16384, {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}),
+        ("omit", 16384, {}),
+        ("bogus", 4096, {"thinking": {"type": "disabled"}}),
+    ],
+)
+def test_thinking_mode_setting_shapes_the_request(tmp_path, sample_db, monkeypatch, mode, max_tokens, extra):
+    configure_llm(monkeypatch)
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", mode)
+    model = FakeModel(issues_answer())
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    assert review(app, token).status_code == 200
+
+    body = model.body()
+    assert body["max_tokens"] == max_tokens
+    assert {key: body[key] for key in ("thinking", "reasoning_effort") if key in body} == extra
+
+
+def test_translation_requests_carry_no_thinking_field(tmp_path, sample_db, monkeypatch):
+    configure_llm(monkeypatch)
+    model = FakeModel("译文")
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    assert translate(app, token).status_code == 200
+    assert "thinking" not in model.body() and "max_tokens" not in model.body()

@@ -60,14 +60,15 @@ from . import semantic_review_contract as _semantic_contract
 from .segmentation import WHITESPACE as _SEGMENT_WHITESPACE
 from .segmentation import segment_text as _segment_text
 from .semantic_review import (
-    SEMANTIC_MAX_OUTPUT_TOKENS,
     SEMANTIC_MODEL_ENV,
+    SEMANTIC_THINKING_ENV,
     SEMANTIC_PURPOSE,
     SEMANTIC_RESPONSE_FORMAT,
     ContextBefore,
     Precedent,
     SemanticReviewJob,
     review_segment as _review_segment,
+    thinking_request_options as _thinking_request_options,
 )
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
@@ -1028,15 +1029,26 @@ async def semantic_review_async(
         return _review_pair(snapshot, source, target, direction, review_version="review-v2")  # type: ignore[arg-type]
 
     response_format = SEMANTIC_RESPONSE_FORMAT if _semantic_json_mode() else None
+    import os
+
+    try:
+        max_tokens, extra_body = _thinking_request_options(
+            os.getenv(SEMANTIC_THINKING_ENV, "disabled").strip() or "disabled"
+        )
+    except ValueError:
+        # A typo must not turn an advertised capability into a stream of 503s.
+        LOGGER.warning("unknown %s; using disabled", SEMANTIC_THINKING_ENV)
+        max_tokens, extra_body = _thinking_request_options("disabled")
 
     async def complete(messages: list[dict[str, str]]) -> str:
         return await translator.complete_chat_async(
             messages,
             purpose=SEMANTIC_PURPOSE,
-            max_tokens=SEMANTIC_MAX_OUTPUT_TOKENS,
+            max_tokens=max_tokens,
             response_format=response_format,
             model_env=SEMANTIC_MODEL_ENV,
             before_llm_call=before_llm_call,
+            extra_body=extra_body,
         )
 
     try:
