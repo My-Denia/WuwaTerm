@@ -531,6 +531,7 @@ async def _translate_plain_async(
     to_chinese: bool,
     before_llm_call: LlmCallGuard | None = None,
     context: TranslationContext | None = None,
+    source_text: str | None = None,
 ) -> TranslationOutcome:
     try:
         if context is None:
@@ -542,7 +543,7 @@ async def _translate_plain_async(
             )
         else:
             translated = await translator.translate_async(
-                prepared,
+                prepared if source_text is None else source_text,
                 to_chinese=to_chinese,
                 propagate_errors=True,
                 before_llm_call=before_llm_call,
@@ -586,9 +587,11 @@ async def translate_request_async(
     # Split internally so every LLM call keeps the public per-call bound.
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         # ``splitter`` is ignored: segmentation-v1 is the one long-text rule.
+        # It cuts the text as submitted, so every separator, blank lines
+        # included, is the source's own; each core is prepared on its own.
         return await _translate_long_plain_text(
             translator,
-            prepared,
+            request.text,
             to_chinese=to_chinese,
             context=request.context,
             before_llm_call=before_llm_call,
@@ -643,6 +646,9 @@ async def translate_request_async(
         to_chinese=to_chinese,
         before_llm_call=before_llm_call,
         context=request.context,
+        # A context-mode request keeps its paragraph breaks (see
+        # SentenceTranslator.prepare_text_keeping_paragraphs).
+        source_text=request.text if request.context is not None else None,
     )
 
 

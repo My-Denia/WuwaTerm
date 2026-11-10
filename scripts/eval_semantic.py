@@ -95,6 +95,7 @@ M_MIN_ORDINARY = 10
 MPRIME_MIN_SAME = 10
 MPRIME_MIN_DIFF = 5
 LAYERS = ("P", "E", "M", "Mprime")
+NOT_REVIEWED_STREAK_STOP = 3
 B1_SANITIZED = "work/B1-zh.sanitized.txt"
 SNAPSHOT_DB = "work/terms-3.7.snapshot.db"
 ENV_KEYS = re.compile(r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_)[A-Z_]+$")
@@ -201,6 +202,12 @@ class Ledger:
                 llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
             )
         if record.get("purpose") == "eval" and self.eval_total() + 1 > EVAL_SELF_LIMIT:
+            raise llm_transport.LLMTranslationError(
+                llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
+            )
+        cap = record.get("max_calls")
+        if cap is not None and int(record.get("calls", 0)) + 1 > int(cap):
+            record["cap_reached"] = True
             raise llm_transport.LLMTranslationError(
                 llm_transport.BUDGET_EXHAUSTED_NOTICE, reason="budget"
             )
@@ -339,7 +346,8 @@ def fake_gateway(request: httpx.Request) -> httpx.Response:
                     "source_quote": None,
                     "target_quote": quote,
                     "rationale": "dry run",
-                    "suggestion": None,
+                    # Exercises term_effect on the real snapshot at no cost.
+                    "suggestion": {"replacement": quote[::-1]},
                     "alternative": None,
                 }
             )
@@ -386,7 +394,7 @@ class Runner:
     translator: SentenceTranslator
     service: Any
     explain_language: str = "zh"
-    calls: list[dict[str, Any]] = field(default_factory=list)
+    not_reviewed_streak: int = 0
 
     def save(self, rel: str, data: Any) -> None:
         write_json_atomic(self.out_dir / rel, data)
@@ -408,8 +416,20 @@ class Runner:
             "body": outcome.body,
             "model_calls": outcome.model_calls,
         }
+        if outcome.error_code is not None:
+            self.save(f"errors/{key.replace(':', '_')}.json", result)
         if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
             raise Refused(f"budget stop at {key}")
+        if outcome.error_code is not None:
+            # A gateway that refuses one request (bad model name, rejected
+            # response_format, auth) refuses the rest: stop before spending more.
+            raise Refused(f"gateway error {outcome.error_code} at {key}")
+        if outcome.body is not None and outcome.body["status"] == "not_reviewed":
+            self.not_reviewed_streak += 1
+            if self.not_reviewed_streak >= NOT_REVIEWED_STREAK_STOP:
+                raise Refused(f"{NOT_REVIEWED_STREAK_STOP} not_reviewed answers in a row at {key}")
+        else:
+            self.not_reviewed_streak = 0
         return result
 
     async def translate(self, text: str, context: app_layer.TranslationContext | None) -> dict[str, Any]:
@@ -421,6 +441,8 @@ class Runner:
         )
         if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
             raise Refused("budget stop during translation")
+        if outcome.error_code is not None:
+            raise Refused(f"gateway error {outcome.error_code} during translation")
         return {
             "kind": outcome.kind,
             "error_code": outcome.error_code,
@@ -467,7 +489,10 @@ class Runner:
     # -- M ----------------------------------------------------------------
     async def run_m(self) -> None:
         for doc in self.inputs.m_gold["docs"]:
-            prepared = self.translator.prepare_text(self.inputs.doc_text(doc))
+            raw = self.inputs.doc_text(doc)
+            # The old path prepares the whole text (blank lines folded away);
+            # the new path cuts the text as written, like Core does.
+            prepared = self.translator.prepare_text(raw)
             started = time.perf_counter()
             try:
                 old_pairs = await legacy_translate_plain(self.translator, prepared)
@@ -494,7 +519,7 @@ class Runner:
             started = time.perf_counter()
             outcome = await app_layer._translate_long_plain_text(
                 self.translator,
-                prepared,
+                raw,
                 to_chinese=False,
                 context=app_layer.TranslationContext(),
                 on_segment=observe,
@@ -506,7 +531,7 @@ class Runner:
                 raise Refused(f"new-path translation failed in {doc}: {outcome.error_code}")
             reviews = []
             for index, seg in enumerate(segments_out):
-                core = prepared[seg["core_start"] : seg["core_end"]]
+                core = raw[seg["core_start"] : seg["core_end"]]
                 reviews.append(
                     await self.review(
                         f"M:{doc}:seg{index}",
@@ -523,6 +548,7 @@ class Runner:
                 {
                     "layer": "M",
                     "doc": doc,
+                    "raw": raw,
                     "prepared": prepared,
                     "old": {
                         "text": "\n".join(t for _, t in old_pairs),
@@ -662,6 +688,7 @@ def _command_run(args: argparse.Namespace) -> int:
         is_retry=bool(args.retry),
         reused_samples=args.round > 1 or bool(args.reused_samples),
         layers=list(layers),
+        max_calls=args.max_calls,
         dry_run=bool(args.fake_transport),
         status="running",
     )
@@ -679,7 +706,7 @@ def _command_run(args: argparse.Namespace) -> int:
     try:
         asyncio.run(_run_layers(runner, layers, args.include_supplementary))
     except Refused as exc:
-        status = f"stopped: {exc}"
+        status = "capped by --max-calls" if record.get("cap_reached") else f"stopped: {exc}"
     finally:
         remove_hook()
         remove_observer()
@@ -708,7 +735,7 @@ def _command_run(args: argparse.Namespace) -> int:
             ensure_ascii=False,
         )
     )
-    return 0 if status == "complete" else 1
+    return 0 if status in ("complete", "capped by --max-calls") else 1
 
 
 # --------------------------------------------------------------------------
@@ -996,18 +1023,31 @@ def score_e(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
     return {"gates": gates, "non_injected_issues": non_injected}
 
 
-def separator_fidelity(prepared: str, segments: Sequence[Mapping[str, Any]], new_text: str) -> dict[str, Any]:
-    """Rebuild with segmentation-v1 and compare separators and assembly."""
+_BLANK_LINE = re.compile(r"\n[^\S\n]*\n")
+
+
+def _blank_lines(text: str) -> int:
+    return len(_BLANK_LINE.findall(text))
+
+
+def separator_fidelity(source: str, segments: Sequence[Mapping[str, Any]], new_text: str) -> dict[str, Any]:
+    """Rebuild with segmentation-v1 from the source as written and compare.
+
+    Gate: the output equals ``Σ (leading_i + T_i + trailing_i)`` over the
+    source's own segments, every separator verbatim, no T_i with stray edge
+    whitespace. Descriptive only: how many segments kept their internal blank
+    lines, which is up to the model.
+    """
     pieces = []
     seps_ok = True
     edges_ok = True
     line_agree = 0
-    expected = [seg for seg in segment_text(prepared) if seg.core_start != seg.core_end]
+    expected = [seg for seg in segment_text(source) if seg.core_start != seg.core_end]
     by_start = {seg["start"]: seg for seg in segments}
     cursor = 0
-    for seg in segment_text(prepared):
+    for seg in segment_text(source):
         if seg.core_start == seg.core_end:
-            pieces.append(prepared[seg.start : seg.end])
+            pieces.append(source[seg.start : seg.end])
             continue
         got = by_start.get(seg.start)
         if got is None or (got["core_start"], got["core_end"]) != (seg.core_start, seg.core_end):
@@ -1016,15 +1056,16 @@ def separator_fidelity(prepared: str, segments: Sequence[Mapping[str, Any]], new
         text = got["translation"]
         if text and (text[0] in WHITESPACE or text[-1] in WHITESPACE):
             edges_ok = False
-        core = prepared[seg.core_start : seg.core_end]
-        line_agree += int(core.count("\n") == text.count("\n"))
-        pieces.append(prepared[seg.start : seg.core_start] + text + prepared[seg.core_end : seg.end])
+        core = source[seg.core_start : seg.core_end]
+        line_agree += int(_blank_lines(core) == _blank_lines(text))
+        pieces.append(source[seg.start : seg.core_start] + text + source[seg.core_end : seg.end])
         cursor += 1
     rebuilt = "".join(pieces)
     return {
         "ok": seps_ok and edges_ok and rebuilt == new_text and cursor == len(expected),
         "segments": len(expected),
-        "internal_line_count_agrees": line_agree,
+        "measured_against": "source as written, not the prepared text",
+        "internal_blank_lines_agree": line_agree,
     }
 
 
@@ -1050,9 +1091,9 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     mh_issues: list[dict[str, Any]] = []
     verified = {"old": 0, "new": 0}
     for doc in docs:
-        fidelity[doc["doc"]] = separator_fidelity(doc["prepared"], doc["new"]["segments"], doc["new"]["text"])
+        fidelity[doc["doc"]] = separator_fidelity(doc["raw"], doc["new"]["segments"], doc["new"]["text"])
         for index, (seg, review) in enumerate(zip(doc["new"]["segments"], doc["reviews"], strict=False)):
-            core = doc["prepared"][seg["core_start"] : seg["core_end"]]
+            core = doc["raw"][seg["core_start"] : seg["core_end"]]
             for issue in stats.add(review, core, seg["translation"]):
                 if issue["confidence"] in ("medium", "high"):
                     mh_issues.append(
@@ -1109,7 +1150,8 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         packet.append(
             {
                 "doc": doc["doc"],
-                "source": doc["prepared"],
+                "source_as_written": doc["raw"],
+                "gold_coordinates": "file_range indexes source_as_written",
                 "A": doc[a_side]["text"],
                 "B": doc[b_side]["text"],
                 "gold": [item for item in inputs.m_gold["items"] if item["doc"] == doc["doc"]],
@@ -1404,6 +1446,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fake-transport", action="store_true", help="dry run against an in-process fake gateway")
     p.add_argument("--include-supplementary", action="store_true", help="also run supplementary M' experiments")
     p.add_argument("--retry", action="store_true", help="mark this run as a manual retry in the ledger")
+    p.add_argument("--max-calls", type=int, help="stop this run after this many gateway attempts")
     p.add_argument("--reused-samples", action="store_true")
     p = sub.add_parser("score")
     common(p)

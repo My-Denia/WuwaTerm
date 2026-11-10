@@ -56,6 +56,8 @@ from .semantic_review_contract import PRECEDENT_WORDING
 
 
 LOGGER = logging.getLogger(__name__)
+# A blank line: two line breaks with only non-newline whitespace between.
+_PARAGRAPH_BREAK_RE = re.compile(r"\n[^\S\n]*\n\s*")
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
@@ -523,6 +525,18 @@ class SentenceTranslator:
             return ""
         return "\n".join(self._resolve_speaker_prefix(line) for line in text.splitlines())
 
+    def prepare_text_keeping_paragraphs(self, text: str) -> str:
+        """``prepare_text`` per paragraph, keeping one blank line between them.
+
+        ``prepare_text`` folds blank lines away. A context-mode request
+        (translation-context-v1) is one segment of a document, where a blank
+        line is structure the translation should keep, so each paragraph is
+        prepared on its own and the paragraphs are joined with a blank line.
+        """
+        unified = text.replace("\r\n", "\n").replace("\r", "\n")
+        parts = (self.prepare_text(part) for part in _PARAGRAPH_BREAK_RE.split(unified))
+        return "\n\n".join(part for part in parts if part)
+
     def lock_terms(
         self, text: str, *, allow_plural_inflection: bool = False
     ) -> LockedSentence:
@@ -845,9 +859,14 @@ class SentenceTranslator:
         """Translate plain text; ``context`` opts into translation-context-v1.
 
         ``context`` is any object with ``before`` (``source``/``target`` or
-        None) and ``precedents``. ``None`` keeps the original prompt.
+        None) and ``precedents``. ``None`` keeps the original preparation and
+        prompt; a context also keeps paragraph breaks in the text sent.
         """
-        prepared = self.prepare_text(text)
+        prepared = (
+            self.prepare_text(text)
+            if context is None
+            else self.prepare_text_keeping_paragraphs(text)
+        )
         if not prepared:
             return ""
         exact = self.service.lookup_exact(prepared, limit=5)

@@ -251,3 +251,28 @@ def test_env_file_sets_only_gateway_keys_and_prints_nothing(ev, tmp_path, monkey
     assert __import__("os").environ.get("HOME") == home
     captured = capsys.readouterr()
     assert "sk-secret" not in captured.out + captured.err
+
+
+def test_a_gateway_error_stops_the_run_after_one_attempt(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+    monkeypatch.setattr(ev, "fake_gateway", lambda request: ev.httpx.Response(400, json={"error": "bad"}))
+    out = tmp_path / "dry"
+    code = ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--fake-transport", "--out-dir", str(out)])
+    assert code == 1
+    dry = json.loads((out / "ledger.dry-run.json").read_text(encoding="utf-8"))
+    assert dry["model_calls_total"] == 1
+    assert "gateway error" in dry["records"][-1]["status"]
+
+
+def test_max_calls_caps_a_smoke_run(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "dry"
+    code = ev.main([
+        "run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+        "--max-calls", "1", "--fake-transport", "--out-dir", str(out),
+    ])
+    assert code == 0
+    dry = json.loads((out / "ledger.dry-run.json").read_text(encoding="utf-8"))
+    assert dry["model_calls_total"] == 1
+    assert dry["records"][-1]["status"] == "capped by --max-calls"
+    assert (out / "P" / "S1-u1.zh->en.json").is_file()

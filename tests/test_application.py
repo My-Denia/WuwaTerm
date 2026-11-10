@@ -272,9 +272,9 @@ def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypa
         return f"  T{len(seen)}\n"  # stray whitespace must not leak into the output
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
-    # prepare_text already folds blank lines away, so the separators that
-    # reach segmentation are line breaks; each must survive verbatim.
-    text = "甲" * 1000 + "\n" + "乙" * 1000 + "\n" + "丙" * 300
+    # The text is cut as submitted: separators, blank lines included, are the
+    # source's own; a blank line inside a merged core reaches the model too.
+    text = "甲" * 1000 + "\n\n" + "乙" * 1000 + "\n \n\n" + "丙" * 300
 
     outcome = asyncio.run(
         translate_request_async(
@@ -282,8 +282,8 @@ def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypa
         )
     )
 
-    assert outcome.text == "T1\nT2"
-    assert [len(locked) for locked, _ in seen] == [1000, 1301]
+    assert outcome.text == "T1\n\nT2"
+    assert [locked for locked, _ in seen] == ["甲" * 1000, "乙" * 1000 + "\n\n" + "丙" * 300]
     assert seen[0][1].before is None
     assert seen[1][1].before.source == "甲" * 400
     assert seen[1][1].before.target == "T1"
