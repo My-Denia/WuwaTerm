@@ -1621,4 +1621,3 @@ def test_direct_baseline_pairing_system_status_and_model_mismatch(ev, run_dirs, 
     assert paired_failed is not None
     assert paired_failed["comparable"] is False
     assert paired_failed["system"]["status"] == "failed"
-
