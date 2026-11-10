@@ -51,6 +51,21 @@ SEMANTIC_THINKING_MODES = ("disabled", "low", "high", "omit")
 # 12-25 s and 1,900-3,400 completion tokens per call instead of 5-7 s and
 # 870-1,210 tokens with thinking disabled.
 SEMANTIC_THINKING_DEFAULT = "low"
+# Low-effort thinking took 12-26 s per segment on the evaluation, and one
+# segment ran past the 45 s translation timeout. Semantic review gets its own
+# bound; it stays under the API's default 90 s request budget so a slow model
+# answers llm_unavailable rather than being cut by the request budget.
+SEMANTIC_TIMEOUT_SECONDS = 75.0
+SEMANTIC_TIMEOUT_ENV = "WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS"
+
+
+def semantic_timeout_seconds(raw: str | None) -> float:
+    """Model timeout for one review: the env value if it is a number in (0, 600]."""
+    try:
+        value = float(raw) if raw and raw.strip() else SEMANTIC_TIMEOUT_SECONDS
+    except ValueError:
+        return SEMANTIC_TIMEOUT_SECONDS
+    return value if 0 < value <= 600 else SEMANTIC_TIMEOUT_SECONDS
 
 
 def thinking_request_options(mode: str) -> tuple[int, dict[str, Any]]:

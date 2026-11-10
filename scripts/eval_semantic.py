@@ -96,6 +96,7 @@ MPRIME_MIN_SAME = 10
 MPRIME_MIN_DIFF = 5
 LAYERS = ("P", "E", "M", "Mprime")
 NOT_REVIEWED_STREAK_STOP = 3
+TIMEOUT_STREAK_STOP = 3
 B1_SANITIZED = "work/B1-zh.sanitized.txt"
 SNAPSHOT_DB = "work/terms-3.7.snapshot.db"
 ENV_KEYS = re.compile(r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_)[A-Z_]+$")
@@ -443,6 +444,16 @@ class Runner:
     service: Any
     explain_language: str = "zh"
     not_reviewed_streak: int = 0
+    timeout_streak: int = 0
+    resume: bool = False
+
+    def done(self, rel: str) -> bool:
+        """With --resume: an output that exists and did not fail is kept."""
+        path = self.out_dir / rel
+        if not (self.resume and path.is_file()):
+            return False
+        data = load_json(path)
+        return not data.get("error_code")
 
     def save(self, rel: str, data: Any) -> None:
         write_json_atomic(self.out_dir / rel, data)
@@ -468,6 +479,16 @@ class Runner:
             self.save(f"errors/{key.replace(':', '_')}.json", result)
         if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
             raise Refused(f"budget stop at {key}")
+        reason = getattr(outcome.llm_failure, "reason", None)
+        if outcome.error_code is not None and reason == "timeout":
+            # A slow segment is a result (it fails the latency gate), not a
+            # broken gateway: record it and go on, unless it keeps happening.
+            result["timeout"] = True
+            self.timeout_streak += 1
+            if self.timeout_streak >= TIMEOUT_STREAK_STOP:
+                raise Refused(f"{TIMEOUT_STREAK_STOP} timeouts in a row at {key}")
+            return result
+        self.timeout_streak = 0
         if outcome.error_code is not None:
             # A gateway that refuses one request (bad model name, rejected
             # response_format, auth) refuses the rest: stop before spending more.
@@ -490,7 +511,14 @@ class Runner:
         if outcome.error_code == app_layer.ERROR_LLM_BUDGET_EXHAUSTED:
             raise Refused("budget stop during translation")
         if outcome.error_code is not None:
+            if getattr(outcome.llm_failure, "reason", None) == "timeout":
+                self.timeout_streak += 1
+                if self.timeout_streak >= TIMEOUT_STREAK_STOP:
+                    raise Refused(f"{TIMEOUT_STREAK_STOP} timeouts in a row during translation")
+                return {"kind": outcome.kind, "error_code": outcome.error_code, "text": None,
+                        "timeout": True, "latency_s": round(time.perf_counter() - started, 3)}
             raise Refused(f"gateway error {outcome.error_code} during translation")
+        self.timeout_streak = 0
         return {
             "kind": outcome.kind,
             "error_code": outcome.error_code,
@@ -506,6 +534,8 @@ class Runner:
                 ("en->zh", unit["en_text"], unit["zh_text"]),
             ):
                 key = f"P:{unit['unit_id']}:{direction}"
+                if self.done(f"P/{unit['unit_id']}.{direction}.json"):
+                    continue
                 result = await self.review(
                     key,
                     SemanticReviewJob(
@@ -522,6 +552,8 @@ class Runner:
     async def run_e(self) -> None:
         for variant in self.inputs.variants["variants"]:
             key = f"E:{variant['variant_id']}"
+            if self.done(f"E/{variant['variant_id']}.json"):
+                continue
             result = await self.review(
                 key,
                 SemanticReviewJob(
@@ -537,6 +569,8 @@ class Runner:
     # -- M ----------------------------------------------------------------
     async def run_m(self) -> None:
         for doc in self.inputs.m_gold["docs"]:
+            if self.done(f"M/{doc}.json"):
+                continue
             raw = self.inputs.doc_text(doc)
             # The old path prepares the whole text (blank lines folded away);
             # the new path cuts the text as written, like Core does.
@@ -628,6 +662,8 @@ class Runner:
                 source_end=raw["anchor"]["source_end"],
             )
             for target in experiment["targets"]:
+                if self.done(f"Mprime/{experiment['experiment']}-P{target['para']}.json"):
+                    continue
                 out: dict[str, Any] = {
                     "layer": "Mprime",
                     "experiment": experiment["experiment"],
@@ -648,7 +684,7 @@ class Runner:
 
 
 def build_runtime(
-    inputs: Inputs, out_dir: Path, *, fake: bool
+    inputs: Inputs, out_dir: Path, *, fake: bool, llm_timeout: float = 45.0
 ) -> tuple[SentenceTranslator, Any, Path]:
     db_copy = out_dir / "_db" / "terms.db"
     db_copy.parent.mkdir(parents=True, exist_ok=True)
@@ -656,7 +692,7 @@ def build_runtime(
     transport = httpx.MockTransport(fake_gateway) if fake else None
     translator = SentenceTranslator(
         db_copy,
-        llm_timeout_seconds=45.0,
+        llm_timeout_seconds=llm_timeout,
         llm_max_concurrency=1,
         llm_transport=transport,
         en_zh_protocol=True,
@@ -737,9 +773,26 @@ def _command_run(args: argparse.Namespace) -> int:
             raise Refused("no config_freeze in the ledger: run freeze-config before a formal round")
         if frozen.get("config_sha256") != fingerprint["config_sha256"]:
             raise Refused("prompt or request options differ from the frozen config_sha256")
+    from wuwaterm.semantic_review import SEMANTIC_TIMEOUT_ENV, semantic_timeout_seconds
+
+    llm_timeout = float(args.llm_timeout or os.getenv("WUWATERM_LLM_TIMEOUT_SECONDS") or 45.0)
+    run_parameters = {
+        "translation_timeout_s": llm_timeout,
+        "semantic_review_timeout_s": semantic_timeout_seconds(os.getenv(SEMANTIC_TIMEOUT_ENV)),
+        "note": args.note or "",
+    }
+    meta_path = out_dir / "run-meta.json"
+    meta = load_json(meta_path) if meta_path.is_file() else {}
+    history = list(meta.get("runs", []))
+    history.append({"at": now_iso(), "resume": bool(args.resume), **run_parameters})
     write_json_atomic(
-        out_dir / "run-meta.json",
-        {"round": args.round, "reused_units": list(args.reused_units or []), "config": fingerprint},
+        meta_path,
+        {
+            "round": args.round,
+            "reused_units": sorted(set(meta.get("reused_units", [])) | set(args.reused_units or [])),
+            "config": fingerprint,
+            "runs": history,
+        },
     )
     record = ledger.open_record(
         purpose="eval",
@@ -749,6 +802,8 @@ def _command_run(args: argparse.Namespace) -> int:
         layers=list(layers),
         reused_units=list(args.reused_units or []),
         config_sha256=fingerprint["config_sha256"],
+        resumed=bool(args.resume),
+        run_parameters=run_parameters,
         max_calls=args.max_calls,
         dry_run=bool(args.fake_transport),
         status="running",
@@ -761,8 +816,10 @@ def _command_run(args: argparse.Namespace) -> int:
         )
     )
     inputs = load_inputs(run_dir, corpus_dir)
-    translator, service, db_copy = build_runtime(inputs, out_dir, fake=bool(args.fake_transport))
-    runner = Runner(inputs, out_dir, ledger, record, translator, service)
+    translator, service, db_copy = build_runtime(
+        inputs, out_dir, fake=bool(args.fake_transport), llm_timeout=llm_timeout
+    )
+    runner = Runner(inputs, out_dir, ledger, record, translator, service, resume=bool(args.resume))
     status = "complete"
     try:
         asyncio.run(_run_layers(runner, layers, args.include_supplementary))
@@ -902,6 +959,7 @@ class ReviewStats:
     illegal: int = 0
     not_reviewed: int = 0
     errors: int = 0
+    timeouts: int = 0
     max_bytes: int = 0
     latencies: list[float] = field(default_factory=list)
     confidence: dict[str, int] = field(default_factory=dict)
@@ -909,6 +967,10 @@ class ReviewStats:
     def add(self, result: Mapping[str, Any], source: str, target: str) -> list[dict[str, Any]]:
         if result.get("error_code"):
             self.errors += 1
+            if result.get("timeout"):
+                # A timed-out review is a latency sample at least this slow.
+                self.timeouts += 1
+                self.latencies.append(float(result["latency_s"]))
             return []
         body = result["body"]
         self.latencies.append(float(result["latency_s"]))
@@ -1395,7 +1457,7 @@ def score_round(inputs: Inputs, out_dir: Path, *, ledger: Mapping[str, Any], dry
     p95 = _percentile(stats.latencies, 0.95)
     gates["latency_p95"] = gate(
         UNDECIDABLE if p95 is None else (MET if p95 <= LATENCY_P95_LIMIT_S else NOT_MET),
-        p95_s=p95, limit_s=LATENCY_P95_LIMIT_S, n=len(stats.latencies),
+        p95_s=p95, limit_s=LATENCY_P95_LIMIT_S, n=len(stats.latencies), timeouts=stats.timeouts,
     )
     gates["G_regression"] = gate(UNDECIDABLE, reason="no frozen G set in the run directory")
     states: dict[str, int] = {}
@@ -1449,6 +1511,7 @@ def command_score(args: argparse.Namespace) -> int:
             "note": "tuned on before this round; their numbers are optimistic and are also shown separately",
         }
         receipt["config_sha256"] = meta["config"]["config_sha256"]
+        receipt["run_parameters"] = meta.get("runs", [])
     target = out_dir / "receipt.dry-run.json" if dry_run else run_dir / "receipt.json"
     if not dry_run and target.is_file():
         existing = load_json(target)
@@ -1536,6 +1599,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-supplementary", action="store_true", help="also run supplementary M' experiments")
     p.add_argument("--retry", action="store_true", help="mark this run as a manual retry in the ledger")
     p.add_argument("--max-calls", type=int, help="stop this run after this many gateway attempts")
+    p.add_argument("--resume", action="store_true", help="keep finished outputs of this round; run the rest")
+    p.add_argument("--llm-timeout", type=float, help="translation model timeout in seconds (default: env or 45)")
+    p.add_argument("--note", help="free text recorded in the ledger and run-meta")
     p.add_argument("--reused-samples", action="store_true")
     p.add_argument("--reused-units", nargs="*", default=[], help="units already used for tuning; marked in the receipt")
     p = sub.add_parser("freeze-config", help="record the prompt/request-option SHA-256 in the ledger")

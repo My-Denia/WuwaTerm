@@ -344,6 +344,7 @@ async def post_chat_completion(
     response_format: dict | None = None,
     model_env: str | None = None,
     extra_body: dict | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     """POST one chat completion and return the message content.
 
@@ -370,10 +371,15 @@ async def post_chat_completion(
     status_code: int | None = None
     started = time.monotonic()
     try:
+        post_options: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            # Overrides the client's timeout for this request only.
+            post_options["timeout"] = httpx.Timeout(timeout_seconds)
         response = await client.post(
             f"{base_url}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json=payload,
+            **post_options,
         )
         status_code = response.status_code
         try:

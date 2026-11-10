@@ -1027,8 +1027,13 @@ class SentenceTranslator:
         model_env: str | None = None,
         before_llm_call=None,
         extra_body: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
-        """Run one chat completion under the shared LLM slot and client."""
+        """Run one chat completion under the shared LLM slot and client.
+
+        ``timeout_seconds`` replaces the translator's own timeout for this
+        request only.
+        """
 
         async with self._current_llm_slots():
             client = await self._current_llm_client()
@@ -1044,6 +1049,7 @@ class SentenceTranslator:
                 response_format=response_format,
                 model_env=model_env,
                 extra_body=extra_body,
+                timeout_seconds=timeout_seconds,
             )
 
     def _call_llm_sync(

@@ -63,12 +63,14 @@ from .semantic_review import (
     SEMANTIC_MODEL_ENV,
     SEMANTIC_THINKING_DEFAULT,
     SEMANTIC_THINKING_ENV,
+    SEMANTIC_TIMEOUT_ENV,
     SEMANTIC_PURPOSE,
     SEMANTIC_RESPONSE_FORMAT,
     ContextBefore,
     Precedent,
     SemanticReviewJob,
     review_segment as _review_segment,
+    semantic_timeout_seconds as _semantic_timeout_seconds,
     thinking_request_options as _thinking_request_options,
 )
 from .sentence import (
@@ -1040,6 +1042,7 @@ async def semantic_review_async(
         # A typo must not turn an advertised capability into a stream of 503s.
         LOGGER.warning("unknown %s; using %s", SEMANTIC_THINKING_ENV, SEMANTIC_THINKING_DEFAULT)
         max_tokens, extra_body = _thinking_request_options(SEMANTIC_THINKING_DEFAULT)
+    timeout_seconds = _semantic_timeout_seconds(os.getenv(SEMANTIC_TIMEOUT_ENV))
 
     async def complete(messages: list[dict[str, str]]) -> str:
         return await translator.complete_chat_async(
@@ -1050,6 +1053,7 @@ async def semantic_review_async(
             model_env=SEMANTIC_MODEL_ENV,
             before_llm_call=before_llm_call,
             extra_body=extra_body,
+            timeout_seconds=timeout_seconds,
         )
 
     try:

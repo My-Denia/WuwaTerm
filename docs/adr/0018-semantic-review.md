@@ -194,6 +194,13 @@ real proxy route once Web pins this contract.
   870-1,210. `WUWATERM_SEMANTIC_REVIEW_THINKING` picks `low` (default),
   `high`, `disabled` (`max_tokens` 4,096) or `omit` (send neither field, for
   a gateway that refuses them). Translation requests are unchanged.
+- Semantic review has its own model timeout, 75 s
+  (`WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS`, 0 < value ≤ 600); translation
+  keeps the 45 s translator timeout. Low-effort thinking took 12-26 s per
+  segment in the evaluation and one segment ran past 45 s. 75 s stays under
+  the API's default 90 s request budget, so a slow model is reported as
+  `llm_unavailable` rather than cut off by the request budget; raising the
+  semantic timeout past the request budget needs the budget raised too.
 - The prompt states one rule for what to report: a difference that changes
   what a reader learns (a checkable fact, a number, a negation or modality,
   a referent, how a statement is meant). Ordinary localization (restructured

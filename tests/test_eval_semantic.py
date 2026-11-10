@@ -299,3 +299,35 @@ def test_formal_round_needs_the_frozen_config_and_refuses_a_changed_one(ev, run_
     assert ev.main(args) == 1  # options changed after the freeze
     ledger = json.loads((run / "ledger.json").read_text(encoding="utf-8"))
     assert ledger["model_calls_total"] == 0 and ledger["records"] == []
+
+
+def test_a_timeout_is_recorded_and_resume_reruns_only_unfinished_items(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+    real = ev.fake_gateway
+    state = {"n": 0}
+
+    def flaky(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise ev.httpx.ReadTimeout("slow", request=request)
+        return real(request)
+
+    monkeypatch.setattr(ev, "fake_gateway", flaky)
+    out = tmp_path / "dry"
+    base = ["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+            "--fake-transport", "--out-dir", str(out)]
+    assert ev.main([*base, "--llm-timeout", "90"]) == 0  # a timeout does not stop the run
+    first = json.loads((out / "P" / "S1-u1.zh->en.json").read_text(encoding="utf-8"))
+    assert first["timeout"] is True and first["error_code"] == "llm_unavailable"
+    meta = json.loads((out / "run-meta.json").read_text(encoding="utf-8"))
+    assert meta["runs"][-1]["translation_timeout_s"] == 90.0
+    assert meta["runs"][-1]["semantic_review_timeout_s"] == 75.0
+
+    # The second run copies the real ledger again; only the failed item is redone.
+    assert ev.main([*base, "--resume"]) == 0
+    dry = json.loads((out / "ledger.dry-run.json").read_text(encoding="utf-8"))
+    assert dry["records"][-1]["calls"] == 1
+    again = json.loads((out / "P" / "S1-u1.zh->en.json").read_text(encoding="utf-8"))
+    assert again["error_code"] is None
+
+    assert ev.main(["score", "--run-dir", str(run), "--corpus-dir", str(corpus), "--out-dir", str(out), "--dry-run"]) == 0

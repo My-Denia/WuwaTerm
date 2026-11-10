@@ -967,3 +967,23 @@ def test_translation_requests_carry_no_thinking_field(tmp_path, sample_db, monke
 
     assert translate(app, token).status_code == 200
     assert "thinking" not in model.body() and "max_tokens" not in model.body()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, 75.0), ("120", 120.0), ("abc", 75.0), ("0", 75.0)])
+def test_semantic_review_has_its_own_model_timeout(tmp_path, sample_db, monkeypatch, raw, expected):
+    """One low-effort review ran past 45 s; translation keeps the translator timeout."""
+    configure_llm(monkeypatch)
+    if raw is None:
+        monkeypatch.delenv("WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS", raw)
+    model = FakeModel(issues_answer(), "译文")
+    app, _, token = semantic_app(tmp_path, sample_db, model)
+
+    assert review(app, token).status_code == 200
+    assert translate(app, token).status_code == 200
+
+    review_timeout = model.requests[0].extensions["timeout"]
+    translate_timeout = model.requests[1].extensions["timeout"]
+    assert review_timeout["read"] == expected
+    assert translate_timeout["read"] == SentenceTranslator(sample_db).llm_timeout_seconds
