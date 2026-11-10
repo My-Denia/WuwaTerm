@@ -27,6 +27,11 @@ name as X". Those decisions are lost on the next model call.
    trailing whitespace is a separator copied verbatim; only the core is
    translated. The output is `Σ (leading_i + translate(core_i) + trailing_i)`,
    which also removes the extra line break of the current hard-cut path.
+   The text is cut as submitted, before the per-line preparation that folds
+   blank lines away, so the separators are the source's own; a context-mode
+   request prepares each paragraph separately and keeps one blank line
+   between paragraphs inside a core. A request without `context` keeps the
+   old preparation.
 2. **Read-only context.** Each segment carries the previous segment's source
    and translation, at most 400 scalars each, marked read-only. Nothing else
    crosses segments.
