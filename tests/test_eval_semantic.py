@@ -496,3 +496,54 @@ def test_e_recall_with_unreviewed_variants_is_decided_only_by_its_bounds(ev, tmp
     assert gate["state"] == "undecidable" and len(gate["injections_unreviewed"]) == 3
     write(8, True)  # 8 found: met even if the other 2 were missed
     assert ev.score_e(inputs, out, ev.ReviewStats())["gates"]["E_recall_negation_change"]["state"] == "met"
+
+
+def test_resume_retries_nested_failures(ev):
+    ok = {"kind": "llm", "error_code": None, "text": "t"}
+    timed_out = {"kind": "error", "error_code": "llm_unavailable", "text": None, "timeout": True}
+    assert ev.result_complete({"layer": "Mprime", "with_precedent": ok, "without_precedent": ok})
+    assert not ev.result_complete({"layer": "Mprime", "with_precedent": timed_out, "without_precedent": ok})
+    assert not ev.result_complete({"layer": "Mprime", "with_precedent": ok, "without_precedent": timed_out})
+    review_ok = {"error_code": None, "body": {}}
+    assert ev.result_complete({"layer": "M", "reviews": [review_ok, {"skipped": True}]})
+    assert not ev.result_complete({"layer": "M", "reviews": [review_ok, {"error_code": "llm_unavailable", "timeout": True}]})
+    assert not ev.result_complete({"layer": "P", "error_code": "llm_unavailable"})
+    assert ev.result_complete({"layer": "P", "error_code": None})
+
+
+def test_fingerprint_v2_sees_a_translation_model_change_v1_frozen_hashes_still_check(ev, run_dirs, tmp_path, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
+    v1_a, v2_a = ev.config_fingerprint(1), ev.config_fingerprint(2)
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-b")
+    v1_b, v2_b = ev.config_fingerprint(1), ev.config_fingerprint(2)
+    assert v1_a["config_sha256"] == v1_b["config_sha256"]  # the v1 blind spot, kept for old freezes
+    assert v2_a["config_sha256"] != v2_b["config_sha256"]
+    assert v2_b["options"]["translation_model"] == "translation-b"
+
+    run, corpus = run_dirs
+    ledger = json.loads((run / "ledger.json").read_text(encoding="utf-8"))
+    ledger["config_freeze"] = {k: v for k, v in v1_b.items() if k != "fingerprint_version"}  # an old-style freeze
+    (run / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    monkeypatch.setattr(ev, "build_runtime", lambda *a, **k: (_ for _ in ()).throw(ev.Refused("stop before any call")))
+    code = ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P", "--round", "1",
+                    "--out-dir", str(tmp_path / "r")])
+    # It passed the freeze check (v1 compared with v1): a run record exists,
+    # stopped at the stub, and the run lock was released.
+    assert code == 1
+    records = json.loads((run / "ledger.json").read_text(encoding="utf-8"))["records"]
+    assert records[-1]["status"] == "stopped: stop before any call"
+    assert records[-1]["calls"] == 0
+    assert not (tmp_path / "r" / "run.lock").exists()
+
+    # A translation model change after a v2 freeze is refused.
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
+    ledger = json.loads((run / "ledger.json").read_text(encoding="utf-8"))
+    ledger["config_freeze"] = v2_b
+    (run / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
+    before = len(ledger["records"])
+    assert ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P", "--round", "1",
+                    "--out-dir", str(tmp_path / "r")]) == 1
+    assert len(json.loads((run / "ledger.json").read_text(encoding="utf-8"))["records"]) == before

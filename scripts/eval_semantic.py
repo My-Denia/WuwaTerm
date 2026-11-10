@@ -114,12 +114,21 @@ class Refused(RuntimeError):
     """A precondition failed; nothing further is run."""
 
 
-def config_fingerprint() -> dict[str, Any]:
+FINGERPRINT_VERSION = 2
+
+
+def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     """SHA-256 of everything that shapes a model request in this evaluation.
 
     Prompt texts, the code that assembles them, and the request options as
-    this process's environment resolves them. Model name and gateway host are
+    this process's environment resolves them. Model names and gateway host are
     recorded as plain values (no credential is part of them).
+
+    Version 1 (the freezes of rounds 1 and 2) recorded only the semantic
+    review model, so with ``WUWATERM_SEMANTIC_REVIEW_MODEL`` set a change of
+    the translation model went unnoticed. Version 2 also records the
+    translation model. A frozen hash is always checked with the version it
+    was made with; frozen values are never rewritten.
     """
     import inspect
 
@@ -150,6 +159,7 @@ def config_fingerprint() -> dict[str, Any]:
             + inspect.getsource(sentence._context_instruction)
         ),
     }
+    _base, _key, translation_model = llm_transport.resolve_llm_config()
     options = {
         "thinking_mode": thinking,
         "semantic_max_tokens": max_tokens,
@@ -158,8 +168,10 @@ def config_fingerprint() -> dict[str, Any]:
         "model": model,
         "gateway_host": httpx.URL(base_url).host if base_url else None,
     }
+    if version >= 2:
+        options["translation_model"] = translation_model
     combined = h(json.dumps({"parts": parts, "options": options}, sort_keys=True))
-    return {"config_sha256": combined, "parts": parts, "options": options}
+    return {"config_sha256": combined, "parts": parts, "options": options, "fingerprint_version": version}
 
 
 # --------------------------------------------------------------------------
@@ -484,6 +496,25 @@ async def legacy_translate_plain(
     return out
 
 
+def result_complete(data: Mapping[str, Any]) -> bool:
+    """Whether a saved result needs no retry, child results included.
+
+    M′ keeps its two translations inside ``with_precedent`` and
+    ``without_precedent``; an M document keeps its reviews in ``reviews``.
+    A failure in any of them makes the whole result unfinished.
+    """
+    if data.get("error_code"):
+        return False
+    if data.get("layer") == "Mprime":
+        return all(
+            not (data.get(name) or {}).get("error_code") and (data.get(name) or {}).get("text")
+            for name in ("with_precedent", "without_precedent")
+        )
+    if data.get("layer") == "M":
+        return all(review.get("skipped") or not review.get("error_code") for review in data.get("reviews", []))
+    return True
+
+
 @dataclass
 class Runner:
     inputs: Inputs
@@ -502,8 +533,7 @@ class Runner:
         path = self.out_dir / rel
         if not (self.resume and path.is_file()):
             return False
-        data = load_json(path)
-        return not data.get("error_code")
+        return result_complete(load_json(path))
 
     def save(self, rel: str, data: Any) -> None:
         write_json_atomic(self.out_dir / rel, data)
@@ -917,8 +947,9 @@ def _command_run(args: argparse.Namespace) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         ledger_path = real_ledger_path
     ledger = Ledger(ledger_path)
-    fingerprint = config_fingerprint()
     frozen = ledger.data.get("config_freeze")
+    # Check against the freeze with the algorithm that made it.
+    fingerprint = config_fingerprint(int((frozen or {}).get("fingerprint_version", 1)) if frozen else FINGERPRINT_VERSION)
     if not args.fake_transport and args.round >= 1:
         if not frozen:
             raise Refused("no config_freeze in the ledger: run freeze-config before a formal round")
@@ -970,14 +1001,16 @@ def _command_run(args: argparse.Namespace) -> int:
             {"purpose": rec.purpose, "outcome": rec.outcome, "status": rec.status_code, "elapsed_ms": rec.elapsed_ms}
         )
     )
-    inputs = load_inputs(run_dir, corpus_dir)
-    translator, service, db_copy = build_runtime(
-        inputs, out_dir, fake=bool(args.fake_transport), llm_timeout=llm_timeout
-    )
-    runner = Runner(inputs, out_dir, ledger, record_id, translator, service, resume=bool(args.resume))
     status = "complete"
+    db_copy: Path | None = None
     previous_handlers = _interrupt_on_terminate()
     try:
+        # Set-up failures are recorded and release the lock like any stop.
+        inputs = load_inputs(run_dir, corpus_dir)
+        translator, service, db_copy = build_runtime(
+            inputs, out_dir, fake=bool(args.fake_transport), llm_timeout=llm_timeout
+        )
+        runner = Runner(inputs, out_dir, ledger, record_id, translator, service, resume=bool(args.resume))
         asyncio.run(_run_layers(runner, layers, args.include_supplementary))
     except Refused as exc:
         cap = ledger.record(record_id).get("cap_reached")
@@ -993,7 +1026,8 @@ def _command_run(args: argparse.Namespace) -> int:
         calls_path = out_dir / "calls.json"
         earlier = load_json(calls_path) if args.resume and calls_path.is_file() else []
         write_json_atomic(calls_path, [*earlier, *observed])
-        shutil.rmtree(db_copy.parent, ignore_errors=True)
+        if db_copy is not None:
+            shutil.rmtree(db_copy.parent, ignore_errors=True)
         release_run_lock(out_dir)
     after = verify_frozen(run_dir, corpus_dir, load_json(real_ledger_path))
     if after:

@@ -307,3 +307,16 @@ def test_isolated_surrogate_in_model_text_is_not_reviewed(sample_db, issue):
     assert result.response.body["status"] == "not_reviewed"
     assert result.response.body["status_reason"] == "invalid_model_output"
     result.response.data.decode("utf-8")  # the served bytes are valid UTF-8
+
+
+def test_swapping_one_official_form_for_another_alters_the_match(sample_db):
+    """巧手烹调 has two official renderings in the fixture (Life Skill, Skillful Cooking)."""
+    job = SemanticReviewJob(
+        source="巧手烹调很重要。", target="Life Skill matters.", direction="en", explain_language="zh"
+    )
+    content = json.dumps(
+        {"issues": [_issue(category="term_sense", source_quote="巧手烹调", target_quote="Life Skill",
+                           suggestion={"replacement": "Skillful Cooking"})]}
+    )
+    issue = _run(sample_db, job, content).response.body["issues"][0]
+    assert issue["suggestion"]["term_effect"] == "alters_official_match"

@@ -491,9 +491,17 @@ def _place(issue: ModelIssue, source: str, target: str) -> _Placed | None:
 # --------------------------------------------------------------------------
 
 
-def _verified_ids(report: ReviewReport) -> frozenset[str]:
+def _verified_forms(report: ReviewReport) -> frozenset[tuple[str, str]]:
+    """(source mention, matched official form) for every verified finding.
+
+    The form matters as well as the mention: one source surface can have
+    several official translations, and swapping one for another removes the
+    form that matched.
+    """
     return frozenset(
-        finding.id for finding in report.findings if finding.verdict == VERDICT_VERIFIED
+        (finding.id, finding.target_span.text)
+        for finding in report.findings
+        if finding.verdict == VERDICT_VERIFIED and finding.target_span is not None
     )
 
 
@@ -514,11 +522,11 @@ def term_effect(
         after = reviewer(source, changed, direction)
     except Exception:  # noqa: BLE001 - a failed check is reported, not raised
         return "not_checked"
-    before_ids = _verified_ids(base)
-    after_ids = _verified_ids(after)
-    if before_ids - after_ids:
+    before = _verified_forms(base)
+    after_forms = _verified_forms(after)
+    if before - after_forms:
         return "alters_official_match"
-    if after_ids - before_ids:
+    if after_forms - before:
         return "introduces_official_form"
     return "none"
 
