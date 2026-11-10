@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -9,6 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -612,3 +614,1011 @@ def test_illegal_offlist_and_m_verdicts_stay_pending(ev, tmp_path):
     assert ev._verdict({"M1": {"A": "ok", "B": "wrong"}}, blind, item, "old") is None
     assert ev._verdict({"M1": {"A": "ok", "B": "wrong"}}, blind, item, "new") == "wrong"
     assert ev._verdict({"M1": {}}, blind, item, "new") is None
+
+
+def test_direct_model_translation_bypasses_dictionary_and_segmentation(ev, sample_db, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-chat")
+    transport = httpx.MockTransport(ev.fake_gateway)
+    translator = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=transport,
+    )
+    try:
+        # 椿 is an official character name in sample_db
+        text = "今天天气很好，椿来到了今州城。"
+        result = asyncio.run(
+            ev.direct_model_translate(
+                translator,
+                text,
+                to_chinese=False,
+                case_id="case-1",
+            )
+        )
+        assert result["status"] == "complete"
+        assert result["error_code"] is None
+        assert result["direction"] == "zh->en"
+        assert result["to_chinese"] is False
+        assert result["case_id"] == "case-1"
+        assert result["model"] == "deepseek-chat"
+        assert result["raw_response"] == result["final_output"]
+        assert result["source_length"] == len(text)
+        assert result["source_text_hash"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Credentials must not appear in request_params
+        assert "api_key" not in result["request_params"]
+        assert "base_url" not in result["request_params"]
+        assert "token" not in result["request_params"]
+        assert result["request_params"]["direction"] == "zh->en"
+        assert result["request_params"]["instruction"] == ev.DIRECT_PROMPTS["zh->en"]
+        assert "Locked terms:" not in result["request_params"]["instruction"]
+        assert "Dictionary term references:" not in result["request_params"]["instruction"]
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def test_direct_model_translation_fails_on_unconfigured_gateway(ev, sample_db, monkeypatch):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    transport = httpx.MockTransport(ev.fake_gateway)
+    translator = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=transport,
+    )
+    try:
+        result = asyncio.run(
+            ev.direct_model_translate(
+                translator,
+                "测试文本",
+                to_chinese=False,
+                case_id="unconf-case",
+            )
+        )
+        assert result["status"] == "failed"
+        assert result["error_code"] == "gateway_not_configured"
+        assert result["error_stage"] == "configuration"
+        assert result["final_output"] is None
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def _build_direct_runner(
+    ev,
+    run_dirs,
+    out: Path,
+    monkeypatch,
+    *,
+    model: str = "deepseek-chat",
+    resume: bool = False,
+    gateway_fn=None,
+    timeout: float = 45.0,
+    max_calls: int | None = None,
+):
+    run, corpus = run_dirs
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", model)
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", "1")
+    out.mkdir(parents=True, exist_ok=True)
+    ledger_file = out / "ledger.dry-run.json"
+    if not ledger_file.is_file():
+        shutil.copyfile(run / "ledger.json", ledger_file)
+    inputs = ev.load_inputs(run, corpus)
+    ledger = ev.Ledger(ledger_file)
+    rid = ledger.open_record(purpose="eval", round=1, max_calls=max_calls, status="running")
+    payloads: list[dict] = []
+    handler = gateway_fn or ev.fake_gateway
+
+    def capturing(req: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(req.content.decode("utf-8")))
+        return handler(req)
+
+    translator = ev.SentenceTranslator(
+        run / "work" / "terms-3.7.snapshot.db",
+        llm_timeout_seconds=timeout,
+        llm_max_concurrency=1,
+        llm_transport=httpx.MockTransport(capturing),
+    )
+    service = ev.app_layer.build_term_service(run / "work" / "terms-3.7.snapshot.db")
+    return ev.Runner(inputs, out, ledger, rid, translator, service, resume=resume), payloads
+
+
+def _run_with_pre_send_hook(ev, runner, coro, *, hook_fn=None):
+    remove = ev.llm_transport.add_pre_send_hook(
+        hook_fn or (lambda purpose: runner.ledger.charge(runner.record_id))
+    )
+    try:
+        return asyncio.run(coro)
+    finally:
+        remove()
+        asyncio.run(runner.translator.aclose())
+
+
+def _assert_manifest_counts(
+    manifest: dict, *, total: int, completed: int, failed: int, not_started: int
+) -> None:
+    assert manifest["total_cases"] == total
+    assert manifest["completed"] == completed
+    assert manifest["failed"] == failed
+    assert manifest["not_started"] == not_started
+    assert completed + failed + not_started == total == len(manifest["cases"])
+    for entry in manifest["cases"]:
+        assert entry["status"] in ("complete", "failed", "not_started")
+        if entry["status"] == "not_started":
+            assert entry["error_code"] is None
+            assert entry["latency_s"] is None
+
+
+def test_direct_model_translation_gt_2000_chars_sent_verbatim_without_cap(ev, sample_db, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-chat")
+    captured_requests = []
+
+    def capturing_gateway(req: httpx.Request):
+        captured_requests.append(json.loads(req.content.decode("utf-8")))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Translated long text successfully."}}]})
+
+    transport = httpx.MockTransport(capturing_gateway)
+    translator = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=transport,
+    )
+    try:
+        # > 2000 characters (e.g. 2500 chars)
+        long_text = "这是测试长文本。" * 280  # 2520 characters
+        assert len(long_text) > 2000
+
+        result = asyncio.run(
+            ev.direct_model_translate(
+                translator,
+                long_text,
+                to_chinese=False,
+                case_id="long-case-1",
+            )
+        )
+        assert result["status"] == "complete"
+        assert result["error_code"] is None
+        assert result["final_output"] == "Translated long text successfully."
+        assert len(captured_requests) == 1
+        req_payload = captured_requests[0]
+
+        # Verbatim text unchanged: no chunking, no placeholders, no term modification
+        assert req_payload["messages"][1]["content"] == long_text
+        assert "Locked terms:" not in req_payload["messages"][0]["content"]
+
+        # Default request matches B: no max_tokens sent in HTTP payload
+        assert "max_tokens" not in req_payload
+        assert result["request_params"]["max_tokens"] is None
+
+        # When caller opts in with explicit max_tokens cap, it is sent and traced
+        captured_requests.clear()
+        res_capped = asyncio.run(
+            ev.direct_model_translate(
+                translator,
+                "短文本",
+                to_chinese=False,
+                case_id="capped-case",
+                max_tokens=2048,
+            )
+        )
+        assert res_capped["status"] == "complete"
+        assert len(captured_requests) == 1
+        assert captured_requests[0]["max_tokens"] == 2048
+        assert res_capped["request_params"]["max_tokens"] == 2048
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def test_direct_model_translation_supports_both_directions(ev, sample_db, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-chat")
+    transport = httpx.MockTransport(ev.fake_gateway)
+    translator = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=transport,
+    )
+    try:
+        zh_text = "你好，世界！"
+        res_en = asyncio.run(
+            ev.direct_model_translate(translator, zh_text, to_chinese=False, case_id="dir-en")
+        )
+        assert res_en["direction"] == "zh->en"
+        assert res_en["to_chinese"] is False
+        assert res_en["request_params"]["instruction"] == ev.DIRECT_PROMPTS["zh->en"]
+        assert "Chinese text into English" in res_en["request_params"]["instruction"]
+
+        en_text = "Hello, world!"
+        res_zh = asyncio.run(
+            ev.direct_model_translate(translator, en_text, to_chinese=True, case_id="dir-zh")
+        )
+        assert res_zh["direction"] == "en->zh"
+        assert res_zh["to_chinese"] is True
+        assert res_zh["request_params"]["instruction"] == ev.DIRECT_PROMPTS["en->zh"]
+        assert "English text into Chinese" in res_zh["request_params"]["instruction"]
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def test_direct_model_failures_not_skipped_on_resume_and_retry_budget_enforced(ev, run_dirs, tmp_path):
+    # Verify result_complete behavior on various failure shapes
+    good = {
+        "layer": "direct_baseline",
+        "status": "complete",
+        "error_code": None,
+        "final_output": "Translated text",
+    }
+    assert ev.result_complete(good) is True
+
+    for bad in [
+        {"layer": "direct_baseline", "status": "failed", "error_code": "timeout", "final_output": None},
+        {"layer": "direct_baseline", "status": "failed", "error_code": "budget_exhausted", "final_output": None},
+        {"layer": "direct_baseline", "status": "failed", "error_code": "empty_response", "final_output": None},
+        {"layer": "direct_baseline", "status": "failed", "error_code": "input_too_long", "final_output": None},
+        {"layer": "direct_baseline", "status": "complete", "error_code": None, "final_output": ""},
+        {"layer": "direct_baseline", "status": "complete", "error_code": None, "final_output": None},
+        {"layer": "direct_baseline", "status": "failed", "error_code": None, "final_output": "some text"},
+    ]:
+        assert ev.result_complete(bad) is False
+
+
+def test_direct_model_empty_and_timeout_error_handling(ev, sample_db, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-chat")
+    # Gateway returning empty response
+    def empty_gateway(req):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]})
+
+    translator_empty = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=httpx.MockTransport(empty_gateway),
+    )
+    try:
+        res_empty = asyncio.run(
+            ev.direct_model_translate(translator_empty, "测试", to_chinese=False, case_id="empty-1")
+        )
+        assert res_empty["status"] == "failed"
+        assert res_empty["error_code"] == "empty_response"
+        assert res_empty["error_stage"] == "response_validation"
+        assert res_empty["final_output"] is None
+    finally:
+        asyncio.run(translator_empty.aclose())
+
+    # Gateway timing out
+    def timeout_gateway(req):
+        raise httpx.ReadTimeout("read timeout")
+
+    translator_timeout = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=0.1,
+        llm_max_concurrency=1,
+        llm_transport=httpx.MockTransport(timeout_gateway),
+    )
+    try:
+        res_timeout = asyncio.run(
+            ev.direct_model_translate(translator_timeout, "测试", to_chinese=False, case_id="timeout-1")
+        )
+        assert res_timeout["status"] == "failed"
+        assert res_timeout["error_code"] == "timeout"
+        assert res_timeout["error_stage"] == "gateway_call"
+        assert res_timeout["final_output"] is None
+    finally:
+        asyncio.run(translator_timeout.aclose())
+
+
+def test_direct_baseline_pairing_by_case_id(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "baseline_out"
+    code = ev.main([
+        "run",
+        "--run-dir", str(run),
+        "--corpus-dir", str(corpus),
+        "--fake-transport",
+        "--out-dir", str(out),
+        "--layer", "M",
+        "--direct-baseline",
+        "--direct-baseline-scope", "m",
+    ])
+    assert code == 0
+
+    manifest_path = out / "direct_baseline" / "manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["total_cases"] == len(manifest["cases"]) >= 1
+    assert manifest["completed"] >= 1
+
+    # Pair with M:B1
+    m_b1 = json.loads((out / "M" / "B1.json").read_text(encoding="utf-8"))
+    assert m_b1["case_id"] == "M:B1"
+    assert m_b1["model"] == "dry-run"
+    assert m_b1["request_params"]["model"] == "dry-run"
+    paired = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired is not None
+    assert paired["case_id"] == "M:B1"
+    assert paired["direction"] == "zh->en"
+    assert paired["comparable"] is True
+    assert paired["direct"]["status"] == "complete"
+    assert paired["direct"]["text"] is not None
+    assert paired["system"]["status"] == "complete"
+    assert paired["system"]["text"] is not None
+
+
+def test_direct_baseline_resume_retries_failed_cases(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "resume_direct"
+    # First run standalone direct_baseline
+    code = ev.main([
+        "run",
+        "--run-dir", str(run),
+        "--corpus-dir", str(corpus),
+        "--fake-transport",
+        "--out-dir", str(out),
+        "--layer", "direct_baseline",
+        "--direct-baseline-scope", "m",
+    ])
+    assert code == 0
+
+    direct_b1 = out / "direct_baseline" / "M_B1.zh->en.json"
+    assert direct_b1.is_file()
+    data = json.loads(direct_b1.read_text(encoding="utf-8"))
+    assert data["status"] == "complete"
+
+    # Corrupt B1 to look like a timeout failure
+    failed_data = dict(data)
+    failed_data.update(status="failed", error_code="timeout", final_output=None)
+    ev.write_json_atomic(direct_b1, failed_data)
+
+    # Now verify done() sees it as unfinished
+    inputs = ev.load_inputs(run, corpus)
+    ledger = ev.Ledger(out / "ledger.dry-run.json")
+    rid = ledger.open_record(purpose="eval", round=1, status="running")
+    translator, service, _ = ev.build_runtime(inputs, out, fake=True)
+    runner = ev.Runner(inputs, out, ledger, rid, translator, service, resume=True)
+
+    assert runner.done("direct_baseline/M_B1.zh->en.json") is False
+    assert runner.done("direct_baseline/M_B2.zh->en.json") is True
+
+    # Re-running with --resume should retry B1 and restore it to complete
+    calls_before = len(json.loads((out / "calls.json").read_text(encoding="utf-8")))
+    code = ev.main([
+        "run",
+        "--run-dir", str(run),
+        "--corpus-dir", str(corpus),
+        "--fake-transport",
+        "--out-dir", str(out),
+        "--layer", "direct_baseline",
+        "--direct-baseline-scope", "m",
+        "--resume",
+    ])
+    assert code == 0
+
+    re_data = json.loads(direct_b1.read_text(encoding="utf-8"))
+    assert re_data["status"] == "complete"
+    assert re_data["error_code"] is None
+    assert re_data["final_output"] is not None
+
+    calls_after = len(json.loads((out / "calls.json").read_text(encoding="utf-8")))
+    # Exactly one call was retried for B1
+    assert calls_after == calls_before + 1
+
+
+def test_direct_baseline_standalone_layer_fake_transport(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "standalone_direct"
+    code = ev.main([
+        "run",
+        "--run-dir", str(run),
+        "--corpus-dir", str(corpus),
+        "--fake-transport",
+        "--out-dir", str(out),
+        "--layer", "direct_baseline",
+        "--direct-baseline-scope", "m",
+    ])
+    assert code == 0
+
+    # Ensure P, E, M directories were NOT created
+    assert not (out / "P").exists()
+    assert not (out / "E").exists()
+    assert not (out / "M").exists()
+    assert (out / "direct_baseline").is_dir()
+    assert (out / "direct_baseline" / "manifest.json").is_file()
+
+
+def test_direct_baseline_four_cases_pre_send_cap_and_direct_refused_hook(ev, run_dirs, tmp_path, monkeypatch):
+    cases = [
+        ev.DirectBaselineCase(case_id=f"case-{i}", source_text=f"source text {i}")
+        for i in range(4)
+    ]
+    # 1. Real Runner + Ledger.charge + add_pre_send_hook with max_calls=1 across 4 cases
+    out_cap = tmp_path / "pre_send_cap1"
+    runner_cap, cap_payloads = _build_direct_runner(
+        ev, run_dirs, out_cap, monkeypatch, model="deepseek-chat", max_calls=1
+    )
+    with pytest.raises(ev.Refused, match="budget stop"):
+        _run_with_pre_send_hook(ev, runner_cap, runner_cap.run_direct_baseline(cases))
+
+    assert len(cap_payloads) == 1
+    rec_cap = runner_cap.ledger.record(runner_cap.record_id)
+    assert rec_cap["calls"] == 1
+    assert rec_cap["cap_reached"] is True
+    assert runner_cap.ledger.total == 1
+    assert (out_cap / "direct_baseline" / "case-0.zh->en.json").is_file()
+    for idx in (1, 2, 3):
+        assert not (out_cap / "direct_baseline" / f"case-{idx}.zh->en.json").exists()
+
+    manifest_cap = json.loads((out_cap / "direct_baseline" / "manifest.json").read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest_cap, total=4, completed=1, failed=0, not_started=3)
+    assert [c["status"] for c in manifest_cap["cases"]] == [
+        "complete",
+        "not_started",
+        "not_started",
+        "not_started",
+    ]
+
+    # Resume after pre-send cap: case-0 reused, cases 1..3 sent (3 HTTP calls)
+    runner_resume, resume_payloads = _build_direct_runner(
+        ev, run_dirs, out_cap, monkeypatch, model="deepseek-chat", resume=True
+    )
+    resumed = _run_with_pre_send_hook(ev, runner_resume, runner_resume.run_direct_baseline(cases))
+    assert len(resumed) == 4
+    assert len(resume_payloads) == 3
+    assert runner_resume.ledger.record(runner_resume.record_id)["calls"] == 3
+    assert runner_resume.ledger.total == 4
+    manifest_resumed = json.loads((out_cap / "direct_baseline" / "manifest.json").read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest_resumed, total=4, completed=4, failed=0, not_started=0)
+
+    # 2. Pre-send hook directly raising Refused on the 2nd attempt propagates verbatim
+    out_ref = tmp_path / "pre_send_direct_refused"
+    runner_ref, ref_payloads = _build_direct_runner(
+        ev, run_dirs, out_ref, monkeypatch, model="deepseek-chat"
+    )
+    attempts = 0
+
+    def direct_refused_hook(purpose: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            raise ev.Refused(f"custom pre-send refused on {purpose}")
+        runner_ref.ledger.charge(runner_ref.record_id)
+
+    with pytest.raises(ev.Refused, match="custom pre-send refused on direct_translation"):
+        _run_with_pre_send_hook(
+            ev, runner_ref, runner_ref.run_direct_baseline(cases), hook_fn=direct_refused_hook
+        )
+
+    assert len(ref_payloads) == 1
+    assert runner_ref.ledger.record(runner_ref.record_id)["calls"] == 1
+    assert (out_ref / "direct_baseline" / "case-0.zh->en.json").is_file()
+    for idx in (1, 2, 3):
+        assert not (out_ref / "direct_baseline" / f"case-{idx}.zh->en.json").exists()
+    manifest_ref = json.loads((out_ref / "direct_baseline" / "manifest.json").read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest_ref, total=4, completed=1, failed=0, not_started=3)
+
+
+def test_direct_baseline_four_cases_budget_stop_manifest_and_denominator(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "budget_stop_run"
+    call_count = 0
+
+    def budget_stop_gateway(req: httpx.Request):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            return httpx.Response(
+                429,
+                json={"error": {"code": "insufficient_quota", "message": "budget exhausted"}},
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"Translation {call_count}"}}]})
+
+    runner, payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", gateway_fn=budget_stop_gateway
+    )
+    cases = [
+        ev.DirectBaselineCase(case_id=f"case-{i}", source_text=f"source text {i}")
+        for i in range(4)
+    ]
+    with pytest.raises(ev.Refused, match="budget stop"):
+        _run_with_pre_send_hook(ev, runner, runner.run_direct_baseline(cases))
+
+    manifest_path = out / "direct_baseline" / "manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest, total=4, completed=1, failed=1, not_started=2)
+    assert manifest["cases"][0]["status"] == "complete"
+    assert manifest["cases"][1]["status"] == "failed"
+    assert manifest["cases"][1]["error_code"] == "budget_exhausted"
+    assert manifest["cases"][2]["status"] == "not_started"
+    assert manifest["cases"][3]["status"] == "not_started"
+    assert call_count == len(payloads) == 2
+    assert runner.ledger.record(runner.record_id)["calls"] == 2
+    assert (out / "direct_baseline" / "case-1.zh->en.json").is_file()
+    assert not (out / "direct_baseline" / "case-2.zh->en.json").exists()
+    assert not (out / "direct_baseline" / "case-3.zh->en.json").exists()
+
+    # Resume: case 0 (complete) kept, case 1 (failed) retried, cases 2-3 run
+    runner_resume, resume_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", resume=True
+    )
+    resumed_results = _run_with_pre_send_hook(
+        ev, runner_resume, runner_resume.run_direct_baseline(cases)
+    )
+    assert len(resumed_results) == 4
+    assert len(resume_payloads) == 3
+    manifest_after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest_after, total=4, completed=4, failed=0, not_started=0)
+
+
+def test_direct_baseline_timeout_streak_stop_manifest_and_denominator(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "timeout_stop_run"
+    call_count = 0
+
+    def timeout_gateway(req: httpx.Request):
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ReadTimeout("read timed out")
+
+    runner, payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", gateway_fn=timeout_gateway, timeout=0.1
+    )
+    cases = [
+        ev.DirectBaselineCase(case_id=f"timeout-case-{i}", source_text=f"timeout text {i}")
+        for i in range(4)
+    ]
+    with pytest.raises(ev.Refused, match="timeouts in a row"):
+        _run_with_pre_send_hook(ev, runner, runner.run_direct_baseline(cases))
+
+    manifest_path = out / "direct_baseline" / "manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest, total=4, completed=0, failed=3, not_started=1)
+    assert call_count == len(payloads) == 3
+    assert runner.ledger.record(runner.record_id)["calls"] == 3
+    assert not (out / "direct_baseline" / "timeout-case-3.zh->en.json").exists()
+
+
+def test_direct_baseline_resume_preserves_untraversed_valid_complete_caches(
+    ev, run_dirs, tmp_path, monkeypatch
+):
+    out = tmp_path / "resume_preserve_valid"
+    cases = [
+        ev.DirectBaselineCase(case_id=f"case-{i}", source_text=f"source text {i}")
+        for i in range(4)
+    ]
+    # Seed valid complete caches for case-0, case-1, case-2
+    runner_seed, seed_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat"
+    )
+    _run_with_pre_send_hook(ev, runner_seed, runner_seed.run_direct_baseline(cases[:3]))
+    assert len(seed_payloads) == 3
+
+    # Corrupt case-1 identity on disk; keep case-0 and case-2 valid complete; case-3 not on disk
+    case1_path = out / "direct_baseline" / "case-1.zh->en.json"
+    case2_path = out / "direct_baseline" / "case-2.zh->en.json"
+    case1_orig = json.loads(case1_path.read_text(encoding="utf-8"))
+    case2_bytes_before = case2_path.read_bytes()
+    tampered_case1 = {**case1_orig, "source_text_hash": "a" * 64}
+    ev.write_json_atomic(case1_path, tampered_case1)
+    tampered_case1_bytes = case1_path.read_bytes()
+
+    runner_resume, resume_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", resume=True
+    )
+    with pytest.raises(ev.Refused, match="identity mismatch.*source hash"):
+        _run_with_pre_send_hook(ev, runner_resume, runner_resume.run_direct_baseline(cases))
+
+    # Zero requests sent (0 auto-rebuy), tampered evidence not overwritten/deleted,
+    # and untraversed valid complete cache (case-2) preserved as complete in manifest
+    assert len(resume_payloads) == 0
+    assert runner_resume.ledger.record(runner_resume.record_id)["calls"] == 0
+    assert case1_path.read_bytes() == tampered_case1_bytes
+    assert case2_path.read_bytes() == case2_bytes_before
+
+    manifest = json.loads((out / "direct_baseline" / "manifest.json").read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest, total=4, completed=2, failed=0, not_started=2)
+    assert [c["status"] for c in manifest["cases"]] == [
+        "complete",
+        "not_started",
+        "complete",
+        "not_started",
+    ]
+
+    # Also verify pre-send cap before reaching case-2 preserves case-2 as complete
+    (out / "direct_baseline" / "case-0.zh->en.json").unlink()
+    case1_path.unlink()
+    runner_cap_resume, cap_resume_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", resume=True, max_calls=1
+    )
+    with pytest.raises(ev.Refused, match="budget stop"):
+        _run_with_pre_send_hook(
+            ev, runner_cap_resume, runner_cap_resume.run_direct_baseline(cases)
+        )
+    assert len(cap_resume_payloads) == 1
+    manifest_cap = json.loads((out / "direct_baseline" / "manifest.json").read_text(encoding="utf-8"))
+    _assert_manifest_counts(manifest_cap, total=4, completed=2, failed=0, not_started=2)
+    assert [c["status"] for c in manifest_cap["cases"]] == [
+        "complete",
+        "not_started",
+        "complete",
+        "not_started",
+    ]
+
+
+def test_direct_baseline_manifest_written_when_all_stops_in_earlier_layer(
+    ev, run_dirs, tmp_path, capsys
+):
+    run, corpus = run_dirs
+    out = tmp_path / "all_capped_before_direct"
+    code = ev.main(
+        [
+            "run",
+            "--run-dir",
+            str(run),
+            "--corpus-dir",
+            str(corpus),
+            "--layer",
+            "all",
+            "--direct-baseline",
+            "--direct-baseline-scope",
+            "all",
+            "--max-calls",
+            "1",
+            "--fake-transport",
+            "--out-dir",
+            str(out),
+        ]
+    )
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["status"] == "capped by --max-calls"
+    assert summary["calls_this_run"] == 1
+    assert summary["ledger_total"] == 1
+
+    calls = json.loads((out / "calls.json").read_text(encoding="utf-8"))
+    assert len(calls) == 1
+    assert calls[0]["purpose"] == "semantic_review"
+
+    manifest_path = out / "direct_baseline" / "manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["scope"] == "all"
+    _assert_manifest_counts(manifest, total=4, completed=0, failed=0, not_started=4)
+    assert [(c["case_id"], c["direction"]) for c in manifest["cases"]] == [
+        ("M:B1", "zh->en"),
+        ("M:B2", "zh->en"),
+        ("P:S1-u1", "zh->en"),
+        ("P:S1-u1", "en->zh"),
+    ]
+
+
+def test_direct_model_blank_input_and_blank_response_handling(ev, sample_db, monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-chat")
+    call_count = 0
+
+    def gateway(req: httpx.Request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]})
+
+    transport = httpx.MockTransport(gateway)
+    translator = ev.SentenceTranslator(
+        sample_db,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=transport,
+    )
+    try:
+        # Blank input: failed, empty_input, input_validation, final_output=None, latency=0, no requests
+        res_blank = asyncio.run(
+            ev.direct_model_translate(translator, "   ", case_id="blank-in")
+        )
+        assert res_blank["status"] == "failed"
+        assert res_blank["error_code"] == "empty_input"
+        assert res_blank["error_stage"] == "input_validation"
+        assert res_blank["final_output"] is None
+        assert res_blank["latency_s"] == 0.0
+        assert call_count == 0  # No request sent!
+        assert ev.result_complete(res_blank) is False
+
+        # Blank response from model: failed, empty_response, response_validation, final_output=None
+        res_resp = asyncio.run(
+            ev.direct_model_translate(translator, "有效文本", case_id="blank-out")
+        )
+        assert res_resp["status"] == "failed"
+        assert res_resp["error_code"] == "empty_response"
+        assert res_resp["error_stage"] == "response_validation"
+        assert res_resp["final_output"] is None
+        assert call_count == 1
+        assert ev.result_complete(res_resp) is False
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def test_direct_baseline_same_name_different_source_cache_refused(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "cache_mismatch_run"
+    runner_init, init_payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(
+            runner_init.run_direct_baseline(
+                [ev.DirectBaselineCase(case_id="case-1", source_text="ALIEN SOURCE TEXT")]
+            )
+        )
+    finally:
+        asyncio.run(runner_init.translator.aclose())
+    assert len(init_payloads) == 1
+    assert init_payloads[0]["messages"][1]["content"] == "ALIEN SOURCE TEXT"
+
+    runner_resume, resume_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", resume=True
+    )
+    try:
+        cases = [ev.DirectBaselineCase(case_id="case-1", source_text="ORIGINAL EXPECTED TEXT")]
+        with pytest.raises(ev.Refused, match="identity mismatch.*source hash"):
+            asyncio.run(runner_resume.run_direct_baseline(cases))
+    finally:
+        asyncio.run(runner_resume.translator.aclose())
+
+    # Zero requests sent on refused resume: must not auto-rebuy or overwrite cached file
+    assert len(resume_payloads) == 0
+
+
+def test_direct_baseline_heterogeneous_source_m_pairing_refused(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "pairing_test_run"
+    runner, payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(runner.run_m())
+        asyncio.run(runner.run_direct_baseline(scope="all"))
+    finally:
+        asyncio.run(runner.translator.aclose())
+    assert len(payloads) >= 4
+
+    # Real Runner-generated M:B1 and direct_baseline M:B1 pair with comparable=True
+    paired = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired is not None
+    assert paired["comparable"] is True
+    assert paired["model"] == "deepseek-chat"
+    assert paired["direct"]["status"] == "complete"
+    assert paired["system"]["status"] == "complete"
+
+    # Real Runner-generated P:S1-u1 has no system translation baseline: comparable=False, not_available
+    paired_p = ev.pair_direct_baseline(out, "P:S1-u1", "zh->en")
+    assert paired_p is not None
+    assert paired_p["comparable"] is False
+    assert paired_p["system"]["status"] == "not_available"
+    assert "cannot form A/B conclusion" in paired_p["comparison_note"]
+
+    # Copying M:B1 direct baseline file into P:S1-u1 slot (mismatched case_id) must fail closed
+    d_b1_path = out / "direct_baseline" / "M_B1.zh->en.json"
+    d_p_path = out / "direct_baseline" / "P_S1-u1.zh->en.json"
+    d_b1_orig = json.loads(d_b1_path.read_text(encoding="utf-8"))
+    ev.write_json_atomic(d_p_path, d_b1_orig)
+    assert ev.pair_direct_baseline(out, "P:S1-u1", "zh->en") is None
+
+    # Heterogeneous source text between M/B1.json and direct_baseline/M_B1.zh->en.json must be refused
+    d_b2_orig = json.loads((out / "direct_baseline" / "M_B2.zh->en.json").read_text(encoding="utf-8"))
+    ev.write_json_atomic(d_b1_path, {**d_b2_orig, "case_id": "M:B1"})
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    # Same source text but different case_id (M:B2 case_id in M_B1 file) must be refused
+    ev.write_json_atomic(d_b1_path, {**d_b1_orig, "case_id": "M:B2"})
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    # Missing request_params or unknown model in direct baseline must fail closed
+    no_params = dict(d_b1_orig)
+    del no_params["request_params"]
+    ev.write_json_atomic(d_b1_path, no_params)
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    unknown_direct = {
+        **d_b1_orig,
+        "model": "unknown",
+        "request_params": {**d_b1_orig["request_params"], "model": "unknown"},
+    }
+    ev.write_json_atomic(d_b1_path, unknown_direct)
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+
+def test_direct_baseline_cache_identity_mismatches_refused_all_dimensions(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "cache_dimensions_run"
+    case = ev.DirectBaselineCase(case_id="case-dim", source_text="标准测试原文", direction="zh->en")
+
+    # Generate real cache via Runner + MockTransport
+    runner_gen, gen_payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(runner_gen.run_direct_baseline([case]))
+    finally:
+        asyncio.run(runner_gen.translator.aclose())
+    assert len(gen_payloads) == 1
+    assert gen_payloads[0]["model"] == "deepseek-chat"
+    assert gen_payloads[0]["temperature"] == 0.0
+    assert "max_tokens" not in gen_payloads[0]
+
+    target_file = out / "direct_baseline" / "case-dim.zh->en.json"
+    base_valid = json.loads(target_file.read_text(encoding="utf-8"))
+
+    # Matching resume reuses cache without sending any request
+    runner_ok, ok_payloads = _build_direct_runner(
+        ev, run_dirs, out, monkeypatch, model="deepseek-chat", resume=True
+    )
+    try:
+        res_ok = asyncio.run(runner_ok.run_direct_baseline([case]))
+        assert len(res_ok) == 1 and len(ok_payloads) == 0
+    finally:
+        asyncio.run(runner_ok.translator.aclose())
+
+    def assert_resume_refused(mutated_record, match_pattern: str, *, runtime_model="deepseek-chat", run_case=case):
+        ev.write_json_atomic(target_file, mutated_record)
+        runner_r, r_payloads = _build_direct_runner(
+            ev, run_dirs, out, monkeypatch, model=runtime_model, resume=True
+        )
+        try:
+            with pytest.raises(ev.Refused, match=match_pattern):
+                asyncio.run(runner_r.run_direct_baseline([run_case]))
+        finally:
+            asyncio.run(runner_r.translator.aclose())
+        assert len(r_payloads) == 0
+
+    # 1. Runtime model changed vs cached model
+    assert_resume_refused(base_valid, "model.*does not match", runtime_model="gpt-4o")
+    # 2. Unknown or empty model rejected even if cached and runtime both say "unknown"
+    unknown_rec = {
+        **base_valid,
+        "model": "unknown",
+        "request_params": {**base_valid["request_params"], "model": "unknown"},
+    }
+    assert_resume_refused(unknown_rec, "unknown model|missing model", runtime_model="unknown")
+    assert_resume_refused(base_valid, "unknown model|missing model", runtime_model="")
+    # 3. Prompt hash mismatch
+    assert_resume_refused(
+        {**base_valid, "request_params": {**base_valid["request_params"], "prompt_sha256": "badhash123"}},
+        "prompt hash.*does not match",
+    )
+    # 4. Direction & to_chinese mismatch
+    assert_resume_refused({**base_valid, "direction": "en->zh"}, "direction.*does not match")
+    assert_resume_refused({**base_valid, "to_chinese": True}, "to_chinese.*does not match")
+    # 5. Same source text but different case_id
+    assert_resume_refused({**base_valid, "case_id": "case-other"}, "case_id.*does not match")
+    # 6. Temperature & max_tokens (cap) mismatch or missing
+    assert_resume_refused(
+        base_valid,
+        "temperature.*does not match",
+        run_case=ev.DirectBaselineCase(
+            case_id="case-dim", source_text="标准测试原文", direction="zh->en", temperature=0.5
+        ),
+    )
+    assert_resume_refused(
+        base_valid,
+        "max_tokens.*does not match",
+        run_case=ev.DirectBaselineCase(
+            case_id="case-dim", source_text="标准测试原文", direction="zh->en", max_tokens=2048
+        ),
+    )
+    no_temp_params = dict(base_valid["request_params"])
+    del no_temp_params["temperature"]
+    assert_resume_refused({**base_valid, "request_params": no_temp_params}, "temperature")
+    no_cap_params = dict(base_valid["request_params"])
+    del no_cap_params["max_tokens"]
+    assert_resume_refused({**base_valid, "request_params": no_cap_params}, "max_tokens")
+    # 7. Missing request_params, missing model, missing source_text_hash
+    no_req = dict(base_valid)
+    del no_req["request_params"]
+    assert_resume_refused(no_req, "missing request_params")
+    no_model = dict(base_valid)
+    del no_model["model"]
+    assert_resume_refused(no_model, "missing model")
+    no_hash = dict(base_valid)
+    del no_hash["source_text_hash"]
+    assert_resume_refused(no_hash, "source hash")
+
+
+def test_direct_baseline_pairing_system_status_and_model_mismatch(ev, run_dirs, tmp_path, monkeypatch):
+    out = tmp_path / "pairing_variations"
+    # 1. Generate real A under model-A before M exists: system_status="not_found", comparable=False
+    runner_a, a_payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(runner_a.run_direct_baseline(scope="m"))
+    finally:
+        asyncio.run(runner_a.translator.aclose())
+    assert len(a_payloads) == 2
+
+    paired_missing = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired_missing is not None
+    assert paired_missing["comparable"] is False
+    assert paired_missing["system"]["status"] == "not_found"
+    assert paired_missing["system"]["text"] is None
+
+    # 2. Generate real B via Runner.run_m under a DIFFERENT model (claude-3-5-sonnet): pairing refused
+    runner_b_diff, _ = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="claude-3-5-sonnet")
+    try:
+        asyncio.run(runner_b_diff.run_m())
+    finally:
+        asyncio.run(runner_b_diff.translator.aclose())
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    # 3. Re-run real B under matching model (deepseek-chat): comparable=True
+    shutil.rmtree(out / "M")
+    runner_b_same, _ = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(runner_b_same.run_m())
+    finally:
+        asyncio.run(runner_b_same.translator.aclose())
+    paired_ok = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired_ok is not None and paired_ok["comparable"] is True
+
+    # 4. Request parameter differences (cap max_tokens or temperature) on A vs B refused
+    m_b1_path = out / "M" / "B1.json"
+    m_b1_orig = json.loads(m_b1_path.read_text(encoding="utf-8"))
+
+    runner_capped, cap_payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        raw_b1 = runner_capped.inputs.doc_text("B1")
+        asyncio.run(
+            runner_capped.run_direct_baseline(
+                [ev.DirectBaselineCase(case_id="M:B1", source_text=raw_b1, max_tokens=1024)]
+            )
+        )
+    finally:
+        asyncio.run(runner_capped.translator.aclose())
+    assert cap_payloads[-1]["max_tokens"] == 1024
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    runner_temp, temp_payloads = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        raw_b1 = runner_temp.inputs.doc_text("B1")
+        asyncio.run(
+            runner_temp.run_direct_baseline(
+                [ev.DirectBaselineCase(case_id="M:B1", source_text=raw_b1, temperature=0.7)]
+            )
+        )
+    finally:
+        asyncio.run(runner_temp.translator.aclose())
+    assert temp_payloads[-1]["temperature"] == 0.7
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    # Restore matching A (temperature=0.0, max_tokens=None) via real Runner
+    runner_restore, _ = _build_direct_runner(ev, run_dirs, out, monkeypatch, model="deepseek-chat")
+    try:
+        asyncio.run(runner_restore.run_direct_baseline(scope="m"))
+    finally:
+        asyncio.run(runner_restore.translator.aclose())
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en")["comparable"] is True
+
+    # 5. Legacy M artifact lacking model provenance -> comparable=False, status="not_comparable" (never guessed from run-meta)
+    legacy_m = dict(m_b1_orig)
+    del legacy_m["model"]
+    del legacy_m["request_params"]
+    ev.write_json_atomic(m_b1_path, legacy_m)
+    paired_legacy = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired_legacy is not None
+    assert paired_legacy["comparable"] is False
+    assert paired_legacy["system"]["status"] == "not_comparable"
+
+    # 6. Unknown model on M artifact -> refused (returns None)
+    ev.write_json_atomic(
+        m_b1_path,
+        {
+            **m_b1_orig,
+            "model": "unknown",
+            "request_params": {**m_b1_orig["request_params"], "model": "unknown"},
+        },
+    )
+    assert ev.pair_direct_baseline(out, "M:B1", "zh->en") is None
+
+    # 7. Failed system translation (new.text is None) -> comparable=False, status="failed"
+    ev.write_json_atomic(
+        m_b1_path,
+        {**m_b1_orig, "new": {**m_b1_orig["new"], "text": None}},
+    )
+    paired_failed = ev.pair_direct_baseline(out, "M:B1", "zh->en")
+    assert paired_failed is not None
+    assert paired_failed["comparable"] is False
+    assert paired_failed["system"]["status"] == "failed"
+
