@@ -64,11 +64,22 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "086dcf5f48ca64cc25e003ff65b32b7bd7c0072c",
-        "tree": "423cb478ca6c468652aec3358ef54861c6b3efa7",
+        "commit": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
+        "tree": "085f0fc5da164690d713c9a1f70e14de047dfc83",
         "status": "merged"
       },
-      "source_version": "0.7.2",
+      "source_version": "0.8.0",
+      "pending_release": {
+        "version": "0.8.0",
+        "status": "release_prepared",
+        "source_commit": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
+        "source_tree": "085f0fc5da164690d713c9a1f70e14de047dfc83",
+        "includes": [
+          "7122ea7cb41e5987aac80b23fc27bd071fcfa22b",
+          "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45"
+        ],
+        "note": "The merged source this release is built on. It carries the semantic-review-v1 and segmentation-v1 contracts (#198) and the semantic review engine, translation context and separator-preserving segmentation (#199); its pyproject still declares 0.7.2, and the 0.8.0 version bump, lockfile, OpenAPI snapshot and changelog travel in the release pull request. Semantic review ships off by default. The published 0.8.0 assets and their SHA-256 are recorded here after publication."
+      },
       "release": {
         "version": "0.7.2",
         "tag": "v0.7.2",

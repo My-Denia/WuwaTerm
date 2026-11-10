@@ -3,6 +3,79 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.0
+
+### Highlights
+
+- Long texts keep their separators. A text over the per-call limit used to be
+  cut at a hard boundary and the pieces were joined with an invented `\n`, so a
+  translated post could gain line breaks the author never wrote. Core now cuts
+  with `segmentation-v1` on the text as submitted and copies every separator
+  verbatim. The rule text is [docs/segmentation-v1.md](docs/segmentation-v1.md);
+  the Web, Windows and Telegram clients port it and run the same fixtures from
+  `contracts/segmentation-v1.json`. `splitter` is still accepted and ignored.
+- Translations can carry document context (`translation-context-v1`).
+  `POST /v1/translations` accepts an optional `context` with the previous
+  segment's source and translation (`before`) and up to 12 earlier choices the
+  user made in the same manuscript (`precedents`). The context is read-only
+  guidance for the model: it helps with references, negation and numbers, and
+  it never overrides an official term. Unknown keys are refused and the
+  response shape is unchanged.
+- Semantic review is available as an experimental, opt-in feature
+  (`semantic-review-v1`). `POST /v1/semantic-reviews` asks the model to compare
+  one Chinese and English segment and returns issues anchored to exact slices of
+  the submitted text, with the review-v2 term effect attached. It is off by
+  default and public deployments should leave it off: in the maintainers'
+  evaluation on official Chinese/English pairs it flagged more differences than
+  the accepted limit, most of them legitimate localization rewrites. Set
+  `WUWATERM_SEMANTIC_REVIEW_ENABLED=1` only if your users accept that noise.
+  While it is off, the endpoint answers `llm_unavailable` (503) without calling
+  a model.
+- `GET /v1/capabilities` lists the optional features a server offers, so a
+  client can hide what is missing. `translation-context-v1` is listed whenever a
+  model is configured; `semantic-review-v1` only when the switch is on as well.
+  A server that predates the endpoint answers 404, which clients treat as no
+  optional capabilities. It is a meta-scope call and does not spend the business
+  allowance.
+
+### Added
+
+- `POST /v1/semantic-reviews`, `GET /v1/capabilities` and the optional
+  `context` field of `POST /v1/translations`, documented in
+  `docs/api/openapi.json`, with synthetic fixtures under
+  `contracts/semantic-review-v1/` and `contracts/segmentation-v1.json`.
+- `WUWATERM_SEMANTIC_REVIEW_ENABLED` and
+  `WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS` (default 75). A semantic review has
+  its own 75 s timeout, independent of the 45 s translation timeout.
+- One log line per model attempt (`llm call purpose=... outcome=... status=...
+  elapsed_ms=...`), carrying no URL, key, model name, prompt or output, so a
+  provider invoice can be reconciled against calls.
+- ADR 0018 (semantic review) and ADR 0019 (document context and human
+  precedents); the privacy and self-hosting guides describe what is sent to the
+  model for each feature.
+
+### Changed
+
+- A request without `context` sends exactly the model request that 0.7.x sent;
+  the translation request bodies are covered by byte-for-byte tests. Existing
+  `/v1`, `review-v1`, `review-v2` and `wuwaterm-manuscript-v1` behavior and
+  fields are unchanged.
+
+### Fixed
+
+- Long Telegram posts and API translations over the per-call limit no longer
+  gain a `\n` where two pieces were joined.
+
+### Compatibility and distribution
+
+- The API change is additive. The Web 0.1.1 and Windows 0.3.0 clients that the
+  Core CI pins keep working and simply do not see the new capabilities.
+- The Telegram product pins an exact Core wheel; Telegram 0.1.1 stays on Core
+  0.7.0 and is not installed together with this release.
+- Source version is `0.8.0`; `uv.lock` and the OpenAPI snapshot are regenerated
+  with it. `contracts/products.json` / `docs/products.md` record the published
+  release with its asset digests after publication.
+
 ## 0.7.2
 
 ### Highlights
