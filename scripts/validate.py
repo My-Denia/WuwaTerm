@@ -76,6 +76,12 @@ SERVER_STEPS: list[Step] = [
         ROOT,
     ),
     Step(
+        "typing",
+        "the type checker reports an error outside the baseline in pyproject.toml",
+        ["-m", "mypy", "src/wuwaterm"],
+        ROOT,
+    ),
+    Step(
         "pytest",
         "the repository test suite is red",
         ["-m", "pytest"],
