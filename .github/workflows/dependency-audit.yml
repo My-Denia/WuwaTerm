@@ -1,0 +1,113 @@
+name: Dependency audit
+
+# Advisory gate for the LOCKED dependency set.
+#
+# This is deliberately not a job inside ci.yml, for three reasons that are
+# properties of the trigger, not of the check:
+#
+#   1. `pull_request.paths` is a workflow-level filter. Hanging it off ci.yml
+#      would skip the test matrix, the package build and the contracts on every
+#      pull request that does not touch a dependency file, which is most of
+#      them. The filter is wanted for THIS check only.
+#   2. The weekly schedule exists because advisories are published against
+#      versions that do not change. Running the weekly pass through ci.yml would
+#      also rebuild the container images and check out two sibling products once
+#      a week for no reason.
+#   3. `contracts/ci-source-epochs.json` and scripts/ci_source_epoch.py pin the
+#      CI job list that the `validated source` receipt promises consumers. This
+#      check is not part of that promise, and adding a job there to satisfy an
+#      advisory reader would quietly change what a receipt claims.
+#
+# What it is not: `uv lock --check` in the `lock` job proves the lock resolves
+# and matches pyproject.toml. It does not evaluate `[tool.uv]
+# constraint-dependencies` at all (measured 2026-11-11 on uv 0.11.3 and 0.13.7:
+# a lock pinning certifi 2026.6.17 with a `certifi>=2026.10.19` floor passes),
+# so the floor added in #216 is a re-lock guard. Neither job substitutes for
+# the other; one is a consistency check, this one is a vulnerability check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Only a dependency change can change the answer. A pull request that
+    # touches none of these does not run this workflow at all.
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - scripts/check_dependency_advisories.py
+      - tests/test_dependency_advisories.py
+      - .github/workflows/dependency-audit.yml
+  schedule:
+    # Advisories are published against versions that never change, so a week
+    # with no commit can still turn this red. Monday, 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: locked dependencies (critical/high)
+    runs-on: ubuntu-latest
+    # An audit of ~100 pinned requirements against PyPI plus a handful of OSV
+    # lookups finishes in under a minute. Ten minutes is the runaway ceiling,
+    # not the expectation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      # Same uv as deploy/Dockerfile, so the export is produced by the resolver
+      # the runtime image uses.
+      - run: python -m pip install -U pip uv==0.11.3
+      - name: Export the locked dependency set
+        # The same set the runtime image installs: every extra from the lock,
+        # project itself excluded because it is not published to an index.
+        run: |
+          set -euo pipefail
+          uv export --frozen --format requirements-txt --no-hashes \
+            --all-extras --no-emit-project > requirements-locked.txt
+          echo "exported $(grep -c '==' requirements-locked.txt) pinned requirements"
+          # A green audit over an empty or truncated export is the failure mode
+          # this gate exists to prevent, so the input is checked before it is
+          # audited rather than trusted afterwards.
+          for required in httpx certifi fastapi uvicorn python-telegram-bot; do
+            grep -q "^${required}==" requirements-locked.txt || {
+              echo "::error title=Export::requirements-locked.txt is missing ${required}"
+              exit 1
+            }
+          done
+      - name: Audit the locked set
+        # pip-audit exits 1 when it finds an advisory and 1 when it fails, so
+        # the status is passed to the gate instead of being read as a verdict.
+        run: |
+          set -euo pipefail
+          status=0
+          uv run --no-project --python 3.11 --with pip-audit==2.10.1 \
+            python -m pip_audit -r requirements-locked.txt \
+            --no-deps --strict --progress-spinner off \
+            --format json -o pip-audit.json || status=$?
+          echo "pip-audit exit status: ${status}"
+          echo "PIP_AUDIT_STATUS=${status}" >> "$GITHUB_ENV"
+      - name: Fail on critical, high or unreadable advisories
+        run: python scripts/check_dependency_advisories.py pip-audit.json --audit-exit "${PIP_AUDIT_STATUS}"
+      - name: Keep the audit report
+        # The report is the evidence for both outcomes. A red run that cannot be
+        # inspected is a red run somebody will re-run until it is green.
+        # `run_attempt` is in the name because an artifact name must be unique
+        # within a run: without it, re-running a failed job after the advisory
+        # was fixed fails on the upload instead of reporting the new audit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-audit-report-${{ github.run_attempt }}
+          path: |
+            pip-audit.json
+            requirements-locked.txt
+          if-no-files-found: warn
