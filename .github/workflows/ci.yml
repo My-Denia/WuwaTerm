@@ -124,7 +124,14 @@ jobs:
       # hygiene, architecture, API contract, ruff, then the suite.
       # Listing the gates here as separate steps is what let CI and the
       # documentation drift apart; the list lives in scripts/validate.py now.
-      - run: python scripts/validate.py
+      # Coverage measurement and regression floor are enforced on the baseline
+      # Python 3.11 job only, avoiding the wall-clock cost on every matrix leg.
+      - name: Validate with coverage floor (Python 3.11)
+        if: matrix.python-version == '3.11'
+        run: python scripts/validate.py --cov
+      - name: Validate
+        if: matrix.python-version != '3.11'
+        run: python scripts/validate.py
 
   lock:
     needs: source

@@ -21,7 +21,12 @@ file's location and every step is run there.
     python scripts/validate.py            # everything, in order
     python scripts/validate.py --list     # what it would run, runs nothing
     python scripts/validate.py --quick    # everything except the test suite
+    python scripts/validate.py --cov      # run tests with coverage and floor gate
     python scripts/validate.py --only ruff
+
+The ``--cov`` flag measures test coverage and enforces the regression floor
+during the pytest step by passing ``--cov=src --cov-report=term-missing``.
+It cannot be combined with ``--quick``, which skips the test suite entirely.
 
 Exit status is 0 only when every selected step passed. The first failing step
 stops the run and its name is printed, so the output says which gate failed
@@ -99,9 +104,28 @@ def selected_steps(args: argparse.Namespace) -> list[Step]:
                 f"validate: unknown step {args.only!r}; known steps: "
                 + ", ".join(by_name)
             )
-        return [by_name[args.only]]
-    if args.quick:
+        steps = [by_name[args.only]]
+    elif args.quick:
         steps = [step for step in steps if step.name not in {"pytest"}]
+
+    if getattr(args, "cov", False):
+        steps = [
+            Step(
+                step.name,
+                (
+                    "the repository test suite is red or coverage falls below the floor"
+                    if step.name == "pytest"
+                    else step.meaning
+                ),
+                (
+                    [*step.argv, "--cov=src", "--cov-report=term-missing"]
+                    if step.name == "pytest"
+                    else step.argv
+                ),
+                step.cwd,
+            )
+            for step in steps
+        ]
     return steps
 
 
@@ -159,11 +183,25 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the test suites; the fast gates only",
     )
     parser.add_argument(
+        "--cov",
+        action="store_true",
+        help="measure test coverage and enforce regression floor in the pytest step",
+    )
+    parser.add_argument(
         "--only",
         metavar="NAME",
         help="run a single step by name",
     )
     args = parser.parse_args(argv)
+
+    if args.quick and args.cov:
+        parser.error(
+            "--cov cannot be combined with --quick (coverage requires running the test suite)"
+        )
+    if args.only and args.only != "pytest" and args.cov:
+        parser.error(
+            f"--cov cannot be combined with --only {args.only!r} (coverage applies only to the pytest step)"
+        )
 
     steps = selected_steps(args)
     if args.list_only:
