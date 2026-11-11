@@ -40,7 +40,7 @@ green at roughly 1028 tests.
 ## Desktop client and API compatibility
 
 [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop source, builds, support and
-release process. The independent [v0.3.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0) is unsigned.
+release process. The independent [v0.4.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0) is unsigned.
 Core CI tests the current `/v1` API and a real nonempty review report against
 the pinned Windows consumer, without importing Qt or the client transport.
 The `api_version` in `/v1/meta` identifies the protocol; `service_version`

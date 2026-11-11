@@ -17,7 +17,7 @@ release. That boundary has not moved.
   `v0.7.2` is the latest published release before it, then `v0.7.1` and
   `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly before any release
   command below.
-- Windows product: [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0), released independently.
+- Windows product: [v0.4.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -85,7 +85,7 @@ notes; do not let "images are published" be read as "no checkout needed".
 ## Independent Windows client release
 
 [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns its own build and release workflow.
-The [v0.3.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0) is unsigned; see its repository for
+The [v0.4.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0) is unsigned; see its repository for
 current release instructions and SmartScreen guidance. Existing Core bundled
 release assets remain available unchanged.
 
