@@ -57,6 +57,20 @@ dev = [
 wuwaterm = "wuwaterm.cli:main"
 wuwaterm-api = "wuwaterm_api.cli:main"
 
+[tool.uv]
+# certifi is transitive (httpx -> httpcore/certifi) and nobody imports it
+# directly, so it is not a project dependency. The floor is here because the
+# bundled CA store is what the bot and API actually trust when httpx opens TLS
+# to Telegram and the LLM endpoints: 2026.6.17 still ships the emSign ECC
+# Root CA - G3 chain whose intermediates had compromised keys (PYSEC-2026-4320
+# / GHSA-6q48-6c7w-9gw2). 2026.10.18 dropped the affected roots and 2026.10.19
+# put back the ones that were not compromised, so the floor is the latter.
+# This is enforced when the lock is resolved, not by `uv lock --check`: a lock
+# pinning certifi below the floor still passes `--check` under both uv 0.11.3
+# and 0.13.7 (measured 2026-11-11), so the CI job that runs `uv lock --check`
+# is a drift check, not a vulnerability gate.
+constraint-dependencies = ["certifi>=2026.10.19"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
