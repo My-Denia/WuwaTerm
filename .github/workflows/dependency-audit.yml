@@ -100,10 +100,13 @@ jobs:
       - name: Keep the audit report
         # The report is the evidence for both outcomes. A red run that cannot be
         # inspected is a red run somebody will re-run until it is green.
+        # `run_attempt` is in the name because an artifact name must be unique
+        # within a run: without it, re-running a failed job after the advisory
+        # was fixed fails on the upload instead of reporting the new audit.
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: dependency-audit-report
+          name: dependency-audit-report-${{ github.run_attempt }}
           path: |
             pip-audit.json
             requirements-locked.txt

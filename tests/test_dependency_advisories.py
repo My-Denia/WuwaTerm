@@ -321,6 +321,10 @@ def test_the_gate_decides_and_the_report_is_kept():
     keep = _step("Keep the audit report")
     assert keep["if"] == "always()"
     assert "pip-audit.json" in keep["with"]["path"]
+    # Artifact names must be unique inside one run, and a failed job gets
+    # re-run once the advisory is fixed; without the attempt the re-run fails
+    # on the upload instead of reporting the new audit.
+    assert keep["with"]["name"].endswith("-${{ github.run_attempt }}")
 
     assert _workflow()["permissions"] == {"contents": "read"}
     assert int(_job()["timeout-minutes"]) <= 10
