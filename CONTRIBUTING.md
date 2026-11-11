@@ -122,7 +122,8 @@ green run here is necessary and not sufficient — see the job list further down
 
 ```bash
 python scripts/validate.py --list        # what it would run; runs nothing
-python scripts/validate.py --quick       # everything except the test suites
+python scripts/validate.py --quick       # everything except the test suite
+python scripts/validate.py --cov         # run tests with coverage and floor gate
 python scripts/validate.py --only ruff   # a single step by name
 ```
 
@@ -135,15 +136,24 @@ status. The steps, in order:
 | `architecture` | Guards import directions between layers | An import crosses a boundary the architecture forbids |
 | `api-contract` | Ties the published contract to the code | The committed `docs/api/openapi.json` no longer equals the document the application generates |
 | `ruff` | Correctness linting only — rules `E4`, `E7`, `E9`, `F` | An unused import, an undefined name, a broken f-string, or similar. Formatting is not enforced, so do not send a formatting sweep |
-| `pytest` | The repository test suite | The suite is red |
+| `typing` | Static type checking of `src/wuwaterm` against the baseline in `pyproject.toml` | The type checker reports an error outside the baseline in `pyproject.toml` |
+| `pytest` | The repository test suite | The suite is red (or under `--cov`, coverage falls below the floor) |
+
+`--cov` appends `--cov=src --cov-report=term-missing` to `pytest` and enforces
+the regression floor configured in `pyproject.toml` (`fail_under = 88`, measured
+baseline 91.37% combined on 2026-11-11, #211). Because coverage requires
+running the suite, `--cov` cannot be combined with `--quick`.
 
 [docs/validation.md](docs/validation.md) has the longer account, including the
 candidate-database checks that belong to a data refresh rather than to every
 commit.
 
-Continuous integration runs `python scripts/validate.py` on Python 3.11, 3.12,
-3.13 and 3.14 on `ubuntu-latest`, plus a uv lock-drift check, package audit,
-Docker boundary check, and contracts against pinned Web and Windows checkouts.
+Continuous integration runs `python scripts/validate.py` across the supported
+Python versions (3.11, 3.12, 3.13 and 3.14 on `ubuntu-latest`; pull requests
+run 3.11 and 3.14). The Python 3.11 leg runs `python scripts/validate.py --cov`
+to enforce the coverage floor without duplicating runtime overhead across every
+matrix leg. CI also runs a uv lock-drift check, package audit, Docker boundary
+check, and contracts against pinned Web and Windows checkouts.
 The full Site suite runs in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
 CI publishes nothing.
 
