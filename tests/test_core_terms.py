@@ -1,10 +1,11 @@
-"""Brand entry added through ``CORE_TERM_KEYS``: 飞讯摆件 -> WavesLine Decor.
+"""Entries added through ``CORE_TERM_KEYS``: 飞讯摆件 -> WavesLine Decor
+and the 3.7 version title.
 
 The three original members of ``CORE_TERM_KEYS`` are stable system names that
 no BinData Name field carries, so they are read straight from the pinned text
-map. This module covers the entry added beside them and, just as importantly,
-what the mechanism must not grow: a second record for the identical mirror key,
-or a bare fragment of the brand becoming a dictionary term.
+map. This module covers the entries added beside them and, just as importantly,
+what the mechanism must not grow: a second record for an identical mirror key,
+or a bare fragment of a brand or title becoming a dictionary term.
 
 The whole build path is real here: a fixture in the pinned Arikatsu layout goes
 through ``iter_records`` and ``create_database`` into ``TermService``, and the
@@ -26,9 +27,17 @@ from wuwaterm.db import connect, create_database
 from wuwaterm.lookup import TermService
 from wuwaterm.normalize import normalize_text
 from wuwaterm.sentence import SentenceTranslator
+from wuwaterm.telegram_html import protect_telegram_html
 
 BRAND_ZH = "飞讯摆件"
 BRAND_EN = "WavesLine Decor"
+# The official saved pair for the 3.7 version title, verbatim from the pinned
+# snapshot: U+FF0C inside the Chinese title, ASCII comma inside the English one.
+VERSION_ZH = "镜锁妄世，心照红尘"
+VERSION_EN = "Prism's Illusion, Heart's Illumination"
+# Bare achievement name: the same snapshot's other official wording.
+BARE_VERSION_ZH = "心照红尘"
+BARE_VERSION_EN = "To the Mortal World, a Burning Heart"
 
 ORIGINAL_CORE_KEYS = (
     "LoadingTipsText_1005_Title",
@@ -45,6 +54,11 @@ UPSTREAM_TEXT = {
     "OccupationConfig_漂泊者_Name": ("漂泊者", "Rover"),
     "ItemType_ChatCharm": (BRAND_ZH, BRAND_EN),
     "PrefabTextItem_2083276822_Text": (BRAND_ZH, BRAND_EN),
+    "Advertising_VersionTitle_37": (VERSION_ZH, VERSION_EN),
+    # Mirror key carrying the identical pair, and the bare achievement name
+    # with different official English: neither may become a second row.
+    "LoadingTipsText_901401_Title": (VERSION_ZH, VERSION_EN),
+    "Achievement_200691_Name": (BARE_VERSION_ZH, BARE_VERSION_EN),
 }
 
 
@@ -100,7 +114,11 @@ def test_chat_charm_key_registers_one_core_term_row(core_term_db: Path):
     rows = _direct_rows(core_term_db)
 
     # The mirror key holds the same pair upstream and is still not a second row.
-    assert set(rows) == {*ORIGINAL_CORE_KEYS, "ItemType_ChatCharm"}
+    assert set(rows) == {
+        *ORIGINAL_CORE_KEYS,
+        "ItemType_ChatCharm",
+        "Advertising_VersionTitle_37",
+    }
 
     row = rows["ItemType_ChatCharm"]
     # Same category, priority and normalisation path as the three keys that
@@ -161,12 +179,95 @@ def test_bare_brand_word_is_not_a_dictionary_term(core_term_db: Path):
     assert bare.locks == ()
 
 
+def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
+    core_term_db: Path,
+):
+    rows = _direct_rows(core_term_db)
+
+    # The mirror key carries the identical pair and the bare 心照红尘 has its
+    # own different official English; neither is a dictionary entry.
+    assert set(rows) == {
+        *ORIGINAL_CORE_KEYS,
+        "ItemType_ChatCharm",
+        "Advertising_VersionTitle_37",
+    }
+
+    row = rows["Advertising_VersionTitle_37"]
+    assert row["category"] == "core_term"
+    assert row["priority"] == CATEGORY_ORDER["core_term"]
+    assert (row["zh"], row["en"]) == (VERSION_ZH, VERSION_EN)
+    assert row["zh_norm"] == normalize_text(VERSION_ZH)
+    assert row["en_norm"] == normalize_text(VERSION_EN)
+
+    service = TermService(core_term_db)
+    # Lookup keys are NFKC-folded on both sides, so the title is exact in the
+    # saved spelling and in the ASCII-comma spelling a user may type.
+    for zh in (VERSION_ZH, "镜锁妄世,心照红尘"):
+        zh_hit = service.lookup_exact(zh)
+        assert zh_hit.exact
+        assert zh_hit.best.entry.en == VERSION_EN
+    en_hit = service.lookup_exact(VERSION_EN)
+    assert en_hit.exact
+    assert en_hit.best.entry.zh == VERSION_ZH
+    assert not service.lookup_exact(BARE_VERSION_ZH).exact
+
+
+def test_version_title_references_and_locks_while_html_stays_raw_exact(
+    core_term_db: Path,
+):
+    translator = SentenceTranslator(core_term_db)
+
+    # The announcement line keeps its U+FF0C; prepare_text folds it to ASCII,
+    # so this reference exists only because the prepared plain-text path also
+    # compares the stored raw surface's NFKC spelling (the flag the translate
+    # path passes). Bare 心照红尘 stays out of the dictionary and out of refs.
+    zh_source = translator.prepare_text(f"全新3.7版本「{VERSION_ZH}」即将开启！")
+    assert "，" not in zh_source and "," in zh_source
+    zh_locked = translator._lock_terms_with_references(
+        zh_source, to_chinese=False, allow_nfkc_spelling=True
+    )
+    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in zh_locked.references
+    bare = translator._lock_terms_with_references(
+        translator.prepare_text(f"「{BARE_VERSION_ZH}」即将开启！"),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    assert bare.references == ()
+
+    # en→zh keeps the pair as one span; the comma inside the title does not
+    # split it, and restore returns the official Chinese title.
+    en_source = translator.prepare_text(f"Version 3.7 {VERSION_EN} is coming.")
+    en_locked = translator._lock_terms_with_references(en_source, to_chinese=True)
+    assert len(en_locked.locks) == 1
+    placeholder, lock_zh, lock_en = en_locked.locks[0]
+    assert (lock_zh, lock_en) == (VERSION_ZH, VERSION_EN)
+    assert en_locked.locked_text == f"Version 3.7 {placeholder} is coming."
+    assert VERSION_ZH in en_locked.restore(en_locked.locked_text, to_en=False)
+
+    # Telegram HTML is not prepared, so its raw U+FF0C text node matches the
+    # raw dictionary surface exactly. An ASCII-comma variant inside HTML has
+    # no NFKC candidate by design (protected text keeps exact matching): that
+    # is a stated source boundary, not full coverage.
+    raw_html = protect_telegram_html(f"<b>全新3.7版本「{VERSION_ZH}」即将开启！</b>")
+    raw_locked = translator._lock_protected_terms_with_references(
+        raw_html.neutral, to_chinese=False
+    )
+    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in raw_locked.references
+
+    ascii_html = protect_telegram_html(
+        "<b>全新3.7版本「镜锁妄世,心照红尘」即将开启！</b>"
+    )
+    ascii_locked = translator._lock_protected_terms_with_references(
+        ascii_html.neutral, to_chinese=False
+    )
+    assert ascii_locked.references == ()
+
+
 def test_missing_upstream_key_still_skips_and_keeps_the_original_three(
     tmp_path: Path,
 ):
-    texts = {
-        key: pair for key, pair in UPSTREAM_TEXT.items() if key != "ItemType_ChatCharm"
-    }
+    added_keys = {"ItemType_ChatCharm", "Advertising_VersionTitle_37"}
+    texts = {key: pair for key, pair in UPSTREAM_TEXT.items() if key not in added_keys}
 
     rows = _direct_rows(_build(tmp_path, texts))
 
