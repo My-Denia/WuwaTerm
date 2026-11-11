@@ -21,8 +21,9 @@ here and a green matrix job are the same claim, on the same file. Before it
 existed, CI carried one list, the README a shorter one, and this page a third,
 and a gate added to one of them was invisible in the others.
 
-It is **not** the whole pull request. CI separately checks the lock, package,
-Docker boundary, and contracts against pinned Web and Windows checkouts. Windows
+It is **not** the whole pull request. CI separately checks the lock, the
+package, the Docker boundary, the contracts against pinned Web and Windows
+checkouts, and the locked dependency set for published advisories. Windows
 build and release validation runs in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows).
 
 `.github/workflows/selfhost-smoke.yml` runs when the pull request changes
@@ -33,6 +34,49 @@ exact lookup, one sentence translation against a mock model endpoint, and a
 credential-store backup and restore. It is the only gate in this repository
 that runs the documented install instead of reading it, which is exactly the
 class of defect the text gates cannot see.
+
+## Dependency Advisories
+
+`.github/workflows/dependency-audit.yml` is the gate that turns the locked
+dependency set into a verdict. It exports the same resolution the runtime image
+installs (`uv export --frozen`, every extra) and runs a version-pinned
+`pip-audit` over that file. Critical and high advisories fail the job; medium
+and low are printed with their package, advisory ID and fix version and do not
+turn it red, because a gate that is red for things it is not asking anyone to
+change stops being read. An advisory the gate cannot classify fails too: a
+version nobody can label is not evidence of a clean set.
+
+| Event | Runs when |
+| --- | --- |
+| push to `main` | always |
+| pull request | `pyproject.toml`, `uv.lock`, the gate script, its test, or the workflow itself changed |
+| schedule | Monday 04:17 UTC. Advisories are published against versions that do not change, so a week without a commit can still turn this red |
+| `workflow_dispatch` | manual |
+
+It runs outside `ci.yml` for a trigger reason, not a check reason: a
+`pull_request.paths` filter is workflow-level, so hanging this off `ci.yml`
+would skip the test matrix on most pull requests, and a weekly schedule there
+would rebuild the container images every Monday. The weekly and pull-request
+answers are the same check, on the same lock.
+
+Two things it does **not** claim:
+
+- It is not a lock check, and the `lock` job is not an advisory check.
+  `uv lock --check` does not evaluate `[tool.uv] constraint-dependencies` at all
+  (a lock pinning `certifi 2026.6.17` next to a `certifi>=2026.10.19` floor
+  passes it, measured 2026-11-11 under uv 0.11.3 and 0.13.7, #217). The floor
+  added in #216 is a re-lock guard; this job is what is red while the lock
+  still carries a bad version.
+- It only knows what PyPI and OSV publish. Vendored trees, patched copies
+  inside an image, non-PyPI indexes, and binaries downloaded from source URLs
+  are outside what `pip-audit -r` can see. Platform markers resolve for the
+  audit platform, so pins that only apply on Windows are not in the Linux
+  export that gets audited.
+
+`--all-extras` is deliberate: a vulnerable test runner or build helper is a
+defect in this repository even though it never reaches the runtime image.
+`tests/test_dependency_advisories.py` exercises the classifier and the workflow
+contract offline, so the gate's own behaviour is part of the suite it runs in.
 
 The READMEs used to carry their own command block, and it was **not**
 equivalent: it predated both the linter and the API-contract gate, so following
