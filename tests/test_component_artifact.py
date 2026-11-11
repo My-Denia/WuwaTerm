@@ -29,6 +29,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import component_artifact as art  # noqa: E402
 import install_probe  # noqa: E402
 
+# Every call here runs with descriptor 9 closed, the state the build script
+# establishes with `exec 9>&-` before it touches an artifact entry point.
+pytestmark = pytest.mark.closed_fd9
+
 SITE = "/app/.venv/lib/python3.11/site-packages"
 PROBE_BYTES = (ROOT / "scripts" / "install_probe.py").read_bytes()
 ENTRYPOINT = b"#!/bin/sh\nexec \"$@\"\n"
@@ -352,22 +356,6 @@ class FakeDocker:
 
     def inspect_image(self, image_id: str):
         return self.images.get(image_id)
-
-
-@pytest.fixture(autouse=True)
-def no_inherited_fd9():
-    """Mutating entry points refuse FD9; park a runner-inherited FD9 for each test."""
-    try:
-        saved = os.dup(9)
-    except OSError:
-        yield
-        return
-    os.close(9)
-    try:
-        yield
-    finally:
-        os.dup2(saved, 9)
-        os.close(saved)
 
 
 @pytest.fixture
@@ -818,7 +806,8 @@ def test_mutating_entry_points_refuse_inherited_fd9(fx: Fixture) -> None:
         os.dup2(fd, 9)
         os.close(fd)
     try:
-        for call in (lambda: art.acquire(verified.path, fx.root, docker=FakeDocker()),
+        for call in (lambda: art.begin_delivery(fx.delivery, art.new_id(), fx.product),
+                     lambda: art.acquire(verified.path, fx.root, docker=FakeDocker()),
                      lambda: art.cancel(fx.root, fx.attempt_id),
                      lambda: art.recover(fx.root, fx.attempt_id, docker=FakeDocker())):
             with pytest.raises(art.ArtifactError, match="descriptor 9"):
@@ -827,6 +816,43 @@ def test_mutating_entry_points_refuse_inherited_fd9(fx: Fixture) -> None:
     finally:
         os.close(9)
     assert not (fx.root / ".deployments" / "artifacts" / "attempts").exists()
+
+
+def test_call_phase_runs_with_fd9_closed(fx: Fixture) -> None:
+    """Descriptor 9 is free here, so this module's entry-point calls match a deploy.
+
+    Asserted rather than assumed because the number has two very different
+    owners depending on the machine: a runner that passes one in, or pytest's
+    own fd capture when nothing was inherited. Both have to leave the entry
+    points a closed 9 during the call, and neither may be left holding a number
+    that was taken away from under it.
+    """
+    with pytest.raises(OSError):
+        os.fstat(9)
+    verified = fx.seal()
+    assert art.acquire(verified.path, fx.root, docker=FakeDocker())["receipt"]["acquisition_id"]
+
+
+def test_a_session_without_an_inherited_descriptor_finishes_green() -> None:
+    """The reported breakage: no inherited fd 9 at all, which is what a local run has.
+
+    ``scripts/validate.py`` spawns the suite with ``subprocess`` and its default
+    ``close_fds``, so the tests see descriptors 0-2 and nothing else. That is
+    the condition that failed: pytest's capture file landed on 9, the module's
+    fixture closed it, and every capture restore afterwards raised EBADF. Only
+    the descriptor-9 tests run here, so this pins the failure without running
+    the whole gate.
+    """
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith(("COV_CORE", "PYTEST_"))}
+    module = Path(__file__).resolve()
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+         f"{module}::test_build_delivery_closes_fd9_before_anything_else",
+         f"{module}::test_mutating_entry_points_refuse_inherited_fd9",
+         f"{module}::test_call_phase_runs_with_fd9_closed"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=False, timeout=300)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_build_delivery_closes_fd9_before_anything_else(tmp_path: Path) -> None:
