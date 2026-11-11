@@ -171,6 +171,58 @@ def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
     )
 
 
+def _nfkc_spelling(source: str) -> str:
+    """Return the pure NFKC spelling of a dictionary surface.
+
+    ``normalize_text`` also removes every space and casefolds, which would
+    compare different text. Prepared plain input keeps its spacing and case,
+    so only the NFKC step describes how a raw surface can occur there.
+    """
+    return unicodedata.normalize("NFKC", source)
+
+
+def _admissible_nfkc_sources(
+    sources: dict[str, tuple[str, str, str]],
+    variants: list[tuple[str, tuple[str, str, str]]],
+    excluded: frozenset[str],
+) -> frozenset[str]:
+    """Return raw surfaces whose pure-NFKC spelling is safe to compare too.
+
+    Prepared plain text is NFKC while dictionary surfaces are stored raw, so
+    a surface such as ``镜锁妄世，心照红尘`` never occurs in prepared text. The
+    runtime may additionally locate its NFKC spelling, but only when that
+    spelling is unambiguous and not excluded:
+
+    - neither the raw surface nor the spelling is excluded, so a spelling
+      change cannot bypass either exclusion metadata key;
+    - every surface that already owns the spelling (another raw surface or a
+      synthesized case variant) restores the same official pair. A
+      different-official collision keeps the original exact behavior and
+      adds no candidate instead of choosing a new winner by iteration order.
+
+    Only the runtime's prepared plain-text paths consult this set; the
+    selector's default, the builder's corpus measurement and protected text
+    keep exact matching.
+    """
+    spellings = {source: _nfkc_spelling(source) for source in sources}
+    changed = {source for source, spelling in spellings.items() if spelling != source}
+    if not changed:
+        return frozenset()
+    owners: dict[str, set[tuple[str, str]]] = {}
+    for source, official in sources.items():
+        owners.setdefault(spellings[source], set()).add((official[0], official[1]))
+    for surface, official in variants:
+        owners.setdefault(surface, set()).add((official[0], official[1]))
+    admitted: set[str] = set()
+    for source in changed:
+        spelling = spellings[source]
+        if not spelling or source in excluded or spelling in excluded:
+            continue
+        if len(owners.get(spelling, ())) == 1:
+            admitted.add(source)
+    return frozenset(admitted)
+
+
 # Categories whose English surfaces also lock when typed all-lowercase or
 # all-caps. On the 3.7 dictionary resonator surfaces almost never appear in
 # another casing in official English text, while speaker, item, skill and
@@ -292,6 +344,50 @@ def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
     return True
 
 
+def _matched_span_ok(
+    context_text: str,
+    context_offset: int,
+    start: int,
+    end: int,
+    spelling: str,
+    official: tuple[str, str],
+) -> bool:
+    """Apply the existing matching gates to the spelling actually found.
+
+    ASCII word boundaries are decided against the CONTEXT the match lives in
+    (the full visible text for HTML segments, the text itself for plain
+    input): an invisible tag between "Echo" and "s" (visible "Echos") must
+    not make the glued surface look word-bounded, and text before an opening
+    tag must not either. Plain callers pass (text, 0), so their behavior is
+    bit-identical.
+
+    ``spelling`` is the matched text: for an exact surface it equals the
+    dictionary surface; for the runtime's NFKC comparison candidate it is the
+    prepared spelling, so the span length, ASCII edges and single-character
+    context all follow the text that is actually present.
+    """
+    return (
+        _ascii_word_boundaries_ok(
+            context_text, context_offset + start, context_offset + end, spelling
+        )
+        and (
+            spelling in official
+            or _case_variant_boundaries_ok(
+                context_text, context_offset + start, context_offset + end
+            )
+        )
+        and (
+            len(spelling) > 1
+            or single_character_name_context_ok(
+                context_text, context_offset + start, context_offset + end
+            )
+        )
+        and not crosses_cjk_word_boundary(
+            context_text, context_offset + start, context_offset + end
+        )
+    )
+
+
 def select_term_spans(
     text: str,
     lockable: tuple[tuple[str, tuple[str, str]], ...],
@@ -299,6 +395,7 @@ def select_term_spans(
     context_offset: int,
     *,
     allow_plural_inflection: bool = False,
+    nfkc_spelling_sources: frozenset[str] = frozenset(),
 ) -> list[_TermSpan]:
     """Return the term spans ``text`` locks, ordered by start position.
 
@@ -313,38 +410,22 @@ def select_term_spans(
     It is enabled only by the translation paths that already know the target
     is Chinese; every other caller (public ``lock_terms``, the builder's
     exclusion mining) keeps exact current behavior.
+
+    ``nfkc_spelling_sources`` is the runtime's explicit prepared-plain-text
+    opt-in, default empty: for each raw surface in the set, its pure NFKC
+    spelling is also located when that spelling differs, and the span covers
+    the actual matched text while keeping the raw dictionary surface. The
+    runtime supplies only surfaces whose spelling is unambiguous and not
+    excluded; the builder measurement, protected text and every other caller
+    stay exact.
     """
     spans: list[_TermSpan] = []
     for order, (source, official) in enumerate(lockable):
         start = text.find(source)
         while start != -1:
             end = start + len(source)
-            if (
-                # ASCII word boundaries are decided against the CONTEXT the
-                # match lives in (the full visible text for HTML segments,
-                # the text itself for plain input): an invisible tag between
-                # "Echo" and "s" (visible "Echos") must not make the glued
-                # surface look word-bounded, and text before an opening tag
-                # must not either. Plain callers pass (text, 0), so their
-                # behavior is bit-identical.
-                _ascii_word_boundaries_ok(
-                    context_text, context_offset + start, context_offset + end, source
-                )
-                and (
-                    source in official
-                    or _case_variant_boundaries_ok(
-                        context_text, context_offset + start, context_offset + end
-                    )
-                )
-                and (
-                    len(source) > 1
-                    or single_character_name_context_ok(
-                        context_text, context_offset + start, context_offset + end
-                    )
-                )
-                and not crosses_cjk_word_boundary(
-                    context_text, context_offset + start, context_offset + end
-                )
+            if _matched_span_ok(
+                context_text, context_offset, start, end, source, official
             ):
                 spans.append(
                     _TermSpan(
@@ -357,13 +438,44 @@ def select_term_spans(
                 )
             start = text.find(source, start + 1)
 
+    # The runtime's prepared plain-text candidate: the dictionary surface is
+    # raw, the text is NFKC. Only surfaces the runtime admitted are compared
+    # through their other spelling, and the span still covers the text that
+    # is actually there while keeping the raw source for reference identity.
+    if nfkc_spelling_sources:
+        # Preserve an existing exact match's source identity at the same bounds.
+        exact_bounds = {(span.start, span.end) for span in spans}
+        for order, (source, official) in enumerate(lockable):
+            if source not in nfkc_spelling_sources:
+                continue
+            spelling = _nfkc_spelling(source)
+            if not spelling or spelling == source:
+                continue
+            start = text.find(spelling)
+            while start != -1:
+                end = start + len(spelling)
+                if (start, end) not in exact_bounds and _matched_span_ok(
+                    context_text, context_offset, start, end, spelling, official
+                ):
+                    spans.append(
+                        _TermSpan(
+                            start=start,
+                            end=end,
+                            source=source,
+                            official=official,
+                            order=order,
+                        )
+                    )
+                start = text.find(spelling, start + 1)
+
     if allow_plural_inflection:
-        # Plural spans join the same global longest selection as exact spans.
-        # Only exact English surfaces inflect, so ``source in official`` holds
-        # and the case-variant boundary branch is not needed here; the suffix
-        # is consumed into the span, so ASCII word-glue right after the
-        # inflection ("Resonatorses") still vetoes the match. An exact span
-        # always wins a bounds tie: when the synthesized plural of one
+        # Plural spans join the same global longest selection as the spans
+        # selected above. Only exact English surfaces inflect, so
+        # ``source in official`` holds and the case-variant boundary branch is
+        # not needed here; the suffix is consumed into the span, so ASCII
+        # word-glue right after the inflection ("Resonatorses") still vetoes
+        # the match. A span selected before plural synthesis always wins a
+        # bounds tie: when the synthesized plural of one
         # surface is itself another exact dictionary surface (``Star`` vs
         # ``Stars`` -> 星星/群星, ``Luca`` vs ``Lucas``), the exact entry must
         # keep the span regardless of dictionary iteration order.
@@ -515,7 +627,9 @@ class SentenceTranslator:
         self._llm_client: httpx.AsyncClient | None = None
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
-        self._lockable_sources_cache: tuple[tuple[str, tuple[str, str, str]], ...] = ()
+        self._lockable_sources_cache: tuple[
+            tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
+        ] = ((), frozenset())
         self._source_categories_cache_key: tuple[object, ...] | None = None
         self._source_categories_cache: dict[str, str] = {}
 
@@ -540,14 +654,18 @@ class SentenceTranslator:
     def lock_terms(
         self, text: str, *, allow_plural_inflection: bool = False
     ) -> LockedSentence:
-        """Lock terms in ``text`` with exact-surface matching by default.
+        """Lock terms in prepared ``text``.
 
         ``allow_plural_inflection`` mirrors the translation paths' C1 opt-in
-        (en→zh plural locking); direction-less callers keep the default and
-        the exact current behavior.
+        (en→zh plural locking); direction-less callers keep the exact default.
+        Plain text is prepared here, so a raw dictionary surface may also be
+        compared through its pure NFKC spelling, exactly as the translation
+        paths do; the selector and the builder keep their exact default.
         """
         return self._lock_terms(
-            self.prepare_text(text), allow_plural_inflection=allow_plural_inflection
+            self.prepare_text(text),
+            allow_plural_inflection=allow_plural_inflection,
+            allow_nfkc_spelling=True,
         )
 
     def _lock_terms(
@@ -557,6 +675,7 @@ class SentenceTranslator:
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
         single_character_context: tuple[str, int] | None = None,
         allow_plural_inflection: bool = False,
+        allow_nfkc_spelling: bool = False,
         placeholder_prefix: str | None = None,
         placeholder_offset: int = 0,
     ) -> LockedSentence:
@@ -566,6 +685,7 @@ class SentenceTranslator:
             lockable=lockable,
             single_character_context=single_character_context,
             allow_plural_inflection=allow_plural_inflection,
+            allow_nfkc_spelling=allow_nfkc_spelling,
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=placeholder_offset,
         )
@@ -578,6 +698,7 @@ class SentenceTranslator:
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None = None,
         single_character_context: tuple[str, int] | None = None,
         allow_plural_inflection: bool = False,
+        allow_nfkc_spelling: bool = False,
         placeholder_prefix: str | None = None,
         placeholder_offset: int = 0,
     ) -> LockedSentence:
@@ -588,6 +709,9 @@ class SentenceTranslator:
         measurement. Only the model-facing translation paths call this, so a
         term whose meaning depends on the sentence, or whose English form has
         to inflect, stays visible instead of being replaced.
+
+        ``allow_nfkc_spelling`` is enabled only by the plain prepared-text
+        paths; protected text is not prepared and must not use the candidate.
         """
         return self._lock_terms_selected(
             text,
@@ -595,6 +719,7 @@ class SentenceTranslator:
             lockable=lockable,
             single_character_context=single_character_context,
             allow_plural_inflection=allow_plural_inflection,
+            allow_nfkc_spelling=allow_nfkc_spelling,
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=placeholder_offset,
         )
@@ -607,18 +732,26 @@ class SentenceTranslator:
         lockable: tuple[tuple[str, tuple[str, str]], ...] | None,
         single_character_context: tuple[str, int] | None,
         allow_plural_inflection: bool,
+        allow_nfkc_spelling: bool,
         placeholder_prefix: str | None,
         placeholder_offset: int,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
-            lockable = self._eligible_lockable_sources()
+            lockable, nfkc_sources = self._eligible_lockable_snapshot()
+        elif allow_nfkc_spelling:
+            nfkc_sources = self._nfkc_spelling_sources()
+        else:
+            nfkc_sources = frozenset()
+        if not allow_nfkc_spelling:
+            nfkc_sources = frozenset()
         selected = select_term_spans(
             text,
             lockable,
             context_text,
             context_offset,
             allow_plural_inflection=allow_plural_inflection,
+            nfkc_spelling_sources=nfkc_sources,
         )
         prefix = placeholder_prefix or _new_placeholder_prefix(text)
         # The span carries the official pair only; the category is needed to
@@ -740,12 +873,16 @@ class SentenceTranslator:
         seen_references: set[tuple[str, str, str, str]] = set()
         prefix = _new_placeholder_prefix(protected.for_model())
         for segment, offset in zip(segments, offsets, strict=True):
+            # Protected visible text skips plain preparation: its coordinates
+            # are the adapter's, so the raw-vs-NFKC comparison candidate
+            # applied to prepared plain text must not run here.
             if to_chinese is None:
                 locked = self._lock_terms(
                     segment,
                     lockable=lockable,
                     single_character_context=(context_text, offset),
                     allow_plural_inflection=allow_plural_inflection,
+                    allow_nfkc_spelling=False,
                     placeholder_prefix=prefix,
                     placeholder_offset=len(locks),
                 )
@@ -756,6 +893,7 @@ class SentenceTranslator:
                     lockable=lockable,
                     single_character_context=(context_text, offset),
                     allow_plural_inflection=allow_plural_inflection,
+                    allow_nfkc_spelling=False,
                     placeholder_prefix=prefix,
                     placeholder_offset=len(locks),
                 )
@@ -819,13 +957,20 @@ class SentenceTranslator:
         # (Chinese has no plural marking, so restoring the official zh term
         # is well-formed); zh->en and en->en keep exact-surface matching.
         if not _llm_configured():
-            locked = self._lock_terms(prepared, allow_plural_inflection=to_chinese)
+            locked = self._lock_terms(
+                prepared,
+                allow_plural_inflection=to_chinese,
+                allow_nfkc_spelling=True,
+            )
             return locked.restore(locked.locked_text, to_en=not to_chinese)
         # The model gets contextual references for the same spans (see
         # _lock_terms_with_references), so a term whose meaning or English
         # word form depends on the sentence is not overwritten.
         locked = self._lock_terms_with_references(
-            prepared, to_chinese=to_chinese, allow_plural_inflection=to_chinese
+            prepared,
+            to_chinese=to_chinese,
+            allow_plural_inflection=to_chinese,
+            allow_nfkc_spelling=True,
         )
         try:
             if to_chinese:
@@ -877,10 +1022,17 @@ class SentenceTranslator:
             if official:
                 return official
         if not _llm_configured():
-            locked = self._lock_terms(prepared, allow_plural_inflection=to_chinese)
+            locked = self._lock_terms(
+                prepared,
+                allow_plural_inflection=to_chinese,
+                allow_nfkc_spelling=True,
+            )
             return locked.restore(locked.locked_text, to_en=not to_chinese)
         locked = self._lock_terms_with_references(
-            prepared, to_chinese=to_chinese, allow_plural_inflection=to_chinese
+            prepared,
+            to_chinese=to_chinese,
+            allow_plural_inflection=to_chinese,
+            allow_nfkc_spelling=True,
         )
         try:
             if to_chinese:
@@ -1132,11 +1284,25 @@ class SentenceTranslator:
         return official
 
     def _eligible_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
+        return self._eligible_rows(self._lockable_sources())
+
+    @staticmethod
+    def _eligible_rows(
+        rows: tuple[tuple[str, tuple[str, str, str]], ...],
+    ) -> tuple[tuple[str, tuple[str, str]], ...]:
         return tuple(
             (source, (official[0], official[1]))
-            for source, official in self._lockable_sources()
+            for source, official in rows
             if _is_eligible_lockable(source, official)
         )
+
+    def _eligible_lockable_snapshot(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
+    ]:
+        rows, nfkc_sources = self._lockable_snapshot()
+        return self._eligible_rows(rows), nfkc_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
         path = self.service.db_path.resolve(strict=False)
@@ -1152,7 +1318,11 @@ class SentenceTranslator:
             provenance,
         )
 
-    def _read_lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
+    def _read_lockable_sources(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
+    ]:
         excluded = _free_text_exclusions(self.service.metadata())
         sources = _exact_lockable_sources(self.service.entries())
         # Case variants come after every exact source, so an exact surface
@@ -1160,11 +1330,14 @@ class SentenceTranslator:
         # computed before exclusions are removed, so an excluded surface still
         # blocks a variant equal to it and still counts for casefold ambiguity.
         variants = _case_variant_sources(sources, excluded)
+        # Same pre-exclusion snapshot: a spelling collision or exclusion still
+        # counts even when one of the colliding surfaces is later removed.
+        nfkc_sources = _admissible_nfkc_sources(sources, variants, excluded)
         for surface in excluded:
             sources.pop(surface, None)
         for variant, official in variants:
             sources.setdefault(variant, official)
-        return tuple(sources.items())
+        return tuple(sources.items()), nfkc_sources
 
     def _source_categories(self) -> dict[str, str]:
         """Surface -> category, cached with the already-loaded lockable rows.
@@ -1184,22 +1357,35 @@ class SentenceTranslator:
         return categories
 
     def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
+        return self._lockable_snapshot()[0]
+
+    def _nfkc_spelling_sources(self) -> frozenset[str]:
+        """Raw surfaces the prepared plain-text paths may also match by NFKC."""
+        return self._lockable_snapshot()[1]
+
+    def _lockable_snapshot(
+        self,
+    ) -> tuple[
+        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
+    ]:
         # Each source text (Chinese OR English form) maps to the official
         # (zh, en, category) record, retaining single-character name provenance.
         # The eligible lock pairs can be restored in either
         # direction. Cache by filesystem identity plus build provenance so an
         # atomic DB replacement invalidates the cache without repeated full
-        # terms-table reads during normal operation.
+        # terms-table reads during normal operation. The admissible NFKC
+        # spelling set is built from the same snapshot, so it cannot drift
+        # from the rows it augments.
         for _attempt in range(2):
             identity_before = self._lockable_sources_identity()
             if identity_before == self._lockable_sources_cache_key:
                 return self._lockable_sources_cache
-            sources = self._read_lockable_sources()
+            snapshot = self._read_lockable_sources()
             identity_after = self._lockable_sources_identity()
             if identity_before == identity_after:
                 self._lockable_sources_cache_key = identity_after
-                self._lockable_sources_cache = sources
-                return sources
+                self._lockable_sources_cache = snapshot
+                return snapshot
         # A DB that changed twice while being read is not safe to cache. The
         # caller still gets a fresh snapshot and the next call retries caching.
         return self._read_lockable_sources()

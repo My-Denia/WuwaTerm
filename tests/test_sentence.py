@@ -2791,3 +2791,368 @@ def test_html_tag_cannot_change_ascii_lock_eligibility_or_plural(
         protected, locked, locked.locked_text, to_en=False
     )
     assert restored == expected_restore
+
+
+# Runtime comparison surface: plain user text is NFKC-prepared, dictionary
+# surfaces stay raw. These tests lock through the prepared public paths and a
+# mock transport, so no model request leaves the process.
+NFKC_TITLE_ZH = "镜锁妄世，心照红尘"
+NFKC_TITLE_EN = "Prism's Illusion, Heart's Illumination"
+
+
+@pytest.fixture()
+def nfkc_surface_db(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord(
+                "core_term", "Synthetic.json", "31", "Synthetic_title",
+                NFKC_TITLE_ZH, NFKC_TITLE_EN,
+            ),
+            TermRecord("term", "Synthetic.json", "32", "Synthetic_kaisha", "㈱店", "Kaisha Store"),
+            TermRecord("term", "Synthetic.json", "33", "Synthetic_glimmer", "微光（稀有）", "Glimmer（Rare）"),
+            TermRecord("term", "Synthetic.json", "34", "Synthetic_common", "回声（常见）", "回声(常见)"),
+            TermRecord("term", "Synthetic.json", "35", "Synthetic_starlight", "星光（稀有）", "Starlight（Rare）"),
+        ],
+    )
+    return sample_db
+
+
+def test_prepared_fullwidth_title_locks_and_reaches_model(nfkc_surface_db, monkeypatch):
+    translator = SentenceTranslator(nfkc_surface_db)
+    source = f"本次更新加入了{NFKC_TITLE_ZH}相关说明。"
+    locked = translator.lock_terms(source)
+    assert [(zh, en) for _placeholder, zh, en in locked.locks] == [
+        (NFKC_TITLE_ZH, NFKC_TITLE_EN)
+    ]
+    assert locked.restore(locked.locked_text) == (
+        f"本次更新加入了{NFKC_TITLE_EN}相关说明。"
+    )
+
+    result, payload = _reference_payload(
+        monkeypatch, nfkc_surface_db, source, "notes", to_chinese=False
+    )
+    assert result == "notes"
+    assert payload["messages"][1]["content"] == translator.prepare_text(source)
+    system = payload["messages"][0]["content"]
+    assert f"{NFKC_TITLE_ZH} = {NFKC_TITLE_EN} (core_term)" in system
+    assert system.count(NFKC_TITLE_ZH) == 1
+
+
+def test_nfkc_expansion_covers_edges_repeats_and_word_boundaries(nfkc_surface_db):
+    translator = SentenceTranslator(nfkc_surface_db)
+    locked = translator.lock_terms("㈱店声骸㈱店")
+    assert len(locked.locks) == 3
+    assert locked.restore(locked.locked_text) == "Kaisha StoreEchoKaisha Store"
+    assert translator.lock_terms("xGlimmer（Rare）").locks == ()
+    assert translator.lock_terms("Glimmer（Rare）x").locks == ()
+    assert len(translator.lock_terms("Glimmer（Rare） 强化").locks) == 1
+
+
+def test_canonical_spelling_dedupes_same_official_but_not_a_collision(nfkc_surface_db):
+    locked = SentenceTranslator(nfkc_surface_db).lock_terms("获得回声（常见）道具")
+    assert [(zh, en) for _placeholder, zh, en in locked.locks] == [
+        ("回声（常见）", "回声(常见)")
+    ]
+    assert locked.restore(locked.locked_text, to_en=False) == "获得回声（常见）道具"
+    assert "回声（常见）" in SentenceTranslator(nfkc_surface_db)._nfkc_spelling_sources()
+
+    translator = SentenceTranslator(nfkc_surface_db)
+    source = translator.prepare_text("获得回声（常见）道具")
+    referenced = translator._lock_terms_with_references(source, to_chinese=False)
+    assert referenced.references == (
+        ("回声(常见)", "回声（常见）", "回声(常见)", "term"),
+    )
+
+    from wuwaterm.sentence import select_term_spans
+
+    official = ("回声（常见）", "回声(常见)")
+    spans = select_term_spans(
+        source,
+        ((official[0], official), (official[1], official)),
+        source,
+        0,
+        nfkc_spelling_sources=translator._nfkc_spelling_sources(),
+    )
+    assert len(spans) == 1
+    assert spans[0].source == "回声(常见)"
+    assert source[spans[0].start : spans[0].end] == spans[0].source
+
+    add_synthetic_terms(
+        nfkc_surface_db,
+        [
+            TermRecord("term", "Synthetic.json", "36", "Synthetic_kou", "甲（乙）", "Alpha Item"),
+            TermRecord("term", "Synthetic.json", "37", "Synthetic_kou_two", "甲(乙)", "Beta Item"),
+        ],
+    )
+    translator = SentenceTranslator(nfkc_surface_db)
+    collided = translator.lock_terms("前往甲（乙）地点。")
+    assert [(zh, en) for _placeholder, zh, en in collided.locks] == [
+        ("甲(乙)", "Beta Item")
+    ]
+    from wuwaterm.sentence import exact_lockable_sources, select_term_spans
+
+    lockable = exact_lockable_sources(translator.service.entries())
+    raw_text = "甲（乙）/甲（乙）"
+    raw = select_term_spans(raw_text, lockable, raw_text, 0)
+    assert [raw_text[span.start : span.end] for span in raw] == ["甲（乙）", "甲（乙）"]
+    assert [span.official for span in raw] == [("甲（乙）", "Alpha Item")] * 2
+    assert "甲（乙）" not in translator._nfkc_spelling_sources()
+
+
+def test_exclusion_keys_constrain_raw_and_canonical_spellings(nfkc_surface_db):
+    _set_zh_exclusions(
+        nfkc_surface_db,
+        _zh_exclusion_value(sorted([("微光(稀有)", 12, 0), ("星光（稀有）", 12, 0)])),
+    )
+    _set_exclusions(nfkc_surface_db, _exclusion_value([("Glimmer(Rare)", 12, 0)]))
+    translator = SentenceTranslator(nfkc_surface_db)
+
+    # Raw surface excluded, canonical spelling excluded in both metadata keys.
+    assert translator.lock_terms("星光（稀有）").locks == ()
+    assert translator.lock_terms("微光（稀有）").locks == ()
+    assert translator.lock_terms("Glimmer（Rare）").locks == ()
+    admitted = translator._nfkc_spelling_sources()
+    assert {"星光（稀有）", "微光（稀有）", "Glimmer（Rare）"}.isdisjoint(admitted)
+
+
+def test_protected_text_skips_the_candidate_but_keeps_raw_exact(nfkc_surface_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    translator = SentenceTranslator(nfkc_surface_db)
+    assert len(translator.lock_terms("微光（稀有）").locks) == 1
+    hidden = translator._lock_protected_terms_with_references(
+        protect_telegram_html("<b>微光(稀有)</b>").neutral, to_chinese=False
+    )
+    assert hidden.locks == () and hidden.references == ()
+    raw = translator._lock_protected_terms_with_references(
+        protect_telegram_html("<b>微光（稀有）</b>").neutral, to_chinese=False
+    )
+    assert ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term") in raw.references
+
+
+def test_prepare_outputs_keep_their_existing_whitespace_and_paragraphs(nfkc_surface_db):
+    translator = SentenceTranslator(nfkc_surface_db)
+    source = "第一段 微光（稀有）\n\n第二段 微光（稀有）"
+    assert translator.prepare_text(source) == "第一段 微光(稀有)\n第二段 微光(稀有)"
+    assert translator.prepare_text_keeping_paragraphs(source) == (
+        "第一段 微光(稀有)\n\n第二段 微光(稀有)"
+    )
+
+
+def test_canonical_candidate_keeps_bounds_identity_and_longest_selection(
+    nfkc_surface_db,
+):
+    from wuwaterm.sentence import select_term_spans
+
+    official = ("回声（常见）", "回声(常见)")
+    raw = "回声（常见）"
+    text = "获得回声（常见）后回声(常见)。"
+    spans = select_term_spans(
+        text, ((raw, official),), text, 0, nfkc_spelling_sources=frozenset({raw})
+    )
+    # Same length, different bounds: both occurrences survive in text order and
+    # both keep the raw dictionary surface and the official pair.
+    assert [(span.start, span.end) for span in spans] == [(2, 8), (9, 15)]
+    assert [span.source for span in spans] == [raw, raw]
+    assert [span.official for span in spans] == [official, official]
+
+    # An empty spelling set is still the exact contract (builder measurement).
+    assert select_term_spans("回声(常见)", ((raw, official),), "回声(常见)", 0) == []
+
+    add_synthetic_terms(
+        nfkc_surface_db,
+        [
+            TermRecord(
+                "term", "Synthetic.json", "38", "Synthetic_glimmer_short", "微光", "Glimmer"
+            ),
+        ],
+    )
+    translator = SentenceTranslator(nfkc_surface_db)
+    # The expanded candidate is longer than the exact surface inside it, so the
+    # existing global longest selection still wins, and the reference keeps the
+    # raw surface and its category.
+    prepared = translator.prepare_text("微光(稀有)")
+    locked = translator.lock_terms(prepared)
+    assert [(zh, en) for _placeholder, zh, en in locked.locks] == [
+        ("微光（稀有）", "Glimmer（Rare）")
+    ]
+    assert locked.restore(locked.locked_text) == "Glimmer（Rare）"
+    # The translation path opts in explicitly; its reference still carries the
+    # raw dictionary surface and the category read from that surface.
+    referenced = translator._lock_terms_with_references(
+        prepared, to_chinese=False, allow_nfkc_spelling=True
+    )
+    assert referenced.references == (
+        ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term"),
+    )
+
+
+def test_canonical_candidate_keeps_the_exact_span_gates():
+    from wuwaterm.sentence import select_term_spans
+
+    raw = "微光（稀有）"
+    official = ("微光（稀有）", "Glimmer（Rare）")
+    spelling = "微光(稀有)"
+
+    def spans(text):
+        return select_term_spans(
+            text, ((raw, official),), text, 0, nfkc_spelling_sources=frozenset({raw})
+        )
+
+    # The candidate is judged on the spelling that is actually in the text, so
+    # its eligibility equals the same spelling used as an exact surface.
+    for text in (
+        "微光(稀有)",
+        "强化微光(稀有)道具",
+        "é微光(稀有)",
+        "微光(稀有)é",
+    ):
+        candidate = spans(text)
+        exact = select_term_spans(text, ((spelling, official),), text, 0)
+        assert [(span.start, span.end) for span in candidate] == [
+            (span.start, span.end) for span in exact
+        ], text
+        assert all(span.source == raw for span in candidate)
+
+    # CJK neighbours are allowed; ASCII and accent-Latin glue are not.
+    assert [(span.start, span.end) for span in spans("微光(稀有)")] == [(0, 6)]
+    assert [(span.start, span.end) for span in spans("强化微光(稀有)道具")] == [(2, 8)]
+    assert spans("x微光(稀有)") == []
+    assert spans("é微光(稀有)") == []
+    assert spans("微光(稀有)x") == []
+    assert spans("微光(稀有)é") == []
+
+    # A length-changing spelling covers the text that is actually present.
+    expanding_raw = "㈱店"
+    expanded = select_term_spans(
+        "(株)店声骸",
+        ((expanding_raw, ("㈱店", "Kaisha Store")),),
+        "(株)店声骸",
+        0,
+        nfkc_spelling_sources=frozenset({expanding_raw}),
+    )
+    assert [(span.start, span.end) for span in expanded] == [(0, 4)]
+
+
+def test_canonical_candidate_leaves_case_and_plural_opt_in_rules_alone(
+    nfkc_surface_db, monkeypatch
+):
+    add_synthetic_terms(
+        nfkc_surface_db,
+        [
+            # Its NFKC spelling already belongs to a different official pair,
+            # so it is suspended instead of taking over that ownership.
+            TermRecord(
+                "resonator", "Synthetic.json", "40", "Synthetic_fullwidth_name",
+                "全角卡提希娅", "Ｃａｒｔｅｔｈｙｉａ",
+            ),
+            # Unique spelling: compared, but the case rules stay exact.
+            TermRecord(
+                "item", "Synthetic.json", "41", "Synthetic_zzz", "赞赞赞", "Ｚｚｚ"
+            ),
+        ],
+    )
+    translator = SentenceTranslator(nfkc_surface_db)
+    admitted = translator._nfkc_spelling_sources()
+    assert "Ｃａｒｔｅｔｈｙｉａ" not in admitted
+    assert "Ｚｚｚ" in admitted
+
+    # NFKC adds no casefold or case variant of its own.
+    assert translator.lock_terms("zzz").locks == ()
+    assert translator.lock_terms("ZZZ").locks == ()
+    assert [(zh, en) for _placeholder, zh, en in translator.lock_terms("Zzz").locks] == [
+        ("赞赞赞", "Ｚｚｚ")
+    ]
+    # The resonator case-variant rule still owns its own surface.
+    assert [
+        (zh, en) for _placeholder, zh, en in translator.lock_terms("cartethyia").locks
+    ] == [("卡提希娅", "Cartethyia")]
+
+    # Through the real translation path: the plural opt-in stays
+    # exact-English-surface only, so the canonical candidate is never
+    # inflected, while the real plural of the neighbouring term still locks and
+    # restores whole.
+    _identity_llm(monkeypatch)
+    assert translator.translate("微光(稀有) 和 Echoes", to_chinese=True) == (
+        "微光（稀有）和声骸"
+    )
+    assert translator.translate("Two Echoes", to_chinese=True) == "Two 声骸"
+    # A canonical candidate never grows an inflection: the trailing "s" is
+    # word glue for the spelling actually present (exact behaviour too).
+    assert translator.translate("微光(稀有)s", to_chinese=True) == "微光(稀有)s"
+
+
+def test_canonical_locking_leaves_lookup_decor_and_title_contracts(
+    nfkc_surface_db, monkeypatch
+):
+    add_synthetic_terms(
+        nfkc_surface_db,
+        [
+            TermRecord(
+                "core_term", "Synthetic.json", "42", "Synthetic_decor", "飞讯摆件",
+                "WavesLine Decor",
+            ),
+        ],
+    )
+    translator = SentenceTranslator(nfkc_surface_db)
+    service = translator.service
+
+    # Lookup already normalises both sides, so both spellings answer alike; the
+    # runtime candidate changes locking only, and adds no lookup alias.
+    raw_hit = service.lookup_exact("回声（常见）")
+    canonical_hit = service.lookup_exact("回声(常见)")
+    assert raw_hit.exact and canonical_hit.exact
+    assert [
+        (candidate.entry.zh, candidate.entry.en, candidate.entry.category)
+        for candidate in raw_hit.candidates
+    ] == [
+        (candidate.entry.zh, candidate.entry.en, candidate.entry.category)
+        for candidate in canonical_hit.candidates
+    ]
+
+    # The Decor core term has no NFKC change, so its exact path is untouched in
+    # both directions and it gains no candidate alias.
+    assert "飞讯摆件" not in translator._nfkc_spelling_sources()
+    decor_zh_source = translator.prepare_text("新版本上架了飞讯摆件。")
+    assert translator._lock_terms_with_references(
+        decor_zh_source, to_chinese=False
+    ).references == (("飞讯摆件", "飞讯摆件", "WavesLine Decor", "core_term"),)
+    decor_en_source = translator.prepare_text("Claim the new WavesLine Decor.")
+    decor_locked = translator._lock_terms_with_references(
+        decor_en_source,
+        to_chinese=True,
+        allow_plural_inflection=True,
+        allow_nfkc_spelling=True,
+    )
+    assert [(zh, en) for _placeholder, zh, en in decor_locked.locks] == [
+        ("飞讯摆件", "WavesLine Decor")
+    ]
+    assert decor_locked.restore(decor_locked.locked_text, to_en=False) == (
+        "Claim the new 飞讯摆件."
+    )
+
+    # The English title is one whole lock and restores to the official Chinese.
+    # These are exactly the flags translate() passes for a Chinese target.
+    title_source = translator.prepare_text(f"Version {NFKC_TITLE_EN} is live.")
+    title_locked = translator._lock_terms_with_references(
+        title_source,
+        to_chinese=True,
+        allow_plural_inflection=True,
+        allow_nfkc_spelling=True,
+    )
+    assert [(zh, en) for _placeholder, zh, en in title_locked.locks] == [
+        (NFKC_TITLE_ZH, NFKC_TITLE_EN)
+    ]
+    assert title_locked.restore(title_locked.locked_text, to_en=False) == (
+        f"Version {NFKC_TITLE_ZH} is live."
+    )
+
+    # Same result through the public translation path.
+    _identity_llm(monkeypatch)
+    assert translator.translate(f"Version {NFKC_TITLE_EN} is live.", to_chinese=True) == (
+        f"Version {NFKC_TITLE_ZH} is live."
+    )
+    assert translator.translate("Claim the new WavesLine Decor.", to_chinese=True) == (
+        "Claim the new 飞讯摆件."
+    )
