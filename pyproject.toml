@@ -78,7 +78,10 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q --strict-config --strict-markers -m 'not cross_component'"
-markers = ["cross_component: requires a pinned external product checkout"]
+markers = [
+  "cross_component: requires a pinned external product checkout",
+  "closed_fd9: the test call runs with file descriptor 9 closed, as build-delivery.sh runs the artifact tools",
+]
 
 [tool.ruff]
 # Ruff takes the target version from project.requires-python. Generated data,

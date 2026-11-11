@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,59 @@ from wuwaterm.builder import iter_records
 from wuwaterm.constants import get_source_profile
 from wuwaterm.data_source import SourceProvenance
 from wuwaterm.db import create_database
+
+
+def _fd9_is_open() -> bool:
+    try:
+        os.fstat(9)
+    except OSError:
+        return False
+    return True
+
+
+def _park_fd9() -> int | None:
+    """Close descriptor 9 for a marked call, returning what restores it.
+
+    The mutating artifact entry points refuse to run while file descriptor 9 is
+    open: that number is the deployment lock in ``scripts/build-delivery.sh``,
+    and a tool that inherits it can wait forever behind a deploy it does not
+    own. Tests that exercise those entry points therefore have to run in the
+    state the build script establishes with ``exec 9>&-``, which is what the
+    ``closed_fd9`` marker asks for.
+
+    The parking belongs to the call phase, not to a fixture. pytest suspends,
+    resumes and reads back its fd capture at the setup, call and teardown
+    boundaries, so a fixture would hold the number closed across a capture
+    resume. On a machine that inherits no descriptor 9 - the ordinary local
+    case, and the one ``scripts/validate.py`` produces with ``close_fds`` -
+    pytest's own capture temporary file is allocated on that very number, and
+    closing it makes the next capture restore raise EBADF for every test in the
+    session. Around the call the number is free exactly where the entry points
+    run, and it is handed back before pytest touches the file again.
+    """
+    if not _fd9_is_open():
+        return None
+    saved = os.dup(9)
+    os.close(9)
+    return saved
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_pyfunc_call(pyfuncitem: pytest.Function):
+    if pyfuncitem.get_closest_marker("closed_fd9") is None:
+        return (yield)
+    saved = _park_fd9()
+    try:
+        return (yield)
+    finally:
+        if saved is not None:
+            if _fd9_is_open():
+                # The call opened a descriptor of its own on the number. pytest
+                # needs the number itself back to read its capture, so the
+                # call's descriptor goes first.
+                os.close(9)
+            os.dup2(saved, 9)
+            os.close(saved)
 
 
 @pytest.fixture()
