@@ -384,3 +384,28 @@ def test_build_database_records_zh_exclusions_deterministically(
             if key.startswith("free_text_lock_exclusions")
         ]
     assert keys == ["free_text_lock_exclusions", "free_text_lock_exclusions_zh"]
+
+
+def test_measure_free_text_exclusions_stays_on_raw_surfaces(tmp_path: Path):
+    # The runtime can compare a raw surface through its pure NFKC spelling in
+    # prepared plain text; the builder measures the official raw corpus, so a
+    # canonical spelling in that corpus must not be counted as this surface.
+    profile = get_source_profile("dimbreath_legacy")
+    db_path = tmp_path / "raw-surface-exclusions.db"
+    create_database(
+        db_path,
+        [TermRecord("term", "fixture", "1", "1", "回声（稀有）", "Echo（Rare）")],
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    en = {f"line_{index}": "Echo(Rare) appears here." for index in range(12)}
+    zh = {f"line_{index}": "这里没有对应内容。" for index in range(12)}
+
+    assert json.loads(measure_free_text_exclusions(db_path, en, zh))["surfaces"] == []
