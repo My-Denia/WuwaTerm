@@ -159,8 +159,8 @@ jobs:
     needs: source
     name: API to Web contract
     runs-on: ubuntu-latest
-    # Dispatch can check a main ancestor; allow cache reads but not writes.
-    cache-mode: read
+    # Runs the dispatched commit read-only: the source job already proved it is
+    # a main ancestor, and no workflow here uses an Actions cache.
     steps:
       - uses: actions/checkout@v7
         with:
