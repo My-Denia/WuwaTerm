@@ -6,16 +6,17 @@
 python scripts/validate.py            # every gate, in order
 python scripts/validate.py --list     # what it would run; runs nothing
 python scripts/validate.py --quick    # every gate except the test suite
+python scripts/validate.py --cov      # run tests with coverage and floor gate
 python scripts/validate.py --only ruff
 ```
 
 The steps, in order: `hygiene`, `architecture`, `api-contract`,
-`ruff`, `pytest`. `--list` prints them with the command each one runs and what
+`ruff`, `typing`, `pytest`. `--list` prints them with the command each one runs and what
 its failure means. The run stops at the first failing step and names it, and
 the exit status is that step's.
 
 This is the entry point the **server test matrix** uses: the `pytest (py3.x)`
-jobs install the source-appropriate development dependencies and then run `python scripts/validate.py`, so a green run
+jobs install the source-appropriate development dependencies and then run `python scripts/validate.py`. The Python 3.11 baseline job runs `python scripts/validate.py --cov` to enforce the coverage regression floor, while other matrix versions run `python scripts/validate.py` without coverage to avoid unnecessary runtime overhead. A green run
 here and a green matrix job are the same claim, on the same file. Before it
 existed, CI carried one list, the README a shorter one, and this page a third,
 and a gate added to one of them was invisible in the others.
@@ -59,6 +60,22 @@ defaults, so the gate cannot change under the repository when those defaults
 move. It is a correctness gate: unused imports, undefined names, broken
 f-strings. Formatting is not enforced.
 
+The type checker is `mypy`, installed by the `dev` extra and bounded to one
+minor release (`mypy>=2.4,<2.5`) in `pyproject.toml`. The bounded range ensures
+upstream type inference improvements or standard-library stub updates cannot
+silently shift the baseline under the repository. It checks `src/wuwaterm` under
+Python 3.11 with `check_untyped_defs = true`, `warn_unused_ignores = true`, and
+`no_implicit_optional = true`. Missing third-party vendor stubs are ignored
+globally (`ignore_missing_imports = true`) rather than via per-file silences, so
+the gate reports our own type errors rather than upstream gaps. Because the
+codebase predates static typing, an explicit baseline silences eight legacy
+modules carrying existing errors under `[[tool.mypy.overrides]]` with
+`ignore_errors = true` (#208); all other modules are checked strictly, and
+cleaned-up modules must drop their override. `typing` runs under `--quick`
+alongside the other fast offline gates because it is an offline static check
+completing in sub-second time. It does not check untyped external packages or
+the silenced legacy modules until they are cleaned up.
+
 ## Offline Validation
 
 The commands below are what the entry point runs, plus the candidate-database
@@ -76,9 +93,22 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 .venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python scripts/check_api_contract.py
 .venv/bin/python -m ruff check .
+.venv/bin/python -m mypy src/wuwaterm
 .venv/bin/python -m pytest
 uv lock --check
 ```
+
+Running `python scripts/validate.py --cov` appends `--cov=src --cov-report=term-missing`
+to the `pytest` step. Test coverage is measured with branch coverage enabled
+(`[tool.coverage.run] branch = true`) and enforced by a regression floor in
+`pyproject.toml` under `[tool.coverage.report]`: `fail_under = 88`, with the
+measured baseline at 91.37% combined on 2026-11-11 (#211). The step fails if any
+test fails or if measured coverage drops below 88%. Because coverage measurement
+requires executing the test suite, `--cov` cannot be combined with `--quick`
+(which skips the suite and errors) or with a non-pytest `--only` target. CI
+enforces `--cov` on the Python 3.11 test matrix leg only, ensuring the floor is
+gated on every pull request and main push without multiplying the runtime cost
+across every Python matrix version.
 
 The `goal-runs/` paths above are local working artifacts, ignored by Git; the
 scripts create or read them on the machine that runs the validation pass.

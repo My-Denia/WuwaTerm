@@ -97,7 +97,7 @@ Run the repository's gates from a clean checkout of the candidate commit:
 python scripts/validate.py
 ```
 
-That is hygiene, architecture boundaries, the API contract, ruff and
+That is hygiene, architecture boundaries, the API contract, ruff, typing and
 the test suite, in that order, and it is the same entry point CI's server
 matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
@@ -594,7 +594,7 @@ generated notes before publishing rather than assuming this page.
 ### Validation
 
 - `python scripts/validate.py` (hygiene, architecture, API contract,
-  ruff, test suite) on the CI matrix
+  ruff, typing, test suite) on the CI matrix
 - `python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions`
 - Packaging: build, `twine check --strict`,
   `scripts/check_package_artifacts.py`, and a clean-environment
