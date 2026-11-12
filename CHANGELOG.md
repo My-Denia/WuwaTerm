@@ -177,8 +177,9 @@ does not distribute generated game data or generated SQLite databases.
   `release_prepared` against `6a3ec3a` and the published assets after
   publication; `v0.8.0` stays the recorded published release until then.
 - Telegram 0.2.0 pins the published Core `v0.8.0` wheel, and this release does
-  not move the Web `v0.1.1` or Windows `v0.4.0` pins; the CI contract jobs pass
-  against them. These fixes reach Telegram users only after its
+  not move the Web `v0.1.1` or Windows `v0.3.0` CI pins; the CI contract jobs pass
+  against them. Windows `v0.4.0` is the latest public client, not the pinned
+  validation input. These fixes reach Telegram users only after its
   `core-lock.json` moves and a Telegram release follows.
 
 ## 0.8.0
