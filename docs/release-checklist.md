@@ -162,6 +162,12 @@ The installer and Web checks from 0.7.x still apply to this release:
   which installs the published `manifest-{root|prefix}.json` and
   `SHA256SUMS-{root|prefix}` package; the Core release notes link that package
   instead of shipping it.
+- The Telegram bot is a separate product too, and the first-install entry must
+  say so: `./deploy/setup.sh --with-telegram` prints the WuwaTerm-Telegram
+  steps and starts no bot here, `--with-telegram --telegram-dir <checkout>`
+  writes that checkout's `.env` and database copy, and `--status` reports the
+  product and the deprecated inline bot separately. Release notes must not tell
+  a new installer to run `--with-telegram` expecting `wuwaterm-bot`.
 
 For a locally built release candidate database, also run:
 

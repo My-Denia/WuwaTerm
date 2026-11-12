@@ -82,11 +82,18 @@ One command does the first install and each later addition:
 
 ```bash
 ./deploy/setup.sh                  # shared translation service (Core API)
-./deploy/setup.sh --with-telegram  # add the bot
+./deploy/setup.sh --with-telegram  # hand the bot to its own product
 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
                                    # add WuwaTerm-Web behind your proxy
 ./deploy/setup.sh --status         # versions, components and health
 ```
+
+The Telegram bot is a separate product, [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram), with
+its own release, verified artifacts and Compose file. `--with-telegram` checks
+this installation, gives the bot a copy of the database and writes its `.env`
+when you point it at that checkout (`--telegram-dir`), then prints the
+product's own install steps. This checkout no longer starts the inline bot it
+still carries; that became an explicit `--with-legacy-bot`.
 
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
 lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
@@ -103,7 +110,7 @@ Download the portable package from [WuwaTerm-Windows v0.4.0](https://github.com/
 
 ### Telegram bot
 
-There is no shared public bot. Run the bot on your own server with your own BotFather token, then authorize the groups it may serve.
+There is no shared public bot. The bot is its own product in [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram): it runs on your server with your own BotFather token, installs from that repository's verified release artifacts, and reads a terminology database this repository builds. Its README is the install authority; [self-hosting](docs/self-hosting.md) explains how the two fit together and what `--with-telegram` prepares. Then authorize the groups it may serve.
 
 | You send | The bot replies with |
 | --- | --- |
@@ -130,7 +137,7 @@ Every guide is listed in the [documentation index](docs/README.md).
 
 ## Under the hood
 
-Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, Bot, dictionary builder, and deployment tools; [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product.
+Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, the deprecated inline bot, the dictionary builder, and deployment tools; [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product, and [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) owns the supported Telegram bot.
 
 - **Python 3.11+** with python-telegram-bot (long polling) and FastAPI, over a SQLite dictionary that the serving containers mount read-only.
 - **Architecture rules that CI enforces**: the application layer imports no presentation code, and the API contract is drift-checked against a committed OpenAPI snapshot ([ADR 0009](docs/adr/0009-http-api-adapter.md)).

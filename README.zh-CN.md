@@ -76,7 +76,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ### 自建部署
 
-[自建部署指南](docs/self-hosting.md)（英文）从检出发布 tag 一直讲到第一次查词。需要 Linux 上的 Docker Compose（或从源码运行 Python 3.11+）、约 2 GB 磁盘存放上游数据；如需 bot 或整句翻译，还要准备自己的 Telegram bot token 和 OpenAI 兼容接口。
+[自建部署指南](docs/self-hosting.md)（英文）从检出发布 tag 一直讲到第一次查词。需要 Linux 上的 Docker Compose（或从源码运行 Python 3.11+）、约 2 GB 磁盘存放上游数据；如需 bot 或整句翻译，还要准备自己的 Telegram bot token 和 OpenAI 兼容接口。Telegram bot 是独立产品，有自己的仓库、发布与 Compose 文件：`./deploy/setup.sh --with-telegram` 不再启动本检出里的旧 bot，而是给出该产品自己的安装步骤。
 
 ### Windows 客户端
 
@@ -84,7 +84,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ### Telegram bot
 
-目前没有公开可用的 bot。请用自己的 BotFather token 在自己的服务器上运行 bot，再授权它可以服务的群组。
+目前没有公开可用的 bot。bot 是独立产品 [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)：它用自己的 BotFather token 在自己的服务器上运行，按该仓库的校验制品安装，并读取本仓库构建的术语数据库。安装以该仓库的 README 为准；看两者如何配合、`--with-telegram` 会准备什么，见[自建部署指南](docs/self-hosting.md)。再授权它可以服务的群组。
 
 | 发送 | bot 回复 |
 | --- | --- |

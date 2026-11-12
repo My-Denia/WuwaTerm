@@ -1,4 +1,15 @@
 services:
+  # The inline bot this repository still carries. It is DEPRECATED: the
+  # supported Telegram surface is the standalone WuwaTerm-Telegram product,
+  # which owns its own repository, release, Compose file and state.
+  #
+  # It stays an ordinary service here because deploy/product-update.sh resolves
+  # installed services with `compose config` and `compose config --hash`, and a
+  # service behind a profile is invisible to both (`no such service: disabled`),
+  # which would break adoption and updates of an installation that runs it. So
+  # the defaults are enforced where the install entry is: ./deploy/setup.sh no
+  # longer starts this service, and --with-legacy-bot is the explicit way to.
+  # A bare `docker compose up -d` still starts it; name the service you mean.
   wuwaterm:
     build:
       context: ..
