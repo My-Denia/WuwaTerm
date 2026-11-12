@@ -124,7 +124,8 @@
         "status": "superseded_ci_artifact",
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
-      "adoption": "unknown",
+      "adoption": "deployed",
+      "adoption_note": "Core 0.8.1 is running in the owner's wuwaterm-api and legacy wuwaterm-bot since 2026-11-12T08:11:25Z. Deployment source 4a003aa8de4f1ed601d61cc8df31c2bbdc788c9b; release source remains 5f0d962f7a6c4b62a3dfad942bd9f5d180639741. Both containers report 0.8.1, the rebuilt terms.db (sha256 41d5f6a2d9b18ddbf892a41d49f67705134d8925e8a8f04edcced96303e21e08) contains the two new core terms, and the deployment smoke passed with sendMessage skipped. Independent Telegram 0.2.1 is prepared but not released or switched.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/5f0d962f7a6c4b62a3dfad942bd9f5d180639741/docs/self-hosting.md",
