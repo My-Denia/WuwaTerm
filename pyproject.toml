@@ -77,6 +77,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Keep a test's tmp_path only when it failed, and only the latest run's; the
+# default keeps every passing test's directory for the last three runs.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 addopts = "-q --strict-config --strict-markers -m 'not cross_component'"
 markers = [
   "cross_component: requires a pinned external product checkout",
