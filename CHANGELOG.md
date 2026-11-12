@@ -3,6 +3,16 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.3
+
+### Terms And Dictionary
+
+- Four exact official names that the Term/Influence text tables carry but the
+  BinData specs did not register are now pinned: `无音区` / `Tacet Field`,
+  `索拉里斯` / `Solaris`, `瑝珑` / `Huanglong` (category `location`) and
+  `残星会` / `Fractsidus`. No API shape, prompt, evaluator, retry policy or data
+  pin changes. The only OpenAPI change is the version string.
+
 ## 0.8.2
 
 ### Terms And Dictionary
