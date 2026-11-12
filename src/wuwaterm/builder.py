@@ -168,6 +168,25 @@ def iter_arikatsu_records(
         loaded_text_maps.append((zh_map, en_map))
     records: list[TermRecord] = []
 
+    # The pinned Term table is the game's official glossary: 655
+    # ``Term<n>_Title`` pairs. The curated CORE_TERM_KEYS covers a handful;
+    # import the rest as core terms so exact lookup is not limited to those
+    # hand-picked entries. BinData still supplies its own categories.
+    term_title = re.compile(r"Term\d+_Title$")
+    for text_key in sorted(zh_map):
+        if text_key in CORE_TERM_KEYS or not term_title.fullmatch(text_key):
+            continue
+        record = _record_for_key(
+            category="core_term",
+            source_file="Textmaps/multi_text/MultiText.json",
+            source_id=text_key,
+            text_key=text_key,
+            zh_map=zh_map,
+            en_map=en_map,
+        )
+        if record:
+            records.append(record)
+
     for text_key, category in CORE_TERM_KEYS.items():
         record = _record_for_key(
             category=category,
