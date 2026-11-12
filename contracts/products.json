@@ -208,31 +208,31 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "cd10a05a4e321700de946c6e3c65fc63bf3ed794",
-        "tree": "c19b96be1b34de0b2565f36530ff060297785fe6",
+        "commit": "14f0c36ce1767333a8c7bde0085594d61676ca12",
+        "tree": "26ecdbccb4c780eeff4c7ef63ff252253506a762",
         "status": "merged"
       },
       "release": {
-        "version": "0.4.1",
-        "tag": "v0.4.1",
+        "version": "0.4.2",
+        "tag": "v0.4.2",
         "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.1",
-        "published_at": "2026-11-12T11:41:30Z",
-        "source_commit": "cd10a05a4e321700de946c6e3c65fc63bf3ed794",
-        "source_tree": "c19b96be1b34de0b2565f36530ff060297785fe6",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2",
+        "published_at": "2026-11-12T13:35:30Z",
+        "source_commit": "14f0c36ce1767333a8c7bde0085594d61676ca12",
+        "source_tree": "26ecdbccb4c780eeff4c7ef63ff252253506a762",
         "assets": [
-          "WuwaTerm-0.4.1-windows-x64.zip",
+          "WuwaTerm-0.4.2-windows-x64.zip",
           "manifest.json",
           "SHA256SUMS"
         ],
         "asset_sha256": {
-          "WuwaTerm-0.4.1-windows-x64.zip": "4d248a0ead40b905d2269698fce62e82152c49c9aff02881d8724ea3cf781cc9",
-          "manifest.json": "f335ce2e821239abc4e0b4376f6a244a8785e8a98e08e8dc421803a0b905f607",
-          "SHA256SUMS": "986082d74b2ef81ddda4bc2919c97789460df35211880418fc110440297ea010"
+          "WuwaTerm-0.4.2-windows-x64.zip": "824b694c9b157a121e04ddd4bebb77f8cac2e7eb371fd610e94b39edf05d8d47",
+          "manifest.json": "c293a530acedf3e3e0518620e4d990f8b5ec69d6b46e90a52c8e993cf4fc26b2",
+          "SHA256SUMS": "c06f9c0a9440768120b215c8f4743952eaf54acfaa347b70b85e9d3c316eb9bb"
         },
-        "zip_sha256": "4d248a0ead40b905d2269698fce62e82152c49c9aff02881d8724ea3cf781cc9",
+        "zip_sha256": "824b694c9b157a121e04ddd4bebb77f8cac2e7eb371fd610e94b39edf05d8d47",
         "signed": false,
-        "note": "v0.4.1 fixes the empty term-page layout: the title and status strip no longer absorb the leftover height, and the search row stays under the heading. No new service capability is required; the client still uses API v1, review-v2 and wuwaterm-manuscript-v1."
+        "note": "v0.4.2 fixes the empty-state card layout and the term-row tab order. No new service capability is required."
       },
       "adoption": "unknown",
       "compatibility": {
@@ -241,28 +241,28 @@
         "manuscript": "wuwaterm-manuscript-v1",
         "note": "Local manuscript editing works offline; online features require a configured API and device credential."
       },
-      "validation": "0.4.1 release build and Windows CI passed; multi-DPI, mixed-DPI, IME and owner visual acceptance remain unverified.",
+      "validation": "0.4.2 release build and Windows CI passed; multi-DPI, mixed-DPI, IME and owner visual acceptance remain unverified.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/cd10a05a4e321700de946c6e3c65fc63bf3ed794/README.md"
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/14f0c36ce1767333a8c7bde0085594d61676ca12/README.md"
       ],
-      "source_version": "0.4.1",
+      "source_version": "0.4.2",
       "previous_release": {
-        "version": "0.4.0",
-        "tag": "v0.4.0",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0",
-        "published_at": "2026-11-10T12:20:37Z",
-        "source_commit": "3b04b28d62bc22613a05f44f8d040d1a783f237a",
-        "source_tree": "b6654cc0b9dc6831b69248a196ce119f867a5b2a",
+        "version": "0.4.1",
+        "tag": "v0.4.1",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.1",
+        "published_at": "2026-11-12T11:41:30Z",
+        "source_commit": "cd10a05a4e321700de946c6e3c65fc63bf3ed794",
+        "source_tree": "c19b96be1b34de0b2565f36530ff060297785fe6",
         "asset_sha256": {
-          "WuwaTerm-0.4.0-windows-x64.zip": "32e56eace287be0f1d965c904dcb230a254b2b84570c3b11e7337cd1f81b4c83",
-          "manifest.json": "8f7dfb1b0a9b6852b2c8c4d7961882540afbd9b1a0892af07c219f53726badf3",
-          "SHA256SUMS": "fb01792d5fd4e02ecaa4f69a1ec70c812b02ae9c51cfe4b9ab279e0eae34affb"
+          "WuwaTerm-0.4.1-windows-x64.zip": "4d248a0ead40b905d2269698fce62e82152c49c9aff02881d8724ea3cf781cc9",
+          "manifest.json": "f335ce2e821239abc4e0b4376f6a244a8785e8a98e08e8dc421803a0b905f607",
+          "SHA256SUMS": "986082d74b2ef81ddda4bc2919c97789460df35211880418fc110440297ea010"
         },
-        "zip_sha256": "32e56eace287be0f1d965c904dcb230a254b2b84570c3b11e7337cd1f81b4c83",
+        "zip_sha256": "4d248a0ead40b905d2269698fce62e82152c49c9aff02881d8724ea3cf781cc9",
         "signed": false,
-        "note": "Kept as history after v0.4.1; the release and its assets are still published. v0.3.0 remains available on the release page."
+        "note": "Kept as history after v0.4.2; the release and its assets are still published."
       },
-      "adoption_note": "0.4.1 is published, but owner-device multi-DPI, mixed-DPI, IME and visual acceptance are not confirmed."
+      "adoption_note": "0.4.2 is published, but owner-device multi-DPI, mixed-DPI, IME and visual acceptance are not confirmed."
     },
     {
       "id": "web",
