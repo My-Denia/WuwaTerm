@@ -17,8 +17,8 @@ WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责�
 
 | 产品 | 已合并源码快照 | 独立发布状态 | 本次新交付的实际采用 |
 | --- | --- | --- | --- |
-| Core / API | `641937a`，源码版本 `0.8.3` | [v0.8.3](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.3) 已发布（wheel `cd2df7ae…`，sdist `09e55ab7…`，manifest 与 SHA256SUMS 齐全），来源 `641937a`，新增 `无音区`/`索拉里斯`/`瑝珑`/`残星会` 四条官方名称；无 API、提示词、评测或数据 pin 变化。`v0.8.2`、`v0.8.1`、`v0.8.0` 等仍保留 | 已采用：API + 内置 Bot 0.8.3（2026-11-12，部署源 `641937a`；独立 Telegram 0.2.7） |
-| Telegram | `a746706`，源码版本 `0.2.7` | [v0.2.7](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.7) 已发布（wheel `530d4f70…`，sdist、bundle、镜像与安装探针齐全），来源 `a746706`，pin 到 Core `v0.8.3`；`v0.2.6` 与更早版本仍保留 | 已采用：独立 Telegram 0.2.7 + Core 0.8.3（2026-11-12；旧内置 Bot 已停止） |
+| Core / API | `0e64a8e`，源码版本 `0.8.4` | [v0.8.4](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.4) 已发布（wheel `08a6432e…`，sdist `79085c98…`，manifest 与 SHA256SUMS 齐全），来源 `0e64a8e`，导入完整 655 条 `Term<n>_Title` 官方词表（生产 11,987 条）；无 API、提示词、评测或数据 pin 变化 | 已采用：API + 内置 Bot 0.8.4（2026-11-12，部署源 `0e64a8e`；独立 Telegram 0.2.8） |
+| Telegram | `1f9f37f`，源码版本 `0.2.8` | [v0.2.8](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.8) 已发布（wheel `480f550e…`，sdist、bundle、镜像与安装探针齐全），来源 `1f9f37f`，pin 到 Core `v0.8.4`（完整 Term 词表）；`v0.2.7` 与更早版本仍保留 | 已采用：独立 Telegram 0.2.8 + Core 0.8.4（2026-11-12；旧内置 Bot 已停止） |
 | Windows | `14f0c36`，源码版本 `0.4.2` | [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2) 已发布（zip `824b694c…`，manifest 与 SHA256SUMS 齐全），来源 `14f0c36`，修复空状态卡片行高与查词 Tab 顺序；[v0.4.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.1)（zip `4d248a0e…`）与 `v0.4.0`、`v0.3.0` 仍保留 | 未确认 |
 | Web | `3ceab4f`，源码版本 `0.2.0`（未发布） | [v0.1.1](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1) 仍是最新 GitHub 发布，来源 `31fdc14b`；`v0.1.0` 仍在发布页上。Web main `3ceab4f` 含 #32–#36（中等宽度头部、英文逗号、skip link、配额条 CLS、品牌 404），当前公测 Sites 仍部署 `6e1337f` | 已部署旧源 `6e1337f`；`3ceab4f` 待 owner 重新部署 |
 
