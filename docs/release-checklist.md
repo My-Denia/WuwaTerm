@@ -12,10 +12,10 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.8.3`, a dictionary patch on top
-  of `0.8.2` that pins four official world/faction/field names (无音区,
-  索拉里斯, 瑝珑, 残星会); `v0.8.2` is the latest published release before it,
-  then `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1` and `v0.7.0`. Set
+  published tag. The current Core version is `0.8.4`, a dictionary release on
+  top of `0.8.3` that imports the complete official `Term<n>_Title` glossary
+  (651 additional entries); `v0.8.3` is the latest published release before
+  it, then `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1` and `v0.7.0`. Set
   `NEXT_VERSION` to the derived tag explicitly before any release
   command below.
 - Windows product: [v0.4.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0), released independently.
@@ -104,15 +104,15 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.8.3 specifically, also confirm:
+For 0.8.4 specifically, also confirm:
 
-- `docs/api/openapi.json` matches the generated document at version `0.8.3`
+- `docs/api/openapi.json` matches the generated document at version `0.8.4`
   (`python scripts/check_api_contract.py`), and `uv.lock` carries the same
   version. No request or response shape moves in this release: the version
   string is the only OpenAPI change.
-- The rebuilt database contains `无音区` / `Tacet Field`, `索拉里斯` /
-  `Solaris`, `瑝珑` / `Huanglong` (`location`) and `残星会` / `Fractsidus`;
-  exact lookup uses each pair.
+- The rebuilt database carries all 655 `Term<n>_Title` pairs, including a
+  non-curated pair such as `Term260001_Title` / `镇抚司` / `Internal Security
+  Agency`; exact lookup uses it.
 - A model response that stopped at a length cap is refused instead of returned
   as a finished translation. `finish_reason` `length` or `max_tokens` answers
   `llm_unavailable` (503) through the existing unusable-output reason, semantic
