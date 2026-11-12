@@ -21,20 +21,32 @@ carries the label. An advisory whose label cannot be read is treated as
 blocking: a version nobody can classify is not evidence of a clean set, and
 this whole gate exists because silence used to look like safety (#217).
 
+A clean report is also not the same claim as a complete one. pip-audit builds a
+throwaway virtualenv for `-r`, upgrades pip inside it, and reads back only what
+pip said it would install, so a pin pip answers "already satisfied" is never
+audited and never mentioned (see BOOTSTRAP_BLIND_SPOT). The gate is therefore
+also given the export the report was produced from, and joins the two: what the
+export says should have been read and what the report says was read have to be
+the same set. That join is what turns "no advisories" into "no advisories in a
+set that was actually read".
+
 Usage, as the workflow runs it:
 
-    python scripts/check_dependency_advisories.py pip-audit.json --audit-exit 1
+    python scripts/check_dependency_advisories.py pip-audit.json \
+        --audit-exit 1 --export requirements-locked.txt
 
 Exit status: 0 no blocking advisory, 1 a critical or high advisory (or one
 whose severity could not be read), 2 the audit cannot be trusted - which
-includes a missing, empty or malformed report, a dependency pip-audit could
-not collect, and a pip-audit exit status that says the run itself failed.
+includes a missing, empty or malformed report, a dependency pip-audit could not
+collect, an export that is truncated or does not match the report made from it,
+and a pip-audit exit status that says the run itself failed.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -49,6 +61,47 @@ BLOCKING = ("critical", "high")
 # aggregates. Both are reported and neither is blocking.
 SEVERITIES = ("critical", "high", "moderate", "medium", "low")
 UNKNOWN = "unknown"
+
+# pip-audit does not audit the requirements it is given in place. It creates a
+# virtualenv, runs `pip install --upgrade pip wheel setuptools` in it, and then
+# reads the install list pip writes for `--dry-run --report`. A requirement pip
+# answers "already satisfied" never reaches that list, so the distribution is
+# never audited and never mentioned: the report and the export disagree silently.
+#
+# Measured 2026-11-12 on this repository's export (pip-audit 2.10.1, Python
+# 3.11): that virtualenv holds packaging 26.3, pip 26.3, setuptools 84.2.1 and
+# wheel 0.48.0. The committed lock pins packaging 26.2, one patch below the
+# venv's own copy, so all 33 pins that select this platform are audited today
+# and this set is empty. Pinning packaging 26.3, or adding setuptools or wheel
+# at those versions, removes each of them from the report with no other change
+# - a routine bump away, which is why a member of this set going missing is
+# named on every run instead of being taken for coverage.
+#
+# It cannot be fatal for the same reason: this project does not control
+# pip-audit's bootstrap venv, so a pin equal to a version it preinstalls cannot
+# be audited by it at all and there would be no fix path. A pin outside this set
+# going missing has a different cause - a truncated export, or a collector that
+# dropped it - and that is fatal.
+BOOTSTRAP_BLIND_SPOT = frozenset({"packaging", "pip", "setuptools", "wheel"})
+
+# The pins every export of this lock contains: both adapters (the Telegram bot
+# and the HTTP API), the HTTP client they share, and the CA bundle the runtime
+# actually trusts. The join below cannot see a file that was truncated together
+# with its report - both would agree on the smaller set - so the export is
+# checked for these names before its report is believed.
+# `.github/workflows/dependency-audit.yml` greps for the same names before the
+# audit runs, so a truncated export never reaches pip-audit at all; the check is
+# repeated here so the gate stands on its own, and
+# tests/test_dependency_advisories.py compares the two lists so they cannot
+# drift apart.
+REQUIRED_PINS = frozenset({"certifi", "fastapi", "httpx", "python-telegram-bot", "uvicorn"})
+
+# `uv export` writes one pin per line, optionally followed by the lock's
+# environment marker. Each line here comes from that command, not from a human.
+PIN = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*(?P<version>[^;\s]+)"
+    r"\s*(?:;\s*(?P<marker>.+))?$"
+)
 
 Fetch = Callable[[str], "dict | None"]
 
@@ -298,6 +351,127 @@ def _sorted(classified: list[tuple[Advisory, str]]) -> list[tuple[Advisory, str]
     return sorted(classified, key=sort_key)
 
 
+class Coverage(NamedTuple):
+    """What the report covers of the export it was produced from."""
+
+    applicable: int
+    blind_spot: list[tuple[str, str]]
+    other_platform: int
+
+
+def _canonical(name: str) -> str:
+    """PEP 503 normalisation, so `python-telegram-bot` and its variants agree."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def export_pins(raw: bytes, source: str) -> tuple[list[tuple[str, str]], int, set[str]]:
+    """The pins an audit on this platform should read, how many it should not, and
+    every distribution the file pins at all.
+
+    `pip-audit` evaluates environment markers in the environment it runs in, so
+    a pin selected only for `win32` or `darwin` is correctly absent from its
+    report and must not be counted as a gap. This repository's export has one
+    such pin today: `colorama`, which click and pytest need on Windows and
+    nowhere else. Anything a human could not have written by way of
+    `uv export` is a malformed or truncated file, and is an error rather than a
+    skipped line.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AuditError(f"export {source} is not UTF-8: {exc}") from exc
+    try:
+        from packaging.markers import InvalidMarker, Marker
+    except ImportError as exc:  # the workflow runs the gate where pip-audit lives
+        raise AuditError(
+            "--export needs `packaging` to evaluate environment markers, and it "
+            "could not be imported"
+        ) from exc
+    applicable: list[tuple[str, str]] = []
+    other_platform = 0
+    present: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = PIN.match(stripped)
+        if match is None:
+            raise AuditError(f"export {source} has an unreadable line: {stripped!r}")
+        present.add(_canonical(match.group("name")))
+        marker = match.group("marker")
+        if marker is not None:
+            try:
+                selected = Marker(marker).evaluate()
+            except InvalidMarker as exc:
+                raise AuditError(
+                    f"export {source} has an unreadable marker on "
+                    f"{match.group('name')}: {exc}"
+                ) from exc
+            if not selected:
+                other_platform += 1
+                continue
+        applicable.append((match.group("name"), match.group("version")))
+    if not applicable:
+        raise AuditError(
+            f"export {source} selects no requirements for this platform: the "
+            "export was empty or every marker excluded it"
+        )
+    return applicable, other_platform, present
+
+
+def _require_whole_export(present: set[str], source: str) -> None:
+    """Refuse a file that lacks pins every export of this lock carries.
+
+    The join below compares the export against the report, and a file truncated
+    before the audit produces a report truncated the same way: the two agree,
+    and agreeing on less is exactly what a clean run looks like. The names are
+    looked for in the whole file rather than among the pins selected for this
+    platform, because a marker is not something truncation can remove.
+    """
+    absent = sorted(name for name in REQUIRED_PINS if name not in present)
+    if absent:
+        raise AuditError(
+            f"export {source} does not contain {', '.join(absent)}, which every "
+            "export of this lock contains: the file is truncated, or it was "
+            "written by something other than the export step, and an audit of "
+            "part of the locked set looks exactly like an audit of all of it"
+        )
+
+
+def coverage(export: bytes, source: str, raw_report: bytes) -> Coverage:
+    """Join the export against the report, so a partial audit cannot look clean."""
+    pins, other_platform, present = export_pins(export, source)
+    _require_whole_export(present, source)
+    reported = {_canonical(name) for name in _report_names(raw_report)}
+    missing = [pin for pin in pins if _canonical(pin[0]) not in reported]
+    blind_spot = [pin for pin in missing if _canonical(pin[0]) in BOOTSTRAP_BLIND_SPOT]
+    unread = [pin for pin in missing if _canonical(pin[0]) not in BOOTSTRAP_BLIND_SPOT]
+    if unread:
+        listed = ", ".join(f"{name} {version}" for name, version in unread)
+        raise AuditError(
+            "pip-audit's report does not cover "
+            f"{_count(len(unread), 'pinned requirement')} selected on this "
+            f"platform: {listed}. A green result over a set nobody read is not "
+            "a result"
+        )
+    return Coverage(len(pins), blind_spot, other_platform)
+
+
+def _print_coverage(found: Coverage) -> None:
+    print(
+        f"  coverage: {found.applicable} locked requirements apply to this "
+        f"platform; {found.other_platform} select another one"
+    )
+    if not found.blind_spot:
+        return
+    listed = ", ".join(f"{name} {version}" for name, version in found.blind_spot)
+    print(f"  not read by pip-audit here (its bootstrap venv already has them): {listed}")
+    print(
+        "::warning title=Dependency audit::pip-audit does not read these pinned "
+        f"distributions, so no advisory against them can be seen here: {listed}"
+    )
+
+
 def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_dependency_advisories",
@@ -315,6 +489,13 @@ def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
         "--osv-url", default=OSV_VULN_URL, help="OSV advisory endpoint prefix"
     )
     parser.add_argument("--timeout", type=float, default=30.0, help="OSV request timeout")
+    parser.add_argument(
+        "--export",
+        type=Path,
+        help="the requirements file the report was produced from; pins it holds "
+        "that the report does not cover are printed, and a gap outside "
+        "pip-audit's own bootstrap distributions is fatal",
+    )
     args = parser.parse_args(argv)
     lookup = fetch if fetch is not None else OsvLookup(args.osv_url, args.timeout)
 
@@ -329,6 +510,15 @@ def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
         except OSError as exc:
             raise AuditError(f"report {args.report} could not be read: {exc}") from exc
         advisories = load_report(raw)
+        found = None
+        if args.export is not None:
+            try:
+                exported = args.export.read_bytes()
+            except OSError as exc:
+                raise AuditError(
+                    f"export {args.export} could not be read: {exc}"
+                ) from exc
+            found = coverage(exported, str(args.export), raw)
         if args.audit_exit == 1 and not advisories:
             raise AuditError(
                 "pip-audit exited 1 but the report lists no advisories; the report "
@@ -343,6 +533,8 @@ def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
         return 2
 
     _print_findings(classified, _package_count(raw))
+    if found is not None:
+        _print_coverage(found)
     blocking = [
         (advisory, severity)
         for advisory, severity in classified
@@ -369,6 +561,28 @@ def main(argv: list[str] | None = None, fetch: Fetch | None = None) -> int:
         return 1
     print("PASSED: no critical, high or unclassified advisories in the locked set")
     return 0
+
+
+def _report_names(raw: bytes) -> list[str]:
+    """The distributions the report covers, as it names them.
+
+    `load_report` has already refused a report whose entries lack a name, so an
+    entry without one cannot exist here; this reader stays defensive anyway
+    because it also serves the coverage join, which is about the file on disk
+    rather than about a report the gate has decided to believe.
+    """
+    try:
+        report = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    dependencies = report.get("dependencies") if isinstance(report, dict) else None
+    if not isinstance(dependencies, list):
+        return []
+    return [
+        dependency["name"]
+        for dependency in dependencies
+        if isinstance(dependency, dict) and isinstance(dependency.get("name"), str)
+    ]
 
 
 def _package_count(raw: bytes) -> int:

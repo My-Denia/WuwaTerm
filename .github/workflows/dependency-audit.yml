@@ -96,7 +96,16 @@ jobs:
           echo "pip-audit exit status: ${status}"
           echo "PIP_AUDIT_STATUS=${status}" >> "$GITHUB_ENV"
       - name: Fail on critical, high or unreadable advisories
-        run: python scripts/check_dependency_advisories.py pip-audit.json --audit-exit "${PIP_AUDIT_STATUS}"
+        # Runs in the audit's own environment because the gate evaluates the
+        # lock's environment markers, and `packaging` arrives with pip-audit.
+        # `--export` is what tells a clean report apart from a report that only
+        # read part of the locked set: pip-audit never reports a distribution its
+        # bootstrap virtualenv already satisfies, so the export is the only
+        # account of what the report was supposed to answer for.
+        run: |
+          uv run --no-project --python 3.11 --with pip-audit==2.10.1 \
+            python scripts/check_dependency_advisories.py pip-audit.json \
+            --audit-exit "${PIP_AUDIT_STATUS}" --export requirements-locked.txt
       - name: Keep the audit report
         # The report is the evidence for both outcomes. A red run that cannot be
         # inspected is a red run somebody will re-run until it is green.
