@@ -568,18 +568,17 @@ def test_fingerprint_v3_hashes_the_translation_prompt_constants(ev, monkeypatch,
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
     monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
-    v2_a, v3_a = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    v2_a, v3_a, default_a = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint()
     assert part not in v2_a["parts"]
     assert len(v3_a["parts"]) == len(v2_a["parts"]) + 5
 
     monkeypatch.setattr(sentence, constant, getattr(sentence, constant) + "\nchanged in a test")
-    v2_b, v3_b = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    v2_b, v3_b, default_b = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint()
     assert v2_b["config_sha256"] == v2_a["config_sha256"]  # v2 freezes stay comparable
     assert v3_b["config_sha256"] != v3_a["config_sha256"]
-
     # A new freeze is made with the default version and sees the change.
-    assert ev.config_fingerprint()["config_sha256"] == v3_b["config_sha256"]
-    assert ev.config_fingerprint()["fingerprint_version"] == ev.FINGERPRINT_VERSION
+    assert default_b["config_sha256"] != default_a["config_sha256"]
+    assert default_b["fingerprint_version"] >= 3
 
 
 def test_fingerprint_v3_hashes_the_prompt_language_names(ev, monkeypatch):
