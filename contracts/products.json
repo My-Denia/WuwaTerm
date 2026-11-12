@@ -64,48 +64,48 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "641937a5e3bcd20f15fae17d802c14e1d908df10",
-        "tree": "dcb6e0d69d4d8104dfdb30b1b25dea6478fe0cd8",
+        "commit": "0e64a8e4660acbdd0ec5c4fc1baa317318d17614",
+        "tree": "04b9c37af7be2cda2b1aa0c4f6fbef6336e0ef74",
         "status": "merged"
       },
-      "source_version": "0.8.3",
+      "source_version": "0.8.4",
       "release": {
+        "version": "0.8.4",
+        "tag": "v0.8.4",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.4",
+        "published_at": "2026-11-12T18:53:17Z",
+        "source_commit": "0e64a8e4660acbdd0ec5c4fc1baa317318d17614",
+        "source_tree": "04b9c37af7be2cda2b1aa0c4f6fbef6336e0ef74",
+        "assets": [
+          "wuwaterm-0.8.4-py3-none-any.whl",
+          "wuwaterm-0.8.4.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.8.4-py3-none-any.whl": "08a6432e083407095d835b6797f81d75232441811ec299eec87692eec83dbd94",
+          "wuwaterm-0.8.4.tar.gz": "79085c985168fe6f783d2f30bd5616784c1e3cbb2cfa96ffd490520cf97aca13",
+          "release-manifest.json": "84b7af2ad63b443c10bbd6cbdb6e083433b160ba12f9c04c28f7b8f6db41b7a1",
+          "SHA256SUMS": "c9e6483decc50ca5f38100c15d36f1913c061c1d9a771d8d2d5a4bda0c16956e"
+        },
+        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:603d12c646947cad1787fccbe34fc448b503ddfa5304715d1b82720065c04f65 and builder sha256:577f5dc1b534101dcad5f5db150e96c1749532f7df863ddc07af242a6125e008, first pushed as sha-0e64a8e and retagged by promote-images as v0.8.4 and 0.8.",
+        "note": "v0.8.4 imports the complete pinned official Term glossary: 655 Term<n>_Title pairs, 11,987 rows in production. No API shape, prompt, evaluator, retry policy or data pin changed. v0.8.3 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.8.3",
         "tag": "v0.8.3",
-        "status": "released",
         "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.3",
         "published_at": "2026-11-12T17:53:53Z",
         "source_commit": "641937a5e3bcd20f15fae17d802c14e1d908df10",
         "source_tree": "dcb6e0d69d4d8104dfdb30b1b25dea6478fe0cd8",
-        "assets": [
-          "wuwaterm-0.8.3-py3-none-any.whl",
-          "wuwaterm-0.8.3.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
         "asset_sha256": {
           "wuwaterm-0.8.3-py3-none-any.whl": "cd2df7aeac0cf456127f4e7e228221f06bb13534dfd9753a98d428167f0838c7",
           "wuwaterm-0.8.3.tar.gz": "09e55ab78d9687e61a04057ae2010f4f2940ac39278174811df5c6e2127cfe62",
           "release-manifest.json": "fb416c01e6de5ebdbb609ff5eb0ed421a13af19cebee7149c6cb3d31d042bd1a",
           "SHA256SUMS": "27c4cb3a6dc05662db567b5f89dd0c93afe85054cfb478d0ee660ba2bbb4ca76"
         },
-        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:ea63130ae49fad22146be6e91ede5bf696917b3aa1daac1826248b747f1ed333 and builder sha256:2d2ae8c11198a4a3bf25a320371b25204b7fe9657ad8c3da98d714ac4c1a8c7e, first pushed as sha-641937a and retagged by promote-images as v0.8.3 and 0.8.",
-        "note": "v0.8.3 is a dictionary patch from 641937a. It pins four exact official names: 无音区/Tacet Field, 索拉里斯/Solaris, 瑝珑/Huanglong (location) and 残星会/Fractsidus. No request/response shape, prompt, evaluator, retry policy or data pin changed. v0.8.2 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.8.2",
-        "tag": "v0.8.2",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.2",
-        "published_at": "2026-11-12T15:19:27Z",
-        "source_commit": "21c061dd6e6bff5dc7335a5c10f815b23a273acc",
-        "source_tree": "438d91637ff00bbe95bea0e51889745916f888eb",
-        "asset_sha256": {
-          "wuwaterm-0.8.2-py3-none-any.whl": "c14822b9cab742562938cbf321d1f779915fbc43076cfcf82a734aed89501c1c",
-          "wuwaterm-0.8.2.tar.gz": "2f908a7f26608e5cbdc19cefb89a0532e716d44192036d66faec05ee45eef7ef",
-          "release-manifest.json": "ae640f05924db2e879983a63173e47f11a138007450bbc8b8d8ccdf6f5ebf5b0",
-          "SHA256SUMS": "e501bc2d7d96490ab29b6f7aff51cf602699882adb86c13d63101967d4f7ae43"
-        },
-        "note": "Kept as history after v0.8.3; the release and its assets are still published. v0.8.1 and earlier remain on the release page."
+        "note": "Kept as history after v0.8.4; the release and its assets are still published. v0.8.2 and earlier remain on the release page."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -125,11 +125,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core 0.8.3 is running in the owner's wuwaterm-api and legacy wuwaterm-bot since 2026-11-12T17:54:41Z (deployment source 641937a, image e0e3e72). The rebuilt terms.db is sha256 8047a0fa with 11,336 terms and contains the four new official names. Telegram 0.2.7 now pins 0.8.3; the legacy in-Core bot remains stopped.",
+      "adoption_note": "Core 0.8.4 is running in the owner's wuwaterm-api and legacy wuwaterm-bot since 2026-11-12T18:54:03Z (deployment source 0e64a8e, image e16354d). The rebuilt terms.db is sha256 425f8679 with 11,987 terms, including all 655 Term<n>_Title pairs. Telegram 0.2.8 pins 0.8.4; the legacy in-Core bot remains stopped.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/641937a5e3bcd20f15fae17d802c14e1d908df10/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/641937a5e3bcd20f15fae17d802c14e1d908df10/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/0e64a8e4660acbdd0ec5c4fc1baa317318d17614/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/0e64a8e4660acbdd0ec5c4fc1baa317318d17614/docs/data-refresh.md"
       ]
     },
     {
@@ -137,28 +137,59 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
       "responsibility": "Standalone Telegram bot and its installation, operation and state.",
       "main": {
-        "commit": "a746706f23fd0ef665d2b9162948eca8a98682f4",
-        "tree": "4dd56881c4a4f61b853c84bcc038252f6189aa69",
+        "commit": "1f9f37fe092b2370be99295a86ff680e670c714a",
+        "tree": "72aa6a591f6d3a4264ad06c09465cd1a33a8a26e",
         "status": "merged"
       },
-      "source_version": "0.2.7",
+      "source_version": "0.2.8",
       "release": {
-        "version": "0.2.7",
-        "tag": "v0.2.7",
+        "version": "0.2.8",
+        "tag": "v0.2.8",
         "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.7",
-        "published_at": "2026-11-12T18:03:15Z",
-        "source_commit": "a746706f23fd0ef665d2b9162948eca8a98682f4",
-        "source_tree": "4dd56881c4a4f61b853c84bcc038252f6189aa69",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.8",
+        "published_at": "2026-11-12T19:01:33Z",
+        "source_commit": "1f9f37fe092b2370be99295a86ff680e670c714a",
+        "source_tree": "72aa6a591f6d3a4264ad06c09465cd1a33a8a26e",
         "assets": [
-          "wuwaterm_telegram-0.2.7-py3-none-any.whl",
-          "wuwaterm_telegram-0.2.7.tar.gz",
+          "wuwaterm_telegram-0.2.8-py3-none-any.whl",
+          "wuwaterm_telegram-0.2.8.tar.gz",
           "bundle.json",
           "image.oci.tar",
           "install-probe.json",
           "source.tar",
           "SHA256SUMS"
         ],
+        "asset_sha256": {
+          "wuwaterm_telegram-0.2.8-py3-none-any.whl": "480f550e742ac47e0b44393779849630b8c03c1cbb30c9d451fd4dd1ce656129",
+          "wuwaterm_telegram-0.2.8.tar.gz": "d5acbbcb64dee1eaf0a74287f5fb9e5b4a5e79f336c550ad62bf98d02855cb84",
+          "bundle.json": "6a1b7ca0783a4879b82dce3f8c38b682340a9c6e2f7dcf7f13e62a97d3f24547",
+          "image.oci.tar": "3f12330e0bdb18161eb0607b7187d6ebbd5e5e3f980dd40495e92d0d1bc8802a",
+          "install-probe.json": "f9f693f26f415feaed97476f767a6cf5deb765aa15d8956f4606b95fe3a5a59d",
+          "source.tar": "af61996f98cbda9de0c4b96a714efaa5af7a5ffbee14c7b2285e4a60f518c10a",
+          "SHA256SUMS": "590791829cb3975c6680f81b0b200616d8ba2c444bcb686ea72452b627123716"
+        },
+        "note": "v0.2.8 pins the published Core 0.8.4 wheel, which imports the full 655-entry Term glossary. The API and review contracts are unchanged; production was updated."
+      },
+      "adoption": "deployed",
+      "compatibility": {
+        "core_package_version": "0.8.4",
+        "core_wheel_sha256": "08a6432e083407095d835b6797f81d75232441811ec299eec87692eec83dbd94",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/1f9f37fe092b2370be99295a86ff680e670c714a/core-lock.json",
+        "terms_database_schema_version": "2",
+        "http_api_required": false,
+        "note": "core-lock.json pins the published Core v0.8.4 wheel; release-to-release dependency, not a CI artifact."
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/1f9f37fe092b2370be99295a86ff680e670c714a/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/1f9f37fe092b2370be99295a86ff680e670c714a/docs/artifact-verification.md"
+      ],
+      "previous_release": {
+        "version": "0.2.7",
+        "tag": "v0.2.7",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.7",
+        "published_at": "2026-11-12T18:03:15Z",
+        "source_commit": "a746706f23fd0ef665d2b9162948eca8a98682f4",
+        "source_tree": "4dd56881c4a4f61b853c84bcc038252f6189aa69",
         "asset_sha256": {
           "wuwaterm_telegram-0.2.7-py3-none-any.whl": "530d4f70f755d82c4a1616fd9d6d1254f0ac017d3247e34f99d0a1289d9931c4",
           "wuwaterm_telegram-0.2.7.tar.gz": "40374992b84ad88cb6bedd10536e411d873d2ea2285ccba7c2f9d202c3f4a462",
@@ -168,40 +199,9 @@
           "source.tar": "0d77d58bbe86aba606c9a8bc9482a634a16aadb69c0af8b6139d3070bd34a651",
           "SHA256SUMS": "ecf3f03579c61be6dbdaa1223e0fa7b565a467cb0f3f319d797d66bbda889ff8"
         },
-        "note": "v0.2.7 moves the Telegram pin to the published Core 0.8.3 wheel and CORE_VERSION 0.8.3. Core 0.8.3 adds four official world/faction/field names; the API and review contracts are unchanged. Production was updated."
+        "note": "Kept as history after v0.2.8; the release and its assets are still published."
       },
-      "adoption": "deployed",
-      "compatibility": {
-        "core_package_version": "0.8.3",
-        "core_wheel_sha256": "cd2df7aeac0cf456127f4e7e228221f06bb13534dfd9753a98d428167f0838c7",
-        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/a746706f23fd0ef665d2b9162948eca8a98682f4/core-lock.json",
-        "terms_database_schema_version": "2",
-        "http_api_required": false,
-        "note": "core-lock.json pins the published Core v0.8.3 wheel; release-to-release dependency, not a CI artifact."
-      },
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/a746706f23fd0ef665d2b9162948eca8a98682f4/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/a746706f23fd0ef665d2b9162948eca8a98682f4/docs/artifact-verification.md"
-      ],
-      "previous_release": {
-        "version": "0.2.6",
-        "tag": "v0.2.6",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.6",
-        "published_at": "2026-11-12T17:07:12Z",
-        "source_commit": "29c62849fa5d1408d972d3002571ca596f868504",
-        "source_tree": "ae2220b616606a42a958b84435e7dd783af7eb49",
-        "asset_sha256": {
-          "wuwaterm_telegram-0.2.6-py3-none-any.whl": "d331b85a7c4ca8e9f44361130b2dd65b7090e1009d43d8de6f0d52a1b4495fe1",
-          "wuwaterm_telegram-0.2.6.tar.gz": "ce31525817c13c8a2aeb321cd840a33084d72e19f0811f1a39084e454069b350",
-          "bundle.json": "43c7c02b0136d6adffe0745558dd853e3eebd198f8fca167c3f33ee004edbba9",
-          "image.oci.tar": "79e6c3fd57416a02c0ed566d476830c96eb1aa7c90b757f5dd3f4e5a87434a57",
-          "install-probe.json": "0167633648d6dba81348b63c9e4d7752227fa413d435d0c5ee628e93b8475b83",
-          "source.tar": "ef156a222d37e9427ab5bd5ec95fb1ef2942dbb052e4cea8cbaaaa1567a8186c",
-          "SHA256SUMS": "d7a3728a3c767b4a27361cfdbc6e8a4d493566ba849f62f6af8a016450c777ed"
-        },
-        "note": "Kept as history after v0.2.7; this release added the review-result footer."
-      },
-      "adoption_note": "The independent Telegram 0.2.7 container is running on the owner VPS; Core 0.8.3, poll health ready, image sha256:d21741bdce791c4b30e7c9d878b734daf5c233c565cf5c6b34fbde9657674df0. The legacy in-Core bot remains stopped and the API runs Core 0.8.3."
+      "adoption_note": "The independent Telegram 0.2.8 container is running on the owner VPS; Core 0.8.4, poll health ready, image sha256:53126a1d85d4c3f5b49b1fed208028611cda4586e343b56b2dae7b0d57e25ebf. The legacy in-Core bot remains stopped and the API runs Core 0.8.4."
     },
     {
       "id": "windows",
