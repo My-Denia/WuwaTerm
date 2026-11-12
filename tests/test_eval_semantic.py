@@ -551,6 +551,50 @@ def test_fingerprint_v2_sees_a_translation_model_change_v1_frozen_hashes_still_c
     assert len(json.loads((run / "ledger.json").read_text(encoding="utf-8"))["records"]) == before
 
 
+@pytest.mark.parametrize(
+    ("constant", "part"),
+    [
+        ("_UNTRUSTED_SOURCE_INSTRUCTION", "translation_untrusted_source_instruction"),
+        ("_CONTEXTUAL_REFERENCE_INSTRUCTION", "translation_contextual_reference_instruction"),
+        ("_HTML_MODE_INSTRUCTION", "translation_html_mode_instruction"),
+        ("_HTML_MODE_INSTRUCTION_ZH", "translation_html_mode_instruction_zh"),
+    ],
+)
+def test_fingerprint_v3_hashes_the_translation_prompt_constants(ev, monkeypatch, constant, part):
+    """The v2 blind spot: the builder's source names a prompt constant, its text is elsewhere."""
+    from wuwaterm import sentence
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
+    v2_a, v3_a, default_a = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint()
+    assert part not in v2_a["parts"]
+    assert len(v3_a["parts"]) == len(v2_a["parts"]) + 5
+
+    monkeypatch.setattr(sentence, constant, getattr(sentence, constant) + "\nchanged in a test")
+    v2_b, v3_b, default_b = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint()
+    assert v2_b["config_sha256"] == v2_a["config_sha256"]  # v2 freezes stay comparable
+    assert v3_b["config_sha256"] != v3_a["config_sha256"]
+    # A new freeze is made with the default version and sees the change.
+    assert default_b["config_sha256"] != default_a["config_sha256"]
+    assert default_b["fingerprint_version"] >= 3
+
+
+def test_fingerprint_v3_hashes_the_prompt_language_names(ev, monkeypatch):
+    from wuwaterm import semantic_review
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
+    v2_a, v3_a = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    monkeypatch.setitem(semantic_review._LANGUAGE_NAMES, "zh", "Mandarin")
+    v2_b, v3_b = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    assert v2_b["config_sha256"] == v2_a["config_sha256"]
+    assert v3_b["config_sha256"] != v3_a["config_sha256"]
+
+
 def _mprime_inputs(ev, tmp_path):
     inputs = _inputs(ev, tmp_path)
     targets = [{"para": i, "text": f"椿{i}"} for i in range(5)]
