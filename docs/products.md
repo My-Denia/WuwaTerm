@@ -18,7 +18,7 @@ WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责�
 | 产品 | 已合并源码快照 | 独立发布状态 | 本次新交付的实际采用 |
 | --- | --- | --- | --- |
 | Core / API | `21c061d`，源码版本 `0.8.2` | [v0.8.2](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.2) 已发布（wheel `c14822b9…`，sdist `2f908a7f…`，manifest 与 SHA256SUMS 齐全），来源 `21c061d`，把 `扶风转标` / `Gravity Calibrator` 固定为 `location` 术语；无 API、提示词、评测或数据 pin 变化。`v0.8.1`、`v0.8.0`、`v0.7.2` 等仍保留 | 已采用：API + 内置 Bot 0.8.2（2026-11-12，部署源 `21c061d`；独立 Telegram 仍 pin 0.8.1） |
-| Telegram | `73fd513`，源码版本 `0.2.4` | [v0.2.4](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.4) 已发布（wheel `a5d0a895…`，sdist、bundle、镜像与安装探针齐全），来源 `73fd513`，review 提示与采纳原因双语、缺 token 清晰退出；依赖 Core `v0.8.1`。`v0.2.3`（命令菜单）与更早版本仍保留 | 已采用：独立 Telegram 0.2.4（2026-11-12；旧内置 Bot 已停止） |
+| Telegram | `2920c9b`，源码版本 `0.2.5` | [v0.2.5](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.5) 已发布（wheel `36591f0a…`，sdist、bundle、镜像与安装探针齐全），来源 `2920c9b`，pin 到 Core `v0.8.2`（含 `Gravity Calibrator` 词条）；`v0.2.4` 与更早版本仍保留 | 已采用：独立 Telegram 0.2.5 + Core 0.8.2（2026-11-12；旧内置 Bot 已停止） |
 | Windows | `14f0c36`，源码版本 `0.4.2` | [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2) 已发布（zip `824b694c…`，manifest 与 SHA256SUMS 齐全），来源 `14f0c36`，修复空状态卡片行高与查词 Tab 顺序；[v0.4.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.1)（zip `4d248a0e…`）与 `v0.4.0`、`v0.3.0` 仍保留 | 未确认 |
 | Web | `6e1337f`，源码版本 `0.2.0`（未发布） | [v0.1.1](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1) 仍是最新 GitHub 发布，来源 `31fdc14b`：root（归档 `9f88dd71…`）与 `/private`（归档 `32b52a3a…`）两套包；`v0.1.0` 仍在发布页上。公测 Sites 已按 main `6e1337f` 部署，移动端头部、额度区与 `/limits` 表格使用本次合并的布局 | 已部署：公测 Sites（2026-11-12，源码 main `6e1337f`；未发 GitHub release） |
 
