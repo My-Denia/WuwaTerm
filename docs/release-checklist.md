@@ -12,12 +12,11 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.8.1`, a maintenance release on
-  top of `0.8.0` that refuses truncated model output, stops counting
-  undecidable and empty samples as met evaluation gates, fixes term matching
-  and the first-install entry, and adds the dependency-audit gates; `v0.8.0` is
-  the latest published release before it, then `v0.7.2`, `v0.7.1` and
-  `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly before any release
+  published tag. The current Core version is `0.8.2`, a dictionary patch on top
+  of `0.8.1` that pins the official `扶风转标` / `Gravity Calibrator` map mark;
+  `v0.8.1` is the latest published release before it, then `v0.8.0`, `v0.7.2`,
+  `v0.7.1` and `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly
+  before any release
   command below.
 - Windows product: [v0.4.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0), released independently.
 - Supported source profile: `arikatsu`
@@ -105,12 +104,14 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.8.1 specifically, also confirm:
+For 0.8.2 specifically, also confirm:
 
-- `docs/api/openapi.json` matches the generated document at version `0.8.1`
+- `docs/api/openapi.json` matches the generated document at version `0.8.2`
   (`python scripts/check_api_contract.py`), and `uv.lock` carries the same
   version. No request or response shape moves in this release: the version
   string is the only OpenAPI change.
+- The rebuilt database contains `扶风转标` / `Gravity Calibrator` as a
+  `location` term, and exact lookup and sentence locking both use that pair.
 - A model response that stopped at a length cap is refused instead of returned
   as a finished translation. `finish_reason` `length` or `max_tokens` answers
   `llm_unavailable` (503) through the existing unusable-output reason, semantic

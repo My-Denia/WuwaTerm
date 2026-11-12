@@ -3,6 +3,16 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.2
+
+### Terms And Dictionary
+
+- `扶风转标` (`MapMark_170100_MarkTitle`) is pinned to the official
+  `Gravity Calibrator` and enters lookup and sentence locking as a `location`
+  term. The pair comes from the unchanged 3.7.0 TextMap; no data pin, API
+  shape, evaluator, prompt, retry policy or runtime behavior changes. The only
+  OpenAPI change is the version string.
+
 ## 0.8.1
 
 ### Highlights
