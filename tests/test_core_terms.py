@@ -38,6 +38,8 @@ VERSION_EN = "Prism's Illusion, Heart's Illumination"
 # Bare achievement name: the same snapshot's other official wording.
 BARE_VERSION_ZH = "心照红尘"
 BARE_VERSION_EN = "To the Mortal World, a Burning Heart"
+MAPMARK_ZH = "扶风转标"
+MAPMARK_EN = "Gravity Calibrator"
 
 ORIGINAL_CORE_KEYS = (
     "LoadingTipsText_1005_Title",
@@ -55,6 +57,7 @@ UPSTREAM_TEXT = {
     "ItemType_ChatCharm": (BRAND_ZH, BRAND_EN),
     "PrefabTextItem_2083276822_Text": (BRAND_ZH, BRAND_EN),
     "Advertising_VersionTitle_37": (VERSION_ZH, VERSION_EN),
+    "MapMark_170100_MarkTitle": (MAPMARK_ZH, MAPMARK_EN),
     # Mirror key carrying the identical pair, and the bare achievement name
     # with different official English: neither may become a second row.
     "LoadingTipsText_901401_Title": (VERSION_ZH, VERSION_EN),
@@ -118,6 +121,7 @@ def test_chat_charm_key_registers_one_core_term_row(core_term_db: Path):
         *ORIGINAL_CORE_KEYS,
         "ItemType_ChatCharm",
         "Advertising_VersionTitle_37",
+        "MapMark_170100_MarkTitle",
     }
 
     row = rows["ItemType_ChatCharm"]
@@ -142,6 +146,27 @@ def test_chat_charm_is_an_exact_entry_in_both_directions(core_term_db: Path):
     assert en_hit.exact
     assert en_hit.best.entry.zh == BRAND_ZH
     assert en_hit.best.entry.category == "core_term"
+
+
+def test_map_mark_registers_a_location_term_and_locks(core_term_db: Path):
+    rows = _direct_rows(core_term_db)
+    row = rows["MapMark_170100_MarkTitle"]
+    assert row["category"] == "location"
+    assert row["priority"] == CATEGORY_ORDER["location"]
+    assert (row["zh"], row["en"]) == (MAPMARK_ZH, MAPMARK_EN)
+    assert row["zh_norm"] == normalize_text(MAPMARK_ZH)
+    assert row["en_norm"] == normalize_text(MAPMARK_EN)
+
+    service = TermService(core_term_db)
+    for query, expected_en in ((MAPMARK_ZH, MAPMARK_EN), (MAPMARK_EN, MAPMARK_EN)):
+        hit = service.lookup_exact(query)
+        assert hit.exact and hit.best.entry.category == "location"
+    assert service.lookup_exact(MAPMARK_ZH).best.entry.en == MAPMARK_EN
+
+    translator = SentenceTranslator(core_term_db)
+    source = translator.prepare_text(f"前方有{MAPMARK_ZH}，先启动它。")
+    locked = translator._lock_terms_with_references(source, to_chinese=False)
+    assert (MAPMARK_ZH, MAPMARK_ZH, MAPMARK_EN, "location") in locked.references
 
 
 def test_chat_charm_references_into_english_and_locks_into_chinese(
@@ -190,6 +215,7 @@ def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
         *ORIGINAL_CORE_KEYS,
         "ItemType_ChatCharm",
         "Advertising_VersionTitle_37",
+        "MapMark_170100_MarkTitle",
     }
 
     row = rows["Advertising_VersionTitle_37"]
@@ -266,7 +292,7 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
 def test_missing_upstream_key_still_skips_and_keeps_the_original_three(
     tmp_path: Path,
 ):
-    added_keys = {"ItemType_ChatCharm", "Advertising_VersionTitle_37"}
+    added_keys = {"ItemType_ChatCharm", "Advertising_VersionTitle_37", "MapMark_170100_MarkTitle"}
     texts = {key: pair for key, pair in UPSTREAM_TEXT.items() if key not in added_keys}
 
     rows = _direct_rows(_build(tmp_path, texts))

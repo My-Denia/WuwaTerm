@@ -95,6 +95,9 @@ CORE_TERM_KEYS = {
     "OccupationConfig_漂泊者_Name": "core_term",  # 漂泊者 -> Rover
     "ItemType_ChatCharm": "core_term",  # 飞讯摆件 -> WavesLine Decor
     "Advertising_VersionTitle_37": "core_term",  # 镜锁妄世，心照红尘 -> Prism's Illusion, Heart's Illumination
+    # A pinned map mark rather than a core system name. The value is still the
+    # term category, so it enters lookup and locking as a location.
+    "MapMark_170100_MarkTitle": "location",  # 扶风转标 -> Gravity Calibrator
 }
 
 # Free-text lock exclusions. The builder counts how often each English
