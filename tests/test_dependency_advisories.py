@@ -1,4 +1,8 @@
-"""Prove the advisory gate fails on high and critical, and only on those."""
+"""Prove the advisory gate fails on high and critical, and only on those.
+
+Also prove it can tell a clean report from a report that only read part of the
+locked set, which is the whole reason `--export` exists.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +26,11 @@ CRITICAL = {"GHSA-6q48-6c7w-9gw2": {"database_specific": {"severity": "CRITICAL"
 HIGH = {"GHSA-h5c8-rqwp-cp95": {"database_specific": {"severity": "HIGH"}}}
 MODERATE = {"GHSA-9wx4-h78v-vm56": {"database_specific": {"severity": "MODERATE"}}}
 LOW = {"GHSA-aaaa-bbbb-cccc": {"database_specific": {"severity": "LOW"}}}
+
+# A platform marker that selects nothing on any host running this suite. A pin
+# narrowed to win32 or darwin cannot be used here: the real export has one of
+# those, and the same file would then apply on a Windows host.
+OTHER_PLATFORM = "sys_platform == 'sunos5'"
 
 
 class Osv:
@@ -59,6 +68,30 @@ def _report(tmp_path, dependencies, name="pip-audit.json"):
     path = tmp_path / name
     path.write_text(json.dumps({"dependencies": dependencies, "fixes": []}))
     return path
+
+
+def _export(tmp_path, pins, name="requirements-locked.txt"):
+    path = tmp_path / name
+    path.write_text("".join(f"{line}\n" for line in pins))
+    return path
+
+
+def _pin(name, version, marker=None):
+    return f"{name}=={version}" + (f" ; {marker}" if marker else "")
+
+
+def _whole_export(*extra):
+    """The export a test hands the gate when the export itself is not the subject.
+
+    The gate refuses an export that lacks a REQUIRED_PINS name, so every "the
+    report is the problem" fixture carries those pins and the matching report
+    lines; only the pin under test is left out of one side or the other.
+    """
+    return [_pin(name, "1.0") for name in sorted(gate.REQUIRED_PINS)] + list(extra)
+
+
+def _whole_report(*extra):
+    return [_dependency(name, "1.0") for name in sorted(gate.REQUIRED_PINS)] + list(extra)
 
 
 def test_clean_report_passes_without_asking_osv(tmp_path, capsys):
@@ -284,6 +317,130 @@ def test_osv_lookup_failure_is_red(tmp_path, capsys):
     assert "HTTP 503" in capsys.readouterr().err
 
 
+def test_a_pin_the_report_does_not_cover_is_red(tmp_path, capsys):
+    """A report that read part of the locked set is not a clean result."""
+    export = _export(tmp_path, _whole_export(_pin("idna", "3.18")))
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 2
+    error = capsys.readouterr().err
+    assert "does not cover 1 pinned requirement" in error
+    assert "idna 3.18" in error
+
+
+def test_the_bootstrap_blind_spot_is_printed_and_does_not_block(tmp_path, capsys):
+    """pip-audit never reports a distribution its own venv already satisfies.
+
+    Measured on the real lock (2026-11-12, pip-audit 2.10.1): the throwaway
+    virtualenv holds setuptools 84.2.1 and packaging 26.3, and neither appears
+    in the report when the export pins them. Failing on that would leave the
+    gate permanently red with no fix path, so it is printed on every run
+    instead.
+    """
+    export = _export(
+        tmp_path, _whole_export(_pin("packaging", "26.3"), _pin("setuptools", "84.2.1"))
+    )
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
+    output = capsys.readouterr().out
+    assert "PASSED" in output
+    assert "7 locked requirements apply to this platform" in output
+    assert "packaging 26.3, setuptools 84.2.1" in output
+    assert "::warning title=Dependency audit::" in output
+
+
+def test_a_pin_for_another_platform_is_not_a_gap(tmp_path, capsys):
+    export = _export(
+        tmp_path, _whole_export(_pin("colorama", "0.4.6", OTHER_PLATFORM))
+    )
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
+    output = capsys.readouterr().out
+    assert "5 locked requirements apply to this platform; 1 select another one" in output
+    assert "colorama" not in output
+
+
+def test_a_truncated_export_is_red_before_its_report_is_believed(tmp_path, capsys):
+    """A file truncated with its report agrees with it, so names are checked.
+
+    The coverage join only asks whether the report covers the export. Delete a
+    pin from both and the two still agree; the export loses `httpx` here and the
+    report is a perfect account of what is left, which is what a clean run looks
+    like from the inside.
+    """
+    remaining = sorted(gate.REQUIRED_PINS - {"httpx"})
+    export = _export(tmp_path, [_pin(name, "1.0") for name in remaining])
+    report = _report(tmp_path, [_dependency(name, "1.0") for name in remaining])
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 2
+    error = capsys.readouterr().err
+    assert "does not contain httpx" in error
+    assert "the file is truncated" in error
+
+
+def test_a_sentinel_pin_is_counted_even_with_an_excluding_marker(tmp_path, capsys):
+    """The sentinel asks what the file contains, not what this platform selects.
+
+    A marker is a reason for pip-audit not to read a pin; it is not a reason for
+    the file to be allowed to lose it.
+    """
+    others = sorted(gate.REQUIRED_PINS - {"httpx"})
+    export = _export(
+        tmp_path,
+        [_pin(name, "1.0") for name in others] + [_pin("httpx", "1.0", OTHER_PLATFORM)],
+    )
+    report = _report(tmp_path, [_dependency(name, "1.0") for name in others])
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
+    output = capsys.readouterr().out
+    assert "4 locked requirements apply to this platform; 1 select another one" in output
+
+
+def test_the_export_sentinel_matches_the_workflow():
+    """The workflow checks these names before the audit, the gate checks them
+    again; two copies of one list are fine only while they are one list."""
+    run = _step("Export the locked dependency set")["run"]
+    line = next(line for line in run.splitlines() if "for required in" in line)
+    names = line.split("for required in", 1)[1].split(";", 1)[0].split()
+
+    assert set(names) == gate.REQUIRED_PINS
+
+
+def test_an_unreadable_export_is_red(tmp_path, capsys):
+    export = _export(tmp_path, _whole_export("this is not a pin"))
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 2
+    assert "unreadable line" in capsys.readouterr().err
+
+
+def test_an_export_with_no_applicable_pin_is_red(tmp_path, capsys):
+    export = _export(tmp_path, [_pin("colorama", "0.4.6", OTHER_PLATFORM)])
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 2
+    assert "selects no requirements for this platform" in capsys.readouterr().err
+
+
+def test_an_absent_export_is_red(tmp_path, capsys):
+    report = _report(tmp_path, _whole_report())
+
+    assert gate.main(
+        [str(report), "--export", str(tmp_path / "absent.txt")], fetch=Osv()
+    ) == 2
+    assert "could not be read" in capsys.readouterr().err
+
+
+def test_without_an_export_the_gate_answers_the_narrower_question(tmp_path, capsys):
+    """A caller that passes no export still gets the advisory verdict it had."""
+    report = _report(tmp_path, [_dependency("httpx", "0.28.1")])
+
+    assert gate.main([str(report)], fetch=Osv()) == 0
+    assert "coverage:" not in capsys.readouterr().out
+
+
 def _workflow():
     return yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
 
@@ -328,6 +485,9 @@ def test_the_audit_reads_the_lock_and_pins_the_scanner():
     ):
         assert flag in export
     assert "uv lock" not in export
+    # The export is checked before it is audited, not trusted afterwards.
+    assert "for required in" in export
+    assert "exit 1" in export
 
     audit = _step("Audit the locked set")["run"]
     assert "pip-audit==2.10.1" in audit
@@ -341,6 +501,11 @@ def test_the_gate_decides_and_the_report_is_kept():
     gate_step = _step("Fail on critical, high or unreadable advisories")
     assert "scripts/check_dependency_advisories.py" in gate_step["run"]
     assert "--audit-exit" in gate_step["run"]
+    # Without the export the gate cannot tell a partial report from a clean one.
+    assert "--export requirements-locked.txt" in gate_step["run"]
+    # The gate evaluates the lock's markers, so it needs `packaging`, which is
+    # why it runs inside the audit environment instead of the bare toolchain.
+    assert "--with pip-audit==2.10.1" in gate_step["run"]
 
     keep = _step("Keep the audit report")
     assert keep["if"] == "always()"
