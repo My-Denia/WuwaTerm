@@ -285,15 +285,32 @@ Semantic review gates:
 
 The translation-context gates are in ADR 0019. These rules cover both:
 
-- **Three states.** Every gate is "met", "not met" or "undecidable (sample too
-  small)", listed with its sample size. Any "not met" blocks merging the
-  engine. With no "not met" but some "undecidable", the engine may merge
+- **Five report states.** Every gate is "met", "not met", "undecidable"
+  (sample too small, or an annotator marked an occurrence undecidable),
+  "pending adjudication" (verdicts still missing) or "not executed" (no
+  sample at all), listed with its sample size. Any "not met" blocks merging
+  the engine. With no "not met" but some "undecidable", the engine may merge
   (merging exposes nothing), but the PR, the receipt and the tracker say
   "n gates met, m undecidable", never "all met". An undecidable M′ gate falls
   back to the conservative default on its own (ADR 0019). Every other
   undecidable gate needs the owner's explicit acceptance of limited evidence
   in the review session, recorded in the receipt; one not accepted counts as
-  not met and blocks every release.
+  not met and blocks every release. "Pending adjudication" is not a result:
+  the round is not finished while a verdict is missing. "Not executed" has no
+  sample at all, so it is neither a pass nor a failure, it is never counted as
+  met, and it needs the same explicit acceptance as an undecidable gate.
+- **Regression and absolute numbers, both.** The M and M′ gates compare the
+  new path with the old one; that comparison answers "not worse", not "how
+  good". Every receipt therefore carries an absolute section next to the
+  gates: per scored group the denominator, and the count of correct, wrong,
+  undecidable and not-yet-judged occurrences for each path, together with the
+  state of every gate this design defines. An occurrence the annotator marked
+  undecidable is not evidence of correctness: it counts on the not-correct
+  side of the comparison and it keeps its gate from being met. Thresholds and
+  minimum samples are unchanged. Owner audit (MY-229) measured three false
+  passes on synthetic inputs before this rule: both paths wrong still met the
+  official-term gate, 30 explicit undecidables counted as zero errors, and an
+  empty reference, negation and number group counted as met.
 - **Not met.** Report it as it is. Adjust only the prompt or the context
   organization, on evidence; no per-word exceptions and no model change. If
   the call budget's stop line is reached and a gate is still not met, the
