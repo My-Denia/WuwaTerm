@@ -14,6 +14,7 @@ import json
 import logging
 from pathlib import Path
 
+import httpx
 import pytest
 
 from wuwaterm.db import connect, insert_records
@@ -363,6 +364,55 @@ def test_llm_failure_maps_to_stable_error_codes(monkeypatch, sample_db):
     assert budget.error_code == ERROR_LLM_BUDGET_EXHAUSTED
     assert budget.llm_failure.reason == "budget"
     assert budget.llm_failure.detail == "unspecified"
+
+
+def test_declared_truncation_never_becomes_a_translation_outcome(
+    monkeypatch, sample_db
+):
+    """A provider-declared cap stop fails the job; it never answers as llm."""
+    for name, value in (
+        ("WUWATERM_OPENAI_BASE_URL", "http://model.test/v1"),
+        ("WUWATERM_OPENAI_API_KEY", "test-key"),
+        ("WUWATERM_OPENAI_MODEL", "test-model"),
+    ):
+        monkeypatch.setenv(name, value)
+    model_calls = []
+
+    def handler(request):
+        model_calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Jinhsi equipped"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    translator = SentenceTranslator(
+        sample_db, llm_transport=httpx.MockTransport(handler)
+    )
+
+    outcome = asyncio.run(
+        translate_request_async(
+            build_term_service(sample_db),
+            translator,
+            TranslationJob(text="今汐装备了声骸。"),
+        )
+    )
+
+    assert len(model_calls) == 1
+    assert outcome.kind == KIND_ERROR
+    assert outcome.error_code == ERROR_LLM_UNAVAILABLE
+    assert outcome.error_code in TRANSLATION_ERROR_CODES
+    assert outcome.llm_failure.reason == "invalid_response"
+    assert outcome.llm_failure.detail == "truncated_output"
+    assert outcome.text == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "Jinhsi equipped" not in outcome.text
 
 
 def test_translation_outcome_llm_failure_is_non_wire_metadata():
