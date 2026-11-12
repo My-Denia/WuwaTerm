@@ -616,6 +616,177 @@ def test_illegal_offlist_and_m_verdicts_stay_pending(ev, tmp_path):
     assert ev._verdict({"M1": {}}, blind, item, "new") is None
 
 
+M_BLIND = {"B9": ["old", "new"]}
+
+
+def _m_inputs(ev, items, docs=("B9",)):
+    return ev.Inputs(
+        run_dir=Path("/nonexistent/run"), corpus_dir=Path("/nonexistent/corpus"),
+        alignment={"zh_char_denominator": 1000, "units": []}, freeze={"items": []},
+        injections={"injections": []}, variants={"variants": []},
+        m_gold={"docs": {doc: f"/elsewhere/{doc}.txt" for doc in docs}, "items": list(items)},
+        mprime={"experiments": [], "occurrences": []},
+    )
+
+
+def _official_items(n=30):
+    return [{"id": f"T{i:02d}", "doc": "B9", "kind": "term_sense", "gold": "official"} for i in range(n)]
+
+
+def _m_verdicts(ids, old, new):
+    return {item_id: {"A": old, "B": new} for item_id in ids}
+
+
+def _m_row(result, name):
+    return {row["gate"]: row for row in result["absolute"]}[name]
+
+
+def test_a_regression_gate_never_stands_in_for_absolute_quality(ev):
+    """The audit's first gap: 30 official terms, wrong in both paths."""
+    items = _official_items()
+    verdicts = _m_verdicts([item["id"] for item in items], "wrong", "wrong")
+    result = ev._score_m_translation(_m_inputs(ev, items), verdicts, M_BLIND, {"B9"})
+    official = result["gates"]["M_official_terms"]
+    # "not worse than the old path" is a true statement here and it stays.
+    assert official["state"] == "met"
+    row = _m_row(result, "M_official_terms")
+    assert row["denominator"] == 30
+    assert row["paths"]["new"] == {"correct": 0, "wrong": 30, "undecidable": 0, "not_judged": 0}
+    assert row["paths"]["old"] == {"correct": 0, "wrong": 30, "undecidable": 0, "not_judged": 0}
+
+
+def test_an_undecidable_verdict_is_not_a_zero_error(ev):
+    """The audit's second gap (MY-229): old all right, new all undecidable."""
+    items = _official_items()
+    verdicts = _m_verdicts([item["id"] for item in items], "correct", "undecidable")
+    result = ev._score_m_translation(_m_inputs(ev, items), verdicts, M_BLIND, {"B9"})
+    official = result["gates"]["M_official_terms"]
+    assert official["state"] == "not_met"
+    assert official["new_undecidable"] == 30 and official["undecided"] == 30
+    assert official["new_not_correct"] == 30 and official["old_not_correct"] == 0
+    row = _m_row(result, "M_official_terms")
+    assert row["paths"]["new"] == {"correct": 0, "wrong": 0, "undecidable": 30, "not_judged": 0}
+    assert row["paths"]["old"]["correct"] == 30
+
+
+def test_one_undecidable_occurrence_keeps_the_gate_from_met(ev):
+    items = _official_items()
+    ids = [item["id"] for item in items]
+    verdicts = _m_verdicts(ids, "wrong", "correct")  # a clear improvement on its own
+    verdicts[ids[0]] = {"A": "wrong", "B": "undecidable"}
+    official = ev._score_m_translation(_m_inputs(ev, items), verdicts, M_BLIND, {"B9"})["gates"]["M_official_terms"]
+    assert official["new_correct"] == 29 and official["new_undecidable"] == 1
+    assert official["state"] == "undecidable" and official["reason"] == "explicit_undecidable"
+
+
+def test_a_group_with_no_samples_is_not_executed_never_met(ev):
+    """The audit's third gap: no reference/negation/quantity item at all."""
+    result = ev._score_m_translation(_m_inputs(ev, []), {}, M_BLIND, {"B9"})
+    for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number"):
+        assert result["gates"][name]["state"] == "not_executed"
+        assert result["gates"][name]["reason"] == "no samples"
+        row = _m_row(result, name)
+        assert row["denominator"] == 0 and row["executed"] is False and row["state"] == "not_executed"
+
+
+def test_a_group_below_its_minimum_sample_stays_undecidable(ev):
+    items = _official_items(10)  # the frozen minimum is 30
+    verdicts = _m_verdicts([item["id"] for item in items], "wrong", "wrong")
+    official = ev._score_m_translation(_m_inputs(ev, items), verdicts, M_BLIND, {"B9"})["gates"]["M_official_terms"]
+    assert official["state"] == "undecidable" and official["reason"] == "sample too small"
+
+
+def _m_doc(ev, out, issues):
+    doc = {
+        "layer": "M", "doc": "B9", "raw": "甲乙。",
+        "new": {"text": "Alpha.", "segments": [
+            {"start": 0, "end": 3, "core_start": 0, "core_end": 3, "hard_cut": False, "translation": "Alpha."}
+        ]},
+        "old": {"text": "Alpha.", "chunks": [{"source": "甲乙。", "translation": "Alpha."}]},
+        "reviews": [{
+            "segment": 0, "pair": 0, "pair_source": "甲乙。", "pair_target": "Alpha.",
+            "pair_status": "ready", "latency_s": 1.0, "bytes": 100, "error_code": None,
+            "body": {"status": "complete", "dropped_unanchored": 0, "omitted_issues": 0,
+                     "issues": issues},
+        }],
+    }
+    ev.write_json_atomic(out / "M" / "B9.json", doc)
+    return doc
+
+
+def _precision_issue(n):
+    return {"id": f"{n:032x}", "category": "term_sense", "confidence": "high",
+            "source_span": {"start": 0, "end": 2, "text": "甲乙"}, "target_span": None,
+            "rationale": "r", "suggestion": None}
+
+
+def test_undecidable_precision_verdicts_stay_in_the_denominator(ev, tmp_path):
+    """An issue the owner could not judge must not shrink the precision sample."""
+    out = tmp_path / "round"
+    out.mkdir(parents=True)
+    issues = [_precision_issue(n) for n in range(20)]
+    _m_doc(ev, out, issues)
+    keys = [f"M:B9:seg0:pair0:{issue['id']}" for issue in issues]
+    ev.write_json_atomic(out / "adjudication" / "m-precision.json", {key: "undecidable" for key in keys[1:]}
+                         | {keys[0]: "true"})
+    gate = ev.score_m(_m_inputs(ev, []), out, ev.ReviewStats(), None)["gates"]["M_precision"]
+    # One true out of twenty issues is 5%, not one out of one.
+    assert gate["n"] == 20 and gate["true"] == 1 and gate["undecidable"] == 19
+    assert gate["precision"] == 0.05 and gate["precision_judged_only"] == 1.0
+    assert gate["state"] == "not_met"
+
+
+def test_a_round_without_reviews_does_not_pass_anchoring_bytes_or_latency(ev, tmp_path):
+    receipt = ev.score_round(_m_inputs(ev, []), tmp_path / "round", ledger={}, dry_run=True)
+    assert receipt["gates"]["anchoring"]["state"] == "not_executed"
+    assert receipt["gates"]["bytes"]["state"] == "not_executed"
+    assert receipt["gates"]["latency_p95"]["state"] == "not_executed"
+
+
+def test_a_receipt_carries_both_the_absolute_and_the_regression_sections(ev, tmp_path):
+    items = _official_items()
+    ids = [item["id"] for item in items]
+    out = tmp_path / "round"
+    out.mkdir(parents=True)
+    _m_doc(ev, out, [])
+    _write(out / "worklists" / "m-blind-key.json", M_BLIND)
+    ev.write_json_atomic(out / "adjudication" / "m-translation.json", _m_verdicts(ids, "wrong", "wrong"))
+    receipt = ev.score_round(_m_inputs(ev, items), out, ledger={"model_calls_total": 0}, dry_run=True)
+    # The regression gate stays met: that is a true statement about the two paths.
+    assert receipt["gates"]["M_official_terms"]["state"] == "met"
+    absolute = receipt["absolute"]
+    rows = {row["gate"]: row for row in absolute["rows"]}
+    assert rows["M_official_terms"]["paths"]["new"]["correct"] == 0
+    assert rows["M_official_terms"]["denominator"] == 30
+    # Every gate the design defines is named, with its state, in every receipt.
+    assert absolute["gates_missing"] == []
+    assert list(absolute["gate_states"]) and set(absolute["gate_states"]) == set(ev.GATE_NAMES)
+    # The four count buckets are all reported, not just the passing ones.
+    assert set(receipt["summary"]) == set(ev.GATE_STATES)
+    assert "not executed" in receipt["headline"]
+
+
+def test_a_single_undecidable_mprime_occurrence_keeps_precedents_off(ev, tmp_path):
+    inputs, out = _mprime_inputs(ev, tmp_path)
+    good = {"with_precedent": "correct", "without_precedent": "correct"}
+    occurrences = inputs.mprime["occurrences"]
+    verdicts = {occurrence["id"]: dict(good) for occurrence in occurrences}
+    # Only the precedent side is undecidable: that cannot be better than the
+    # side without the precedent, so the gate is not met.
+    verdicts[occurrences[0]["id"]] = {"with_precedent": "undecidable", "without_precedent": "correct"}
+    ev.write_json_atomic(out / "adjudication" / "mprime.json", verdicts)
+    result = ev.score_mprime(inputs, out)
+    assert result["gates"]["Mprime_same_sense"]["undecidable_with_precedent"] == 1
+    assert result["gates"]["Mprime_same_sense"]["state"] == "not_met"
+    assert result["precedents_default"] == "off"
+    # Both sides undecidable on one occurrence: no regression, but no evidence
+    # either, so the gate is undecidable instead of met.
+    verdicts[occurrences[0]["id"]] = {"with_precedent": "undecidable", "without_precedent": "undecidable"}
+    ev.write_json_atomic(out / "adjudication" / "mprime.json", verdicts)
+    gate = ev.score_mprime(inputs, out)["gates"]["Mprime_same_sense"]
+    assert gate["state"] == "undecidable" and gate["reason"] == "explicit_undecidable"
+
+
 def test_direct_model_translation_bypasses_dictionary_and_segmentation(ev, sample_db, monkeypatch):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")

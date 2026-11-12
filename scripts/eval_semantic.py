@@ -97,6 +97,26 @@ M_MIN_OFFICIAL = 30
 M_MIN_ORDINARY = 10
 MPRIME_MIN_SAME = 10
 MPRIME_MIN_DIFF = 5
+# Every gate a receipt can carry, in report order. A round that does not reach
+# a layer still lists its gates (as not executed), and the receipt's absolute
+# section names this list so a gate cannot quietly drop out of a report.
+GATE_NAMES = (
+    "P_false_positives_zh->en",
+    "P_false_positives_en->zh",
+    "P_real_error_recall",
+    *(f"E_recall_{category}" for category in E_RECALL_MIN),
+    "M_official_terms",
+    "M_ordinary_sense",
+    "M_reference_negation_number",
+    "M_precision",
+    "separator_fidelity",
+    "Mprime_same_sense",
+    "Mprime_led_astray",
+    "anchoring",
+    "bytes",
+    "latency_p95",
+    "G_regression",
+)
 LAYERS = ("P", "E", "M", "Mprime")
 NOT_REVIEWED_STREAK_STOP = 3
 TIMEOUT_STREAK_STOP = 3
@@ -108,6 +128,11 @@ MET = "met"
 NOT_MET = "not_met"
 UNDECIDABLE = "undecidable"
 PENDING = "pending_adjudication"
+# No sample and no output: neither met nor not met. Kept apart from
+# UNDECIDABLE, which stays what ADR 0018 says it is (a sample too small to
+# decide, or an annotator's explicit "cannot score this").
+NOT_EXECUTED = "not_executed"
+GATE_STATES = (MET, NOT_MET, UNDECIDABLE, PENDING, NOT_EXECUTED)
 
 
 class Refused(RuntimeError):
@@ -2074,6 +2099,41 @@ def gate(state: str, **details: Any) -> dict[str, Any]:
     return {"state": state, **details}
 
 
+def _gate_with(state: str, reason: str = "", **details: Any) -> dict[str, Any]:
+    """A gate that records why it landed in its state, when there is a reason."""
+    return gate(state, **({"reason": reason} if reason else {}), **details)
+
+
+def _group_state(counted: Mapping[str, Any], minimum: int, failed: bool, *, failure_first: bool = False) -> tuple[str, str]:
+    """State and reason for a scored group of gold items.
+
+    An empty group is not executed: the gate has no denominator, so it is
+    neither a pass nor a failure and is reported apart from both. Below the
+    minimum sample it is undecidable, as before. ``failed`` carries the gate's
+    own comparison (a regression, errors over the limit); a group the annotator
+    left partly undecidable can be not met but never met, because an
+    occurrence nobody could score is not evidence that the new path is good
+    enough. ``failure_first`` keeps a proven failure visible while other items
+    still have no verdict.
+    """
+    if not counted["n"]:
+        return NOT_EXECUTED, "no samples"
+    if counted["n"] < minimum:
+        return UNDECIDABLE, "sample too small"
+    if counted["pending"] and not (failure_first and failed):
+        return PENDING, ""
+    if failed:
+        return NOT_MET, ""
+    if counted["undecided"]:
+        return UNDECIDABLE, "explicit_undecidable"
+    return MET, ""
+
+
+def _reviewed_state(reviewed: int, decided: str) -> str:
+    """A review-shaped gate has no evidence at all when no review completed."""
+    return decided if reviewed else NOT_EXECUTED
+
+
 def bounded_gate(lower: float, upper: float, ok: callable) -> str:
     if ok(upper) and ok(lower):
         return MET
@@ -2155,6 +2215,7 @@ class ReviewStats:
     returned: int = 0
     dropped: int = 0
     illegal: int = 0
+    completed: int = 0
     not_reviewed: int = 0
     errors: int = 0
     timeouts: int = 0
@@ -2176,6 +2237,7 @@ class ReviewStats:
         if body["status"] != "complete":
             self.not_reviewed += 1
             return []
+        self.completed += 1
         self.dropped += int(body["dropped_unanchored"])
         issues = list(body["issues"])
         self.returned += len(issues) + int(body["omitted_issues"])
@@ -2256,7 +2318,7 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
     for direction in ("zh->en", "en->zh"):
         bucket = per_direction.get(direction)
         if bucket is None:
-            gates[f"P_false_positives_{direction}"] = gate(UNDECIDABLE, reason="not run")
+            gates[f"P_false_positives_{direction}"] = gate(NOT_EXECUTED, reason="not run")
             continue
         lower = bucket["on_allowed_mh"] + bucket["offlist_fp_mh"]
         upper = lower + bucket["offlist_pending_mh"]
@@ -2284,10 +2346,15 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
     n_real = len(real_items)
     recall = (len(real_hit) / n_real) if n_real else None
     complete_p = all(covered[d] == set(units) for d in covered)
-    gates["P_real_error_recall"] = gate(
-        UNDECIDABLE
-        if n_real < P_REAL_ERROR_MIN_SAMPLE or not complete_p
-        else (MET if recall >= P_REAL_ERROR_RECALL_MIN else NOT_MET),
+    if not n_real:
+        state_real, reason_real = NOT_EXECUTED, "no frozen real-error items"
+    elif n_real < P_REAL_ERROR_MIN_SAMPLE or not complete_p:
+        state_real, reason_real = UNDECIDABLE, ""
+    else:
+        state_real, reason_real = (MET if recall >= P_REAL_ERROR_RECALL_MIN else NOT_MET), ""
+    gates["P_real_error_recall"] = _gate_with(
+        state_real,
+        reason_real,
         n=n_real,
         min_sample=P_REAL_ERROR_MIN_SAMPLE,
         hit=len(real_hit),
@@ -2349,7 +2416,7 @@ def score_e(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
         ids = [iid for iid, item in injections.items() if item["category"] == category]
         groups = sorted({injections[iid]["doc"] for iid in ids})
         if not ran:
-            gates[f"E_recall_{category}"] = gate(UNDECIDABLE, reason="not run")
+            gates[f"E_recall_{category}"] = gate(NOT_EXECUTED, reason="not run")
             continue
         n = len(ids)
         hit = sum(1 for iid in ids if hits.get(iid))
@@ -2357,7 +2424,9 @@ def score_e(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
         recall = hit / n if n else 0.0
         upper = (hit + len(missing)) / n if n else 0.0
         enough = n >= E_MIN_PER_CATEGORY and len(groups) >= E_MIN_GROUPS
-        if not enough:
+        if not n:
+            state = NOT_EXECUTED  # no injection of this category: no denominator
+        elif not enough:
             state = UNDECIDABLE
         elif recall >= minimum:
             state = MET  # even counting every unreviewed injection as missed
@@ -2476,8 +2545,8 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     gates: dict[str, Any] = {}
     if not docs:
         for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number", "M_precision", "separator_fidelity"):
-            gates[name] = gate(UNDECIDABLE, reason="not run")
-        return {"gates": gates}
+            gates[name] = gate(NOT_EXECUTED, reason="not run")
+        return {"gates": gates, "absolute": []}
     fidelity = {}
     mh_issues: list[dict[str, Any]] = []
     verified = {"old": 0, "new": 0}
@@ -2521,6 +2590,7 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     )
     judged = [item for item in mh_issues if precision_verdicts.get(item["key"]) in M_PRECISION_LABELS]
     true_count = sum(1 for item in judged if precision_verdicts[item["key"]] == "true")
+    undecided = [item for item in judged if precision_verdicts[item["key"]] == "undecidable"]
     pending = [item for item in mh_issues if precision_verdicts.get(item["key"]) not in M_PRECISION_LABELS]
     if len(mh_issues) < M_PRECISION_MIN_SAMPLE:
         state = UNDECIDABLE
@@ -2530,10 +2600,15 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         state = bounded_gate(lower, upper, lambda value: value >= M_PRECISION_MIN)
     else:
         decided = [item for item in judged if precision_verdicts[item["key"]] in ("true", "false")]
-        precision = true_count / len(decided) if decided else 0.0
+        # An issue the owner could not judge is not evidence that the review is
+        # precise: it stays in the denominator and never joins the numerator.
+        precision = true_count / (len(decided) + len(undecided)) if (decided or undecided) else 0.0
         state = MET if precision >= M_PRECISION_MIN else NOT_MET
+    decided_precision = true_count / (len(judged) - len(undecided)) if len(judged) > len(undecided) else None
     gates["M_precision"] = gate(
-        state, n=len(mh_issues), min_sample=M_PRECISION_MIN_SAMPLE, judged=len(judged), true=true_count
+        state, n=len(mh_issues), min_sample=M_PRECISION_MIN_SAMPLE, judged=len(judged), true=true_count,
+        undecidable=len(undecided), precision=None if not judged else round(true_count / len(judged), 3),
+        precision_judged_only=None if decided_precision is None else round(decided_precision, 3),
     )
     write_json_atomic(out_dir / "worklists" / "m-precision.json", pending)
 
@@ -2554,12 +2629,18 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
             }
         )
     write_json_atomic(out_dir / "worklists" / "m-translation-packet.json", packet)
-    gates.update(_score_m_translation(inputs, translation_verdicts, blind_key, {doc["doc"] for doc in docs}))
+    translation = _score_m_translation(inputs, translation_verdicts, blind_key, {doc["doc"] for doc in docs})
+    gates.update(translation["gates"])
     missing_docs = sorted(set(inputs.m_gold["docs"]) - {doc["doc"] for doc in docs})
     if missing_docs:
         for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number", "M_precision", "separator_fidelity"):
             gates[name] = {**gates[name], "state": UNDECIDABLE, "reason": "incomplete", "docs_missing": missing_docs}
-    return {"gates": gates, "verified_constraint_diagnostic": verified, "m_review_pairs": pair_counts}
+    return {
+        "gates": gates,
+        "absolute": translation["absolute"],
+        "verified_constraint_diagnostic": verified,
+        "m_review_pairs": pair_counts,
+    }
 
 
 # A verdict counts only when it is present and one of these labels; anything
@@ -2591,6 +2672,68 @@ def _verdict(verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]]
     return value if value in M_TRANSLATION_LABELS else None
 
 
+def _translation_counts(
+    group: Sequence[Mapping[str, Any]], verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]]
+) -> dict[str, Any]:
+    """Per-path labels over one group of gold items, plus the comparison counts.
+
+    ``undecidable`` is a final verdict, not a missing one, so it has its own
+    counter and it joins the not-correct side of a comparison: an occurrence
+    nobody could score is not evidence for or against the new path.
+    """
+    out: dict[str, Any] = {
+        "n": len(group),
+        "pending": 0,
+        "judged": 0,
+        "old_correct": 0,
+        "old_wrong": 0,
+        "old_undecidable": 0,
+        "new_correct": 0,
+        "new_wrong": 0,
+        "new_undecidable": 0,
+        "undecided": 0,
+        "old_right_new_wrong": 0,
+    }
+    for item in group:
+        old = _verdict(verdicts, blind_key, item, "old")
+        new = _verdict(verdicts, blind_key, item, "new")
+        if old is None or new is None:
+            out["pending"] += 1
+            continue
+        out["judged"] += 1
+        out[f"old_{old}"] += 1
+        out[f"new_{new}"] += 1
+        out["undecided"] += int("undecidable" in (old, new))
+        out["old_right_new_wrong"] += int(old == "correct" and new == "wrong")
+    out["old_not_correct"] = out["old_wrong"] + out["old_undecidable"]
+    out["new_not_correct"] = out["new_wrong"] + out["new_undecidable"]
+    return out
+
+
+def _absolute_row(
+    name: str, state: str, unit: str, denominator: int, paths: Mapping[str, Mapping[str, Any]], note: str
+) -> dict[str, Any]:
+    """One absolute row: every gold item in the denominator, labels counted."""
+    return {
+        "gate": name,
+        "state": state,
+        "executed": bool(denominator),
+        "unit": unit,
+        "denominator": denominator,
+        "paths": dict(paths),
+        "note": note,
+    }
+
+
+def _path_counts(counted: Mapping[str, Any], path: str) -> dict[str, int]:
+    return {
+        "correct": counted[f"{path}_correct"],
+        "wrong": counted[f"{path}_wrong"],
+        "undecidable": counted[f"{path}_undecidable"],
+        "not_judged": counted["pending"],
+    }
+
+
 def _score_m_translation(
     inputs: Inputs, verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]], docs: set[str]
 ) -> dict[str, Any]:
@@ -2599,43 +2742,41 @@ def _score_m_translation(
     ordinary = [i for i in items if i["kind"] == "term_sense" and i["gold"] == "ordinary"]
     rnn = [i for i in items if i["kind"] in ("reference", "negation", "quantity") and i["gold"] != "undecidable"]
 
-    def counts(group: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        out = {"n": len(group), "pending": 0, "old_wrong": 0, "new_wrong": 0, "old_right_new_wrong": 0}
-        for item in group:
-            old = _verdict(verdicts, blind_key, item, "old")
-            new = _verdict(verdicts, blind_key, item, "new")
-            if old is None or new is None:
-                out["pending"] += 1
-                continue
-            out["old_wrong"] += int(old == "wrong")
-            out["new_wrong"] += int(new == "wrong")
-            out["old_right_new_wrong"] += int(old == "correct" and new == "wrong")
-        return out
-
     gates: dict[str, Any] = {}
-    c = counts(official)
-    if c["n"] < M_MIN_OFFICIAL:
-        state = UNDECIDABLE
-    elif c["pending"]:
-        state = PENDING
-    else:
-        state = MET if c["new_wrong"] <= c["old_wrong"] and c["old_right_new_wrong"] <= 1 else NOT_MET
-    gates["M_official_terms"] = gate(state, min_sample=M_MIN_OFFICIAL, **c)
-    c = counts(ordinary)
-    if c["n"] < M_MIN_ORDINARY:
-        state = UNDECIDABLE
-    elif c["pending"]:
-        state = PENDING
-    else:
-        ok = c["new_wrong"] <= 1 or c["new_wrong"] <= c["old_wrong"] * 0.5
-        state = MET if ok else NOT_MET
-    gates["M_ordinary_sense"] = gate(state, min_sample=M_MIN_ORDINARY, **c)
-    c = counts(rnn)
-    state = PENDING if c["pending"] else (MET if c["new_wrong"] <= c["old_wrong"] else NOT_MET)
-    per_doc = {doc: counts([i for i in rnn if i["doc"] == doc]) for doc in sorted(docs)}
-    without_a3 = counts([i for i in rnn if i["doc"] != "A3"])
-    gates["M_reference_negation_number"] = gate(state, per_doc=per_doc, without_A3=without_a3, **c)
-    return gates
+    rows: list[dict[str, Any]] = []
+    c = _translation_counts(official, verdicts, blind_key)
+    # ADR 0019: no worse than the old path, and at most one occurrence right
+    # there and wrong here. A relative comparison on purpose; the absolute
+    # counts travel next to it in the receipt.
+    failed = c["new_not_correct"] > c["old_not_correct"] or c["old_right_new_wrong"] > 1
+    state, reason = _group_state(c, M_MIN_OFFICIAL, failed)
+    gates["M_official_terms"] = _gate_with(state, reason, min_sample=M_MIN_OFFICIAL, **c)
+    rows.append(_absolute_row(
+        "M_official_terms", state, "official term occurrence", c["n"],
+        {path: _path_counts(c, path) for path in ("old", "new")},
+        "regression comparison only: met says the new path is not worse, not that it is right",
+    ))
+    c = _translation_counts(ordinary, verdicts, blind_key)
+    failed = not (c["new_not_correct"] <= 1 or c["new_not_correct"] <= c["old_not_correct"] * 0.5)
+    state, reason = _group_state(c, M_MIN_ORDINARY, failed)
+    gates["M_ordinary_sense"] = _gate_with(state, reason, min_sample=M_MIN_ORDINARY, **c)
+    rows.append(_absolute_row(
+        "M_ordinary_sense", state, "ordinary-sense occurrence", c["n"],
+        {path: _path_counts(c, path) for path in ("old", "new")},
+        "errors drop by half against the old path, or reach at most one in absolute terms",
+    ))
+    c = _translation_counts(rnn, verdicts, blind_key)
+    failed = c["new_not_correct"] > c["old_not_correct"]
+    state, reason = _group_state(c, 0, failed)
+    per_doc = {doc: _translation_counts([i for i in rnn if i["doc"] == doc], verdicts, blind_key) for doc in sorted(docs)}
+    without_a3 = _translation_counts([i for i in rnn if i["doc"] != "A3"], verdicts, blind_key)
+    gates["M_reference_negation_number"] = _gate_with(state, reason, per_doc=per_doc, without_A3=without_a3, **c)
+    rows.append(_absolute_row(
+        "M_reference_negation_number", state, "reference, negation or number occurrence", c["n"],
+        {path: _path_counts(c, path) for path in ("old", "new")},
+        "no frozen minimum sample: an empty group is not executed, never met",
+    ))
+    return {"gates": gates, "absolute": rows}
 
 
 def _count_rendering(text: str, rendering: str | None) -> int:
@@ -2655,11 +2796,16 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
     diff = [o for o in occurrences if o["relation"] == "diff" and not o.get("supplementary")]
     gates: dict[str, Any] = {}
     if not results:
-        gates["Mprime_same_sense"] = gate(UNDECIDABLE, reason="not run")
-        gates["Mprime_led_astray"] = gate(UNDECIDABLE, reason="not run")
-        return {"gates": gates, "precedents_default": "off"}
-    # Same sense: errors with the precedent not more than without.
+        gates["Mprime_same_sense"] = gate(NOT_EXECUTED, reason="not run")
+        gates["Mprime_led_astray"] = gate(NOT_EXECUTED, reason="not run")
+        return {"gates": gates, "absolute": [], "precedents_default": "off"}
+    # Same sense: errors with the precedent not more than without. An
+    # "undecidable" verdict is a finished judgment that the occurrence cannot
+    # be scored, so it counts on the not-correct side and it keeps the gate
+    # from being met.
     wrong = {"with_precedent": 0, "without_precedent": 0}
+    undecided = {"with_precedent": 0, "without_precedent": 0}
+    undecided_same = 0
     pending = 0
     for occ in same:
         entry = mprime_verdict(verdicts, occ["id"])
@@ -2668,21 +2814,24 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
             continue
         for condition in wrong:
             wrong[condition] += int(entry.get(condition) in ("wrong", "led_astray"))
-    if len(same) < MPRIME_MIN_SAME:
-        state_same = UNDECIDABLE
-    elif pending:
-        state_same = PENDING
-    else:
-        state_same = MET if wrong["with_precedent"] <= wrong["without_precedent"] else NOT_MET
-    gates["Mprime_same_sense"] = gate(
-        state_same, n_same=len(same), target_paras=len({(o["experiment"], o["target_para"]) for o in same}),
+            undecided[condition] += int(entry.get(condition) == "undecidable")
+        undecided_same += int("undecidable" in (entry["with_precedent"], entry["without_precedent"]))
+    not_correct = {condition: wrong[condition] + undecided[condition] for condition in wrong}
+    failed_same = not_correct["with_precedent"] > not_correct["without_precedent"]
+    state_same, reason_same = _group_state(
+        {"n": len(same), "pending": pending, "undecided": undecided_same}, MPRIME_MIN_SAME, failed_same
+    )
+    gates["Mprime_same_sense"] = _gate_with(
+        state_same, reason_same, n_same=len(same), target_paras=len({(o["experiment"], o["target_para"]) for o in same}),
         min_sample=MPRIME_MIN_SAME, pending=pending, **{f"wrong_{k}": v for k, v in wrong.items()},
+        **{f"undecidable_{k}": v for k, v in undecided.items()},
     )
     # Led astray: an automatic upper bound per target paragraph; a judged
     # verdict replaces the bound for that occurrence.
     upper = 0
     judged_astray = 0
     unresolved = 0
+    undecided_diff = 0
     for (exp_id, para), result in results.items():
         diff_here = [o for o in diff if (o["experiment"], o["target_para"]) == (exp_id, para)]
         if not diff_here:
@@ -2690,26 +2839,27 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
         rendering = experiments[exp_id]["precedent"]["rendering"]
         text = result["with_precedent"].get("text") or ""
         bound = min(len(diff_here), _count_rendering(text, rendering))
-        undecided = [o for o in diff_here if mprime_verdict(verdicts, o["id"]) is None]
-        judged_astray += sum(
-            1 for o in diff_here
-            if (mprime_verdict(verdicts, o["id"]) or {}).get("with_precedent") == "led_astray"
-        )
-        if bound and undecided:
-            unresolved += min(bound, len(undecided))
+        undecided_here = [o for o in diff_here if mprime_verdict(verdicts, o["id"]) is None]
+        usable_pair = bool(text) and bool((result.get("without_precedent") or {}).get("text"))
+        for occurrence in diff_here:
+            verdict = mprime_verdict(verdicts, occurrence["id"]) or {}
+            if verdict.get("with_precedent") == "led_astray":
+                judged_astray += 1
+            if usable_pair and "undecidable" in (verdict.get("with_precedent"), verdict.get("without_precedent")):
+                undecided_diff += 1
+        if bound and undecided_here:
+            unresolved += min(bound, len(undecided_here))
         upper += bound
-    if len(diff) < MPRIME_MIN_DIFF:
-        state_diff = UNDECIDABLE
-    elif judged_astray:
-        state_diff = NOT_MET
-    elif unresolved:
-        state_diff = PENDING
-    else:
-        state_diff = MET
-    gates["Mprime_led_astray"] = gate(
-        state_diff, n_diff=len(diff), target_paras=len({(o["experiment"], o["target_para"]) for o in diff}),
+    state_diff, reason_diff = _group_state(
+        {"n": len(diff), "pending": unresolved, "undecided": undecided_diff},
+        MPRIME_MIN_DIFF,
+        bool(judged_astray),
+        failure_first=True,  # a proven led-astray stays visible while bounds are open
+    )
+    gates["Mprime_led_astray"] = _gate_with(
+        state_diff, reason_diff, n_diff=len(diff), target_paras=len({(o["experiment"], o["target_para"]) for o in diff}),
         min_sample=MPRIME_MIN_DIFF, automatic_upper_bound=upper, judged_led_astray=judged_astray,
-        unresolved=unresolved,
+        unresolved=unresolved, undecidable=undecided_diff,
     )
     expected_targets = {
         (e["experiment"], t["para"])
@@ -2729,6 +2879,35 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
                 gates[name] = {**gates[name], "state": UNDECIDABLE, "reason": "incomplete", "targets_missing": missing_targets}
         state_same, state_diff = gates["Mprime_same_sense"]["state"], gates["Mprime_led_astray"]["state"]
     default = "on" if state_same == MET and state_diff == MET else "off"
+    judged_same = len(same) - pending
+    diff_pending = sum(1 for occurrence in diff if mprime_verdict(verdicts, occurrence["id"]) is None)
+    rows = [
+        _absolute_row(
+            "Mprime_same_sense", state_same, "same-sense occurrence", len(same),
+            {
+                condition: {
+                    "correct": judged_same - wrong[condition] - undecided[condition],
+                    "wrong": wrong[condition],
+                    "undecidable": undecided[condition],
+                    "not_judged": pending,
+                }
+                for condition in wrong
+            },
+            "errors with the precedent are not more than without; an undecidable verdict counts on the not-correct side",
+        ),
+        _absolute_row(
+            "Mprime_led_astray", state_diff, "different-sense occurrence", len(diff),
+            {
+                "with_precedent": {
+                    "correct": len(diff) - diff_pending - judged_astray - undecided_diff,
+                    "wrong": judged_astray,
+                    "undecidable": undecided_diff,
+                    "not_judged": diff_pending,
+                }
+            },
+            "wrong means led astray by the precedent; a paragraph's automatic upper bound is in the gate details",
+        ),
+    ]
     packet = [
         {
             "occurrence": o,
@@ -2740,7 +2919,7 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
         if mprime_verdict(verdicts, o["id"]) is None
     ]
     write_json_atomic(out_dir / "worklists" / "mprime.json", packet)
-    return {"gates": gates, "precedents_default": default}
+    return {"gates": gates, "absolute": rows, "precedents_default": default}
 
 
 def score_round(inputs: Inputs, out_dir: Path, *, ledger: Mapping[str, Any], dry_run: bool) -> dict[str, Any]:
@@ -2757,32 +2936,50 @@ def score_round(inputs: Inputs, out_dir: Path, *, ledger: Mapping[str, Any], dry
     attempted = stats.returned + stats.dropped
     dropped_ratio = stats.dropped / attempted if attempted else 0.0
     gates["anchoring"] = gate(
-        MET if stats.illegal == 0 and dropped_ratio <= DROPPED_RATIO_LIMIT else NOT_MET,
+        _reviewed_state(
+            stats.completed, MET if stats.illegal == 0 and dropped_ratio <= DROPPED_RATIO_LIMIT else NOT_MET
+        ),
         returned=stats.returned, dropped_unanchored=stats.dropped, illegal_spans=stats.illegal,
-        dropped_ratio=round(dropped_ratio, 3), limit=DROPPED_RATIO_LIMIT,
+        reviews_complete=stats.completed, dropped_ratio=round(dropped_ratio, 3), limit=DROPPED_RATIO_LIMIT,
     )
     gates["bytes"] = gate(
-        MET if stats.max_bytes <= SEMANTIC_RESPONSE_BYTE_BUDGET else NOT_MET,
-        max_bytes=stats.max_bytes, budget=SEMANTIC_RESPONSE_BYTE_BUDGET,
+        _reviewed_state(stats.completed, MET if stats.max_bytes <= SEMANTIC_RESPONSE_BYTE_BUDGET else NOT_MET),
+        max_bytes=stats.max_bytes, budget=SEMANTIC_RESPONSE_BYTE_BUDGET, reviews_complete=stats.completed,
     )
     p95 = _percentile(stats.latencies, 0.95)
     gates["latency_p95"] = gate(
-        UNDECIDABLE if p95 is None else (MET if p95 <= LATENCY_P95_LIMIT_S else NOT_MET),
+        NOT_EXECUTED if p95 is None else (MET if p95 <= LATENCY_P95_LIMIT_S else NOT_MET),
         p95_s=p95, limit_s=LATENCY_P95_LIMIT_S, n=len(stats.latencies), timeouts=stats.timeouts,
     )
     gates["G_regression"] = gate(UNDECIDABLE, reason="no frozen G set in the run directory")
-    states: dict[str, int] = {}
+    states = {state: 0 for state in GATE_STATES}
     for item in gates.values():
-        states[item["state"]] = states.get(item["state"], 0) + 1
+        states[item["state"]] += 1
+    rows = [*m["absolute"], *mp["absolute"]]
     return {
         "generated_at": now_iso(),
         "dry_run": dry_run,
         "summary": states,
         "headline": (
-            f"{states.get(MET, 0)} gates met, {states.get(NOT_MET, 0)} not met, "
-            f"{states.get(UNDECIDABLE, 0)} undecidable, {states.get(PENDING, 0)} pending adjudication"
+            f"{states[MET]} gates met, {states[NOT_MET]} not met, "
+            f"{states[UNDECIDABLE]} undecidable, {states[PENDING]} pending adjudication, "
+            f"{states[NOT_EXECUTED]} not executed"
         ),
         "gates": gates,
+        "absolute": {
+            "definition": (
+                "Absolute counts per scored group, next to the relative gates. Every gold item of the "
+                "group is in the denominator; correct, wrong and undecidable are the annotator's labels; "
+                "not_judged means no verdict yet; a group with no items is not executed. The M gates are "
+                "regression comparisons on purpose, so read them with their row here: a met regression "
+                "gate with zero correct answers is not quality. Gate states for every defined gate "
+                "follow; P and E keep their own n, hit and recall fields in the gate details."
+            ),
+            "rows": rows,
+            "gate_states": {name: item["state"] for name, item in gates.items()},
+            "gates_defined": list(GATE_NAMES),
+            "gates_missing": [name for name in GATE_NAMES if name not in gates],
+        },
         "descriptive": {
             "confidence_buckets": stats.confidence,
             "not_reviewed": stats.not_reviewed,
