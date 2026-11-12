@@ -785,6 +785,11 @@ def test_a_single_undecidable_mprime_occurrence_keeps_precedents_off(ev, tmp_pat
     ev.write_json_atomic(out / "adjudication" / "mprime.json", verdicts)
     gate = ev.score_mprime(inputs, out)["gates"]["Mprime_same_sense"]
     assert gate["state"] == "undecidable" and gate["reason"] == "explicit_undecidable"
+    # The four labels partition each row's denominator; nothing is counted twice.
+    rows = {row["gate"]: row for row in ev.score_mprime(inputs, out)["absolute"]}
+    for name, row in rows.items():
+        for side in row["paths"].values():
+            assert sum(side.values()) == row["denominator"], name
 
 
 def test_direct_model_translation_bypasses_dictionary_and_segmentation(ev, sample_db, monkeypatch):

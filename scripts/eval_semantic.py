@@ -2845,8 +2845,8 @@ def score_mprime(inputs: Inputs, out_dir: Path) -> dict[str, Any]:
             verdict = mprime_verdict(verdicts, occurrence["id"]) or {}
             if verdict.get("with_precedent") == "led_astray":
                 judged_astray += 1
-            if usable_pair and "undecidable" in (verdict.get("with_precedent"), verdict.get("without_precedent")):
-                undecided_diff += 1
+            elif usable_pair and "undecidable" in (verdict.get("with_precedent"), verdict.get("without_precedent")):
+                undecided_diff += 1  # a judged occurrence that is neither correct nor astray
         if bound and undecided_here:
             unresolved += min(bound, len(undecided_here))
         upper += bound
