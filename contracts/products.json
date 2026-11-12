@@ -137,22 +137,22 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
       "responsibility": "Standalone Telegram bot and its installation, operation and state.",
       "main": {
-        "commit": "b0e126eef8b6fd541d11c9c16705d558cd9e4605",
-        "tree": "40da47d1a83ff5c2332d607625c23a1c8e4c92f2",
+        "commit": "ec7aa8bde2df078bb46fd611aefa3959eecc677f",
+        "tree": "f3943c12ed8c427dcf01d93be0ee6308955bbf7b",
         "status": "merged"
       },
-      "source_version": "0.1.1",
+      "source_version": "0.2.1",
       "release": {
-        "version": "0.1.1",
-        "tag": "v0.1.1",
+        "version": "0.2.1",
+        "tag": "v0.2.1",
         "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.1.1",
-        "published_at": "2026-11-09T03:31:14Z",
-        "source_commit": "b0e126eef8b6fd541d11c9c16705d558cd9e4605",
-        "source_tree": "40da47d1a83ff5c2332d607625c23a1c8e4c92f2",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.1",
+        "published_at": "2026-11-12T10:23:26Z",
+        "source_commit": "ec7aa8bde2df078bb46fd611aefa3959eecc677f",
+        "source_tree": "f3943c12ed8c427dcf01d93be0ee6308955bbf7b",
         "assets": [
-          "wuwaterm_telegram-0.1.1-py3-none-any.whl",
-          "wuwaterm_telegram-0.1.1.tar.gz",
+          "wuwaterm_telegram-0.2.1-py3-none-any.whl",
+          "wuwaterm_telegram-0.2.1.tar.gz",
           "bundle.json",
           "image.oci.tar",
           "install-probe.json",
@@ -160,29 +160,48 @@
           "SHA256SUMS"
         ],
         "asset_sha256": {
-          "wuwaterm_telegram-0.1.1-py3-none-any.whl": "07f4ffcf2ff226a4116ac0be09f8523042d38a97d7a97cde02041bd20eeddced",
-          "wuwaterm_telegram-0.1.1.tar.gz": "e5ea3ac34302de2d4068d8269e80aca923702c9b242661f4cc02eb7110030995",
-          "bundle.json": "fdc46268142c51911586cdc46b3e8613a84f7033b921fa5b335addf053b8a80b",
-          "image.oci.tar": "5deb6f3d1d29634796da430d518471acd39e536b5da110922e34d8ff1f7b132f",
-          "install-probe.json": "f5c635bc0ce59ef5ef44a1e07497b05860b7e44448b132fb8b5084818d66bd07",
-          "source.tar": "a9d26360c2f87c67f48e87782f3b8736e1bdf2fbf4f261b259086aa9887b1586",
-          "SHA256SUMS": "2fa5d242bc8bf7bd1eb73758c579ffe73d291ec3aaa8768b2063e26f35bef81c"
+          "wuwaterm_telegram-0.2.1-py3-none-any.whl": "565776020173edd82756f7d0a80ca020f4704cd8263dc25822dc8b3a34910e99",
+          "wuwaterm_telegram-0.2.1.tar.gz": "711823831e503d9262942d23ed1b2a4082a7a743d3ca07ff669072cbacaf1584",
+          "bundle.json": "ba35c98f5813f1c0a8baf1246863705e36b578289faa6aa567e8f011d9589633",
+          "image.oci.tar": "8ccaa873053cc76abe6c7379ccd59e7d6b5e1458071fe126afa6fb63a87ba5ce",
+          "install-probe.json": "3df529ed3e0f8f9116233305b19c49a88743315b6730c61283e5898c2fce0e1c",
+          "source.tar": "53d3a5ff08b173a147b648f2b5cda871a5e106b415370778ec4af53c86454bce",
+          "SHA256SUMS": "ae114de928cdc86767ef01adaf3027a255f115d5360eb212537a38a9b4a116b9"
         },
-        "note": "v0.1.1 supersedes the v0.1.0 release; the earlier release remains published."
+        "note": "v0.2.1 pins the published Core v0.8.1 wheel and carries the truncation fix through Core. The independent Telegram bot is running in production; the legacy in-Core bot was stopped. v0.2.0 and its assets remain published under previous_release."
       },
-      "adoption": "unknown",
+      "adoption": "deployed",
       "compatibility": {
-        "core_package_version": "0.7.0",
-        "core_wheel_sha256": "721b825e9d87c433ff4e72385f234a11feaed02b0903d6dd3740c4459ccef171",
-        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/b0e126eef8b6fd541d11c9c16705d558cd9e4605/core-lock.json",
+        "core_package_version": "0.8.1",
+        "core_wheel_sha256": "80799d03258e9ccc21a0069f7b40b1aa082a331329a20b1c5d0676d755825370",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/ec7aa8bde2df078bb46fd611aefa3959eecc677f/core-lock.json",
         "terms_database_schema_version": "2",
         "http_api_required": false,
-        "note": "core-lock.json pins the published Core v0.7.0 wheel, so this is a release-to-release dependency and not a CI artifact."
+        "note": "core-lock.json pins the published Core v0.8.1 wheel, so this is a release-to-release dependency and not a CI artifact."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/b0e126eef8b6fd541d11c9c16705d558cd9e4605/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/b0e126eef8b6fd541d11c9c16705d558cd9e4605/docs/artifact-verification.md"
-      ]
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/ec7aa8bde2df078bb46fd611aefa3959eecc677f/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/ec7aa8bde2df078bb46fd611aefa3959eecc677f/docs/artifact-verification.md"
+      ],
+      "previous_release": {
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.0",
+        "published_at": "2026-11-10T13:08:01Z",
+        "source_commit": "86a927c4bce20a434bf913ea46c229c9b3846e32",
+        "source_tree": "98c6a98a33726bdc037af237e66070495e4da440",
+        "asset_sha256": {
+          "wuwaterm_telegram-0.2.0-py3-none-any.whl": "fab382862d6c903ab9f078ea512b84308022c9499d20236bcd4b8056d3730b24",
+          "wuwaterm_telegram-0.2.0.tar.gz": "b4bbb006f69a5dfbef74fb8290acc754482f0d474e49550c7cbc34b6420271e9",
+          "bundle.json": "ab9aa19603f8e130c66414f87d3d47999477be75db0d03f4270c965deed9899e",
+          "image.oci.tar": "2a271d50cb3912ff4cf8195762b1e1650cb14d335c4cb70672b9440ed9968d48",
+          "install-probe.json": "bf4157b55998d0bdfe4080cbfa229b653369c970b8a2138c572e233783922df9",
+          "source.tar": "0b72422fccfbd9a361ee95e6e10f974de93be1696936a781e933f379612febc0",
+          "SHA256SUMS": "60ff8b6fbd276272a366fb296a793c674e278ce35726b4dda40e438b6e9daf2a"
+        },
+        "note": "Kept as history after v0.2.1; the release and its assets are still published. v0.1.1 and v0.1.0 remain available on the release page."
+      },
+      "adoption_note": "The independent Telegram 0.2.1 container is running on the owner's VPS since 2026-11-12 (image revision ec7aa8b; Core 0.8.1, Telegram 0.2.1; poll health ready). The legacy in-Core wuwaterm-bot was stopped before the switch and remains stopped for rollback. No Telegram test message was sent."
     },
     {
       "id": "windows",
