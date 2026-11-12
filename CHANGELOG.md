@@ -3,6 +3,17 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.4
+
+### Terms And Dictionary
+
+- The builder now imports the complete pinned official `Term<n>_Title`
+  glossary, not only the curated `CORE_TERM_KEYS`: 651 additional exact
+  Chinese/English pairs reach `terms.db` (about 11,987 rows in the production
+  build). The five curated keys remain authoritative and are not duplicated.
+  No API shape, prompt, evaluator, retry policy or data pin changes. The only
+  OpenAPI change is the version string.
+
 ## 0.8.3
 
 ### Terms And Dictionary
