@@ -269,8 +269,8 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "6e1337f8718af639115517697d0241aeb3596731",
-        "tree": "c9962aecdd836743d41fb5886ffd26abac76961a",
+        "commit": "3ceab4f593fa5d51a9371d94834d0d0eba6207cd",
+        "tree": "16cca7b4a216df4c96fb52590c6ca933c35f4121",
         "status": "merged"
       },
       "source_version": "0.2.0",
@@ -366,10 +366,10 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/6e1337f8718af639115517697d0241aeb3596731/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/6e1337f8718af639115517697d0241aeb3596731/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/3ceab4f593fa5d51a9371d94834d0d0eba6207cd/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/3ceab4f593fa5d51a9371d94834d0d0eba6207cd/docs/self-hosting.md"
       ],
-      "adoption_note": "The owner deployed the public Sites site on 2026-11-12 from Web main 6e1337f. The live page shows the merged mobile header, 4-up Chinese quota and stacked /limits table. This is a source deployment, not a v0.2.0 GitHub release; v0.1.1 remains the published Web product release."
+      "adoption_note": "The owner deployed the public Sites site from Web main 6e1337f on 2026-11-12. Web main has since advanced to 3ceab4f with #32-#36 (541-1140px header wrap, English hero comma, keyboard skip link, quota-strip CLS reservation, branded 404); those changes are pending a redeploy. This is a source deployment, not a v0.2.0 GitHub release; v0.1.1 remains the published Web product release."
     }
   ],
   "ci_pins": {
