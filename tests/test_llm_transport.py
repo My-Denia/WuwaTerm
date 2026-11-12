@@ -395,3 +395,76 @@ def test_extra_body_adds_fields_but_cannot_replace_built_ones():
         with pytest.raises(ValueError):
             asyncio.run(go({"model": "other"}))
     assert len(seen) == 1
+
+
+# --------------------------------------------------------------------------
+# A provider-declared truncation is not a finished translation
+# --------------------------------------------------------------------------
+
+
+def _completion(content: str = "hello", **choice):
+    payload = {"index": 0, "message": {"role": "assistant", "content": content}}
+    payload.update(choice)
+    return httpx.Response(200, json={"choices": [payload]})
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+def test_declared_truncation_is_not_a_translation(finish_reason):
+    """The provider says it stopped at a cap: the prefix is not returned."""
+
+    def handler(request):
+        return _completion("Jinhsi equipped", finish_reason=finish_reason)
+
+    with pytest.raises(lt.LLMTranslationError) as excinfo:
+        _post(handler, purpose="translation")
+
+    error = excinfo.value
+    # Unusable model output, not a transport/gateway failure, so the reason
+    # stays "invalid_response"; only the detail names the cap stop.
+    assert error.reason == "invalid_response"
+    assert error.diagnostic.reason == "invalid_response"
+    assert error.diagnostic.detail == "truncated_output"
+    assert error.user_message == lt.TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_declared_truncation_outranks_the_blank_output_diagnostic():
+    """All tokens spent on reasoning leaves no content, and still truncation."""
+
+    def handler(request):
+        return _completion("", finish_reason="length")
+
+    with pytest.raises(lt.LLMTranslationError) as excinfo:
+        _post(handler, purpose="translation")
+
+    assert excinfo.value.diagnostic.detail == "truncated_output"
+
+
+@pytest.mark.parametrize(
+    "choice",
+    [
+        pytest.param({"finish_reason": "stop"}, id="stop"),
+        pytest.param({"finish_reason": None}, id="null"),
+        pytest.param({}, id="absent"),
+        pytest.param({"finish_reason": "tool_calls"}, id="tool_calls"),
+        pytest.param({"finish_reason": "content_filter"}, id="content_filter"),
+        pytest.param({"finish_reason": "max_new_tokens"}, id="unknown-value"),
+        pytest.param({"finish_reason": 7}, id="not-text"),
+    ],
+)
+def test_finish_reason_without_a_cap_stop_signal_keeps_todays_behaviour(choice):
+    """Missing, null and unknown values must never reject a good answer."""
+
+    def handler(request):
+        return _completion("  Jinhsi equipped  ", **choice)
+
+    assert _post(handler, purpose="translation") == "Jinhsi equipped"
+
+
+def test_blank_output_without_a_cap_stop_signal_stays_empty_output():
+    def handler(request):
+        return _completion("   ", finish_reason="stop")
+
+    with pytest.raises(lt.LLMTranslationError) as excinfo:
+        _post(handler, purpose="translation")
+
+    assert excinfo.value.diagnostic.detail == "empty_output"

@@ -381,6 +381,52 @@ def test_provider_non_text_content_stays_invalid_api_response(monkeypatch):
     assert error.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
 
+def test_provider_declared_truncation_never_returns_the_partial_answer(
+    monkeypatch, sample_db
+):
+    """A cap stop means the content is a prefix, so no answer comes back.
+
+    ``finish_reason="length"`` with a half sentence as the content is the shape
+    the owner audit reproduced: it used to be returned as a finished
+    translation. Both the raising and the swallowing path must refuse it.
+    """
+    enable_llm_env(monkeypatch)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Jinhsi equipped"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    translator = SentenceTranslator(
+        sample_db, llm_transport=httpx.MockTransport(handler)
+    )
+
+    async def run():
+        swallowed = await translator.translate_async("今汐装备了声骸。")
+        with pytest.raises(LLMTranslationError) as excinfo:
+            await translator.translate_async("今汐装备了声骸。", propagate_errors=True)
+        return swallowed, excinfo.value
+
+    swallowed, error = asyncio.run(run())
+
+    assert len(calls) == 2
+    assert swallowed == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "Jinhsi equipped" not in swallowed
+    assert error.reason == "invalid_response"
+    assert error.diagnostic.detail == "truncated_output"
+
+
 def test_sync_translate_logs_swallowed_llm_failure(monkeypatch, caplog, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")

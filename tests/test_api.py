@@ -760,6 +760,71 @@ def test_model_failure_maps_to_llm_unavailable(monkeypatch, tmp_path, sample_db)
     assert TRANSLATION_UNAVAILABLE_NOTICE not in response.text
 
 
+def test_declared_truncation_is_refused_not_returned_as_a_translation(
+    monkeypatch, tmp_path, sample_db
+):
+    """A provider-declared cap stop is an incomplete answer, not a result.
+
+    Reproduced through the real transport and the real HTTP contract: the
+    upstream answered HTTP 200 with ``finish_reason="length"`` and a prefix as
+    the content, and this route used to return that prefix as ``kind="llm"``.
+    """
+    from wuwaterm.sentence import SentenceTranslator
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    model_calls = []
+
+    def model(request):
+        model_calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Jinhsi equipped"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    settings = build_settings(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    translator = SentenceTranslator(
+        sample_db,
+        llm_transport=httpx.MockTransport(model),
+        en_zh_protocol=True,
+    )
+    app = create_app(settings, device_store=store, translator=translator)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            content=json.dumps(
+                {"text": "今汐装备了声骸。"}, ensure_ascii=False
+            ).encode(),
+            headers={**bearer(token), "Content-Type": "application/json"},
+        )
+    )
+
+    assert len(model_calls) == 1
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "llm_unavailable",
+        "message": MESSAGE_BY_CODE["llm_unavailable"],
+    }
+    # No translation shape, and no half sentence on the wire.
+    assert "kind" not in response.json()
+    assert "Jinhsi equipped" not in response.text
+
+
 def test_request_id_is_always_server_generated(tmp_path, sample_db, caplog):
     """The correlation id is minted server-side; an inbound X-Request-Id is
     ignored, never echoed and never logged.

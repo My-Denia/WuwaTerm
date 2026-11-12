@@ -62,12 +62,23 @@ _LLM_FAILURE_DETAILS = frozenset(
     {
         "empty_output",
         "non_text_output",
+        "truncated_output",
         "missing_placeholder",
         "duplicate_placeholder",
         "unspecified",
     }
 )
 _MAX_LLM_DIAGNOSTIC_COUNT = 2_147_483_647
+
+# ``choices[0].finish_reason`` reports why the provider stopped generating.
+# The documented Chat Completions value for "hit the length/token cap" is
+# ``length``; some OpenAI-compatible gateways echo Anthropic's stop
+# vocabulary, where ``max_tokens`` names the same cap. Both mean the content is
+# a prefix of an answer, never a finished one. Every other value - ``stop``,
+# ``tool_calls``, ``content_filter``, a missing field, ``null`` or a value this
+# set does not know - keeps the pre-existing behaviour: only the content is
+# judged.
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
 
 
 def _safe_diagnostic_value(value: object, allowed: frozenset[str], fallback: str) -> str:
@@ -182,6 +193,14 @@ def _require_nonblank_llm_output(content: str) -> str:
     return normalized
 
 
+def _declares_truncation(choice: dict) -> bool:
+    """True when the choice says the provider stopped at a length cap."""
+    finish_reason = choice.get("finish_reason")
+    # Require a builtin str: a foreign string subclass must not reach the
+    # membership test's hash/equality.
+    return type(finish_reason) is str and finish_reason in _TRUNCATED_FINISH_REASONS
+
+
 def _extract_llm_content(data: Any) -> str:
     if not isinstance(data, dict):
         raise ValueError("LLM response is not an object")
@@ -197,6 +216,16 @@ def _extract_llm_content(data: Any) -> str:
     content = message["content"]
     if not isinstance(content, str):
         raise ValueError("LLM content is not text")
+    if _declares_truncation(first):
+        # The provider says it stopped early, so whatever content survived is
+        # a prefix. It must not reach a caller as a finished translation; the
+        # reason stays ``invalid_response`` (unusable model output) and only
+        # the diagnostic detail distinguishes a cap stop from blank output.
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE,
+            reason="invalid_response",
+            detail="truncated_output",
+        )
     return _require_nonblank_llm_output(content)
 
 

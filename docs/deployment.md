@@ -426,18 +426,26 @@ WARNING wuwaterm_api llm translation diagnostic request_id=<server-id> reason=in
 ```
 
 Join this line to the completion record by `request_id`. `detail` distinguishes
-`empty_output`, `non_text_output`, `missing_placeholder`, and
-`duplicate_placeholder`; `unspecified` covers errors without a finer diagnostic.
-The count fields describe only the **first** failing known placeholder check,
-not total missing terms. They are `-` when unavailable. Unknown categories and
-malformed counts are replaced with safe defaults, never stringified.
+`truncated_output`, `empty_output`, `non_text_output`, `missing_placeholder`,
+and `duplicate_placeholder`; `unspecified` covers errors without a finer
+diagnostic. `truncated_output` means the provider itself said it stopped at a
+length or token cap (`finish_reason` `length`, or `max_tokens` on a gateway
+that echoes Anthropic's vocabulary), so the content it sent is a prefix, not a
+finished answer; that answer is refused instead of returned. The count fields
+describe only the **first** failing known placeholder check, not total missing
+terms. They are `-` when unavailable. Unknown categories and malformed counts
+are replaced with safe defaults, never stringified.
 
 These fields are internal logs only. They do not contain source text, translated
 text, placeholder tokens, credentials, request headers or provider addresses,
 and they do not appear in the HTTP response or OpenAPI schema. The existing
 `reason` and public error-code mappings remain distinct: a non-text provider
 response envelope remains `invalid_api_response`, while a custom translator's
-non-text output remains `invalid_response`. No fallback or retry is added.
+non-text output remains `invalid_response`. A declared truncation is a content
+failure like blank output, not a transport or quota failure, so it keeps
+`invalid_response` and the `llm_unavailable` (503) code, and the HTML paths'
+existing one-plain-retry rule applies to it no differently. No new fallback or
+retry is added.
 Failure to write this extra diagnostic cannot replace the request's original
 error. A diagnostic identifies a failed check, not model reliability or billing.
 Reading the diagnostic attribute is inside the same guard as writing the log.
