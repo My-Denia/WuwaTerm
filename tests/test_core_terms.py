@@ -58,6 +58,10 @@ UPSTREAM_TEXT = {
     "PrefabTextItem_2083276822_Text": (BRAND_ZH, BRAND_EN),
     "Advertising_VersionTitle_37": (VERSION_ZH, VERSION_EN),
     "MapMark_170100_MarkTitle": (MAPMARK_ZH, MAPMARK_EN),
+    "Term850078_Title": ("无音区", "Tacet Field"),
+    "Term850079_Title": ("索拉里斯", "Solaris"),
+    "Term850093_Title": ("瑝珑", "Huanglong"),
+    "Influence_998_Title": ("残星会", "Fractsidus"),
     # Mirror key carrying the identical pair, and the bare achievement name
     # with different official English: neither may become a second row.
     "LoadingTipsText_901401_Title": (VERSION_ZH, VERSION_EN),
@@ -113,6 +117,23 @@ def _direct_rows(db_path: Path) -> dict[str, object]:
     return {row["text_key"]: row for row in rows}
 
 
+def test_world_region_faction_and_field_names_register_exact_rows(core_term_db: Path):
+    rows = _direct_rows(core_term_db)
+    expected = {
+        "Term850078_Title": ("无音区", "Tacet Field", "core_term"),
+        "Term850079_Title": ("索拉里斯", "Solaris", "core_term"),
+        "Term850093_Title": ("瑝珑", "Huanglong", "location"),
+        "Influence_998_Title": ("残星会", "Fractsidus", "core_term"),
+    }
+    service = TermService(core_term_db)
+    for key, (zh, en, category) in expected.items():
+        row = rows[key]
+        assert (row["zh"], row["en"], row["category"]) == (zh, en, category)
+        assert row["priority"] == CATEGORY_ORDER[category]
+        hit = service.lookup_exact(zh)
+        assert hit.exact and hit.best.entry.en == en
+
+
 def test_chat_charm_key_registers_one_core_term_row(core_term_db: Path):
     rows = _direct_rows(core_term_db)
 
@@ -122,6 +143,10 @@ def test_chat_charm_key_registers_one_core_term_row(core_term_db: Path):
         "ItemType_ChatCharm",
         "Advertising_VersionTitle_37",
         "MapMark_170100_MarkTitle",
+        "Term850078_Title",
+        "Term850079_Title",
+        "Term850093_Title",
+        "Influence_998_Title",
     }
 
     row = rows["ItemType_ChatCharm"]
@@ -216,6 +241,10 @@ def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
         "ItemType_ChatCharm",
         "Advertising_VersionTitle_37",
         "MapMark_170100_MarkTitle",
+        "Term850078_Title",
+        "Term850079_Title",
+        "Term850093_Title",
+        "Influence_998_Title",
     }
 
     row = rows["Advertising_VersionTitle_37"]
@@ -292,7 +321,15 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
 def test_missing_upstream_key_still_skips_and_keeps_the_original_three(
     tmp_path: Path,
 ):
-    added_keys = {"ItemType_ChatCharm", "Advertising_VersionTitle_37", "MapMark_170100_MarkTitle"}
+    added_keys = {
+        "ItemType_ChatCharm",
+        "Advertising_VersionTitle_37",
+        "MapMark_170100_MarkTitle",
+        "Term850078_Title",
+        "Term850079_Title",
+        "Term850093_Title",
+        "Influence_998_Title",
+    }
     texts = {key: pair for key, pair in UPSTREAM_TEXT.items() if key not in added_keys}
 
     rows = _direct_rows(_build(tmp_path, texts))

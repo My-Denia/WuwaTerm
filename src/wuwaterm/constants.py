@@ -98,6 +98,12 @@ CORE_TERM_KEYS = {
     # A pinned map mark rather than a core system name. The value is still the
     # term category, so it enters lookup and locking as a location.
     "MapMark_170100_MarkTitle": "location",  # 扶风转标 -> Gravity Calibrator
+    # World, region, faction and field names that the Term/Influence tables
+    # carry with an exact official pair but the BinData specs do not register.
+    "Term850078_Title": "core_term",  # 无音区 -> Tacet Field
+    "Term850079_Title": "core_term",  # 索拉里斯 -> Solaris
+    "Term850093_Title": "location",  # 瑝珑 -> Huanglong
+    "Influence_998_Title": "core_term",  # 残星会 -> Fractsidus
 }
 
 # Free-text lock exclusions. The builder counts how often each English
