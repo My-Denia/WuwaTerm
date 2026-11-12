@@ -12,9 +12,11 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.8.0`, which adds
-  `semantic-review-v1`, `segmentation-v1` and `translation-context-v1`;
-  `v0.7.2` is the latest published release before it, then `v0.7.1` and
+  published tag. The current Core version is `0.8.1`, a maintenance release on
+  top of `0.8.0` that refuses truncated model output, stops counting
+  undecidable and empty samples as met evaluation gates, fixes term matching
+  and the first-install entry, and adds the dependency-audit gates; `v0.8.0` is
+  the latest published release before it, then `v0.7.2`, `v0.7.1` and
   `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly before any release
   command below.
 - Windows product: [v0.4.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0), released independently.
@@ -103,11 +105,34 @@ matrix runs. It is not the whole pull request: the lock-drift check, the
 packaging audit, Web and Windows contract checks, and the Docker boundary job are
 separate CI jobs. Confirm on the pull request, not only locally.
 
-For 0.8.0 specifically, also confirm:
+For 0.8.1 specifically, also confirm:
 
-- `docs/api/openapi.json` matches the generated document at version `0.8.0`
+- `docs/api/openapi.json` matches the generated document at version `0.8.1`
   (`python scripts/check_api_contract.py`), and `uv.lock` carries the same
-  version.
+  version. No request or response shape moves in this release: the version
+  string is the only OpenAPI change.
+- A model response that stopped at a length cap is refused instead of returned
+  as a finished translation. `finish_reason` `length` or `max_tokens` answers
+  `llm_unavailable` (503) through the existing unusable-output reason, semantic
+  review still answers `not_reviewed`, and `stop`, `tool_calls`,
+  `content_filter`, a missing field and `null` keep their previous behaviour.
+- The evaluation harness reports no met gate it cannot support: an undecidable
+  verdict joins the not-correct side of the comparison, a group with no items
+  is `not_executed`, every receipt carries the absolute correct, wrong,
+  undecidable and not-judged counts per path, and a led-astray occurrence
+  occupies exactly one bucket.
+- `pyproject.toml` keeps the `certifi>=2026.10.19` floor, and the
+  dependency-audit workflow fails on high and critical advisories and refuses a
+  report that does not cover every pin selected on this platform.
+- `python scripts/validate.py` runs the test suite when no file descriptor 9 is
+  inherited, and still refuses a mutating entry point that inherits one.
+- Term matching can differ from `0.8.0` by design for text carrying the three
+  new core terms or a surface whose prepared spelling is NFKC; check a sample
+  translation before quoting one in the release notes.
+- Release notes carry no evaluation internals, corpus text or private paths.
+
+The 0.8.0 capability checks still apply to this release:
+
 - With no `context`, a translation request body is byte-for-byte what 0.7.x
   sent (the golden tests in `tests/test_llm_transport.py` and the sentence
   suites).
@@ -121,9 +146,9 @@ For 0.8.0 specifically, also confirm:
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the existing pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`);
   this release does not move them.
-- Release notes carry no evaluation internals, corpus text or private paths.
-- Telegram pins an exact Core wheel; do not claim it works with this release
-  until its own lock is moved and released.
+- Telegram pins an exact Core wheel; do not claim it reaches users until its
+  own lock is moved and released. Telegram 0.2.0 pins the published Core
+  `v0.8.0` wheel.
 
 The installer and Web checks from 0.7.x still apply to this release:
 

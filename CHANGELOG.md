@@ -3,6 +3,184 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.1
+
+### Highlights
+
+- A provider that stops at a length cap no longer passes the surviving prefix
+  off as a finished translation. The response reader checked only that the
+  content was non-blank and never looked at `finish_reason`, so a cut-off
+  answer came back from `/v1/translations` as HTTP 200 with `kind="llm"` and
+  half a sentence. A choice that stopped on `length` (or the Anthropic-style
+  `max_tokens` that some OpenAI-compatible gateways echo) is now refused as
+  unusable model output: the public error code is the existing
+  `llm_unavailable` (503), semantic review still answers `not_reviewed`, and
+  the HTML paths keep their one-plain-retry rule.
+- Evaluation receipts no longer report a met gate they cannot support. An
+  undecidable verdict counted as zero errors, so official terms that were
+  wrong in both the old and the new path still met `M_official_terms`, and a
+  group with no samples at all met `M_reference_negation_number`. Undecidable
+  verdicts now sit on the not-correct side of the comparison, a group with no
+  items is `not_executed` instead of met, and every receipt carries the
+  absolute correct, wrong, undecidable and not-judged counts beside the gates.
+- `./deploy/setup.sh --with-telegram` no longer installs the deprecated inline
+  bot from this checkout. The maintained bot is its own product
+  ([WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)), so the
+  flag now prepares the join between the two installations and prints that
+  product's own install steps. The inline bot stays available behind the
+  explicit `--with-legacy-bot`.
+
+### Correctness
+
+- A provider-declared truncation is an incomplete translation, not a success
+  (#223). `_extract_llm_content()` now refuses a choice whose `finish_reason`
+  is `length` or `max_tokens` with `LLMTranslationError(reason="invalid_response",
+  detail="truncated_output")`, which keeps the public `llm_unavailable` (503)
+  code, leaves semantic review at `not_reviewed`, and applies no differently to
+  the HTML paths' single plain retry. A missing field, `null`, `stop`,
+  `tool_calls`, `content_filter` or a value the transport does not know keeps
+  the previous behaviour, where only the content is judged. No prompt, retry
+  policy, temperature or API schema changes.
+- Evaluation gates describe what was measured (#222). An undecidable verdict is
+  counted per path and joins the not-correct side, so it can no longer pass a
+  gate as a zero-error sample; an evaluation group with no items is
+  `not_executed` — neither a pass nor a failure — and is reported apart from
+  both. The same accounting now covers `Mprime_same_sense`,
+  `Mprime_led_astray` and the `M_precision` denominator, and a review-shaped
+  gate with no completed review is not executed instead of met. The regression
+  gates keep their meaning, and no threshold or minimum sample count moved.
+- Each evaluation receipt carries an absolute section next to the gates: the
+  denominator and the correct, wrong, undecidable and not-judged counts for
+  every path, plus the state of every gate the design defines. An occurrence
+  judged led astray and undecidable at the same time used to be counted in both
+  buckets, which could make a row's correct count undercount its denominator;
+  a judged occurrence now lands in exactly one of correct, wrong and
+  undecidable, and a test asserts the four labels sum to the denominator for
+  every absolute row (#224).
+
+### Terms And Dictionary
+
+- A single-character resonator name no longer gets a second, overlapping
+  reference (#203). When a longer selected span already covers the character —
+  a quoted speaker such as `「心」`, or a title that happens to contain it — the
+  translator used to add a naked `心 -> Hsin` reference for the same character
+  as well, so the model was told that one character was two different things in
+  one place. The quoted span keeps its own reference, a separate later mention
+  still gets one, and protected markup keeps its coordinate mapping.
+- The brand term `飞讯摆件` is registered as a core term (`WavesLine Decor`),
+  so it locks as an official name instead of passing through as free text
+  (#205).
+- The complete 3.7 version title `镜锁妄世，心照红尘` is registered as a core
+  term with its official English (`Prism's Illusion, Heart's Illumination`),
+  instead of a partial title (#207).
+- Prepared text is NFKC while dictionary surfaces are stored raw, so a surface
+  written with full-width punctuation — the version title above, for one —
+  never occurs verbatim in the text the application actually translates. The
+  runtime now also locates that pure NFKC spelling when it differs, and only
+  then: every surface that already owns the spelling must restore the same
+  official pair, and neither the raw surface nor the spelling may be excluded
+  (#206). The builder's corpus measurement, the free-text exclusion mining,
+  protected markup and every other caller keep exact matching, so exclusion
+  metadata and the default selector do not move.
+
+### Maintenance
+
+- The CA bundle the bot and API trust for TLS was pinned below an advisory. The
+  lock carried `certifi` 2026.6.17, which still ships the emSign ECC Root CA
+  chain whose intermediates had compromised keys
+  (GHSA-6q48-6c7w-9gw2 / PYSEC-2026-4320, critical). `certifi` is transitive
+  through `httpx`, which is what opens TLS to Telegram and to the configured
+  model endpoint, so the vulnerable bundle was in the runtime image, not just
+  in the dev toolchain. The floor is `>=2026.10.19` — not 2026.10.18, which
+  dropped every emSign root, including the ones that were never compromised —
+  and the lock resolves 2026.10.23 (#216).
+- `python scripts/validate.py` failed at the pytest step on a clean checkout
+  unless something happened to inherit file descriptor 9 (#219). With the
+  descriptor free, pytest's own capture took that number and the artifact
+  fixture closed it, so setup and teardown both raised `OSError: [Errno 9] Bad
+  file descriptor`. The parking now happens around the call that needs the
+  descriptor closed, so the local gate runs everywhere. Production guards are
+  untouched: the same entry points still refuse an inherited descriptor 9,
+  and a test still opens one and asserts the refusal.
+- `deploy/vps-update.sh` picks a Python 3.11+ interpreter instead of whatever
+  `python3` is (#202). Debian 11 ships 3.9, and admission failed with a
+  `TypeError` (`Path.stat(follow_symlinks=)`) on both the 0.7.1 and 0.8.0
+  deploys. `WUWATERM_DEPLOY_PYTHON`, or the first of `python3`, `python3.13`,
+  `python3.12` and `python3.11` that is 3.11+, now runs every helper, recovery
+  included, and a clear message replaces the traceback when none exists.
+
+### Delivery
+
+- The documented first install no longer hands the operator a different
+  program from the released and maintained one (#225). `--with-telegram`
+  resolves the Telegram product, prints its install steps with this
+  installation's database path filled in, and starts no bot;
+  `--telegram-dir <checkout>` copies `data/terms.db` and writes that
+  checkout's `.env` (mode `0600`, bot keys only); `--with-legacy-bot` keeps the
+  old inline-bot behaviour with a deprecation warning; `--status` reports the
+  product and the inline bot separately. The Compose service is unchanged on
+  purpose: a profile gate would make `compose config --hash` answer "no such
+  service: disabled", which is what the adoption and update paths resolve a
+  service with.
+- A dependency with a high or critical advisory now fails CI instead of
+  shipping (#218). `uv lock --check` proves the lock matches `pyproject.toml`;
+  it never reads advisories, and nothing was red while the lock still pinned a
+  bundle carrying a critical one. A workflow exports what the runtime image
+  actually installs (`uv export --frozen`, every extra) and runs `pip-audit`
+  over it: critical and high exit non-zero, medium and low are printed with
+  package, advisory ID and fix version, and severity is read from OSV because
+  pip-audit does not report it. An unreadable severity blocks rather than
+  passing.
+- The audit refuses a report that does not cover the whole export (#221).
+  pip-audit audits inside its own virtualenv, so a pin pip answers "already
+  satisfied" — `pip`, `setuptools`, `wheel`, `packaging` — is silently never
+  looked at. A pin selected on this platform that the report does not cover is
+  now an error naming the package and version, pip-audit's own bootstrap pins
+  are named in a warning on every run, and the export must still carry the
+  pins every export of this lock carries, so a truncated export cannot agree
+  with a truncated report. The summary also spells its advisory count
+  correctly (#220).
+
+### Developer Experience
+
+- The validation entry gained two gates and the documentation for them: `mypy`
+  over `src/wuwaterm` with eight modules on a documented baseline, and an
+  opt-in `--cov` run with an 88% regression floor, both described in
+  `docs/validation.md` and `CONTRIBUTING.md` (#210, #212, #214). A new test
+  module pins the step list, the flags and the failure behaviour of
+  `scripts/validate.py` so the gate cannot drift silently (#213). The
+  semantic-evaluation harness gained opt-in direct translation baselines with
+  canonical request identity and cache checks; they stay inactive unless
+  enabled (#204).
+- CI dropped a job-level `cache-mode` key GitHub silently ignored, and the
+  comment now says what the job actually does (#209). The README, support
+  matrix and product ledger describe the published Windows v0.4.0 and Telegram
+  v0.2.0 releases and the pins they depend on (#215).
+
+### Compatibility and distribution
+
+- No request or response shape changes. The only OpenAPI change is
+  `info.version`: the truncation fix reuses `llm_unavailable` (503), semantic
+  review still answers `not_reviewed`, and `/v1`, `review-v1`, `review-v2` and
+  `wuwaterm-manuscript-v1` are otherwise untouched.
+- Term matching can now lock a span that `0.8.0` passed through as free text:
+  the two new core terms and the NFKC spelling comparison. Text containing
+  them can come back translated differently from `0.8.0` by design; existing
+  exclusions still apply, and the default selector, the builder's corpus
+  measurement and the protected-markup path are unchanged.
+- The first-install entry changed meaning. `--with-telegram` starts no bot and
+  prints another product's steps, so a script that relied on it starting
+  `wuwaterm-bot` must pass `--with-legacy-bot`, and `--status` now reports the
+  two separately.
+- Source version is `0.8.1`; `uv.lock` and the OpenAPI snapshot are regenerated
+  with it. `contracts/products.json` / `docs/products.md` record `0.8.1` as
+  `release_prepared` against `6a3ec3a` and the published assets after
+  publication; `v0.8.0` stays the recorded published release until then.
+- Telegram 0.2.0 pins the published Core `v0.8.0` wheel, and this release does
+  not move the Web `v0.1.1` or Windows `v0.4.0` pins; the CI contract jobs pass
+  against them. These fixes reach Telegram users only after its
+  `core-lock.json` moves and a Telegram release follows.
+
 ## 0.8.0
 
 ### Highlights
