@@ -269,11 +269,11 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
-        "tree": "b0a752656dd0cb2234ba970db4b16ed95a6e8169",
+        "commit": "6e1337f8718af639115517697d0241aeb3596731",
+        "tree": "c9962aecdd836743d41fb5886ffd26abac76961a",
         "status": "merged"
       },
-      "source_version": "0.1.1",
+      "source_version": "0.2.0",
       "release": {
         "version": "0.1.1",
         "tag": "v0.1.1",
@@ -357,7 +357,7 @@
         "release_write": "completed_as_v0_1_0",
         "note": "Recorded while publication was still a read-only rehearsal; the write path was later exercised by the v0.1.0 release."
       },
-      "adoption": "unknown",
+      "adoption": "deployed",
       "compatibility": {
         "api": "v1",
         "review": "review-v2",
@@ -366,9 +366,10 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/31fdc14b1a14563990d0acaf89dc302f024cebdc/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/31fdc14b1a14563990d0acaf89dc302f024cebdc/docs/self-hosting.md"
-      ]
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/6e1337f8718af639115517697d0241aeb3596731/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/6e1337f8718af639115517697d0241aeb3596731/docs/self-hosting.md"
+      ],
+      "adoption_note": "The owner deployed the public Sites site on 2026-11-12 from Web main 6e1337f. The live page shows the merged mobile header, 4-up Chinese quota and stacked /limits table. This is a source deployment, not a v0.2.0 GitHub release; v0.1.1 remains the published Web product release."
     }
   ],
   "ci_pins": {
