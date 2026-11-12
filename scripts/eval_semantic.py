@@ -139,7 +139,7 @@ class Refused(RuntimeError):
     """A precondition failed; nothing further is run."""
 
 
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 
 
 def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
@@ -152,8 +152,11 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     Version 1 (the freezes of rounds 1 and 2) recorded only the semantic
     review model, so with ``WUWATERM_SEMANTIC_REVIEW_MODEL`` set a change of
     the translation model went unnoticed. Version 2 also records the
-    translation model. A frozen hash is always checked with the version it
-    was made with; frozen values are never rewritten.
+    translation model. Version 3 also hashes the fixed translation prompt
+    constants the builder pastes in; version 2 hashed the builder's source
+    only, so changing such a constant left the fingerprint unchanged. A
+    frozen hash is always checked with the version it was made with; frozen
+    values are never rewritten.
     """
     import inspect
 
@@ -184,6 +187,16 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
             + inspect.getsource(sentence._context_instruction)
         ),
     }
+    if version >= 3:
+        # The builders' source names these constants but does not contain
+        # their text, so the source hash alone misses an edit to one of them.
+        parts.update({
+            "semantic_language_names": h(json.dumps(semantic_review._LANGUAGE_NAMES, sort_keys=True)),
+            "translation_untrusted_source_instruction": h(sentence._UNTRUSTED_SOURCE_INSTRUCTION),
+            "translation_contextual_reference_instruction": h(sentence._CONTEXTUAL_REFERENCE_INSTRUCTION),
+            "translation_html_mode_instruction": h(sentence._HTML_MODE_INSTRUCTION),
+            "translation_html_mode_instruction_zh": h(sentence._HTML_MODE_INSTRUCTION_ZH),
+        })
     _base, _key, translation_model = llm_transport.resolve_llm_config()
     options = {
         "thinking_mode": thinking,
