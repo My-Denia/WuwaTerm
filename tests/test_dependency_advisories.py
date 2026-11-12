@@ -195,6 +195,30 @@ def test_records_sharing_a_cve_are_one_vulnerability(tmp_path, capsys):
     assert "PYSEC-2026-1850" in output
 
 
+def test_counts_pluralise_explicitly():
+    """`advisory` does not take a bare `s`, and `package` still does."""
+    assert gate._count(1, "advisory", "advisories") == "1 advisory"
+    assert gate._count(3, "advisory", "advisories") == "3 advisories"
+    assert gate._count(2, "package") == "2 packages"
+
+
+def test_totals_line_spells_the_advisory_plural(tmp_path, capsys):
+    osv = Osv({**MODERATE, **LOW})
+    report = _report(
+        tmp_path,
+        [
+            _dependency("requests", "2.31.0", [_vuln("GHSA-9wx4-h78v-vm56", ["2.32.0"])]),
+            _dependency("jinja2", "3.1.4", [_vuln("GHSA-aaaa-bbbb-cccc")]),
+        ],
+    )
+
+    assert gate.main([str(report)], fetch=osv) == 0
+    output = capsys.readouterr().out
+    assert "2 packages audited" in output
+    assert "totals: 2 advisories (1 moderate, 1 low)" in output
+    assert "advisorys" not in output
+
+
 def test_grouping_keeps_other_packages_apart():
     shared = ("PYSEC-1", ("CVE-9",), ("2.0",))
 

@@ -263,8 +263,8 @@ def _describe_fix(advisory: Advisory) -> str:
     return "no fixed version published"
 
 
-def _count(count: int, noun: str) -> str:
-    return f"{count} {noun if count == 1 else noun + 's'}"
+def _count(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
 
 
 def _print_findings(classified: list[tuple[Advisory, str]], packages: int) -> None:
@@ -286,7 +286,7 @@ def _print_findings(classified: list[tuple[Advisory, str]], packages: int) -> No
         for label in (*SEVERITIES, UNKNOWN)
         if counts.count(label)
     )
-    print(f"  totals: {_count(len(classified), 'advisory')} ({summary})")
+    print(f"  totals: {_count(len(classified), 'advisory', 'advisories')} ({summary})")
 
 
 def _sorted(classified: list[tuple[Advisory, str]]) -> list[tuple[Advisory, str]]:
