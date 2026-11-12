@@ -26,7 +26,8 @@ case "$*" in
     printf 'scopes: translate,meta\\n'
     printf 'created_at: 2026-01-01T00:00:00Z\\n' ;;
   *"build-db"*) : > "$STUB_ROOT/data/terms.candidate.db" ;;
-  "inspect -f {{.State.Status}} wuwaterm-bot") printf '%s\\n' "${STUB_BOT_STATE:-running}" ;;
+  "inspect -f {{.State.Status}} wuwaterm-bot") printf '%s\\n' "${STUB_BOT_STATE:-}" ;;
+  "inspect -f {{.State.Status}} wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_STATE:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-web") printf '%s\\n' "${STUB_WEB_STATE:-running}" ;;
   "inspect -f {{.State.Status}} wuwaterm-api") printf '%s\\n' "running" ;;
   *"com.docker.compose.project"*) printf '%s\\n' "${STUB_COMPOSE_PROJECT-wuwaterm}" ;;
@@ -256,21 +257,127 @@ def test_missing_model_configuration_is_refused_before_docker_work(install_root)
     assert docker_log(install_root).strip() == "docker compose version"
 
 
-def test_telegram_needs_its_token_and_is_started_only_when_asked(install_root):
+def product_checkout(root: pathlib.Path) -> pathlib.Path:
+    """The shape deploy/setup.sh needs to recognise a WuwaTerm-Telegram checkout."""
+    product = root / "product"
+    (product / "deploy").mkdir(parents=True)
+    (product / "deploy" / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (product / "core-lock.json").write_text('{"version": "0.8.0"}\n', encoding="utf-8")
+    return product
+
+
+def env_values(path: pathlib.Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    )
+
+
+def test_with_telegram_routes_to_the_standalone_product_and_starts_no_bot(install_root):
+    # Routing the surface needs no bot token here: the product has its own .env.
+    write_env(install_root)
+
+    result = run_setup(install_root, "--with-telegram", "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    assert "My-Denia/WuwaTerm-Telegram" in result.stdout
+    assert "This checkout starts no bot." in result.stdout
+    # The product's own entry is named, and the shared service still installs.
+    assert "prepare_docker_context.py" in result.stdout
+    log = docker_log(install_root)
+    assert "up -d --no-build wuwaterm-api" in log
+    # The inline bot is neither built, pulled nor started.
+    assert not re.search(r"(build|pull|up -d --no-build) wuwaterm$", log, re.MULTILINE), log
+
+
+def test_with_legacy_bot_keeps_the_deprecated_inline_bot_explicit(install_root):
     write_env(install_root)  # no token
-    refused = run_setup(install_root, "--with-telegram", "--no-adopt")
+    refused = run_setup(install_root, "--with-legacy-bot", "--no-adopt")
 
     assert refused.returncode == 1
     assert "TELEGRAM_BOT_TOKEN is empty" in refused.stderr
     assert "wuwaterm-bot" not in docker_log(install_root)
 
     write_env(install_root, telegram_token="123456:stub-token")
-    accepted = run_setup(install_root, "--with-telegram", "--no-adopt")
+    accepted = run_setup(
+        install_root, "--with-legacy-bot", "--no-adopt", env={"STUB_BOT_STATE": "running"}
+    )
 
     assert accepted.returncode == 0, accepted.stderr
-    assert "up -d --no-build wuwaterm" in docker_log(install_root)
-    assert "setup: Telegram bot is running." in accepted.stdout
-    assert re.search(r"up -d --no-build wuwaterm$", docker_log(install_root), re.MULTILINE)
+    assert "deprecated inline bot (wuwaterm-bot) is running" in accepted.stdout
+    assert "--with-legacy-bot starts the deprecated inline bot" in accepted.stderr
+    assert re.search(
+        r"up -d --no-build wuwaterm$", docker_log(install_root), re.MULTILINE
+    ), docker_log(install_root)
+
+
+def test_the_two_telegram_installations_are_alternatives(install_root):
+    result = run_setup(install_root, "--with-telegram", "--with-legacy-bot")
+
+    assert result.returncode == 2
+    assert "alternatives" in result.stderr
+    assert docker_log(install_root) == ""
+
+
+def test_telegram_dir_gets_the_database_and_only_the_bots_settings(install_root):
+    write_env(install_root, telegram_token="123456:stub-token")
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "OWNER_USER_ID=42\n"
+            "WUWATERM_API_STATE_DIR=state-api\n"
+            "WUWATERM_API_WEB_EDGE_SECRET=do-not-copy\n"
+            "WUWATERM_SITE_DEVICE_TOKEN=wtd1.dev123.secret\n"
+        )
+    product = product_checkout(install_root)
+
+    result = run_setup(install_root, "--telegram-dir", str(product), "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    product_env = product / ".env"
+    assert mode_of(product_env) == 0o600
+    values = env_values(product_env)
+    assert values["TELEGRAM_BOT_TOKEN"] == "123456:stub-token"
+    assert values["OWNER_USER_ID"] == "42"
+    assert values["WUWATERM_OPENAI_MODEL"] == "stub-model"
+    # This installation's API and Web credentials belong to other processes.
+    assert not [key for key in values if key.startswith(("WUWATERM_API_", "WUWATERM_SITE_"))]
+    assert "do-not-copy" not in product_env.read_text(encoding="utf-8")
+    # The product reads a copy of the shared database from its own checkout.
+    assert (product / "data" / "terms.db").read_bytes() == (
+        install_root / "data" / "terms.db"
+    ).read_bytes()
+    assert mode_of(product / "state") == 0o700
+    assert f"copied the database to {product}/data/terms.db" in result.stdout
+    assert f"wrote {product}/.env (mode 0600)" in result.stdout
+    assert not re.search(
+        r"(build|pull|up -d --no-build) wuwaterm$", docker_log(install_root), re.MULTILINE
+    )
+
+    # A second run keeps both, and does not copy the database over again.
+    (product / "data" / "terms.db").write_text("older fixture", encoding="utf-8")
+    again = run_setup(install_root, "--telegram-dir", str(product), "--no-adopt")
+
+    assert again.returncode == 0, again.stderr
+    assert "already present; keeping it" in again.stdout
+    assert (product / "data" / "terms.db").read_text(encoding="utf-8") == "older fixture"
+
+
+def test_telegram_dir_must_be_a_product_checkout(install_root):
+    write_env(install_root, telegram_token="123456:stub-token")
+    empty = install_root / "not-a-product"
+    empty.mkdir()
+
+    refused = run_setup(install_root, "--telegram-dir", str(empty), "--no-adopt")
+
+    assert refused.returncode == 1
+    assert "not a WuwaTerm-Telegram checkout" in refused.stderr
+
+    itself = run_setup(install_root, "--telegram-dir", str(install_root), "--no-adopt")
+
+    assert itself.returncode == 1
+    assert "never share a directory" in itself.stderr
+    assert not (install_root / "data" / "terms.db").exists()
 
 
 def test_with_web_without_a_package_stops_before_building_data(install_root):
@@ -500,13 +607,28 @@ def test_status_reports_without_creating_anything(install_root):
     assert result.returncode == 0
     assert "WuwaTerm status" in result.stdout
     assert "api:" in result.stdout
-    assert "telegram:" in result.stdout
+    assert "telegram:     not installed (standalone product)" in result.stdout
+    assert "legacy bot:   not installed" in result.stdout
     assert "web:" in result.stdout
     assert not (install_root / "data").exists()
     assert not (install_root / "state").exists()
     log = docker_log(install_root)
     for mutation in ("up -d", " build", "run --rm", "rm -f", " pull"):
         assert mutation not in log
+
+
+def test_status_tells_the_two_telegram_installations_apart(install_root):
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--status",
+        env={"STUB_PRODUCT_STATE": "running", "STUB_BOT_STATE": "exited"},
+    )
+
+    assert result.returncode == 0
+    assert "telegram:     running (standalone product)" in result.stdout
+    assert "legacy bot:   exited (deprecated inline bot)" in result.stdout
 
 
 def test_check_fails_when_the_api_is_not_ready(install_root):

@@ -119,7 +119,8 @@ counterpart in one idempotent script. From the checkout:
 
 ```bash
 ./deploy/setup.sh                     # shared translation service (Core API) only
-./deploy/setup.sh --with-telegram     # also start the Telegram bot
+./deploy/setup.sh --with-telegram     # install the Telegram surface, from its own product
+./deploy/setup.sh --with-legacy-bot   # deprecated: the inline bot in this checkout
 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
                                       # also install WuwaTerm-Web
 ./deploy/setup.sh --status            # what is installed, its data version, health
@@ -134,9 +135,9 @@ What it does, in this order:
    is missing.
 2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
    `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
-   `TELEGRAM_BOT_TOKEN` only when `--with-telegram` is given. The bot is never
-   started otherwise, so an API-only installation cannot fall into a restart
-   loop.
+   `TELEGRAM_BOT_TOKEN` only when the bot is actually being installed, which is
+   `--with-legacy-bot` or `--telegram-dir`. No bot is started otherwise, so an
+   API-only installation cannot fall into a restart loop.
 3. Pulls the official GHCR images for the declared version unless
    `--build-local` is given, and builds `data/terms.db` when it is missing:
    `refresh-data` → `build-db --atomic` on a candidate → `verify-db` → promote.
@@ -144,7 +145,9 @@ What it does, in this order:
 4. Starts `wuwaterm-api`, waits for `/readyz`, and issues one
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
-5. `--with-telegram` starts `wuwaterm-bot` and fails if it is not running.
+5. `--with-telegram` installs no bot here. It resolves the Telegram product,
+   prepares its checkout when `--telegram-dir` is given (below), and prints
+   that product's own install steps with this installation's paths filled in.
 6. `--with-web` writes `state-web/web.env` (mode `0600`) with the runtime
    mode, the external HTTPS origin (`--web-origin`), a dedicated
    `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the
@@ -200,6 +203,86 @@ different surface and is not installed by this flag.
 The script does not do TLS, reverse-proxy authentication, the Telegram token,
 or the model key for you. Those are the inputs described in
 [Configure](#configure) and [Publish It Over HTTPS](#publish-it-over-https).
+The bot token belongs in the Telegram product's own `.env`, not in this one.
+
+## The Telegram Surface Is Its Own Product
+
+The bot is [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram),
+released from its own repository. This checkout still carries an inline bot
+(`wuwaterm-bot`), and through v0.8.0 `--with-telegram` started that one. It no
+longer does: the released product is the supported bot, so the first-install
+entry routes there instead of installing a different program behind the same
+name.
+
+**What the product's own install looks like.** It is a container built from
+two verified wheels: its own release wheel and the Core wheel its
+`core-lock.json` pins. It mounts `data/` read-only and `state/` read-write,
+keeps transient poll health on a private tmpfs, and runs as the Compose service
+`wuwaterm-telegram` from its own `deploy/docker-compose.yml`. It needs:
+
+| Input | Where it comes from |
+| --- | --- |
+| A bot token | BotFather, in the product's `.env` as `TELEGRAM_BOT_TOKEN` |
+| `OWNER_USER_ID` | The Telegram user id allowed to use it in a private chat; empty rejects everyone there |
+| A schema-2 `data/terms.db` | Built by this checkout (step 3 above) and copied into the product's `data/`; the bot only reads it |
+| Model settings | The same `WUWATERM_OPENAI_*` values; sentence translation needs them, exact lookup does not |
+
+It does **not** need the HTTP API in front of it. The bot uses the Core
+library from its pinned wheel, so the API and the bot are independent: one
+host can run the API for the Windows client and the Web workbench while the
+bot runs somewhere else, as long as each has the database.
+
+**What `--with-telegram` does.** It resolves the product, prints its install
+steps with this installation's paths filled in, and starts nothing. Add
+`--telegram-dir <checkout>` — a clone at the release tag,
+`git clone --branch v0.2.0 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
+— and the script also copies `data/terms.db` into that checkout, creates its
+`state/` at mode `0700`, and writes its `.env` at mode `0600` from this one.
+Only the bot's settings travel: the token, the owner id, the model settings and
+the channel/rate/rejection keys. This installation's API and Web credentials
+stay where they are, and the product's Compose file blanks them anyway.
+
+The remaining steps are the product's own, and its README at that tag is
+authoritative if a flag moved: fetch the Core wheel its lock pins, download its
+release wheel and check it against that release's `SHA256SUMS`, prepare the
+Docker context with `scripts/prepare_docker_context.py`, then
+`docker compose -f deploy/docker-compose.yml up --build -d`. `--status` here
+reports both: `telegram` is the product's container and `legacy bot` is the
+inline one.
+
+**The inline bot is deprecated, not removed.** This Compose file still starts
+it when you name `wuwaterm`, because `deploy/product-update.sh` resolves
+installed services with `compose config`, and a service behind a profile is
+invisible to that. What changed is the install entry: `./deploy/setup.sh`
+starts no bot by default, and `--with-legacy-bot` is the only flag that starts
+this one. `deploy/vps-update.sh` names the services it acts on, so an existing
+installation keeps updating as before.
+
+**Upgrading an installation that runs the inline bot.** Stop it first: two
+pollers with one token fight over updates.
+
+```bash
+# 1. stop the deprecated inline bot
+docker compose -f deploy/docker-compose.yml stop wuwaterm
+
+# 2. prepare the product checkout from this installation
+./deploy/setup.sh --with-telegram --telegram-dir /path/to/WuwaTerm-Telegram
+
+# 3. follow the printed steps inside that checkout, then start it
+```
+
+The bot's settings and channel reply index are plain JSON at
+`state/chat_settings.json` and `state/channel_replies.json` in this checkout.
+Copy those two files into the product's `state/` while both processes are
+stopped, to keep group permissions and channel replies; the database is already
+copied by `--telegram-dir`.
+
+A deployment that `deploy/product-update.sh` has adopted does not use this
+hands-on path: build or download the product's delivery bundle, then follow
+[Component runtime](component-runtime.md#completed-artifact-deployment-workflow)
+(`component_artifact.py acquire`, then `runtime-update --components telegram`).
+That path rewrites the retained recipe for the `wuwaterm-telegram` image and
+keeps the existing database and state bindings.
 
 ## Configure
 
@@ -238,13 +321,16 @@ If you run both surfaces on the source path, do not export one file into both:
 [Start The Service](#start-the-service) shows how to give each process only its
 own secrets, which is what the Compose file already does for the container path.
 
-**For the Telegram bot:**
+**For the Telegram bot:** these belong in the *product's* `.env`, in its own
+checkout — not in this one. `--telegram-dir` writes the ones that overlap from
+the `.env` here; `TELEGRAM_BOT_TOKEN` is the one you still have to add if it is
+not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 
 | variable | why it matters |
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Without it the bot cannot start. |
 | `OWNER_USER_ID` | Who may use the bot in a private chat. Empty means private chat rejects everyone, which is the fail-closed default. |
-| `WUWATERM_STATE_DIR` | Where `chat_settings.json` and the channel reply index live. The example file sets it to `state`, and that is what the rest of this document assumes. It is **not** what an unset variable does: with nothing set, those two files fall back to sitting beside the database instead, which is the pre-`state/` layout and would put them where the backup section does not look. Leave the example's value in place. |
+| `WUWATERM_STATE_DIR` | Where `chat_settings.json` and the channel reply index live. The example file sets it to `state`, and that is what the rest of this document assumes. It is **not** what an unset variable does: with nothing set, those two files fall back to sitting beside the database instead, which is the pre-`state/` layout and would put them where the backup section does not look. Leave the example's value in place. Under the product's Compose file those two paths are inside its own `state/`. |
 
 **For the HTTP API:**
 
@@ -362,7 +448,10 @@ docker compose -f deploy/docker-compose.yml up -d wuwaterm
 docker compose -f deploy/docker-compose.yml up -d wuwaterm wuwaterm-api
 ```
 
-The three lines are alternatives: the API alone, the bot alone, or both.
+The three lines are alternatives: the API alone, the deprecated inline bot
+alone, or both. This Compose file is not the first-install entry —
+`./deploy/setup.sh` is, and it starts no bot unless you ask for the deprecated
+one — but an operator who runs `up -d` by hand chooses both surfaces here.
 
 **Source path**, one process each — and they are two long-running processes,
 not two lines of one script. Start each in its own terminal, or put each under
@@ -644,9 +733,9 @@ WUWATERM_RUNTIME_IMAGE=ghcr.io/my-denia/wuwaterm:v0.4.0 \
   docker compose -f deploy/docker-compose.yml up -d --no-build wuwaterm-api
 ```
 
-Name the service here for the same reason as above: without it, an API-only
-installation starts the bot too, and a bot with no token fails and is restarted
-forever. Substitute `wuwaterm` for the bot alone, or list both.
+Name the service here for the same reason as above: it names the surface being
+upgraded, and it is what starts the deprecated inline bot when you actually
+want it. Substitute `wuwaterm` for the bot alone, or list both.
 
 **That variable has to survive the command.** Set only on that one line, it is
 gone from the next one — and every later Compose command, including a restart
@@ -755,7 +844,7 @@ Five things are worth backing up, and one is not.
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
-| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. |
+| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. A standalone Telegram product keeps the same two files in its own `state/`; they are what carries group permissions and channel replies across, so back that directory up too. |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
 | `state-web/` | The self-hosted Web workbench, installed by `--with-web`. `web.env` holds the runtime mode, the external origin, the URL prefix and the `X-WuwaTerm-Edge` secret; `device.token` is the Core API device credential the Web process presents; `web.port` is the port it was started on. Two `0600` files in a `0700` directory, so the copy needs the privileges they were written with. Carry them over or the new host loses its edge gate and has to recreate the Web device. |
 | `state-web/data/pool.sqlite3` | The Web workbench's shared quota pool — the only database under `state-web/`, also in write-ahead-log mode and written by the Web process. Same choice as the credential store: stop the Web container, or take an online backup. |

@@ -2,7 +2,8 @@
 # Official one-command install and opt-in enablement for this checkout.
 #
 #   ./deploy/setup.sh                      Core API only (shared translation service)
-#   ./deploy/setup.sh --with-telegram      add the Telegram bot
+#   ./deploy/setup.sh --with-telegram      hand the Telegram surface to its own product
+#   ./deploy/setup.sh --with-legacy-bot    deprecated: start the inline bot in this checkout
 #   ./deploy/setup.sh --with-web           add the WuwaTerm-Web workbench
 #   ./deploy/setup.sh --status | --check   report what is installed and healthy
 #
@@ -10,6 +11,10 @@
 # existing installation: the .env, the data build, the credential store, the
 # Web secrets and the Compose services are only created when they are missing.
 # Nothing here prints a secret; the operator receives file paths instead.
+#
+# The Telegram bot is a separate product with its own repository, release and
+# Compose file, so --with-telegram routes to that entry instead of installing
+# the inline bot this checkout still carries. See install_telegram().
 #
 # Requirements: Linux with Docker (Compose v2), curl, and a POSIX shell. The
 # source checkout stays necessary because the Compose files, entrypoints and
@@ -22,6 +27,8 @@ code_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$code_root"
 
 with_telegram=0
+with_legacy_bot=0
+telegram_dir=
 with_web=0
 web_prefix=
 web_package=
@@ -39,12 +46,26 @@ Usage: ./deploy/setup.sh [options]
 Start the shared translation service, and add the surfaces you choose.
 
   (no flag)             Core HTTP API only: dictionary lookup, translation,
-                        review, device credentials. The Telegram bot is never
-                        started, so an API-only installation cannot fall into a
-                        bot restart loop.
-  --with-telegram       Also start the Telegram bot. Requires
+                        review, device credentials. No bot is started, so an
+                        API-only installation cannot fall into a bot restart
+                        loop.
+  --with-telegram       Install the Telegram surface through its own product,
+                        WuwaTerm-Telegram, which has its own repository,
+                        release and Compose file. This checkout starts no bot:
+                        it prints that product's install steps, filled in with
+                        this installation's database path. Pass --telegram-dir
+                        to also write that checkout's .env and copy the
+                        database into it.
+  --telegram-dir PATH   WuwaTerm-Telegram checkout to prepare (implies
+                        --with-telegram): writes its .env at mode 0600 from
+                        this .env and copies data/terms.db into it. Requires
+                        TELEGRAM_BOT_TOKEN in .env.
+  --with-legacy-bot     Deprecated. Also start the inline bot this checkout
+                        still carries (wuwaterm-bot). Requires
                         TELEGRAM_BOT_TOKEN in .env; OWNER_USER_ID is strongly
                         recommended (empty means private chat rejects everyone).
+                        The supported Telegram surface is the standalone
+                        product instead: --with-telegram.
   --with-web            Also install and start the WuwaTerm-Web workbench.
                         Requires a published Web package: either the official
                         GitHub release assets (manifest-{root|prefix}.json and
@@ -74,6 +95,8 @@ Start the shared translation service, and add the surfaces you choose.
 
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
+WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
+steps name (default v0.2.0).
 EOF
 }
 
@@ -95,6 +118,10 @@ need_value() {
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --with-telegram) with_telegram=1 ;;
+        --with-legacy-bot) with_legacy_bot=1 ;;
+        --telegram-dir)
+            need_value "$@"; telegram_dir=$2; shift ;;
+        --telegram-dir=*) telegram_dir=${1#--telegram-dir=} ;;
         --with-web) with_web=1 ;;
         --web-prefix)
             need_value "$@"; web_prefix=$2; shift ;;
@@ -126,6 +153,15 @@ esac
 # Asking for a Web package or a prefix is asking for the Web surface.
 if [ -n "$web_package" ] || [ -n "$web_prefix" ]; then
     with_web=1
+fi
+# Preparing the product checkout is asking for the Telegram surface.
+if [ -n "$telegram_dir" ]; then
+    with_telegram=1
+fi
+# Routing the surface and installing the deprecated inline bot are two
+# different installations, and one host cannot run both against one token.
+if [ "$with_telegram" = 1 ] && [ "$with_legacy_bot" = 1 ]; then
+    usage_error "--with-telegram and --with-legacy-bot are alternatives: the standalone product replaces the inline bot"
 fi
 
 # The Compose files bind-mount ../data, ../state, ../state-api, so the root is
@@ -196,7 +232,9 @@ validate_config() {
     require_env WUWATERM_OPENAI_BASE_URL
     require_env WUWATERM_OPENAI_API_KEY
     require_env WUWATERM_OPENAI_MODEL
-    if [ "$with_telegram" = 1 ]; then
+    # Routing the surface needs no token here; the product has its own .env.
+    # Writing that .env, or starting the deprecated inline bot, does.
+    if [ "$with_legacy_bot" = 1 ] || [ -n "$telegram_dir" ]; then
         require_env TELEGRAM_BOT_TOKEN
         warn_if_empty OWNER_USER_ID
     fi
@@ -333,8 +371,194 @@ ensure_api_device() {
     issue_device "setup" "translate,meta" "$token_file"
 }
 
-enable_telegram() {
+# The Telegram bot is its own product: its own repository, release, Compose
+# file and state, and its own pinned Core wheel in core-lock.json. It reads a
+# schema-2 database, which this install builds, and nothing else from here.
+# Installing it from this script would mean re-implementing that product's
+# verified-wheel and image-build steps in a second repository, where they would
+# drift, so this script routes to that product's own entry instead.
+telegram_product_repo=https://github.com/My-Denia/WuwaTerm-Telegram
+telegram_product_release=${WUWATERM_TELEGRAM_VERSION:-v0.2.0}
+
+# Only the bot's own settings travel to the product .env. The Web and API
+# secrets in this .env belong to other processes; the product's Compose file
+# blanks them, and copying them would hand a bot a surface it does not have.
+# WUWATERM_SEMANTIC_REVIEW_ENABLED is deliberately absent: the product keeps its
+# model review track off for production and public bots, so turning it on is a
+# decision for that checkout, not a copy of whatever this one does.
+telegram_env_keys() {
+    cat <<'EOF'
+TELEGRAM_BOT_TOKEN
+OWNER_USER_ID
+WUWATERM_OPENAI_BASE_URL
+WUWATERM_OPENAI_API_KEY
+WUWATERM_OPENAI_MODEL
+WUWATERM_LOG_LEVEL
+WUWATERM_LLM_TIMEOUT_SECONDS
+WUWATERM_LLM_MAX_CONCURRENCY
+WUWATERM_RATE_LIMIT_PER_MINUTE
+WUWATERM_REDACTION_SECRET
+WUWATERM_TR_REJECT_SILENT
+WUWATERM_GROUP_TR_REJECT_TEXT
+WUWATERM_PRIVATE_TR_REJECT_TEXT
+WUWATERM_CHANNEL_AUTOTRANSLATE
+WUWATERM_CHANNEL_MIN_CJK
+WUWATERM_CHANNEL_MIN_LATIN
+WUWATERM_CHANNEL_TEXT_LIMIT
+WUWATERM_CHANNEL_CAPTION_LIMIT
+WUWATERM_CHANNEL_MAX_PENDING
+WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE
+WUWATERM_CHANNEL_MAX_AGE_SECONDS
+EOF
+}
+
+# Copy the values this installation already has, and only those: a key that is
+# empty or absent here stays out of the file, so the product's own defaults
+# apply instead of an empty string that reads as unset anyway.
+write_telegram_env_body() {
+    telegram_env_keys | while IFS= read -r key; do
+        value=$(env_value "$key" || true)
+        [ -n "$value" ] || continue
+        printf '%s=%s\n' "$key" "$value"
+    done
+}
+
+write_telegram_env() {
+    target=$1
+    scratch="$target.$$"
+    # umask before the redirect: the file holds a bot token, so it must never
+    # exist with wider permissions, not even for the moment before a chmod.
+    if ! (
+        umask 077
+        exec >"$scratch"
+        printf '# Written by deploy/setup.sh from the Core .env. The Compose file\n'
+        printf '# under deploy/ mounts data/ read-only and state/ read-write.\n'
+        write_telegram_env_body
+    ); then
+        rm -f "$scratch"
+        fail "cannot write $target"
+    fi
+    mv "$scratch" "$target" || { rm -f "$scratch"; fail "cannot write $target"; }
+    chmod 600 "$target"
+}
+
+# Resolved before the data build for the same reason the Web package is: a
+# wrong path is a typo, and it should stop the install instead of surfacing
+# after a gigabyte of upstream data was fetched.
+resolve_telegram_dir() {
+    [ -n "$telegram_dir" ] || return 0
+    [ -d "$telegram_dir" ] \
+        || fail "--telegram-dir does not exist: $telegram_dir. Clone the product first: git clone --branch $telegram_product_release --depth 1 $telegram_product_repo <dir>"
+    telegram_checkout=$(CDPATH= cd -- "$telegram_dir" && pwd -P)
+    [ "$telegram_checkout" != "$code_root" ] \
+        || fail "--telegram-dir must be the WuwaTerm-Telegram checkout, not this Core checkout: the two products never share a directory"
+    [ -f "$telegram_checkout/deploy/docker-compose.yml" ] \
+        || fail "$telegram_checkout is not a WuwaTerm-Telegram checkout: deploy/docker-compose.yml is missing"
+    [ -f "$telegram_checkout/core-lock.json" ] \
+        || fail "$telegram_checkout is not a WuwaTerm-Telegram checkout: core-lock.json is missing"
+}
+
+# The product mounts ../data and ../state relative to its own deploy/, so the
+# database and the state directory have to be inside that checkout. Both are
+# this installation's to give: the database is built here and the bot only
+# reads it, and the state directory is the product's own.
+prepare_telegram_checkout() {
+    [ -f "$code_root/data/terms.db" ] \
+        || fail "$code_root/data/terms.db is missing; run setup without --telegram-dir first so the database is built"
+    mkdir -p "$telegram_checkout/data" "$telegram_checkout/state"
+    chmod 700 "$telegram_checkout/state"
+    if [ -e "$telegram_checkout/data/terms.db" ]; then
+        printf 'setup: %s/data/terms.db already present; keeping it.\n' "$telegram_checkout"
+    else
+        cp "$code_root/data/terms.db" "$telegram_checkout/data/terms.db" \
+            || fail "cannot copy the database into $telegram_checkout/data"
+        printf 'setup: copied the database to %s/data/terms.db.\n' "$telegram_checkout"
+    fi
+    if [ -e "$telegram_checkout/.env" ]; then
+        printf 'setup: %s/.env already present; keeping it.\n' "$telegram_checkout"
+        return 0
+    fi
+    write_telegram_env "$telegram_checkout/.env"
+    printf 'setup: wrote %s/.env (mode 0600) from this installation.\n' "$telegram_checkout"
+}
+
+# The commands below are the product's own documented path, printed with this
+# installation's paths filled in. Its README at that tag stays authoritative:
+# if a flag moved, follow the README instead of this printout.
+print_telegram_steps() {
+    wheel=$1
+    where=$2
+    prepared=$3
+    download="$telegram_product_repo/releases/download/$telegram_product_release"
+    step=1
+    if [ "$prepared" = 0 ]; then
+        printf 'setup: %s. fetch the product at its release tag, in its own directory:\n' "$step"
+        printf 'setup:      git clone --branch %s --depth 1 %s %s\n' \
+            "$telegram_product_release" "$telegram_product_repo" "$where"
+        step=$((step + 1))
+        printf 'setup: %s. give it a schema-2 database; this installation built one:\n' "$step"
+        printf 'setup:      mkdir -p %s/data && cp %s/data/terms.db %s/data/terms.db\n' \
+            "$where" "$code_root" "$where"
+        step=$((step + 1))
+        printf 'setup: %s. write %s/.env at mode 0600 with TELEGRAM_BOT_TOKEN,\n' "$step" "$where"
+        printf 'setup:    OWNER_USER_ID and the model settings, and keep it out of git.\n'
+        printf 'setup:      cp %s/deploy/env.example %s/.env\n' "$where" "$where"
+        step=$((step + 1))
+    fi
+    printf 'setup: %s. verify the Telegram wheel against the release checksums:\n' "$step"
+    printf 'setup:      cd %s && mkdir -p artifacts\n' "$where"
+    printf 'setup:      curl -fsSLo artifacts/%s %s/%s\n' "$wheel" "$download" "$wheel"
+    printf 'setup:      curl -fsSLo artifacts/SHA256SUMS %s/SHA256SUMS\n' "$download"
+    printf 'setup:      (cd artifacts && grep " %s$" SHA256SUMS | sha256sum -c -)\n' "$wheel"
+    printf "setup:      telegram_sha=\$(awk '\$2 == \"%s\" {print \$1}' artifacts/SHA256SUMS)\n" "$wheel"
+    step=$((step + 1))
+    printf 'setup: %s. fetch the pinned Core wheel and build the verified context:\n' "$step"
+    printf 'setup:      python3 scripts/fetch_core.py --lock core-lock.json --output-dir artifacts\n'
+    printf 'setup:      python3 scripts/prepare_docker_context.py --lock core-lock.json \\\n'
+    printf 'setup:          --core artifacts/wuwaterm-*.whl --telegram artifacts/%s \\\n' "$wheel"
+    printf "setup:          --telegram-sha256 \"\$telegram_sha\" --output-dir artifacts/docker-context\n"
+    step=$((step + 1))
+    printf 'setup: %s. start it with the product Compose file. Poll health is opt-in\n' "$step"
+    printf 'setup:    and read from the environment when the container starts:\n'
+    printf 'setup:      WUWATERM_POLL_HEALTH=1 docker compose -f deploy/docker-compose.yml up --build -d\n'
+    printf 'setup:    then check the running container:\n'
+    printf 'setup:      docker compose -f deploy/docker-compose.yml exec -T wuwaterm-telegram \\\n'
+    printf 'setup:          python -B -m wuwaterm_telegram.operations health\n'
+}
+
+install_telegram() {
     [ "$with_telegram" = 1 ] || return 0
+    case "$telegram_product_release" in
+        v[0-9]*) ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.0, not: $telegram_product_release" ;;
+    esac
+    wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
+    if [ -n "$telegram_dir" ]; then
+        prepare_telegram_checkout
+        where=$telegram_checkout
+        prepared=1
+    else
+        where='<product-dir>'
+        prepared=0
+    fi
+    printf '\nsetup: the Telegram bot is the standalone product %s,\n' "$telegram_product_repo"
+    printf 'setup: release %s. This checkout starts no bot.\n' "$telegram_product_release"
+    print_telegram_steps "$wheel" "$where" "$prepared"
+    printf '\nsetup: the bot uses the Core library from its own pinned wheel, so the API\n'
+    printf 'setup: above is not in its path and does not have to be published for it.\n'
+    if [ "$(container_state wuwaterm-bot)" = running ]; then
+        printf 'setup: the deprecated inline bot is running here; stop it before the product\n'
+        printf 'setup: polls the same token: docker compose -f deploy/docker-compose.yml stop wuwaterm\n'
+    fi
+}
+
+# Kept for existing installations and for an explicit rollback. The install
+# entry no longer reaches it by accident: a first install starts no bot, and
+# this flag is the only thing in this script that starts the inline one.
+enable_legacy_bot() {
+    [ "$with_legacy_bot" = 1 ] || return 0
+    printf 'setup: warning: --with-legacy-bot starts the deprecated inline bot (wuwaterm-bot).\n' >&2
+    printf 'setup: warning: the supported Telegram surface is the standalone product: ./deploy/setup.sh --with-telegram\n' >&2
     if [ "$build_local" = 1 ]; then
         compose build wuwaterm
         compose up -d --no-build wuwaterm
@@ -346,7 +570,7 @@ enable_telegram() {
     sleep 3
     state=$(docker inspect -f '{{.State.Status}}' wuwaterm-bot 2>/dev/null || true)
     [ "$state" = "running" ] || fail "wuwaterm-bot is not running (state: ${state:-missing}); check docker logs wuwaterm-bot"
-    printf 'setup: Telegram bot is running.\n'
+    printf 'setup: deprecated inline bot (wuwaterm-bot) is running.\n'
 }
 
 web_variant() {
@@ -736,8 +960,18 @@ print(
             printf 'data version: could not be read (run --check after the API is ready)\n'
         fi
     fi
+    product_state=$(container_state wuwaterm-telegram)
+    if [ -n "$product_state" ]; then
+        printf 'telegram:     %s (standalone product)\n' "$product_state"
+    else
+        printf 'telegram:     not installed (standalone product)\n'
+    fi
     bot_state=$(container_state wuwaterm-bot)
-    printf 'telegram:     %s\n' "${bot_state:-not installed}"
+    if [ -n "$bot_state" ]; then
+        printf 'legacy bot:   %s (deprecated inline bot)\n' "$bot_state"
+    else
+        printf 'legacy bot:   not installed\n'
+    fi
     if [ -f "$code_root/state-web/web.env" ]; then
         web_state=$(container_state wuwaterm-web)
         printf 'web:          %s\n' "${web_state:-not running}"
@@ -790,15 +1024,18 @@ esac
 
 ensure_layout
 validate_config
-# Resolve the Web package before the data build: a missing package should stop
-# the install instead of after a gigabyte of upstream data was fetched.
+# Resolve the Web package and the Telegram checkout before the data build: a
+# missing package or a wrong path should stop the install instead of after a
+# gigabyte of upstream data was fetched.
 if [ "$with_web" = 1 ]; then
     resolve_web_package
 fi
+resolve_telegram_dir
 build_data
 start_api
 ensure_api_device
-enable_telegram
+install_telegram
+enable_legacy_bot
 enable_web
 maybe_adopt
 
