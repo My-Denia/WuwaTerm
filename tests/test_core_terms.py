@@ -318,6 +318,22 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
     assert ascii_locked.references == ()
 
 
+def test_term_glossary_titles_are_imported(tmp_path: Path):
+    texts = {
+        **UPSTREAM_TEXT,
+        "Term260001_Title": ("镇抚司", "Internal Security Agency"),
+    }
+    rows = _direct_rows(_build(tmp_path, texts))
+    row = rows["Term260001_Title"]
+    assert (row["zh"], row["en"], row["category"]) == (
+        "镇抚司",
+        "Internal Security Agency",
+        "core_term",
+    )
+    hit = TermService(_build(tmp_path / "second", texts)).lookup_exact("镇抚司")
+    assert hit.exact and hit.best.entry.en == "Internal Security Agency"
+
+
 def test_missing_upstream_key_still_skips_and_keeps_the_original_three(
     tmp_path: Path,
 ):
