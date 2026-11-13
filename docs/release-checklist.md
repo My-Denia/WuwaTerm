@@ -12,15 +12,15 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current Core version is `0.8.5`, a delivery-alignment
-  release: the component-artifact verifier reads the Docker v2 schema as well
-  as OCI, a legacy deployment publishes without restarting a retired surface,
-  and the installer names the releases `contracts/products.json` records.
-  `v0.8.4` is the latest published release before it — the dictionary release
-  that imports the complete official `Term<n>_Title` glossary (651 additional
-  entries) — then `v0.8.3`, `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1`
-  and `v0.7.0`. Set `NEXT_VERSION` to the derived tag explicitly before any
-  release command below.
+  published tag. The latest published Core release is `v0.8.5`, a
+  delivery-alignment release: the component-artifact verifier reads the Docker
+  v2 schema as well as OCI, a legacy deployment publishes without restarting a
+  retired surface, and the installer names the releases `contracts/products.json`
+  records. Before it is `v0.8.4`, the dictionary release that imports the
+  complete official `Term<n>_Title` glossary (651 additional entries), then
+  `v0.8.3`, `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1` and `v0.7.0`. Set
+  `NEXT_VERSION` to the derived tag explicitly before any release command
+  below.
 - Windows product: [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -152,9 +152,9 @@ The 0.8.0 capability checks still apply to this release:
   against the existing pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`);
   this release does not move them.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
-  own lock is moved and released. Telegram 0.2.8 pins the published Core
-  `v0.8.4` wheel, so 0.8.5 reaches Telegram users only when that product moves
-  its lock and releases.
+  own lock is moved and released. Telegram 0.2.9 pins the published Core
+  `v0.8.5` wheel and is deployed, so the 0.8.5 library reaches Telegram users
+  through that product's own release.
 
 The installer and Web checks from 0.7.x still apply to this release:
 
