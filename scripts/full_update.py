@@ -670,7 +670,11 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
     state to compare against, so a surface is certified only by the binding it
     carries: absent, or exactly the target image and reference. A present
     object on any other image would be a surface this deployment did not
-    publish.
+    publish. The API is the exception to the absent-passes rule: a first
+    deployment has no recorded running state to inherit, the shell arms
+    ``target_api_running=true`` for it, and the API is the only surface that
+    serves. A stopped or missing API there is an incomplete deployment, not a
+    retired surface, so it must not certify the transaction.
     """
 
     present, value = _pointer_state()
@@ -704,6 +708,15 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
             if (
                 state is None
                 or state[0] != journal[running_key]
+                or state[1] != journal["target_image_id"]
+                or state[2] != journal["target_image_ref"]
+            ):
+                raise FullUpdateError("full_recovery_unresolved")
+            continue
+        if service == "wuwaterm-api":
+            if (
+                state is None
+                or not state[0]
                 or state[1] != journal["target_image_id"]
                 or state[2] != journal["target_image_ref"]
             ):

@@ -1713,3 +1713,69 @@ def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(ful
     assert not (root / "bot-present").exists()
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert "deployment bot surface: absent" in result.stdout
+
+
+# --- a first deployment must confirm a serving API ---------------------------
+#
+# With no recorded pointer there is no previous running state to inherit, and
+# the API is the surface the deployment exists to bring up. The retired-bot
+# exception stays: the inline bot may be absent on a host that serves Telegram
+# from the standalone product. The API may not.
+
+_FIRST_DEPLOY_REF = f"wuwaterm-runtime:{NEW_COMMIT}"
+
+
+def _first_deployment_awaiting_confirmation(root: Path, new_bytes: bytes) -> None:
+    _plant(root, _journal(
+        root, phase="committed", old_db_sha=None, db_backup="none",
+        old_pointer_present=False,
+        new_db_sha=hashlib.sha256(new_bytes).hexdigest(),
+        candidate_rel=f"data/candidates/terms.{TXN}.db",
+        bot_id=None, api_id=None, bot_ref=None, api_ref=None,
+        bot_running=False, api_running=False,
+    ))
+    _published_new_binding(root, new_bytes=new_bytes)
+
+
+@pytest.mark.parametrize(
+    "api_state", ["stopped", "absent", "running-old-image"]
+)
+def test_a_first_deployment_confirms_only_a_running_api(full_harness, api_state):
+    root, env, _old_hash, _new_hash, _ob, new_bytes, _backup_rel = full_harness
+    _first_deployment_awaiting_confirmation(root, new_bytes)
+    _surface(root, "bot", image=NEW_IMAGE, ref=_FIRST_DEPLOY_REF,
+             running=False, present=False)
+    if api_state == "stopped":
+        _surface(root, "api", image=NEW_IMAGE, ref=_FIRST_DEPLOY_REF,
+                 running=False)
+    elif api_state == "absent":
+        _surface(root, "api", image=NEW_IMAGE, ref=_FIRST_DEPLOY_REF,
+                 running=False, present=False)
+    else:
+        _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
+
+    result = _run_recover(root, env)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "full_recovery_unresolved" in result.stderr
+    # The record survives: an operator still has the transaction to recover.
+    assert (root / JOURNAL_RELPATH).exists()
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
+
+
+def test_a_first_deployment_with_an_absent_bot_and_serving_api_confirms(
+    full_harness,
+):
+    """Positive control: the retired-bot exception is not narrowed."""
+    root, env, _old_hash, _new_hash, _ob, new_bytes, _backup_rel = full_harness
+    _first_deployment_awaiting_confirmation(root, new_bytes)
+    _surface(root, "bot", image=NEW_IMAGE, ref=_FIRST_DEPLOY_REF,
+             running=False, present=False)
+    _surface(root, "api", image=NEW_IMAGE, ref=_FIRST_DEPLOY_REF, running=True)
+
+    result = _run_recover(root, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "confirmed on the new binding" in result.stdout
+    assert not (root / JOURNAL_RELPATH).exists()
+    assert not any(" stop " in line for line in _docker_log(root))
