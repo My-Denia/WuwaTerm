@@ -96,7 +96,7 @@ Start the shared translation service, and add the surfaces you choose.
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
-steps name (default v0.2.8, or the tag recorded in contracts/products.json).
+steps name (default v0.2.9, or the tag recorded in contracts/products.json).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
 v0.2.0, the current published release, or latest (default v0.2.0, or the tag
 recorded in contracts/products.json).
@@ -387,7 +387,7 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # snapshot and docs/products.md points readers at it, so when that file can be
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
-DEFAULT_TELEGRAM_VERSION=v0.2.8
+DEFAULT_TELEGRAM_VERSION=v0.2.9
 DEFAULT_WEB_VERSION=v0.2.0
 
 recorded_product_tag() {
@@ -571,7 +571,7 @@ install_telegram() {
     [ "$with_telegram" = 1 ] || return 0
     case "$telegram_product_release" in
         v[0-9]*) ;;
-        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.8, not: $telegram_product_release" ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.9, not: $telegram_product_release" ;;
     esac
     wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
     if [ -n "$telegram_dir" ]; then
