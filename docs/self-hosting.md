@@ -148,6 +148,9 @@ What it does, in this order:
 5. `--with-telegram` installs no bot here. It resolves the Telegram product,
    prepares its checkout when `--telegram-dir` is given (below), and prints
    that product's own install steps with this installation's paths filled in.
+   `WUWATERM_TELEGRAM_VERSION` names another release tag; the default is the
+   tag `contracts/products.json` records (`v0.2.8` today, and the constant in
+   the script when that file is absent).
 6. `--with-web` writes `state-web/web.env` (mode `0600`) with the runtime
    mode, the external HTTPS origin (`--web-origin`), a dedicated
    `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the
@@ -173,8 +176,10 @@ when that flag is installed.
 
 **The Web option installs the published WuwaTerm-Web package.**
 `--with-web` reads `manifest-{root|prefix}.json` and
-`SHA256SUMS-{root|prefix}` from the latest
-[WuwaTerm-Web release](https://github.com/My-Denia/WuwaTerm-Web/releases),
+`SHA256SUMS-{root|prefix}` from a
+[WuwaTerm-Web release](https://github.com/My-Denia/WuwaTerm-Web/releases) —
+the tag `contracts/products.json` records, or `WUWATERM_WEB_VERSION=latest` for
+the newest one —
 checks the manifest digest, downloads the archive that `archive.name` names,
 verifies it against the sums, extracts it, and runs the bundle's
 `bundle/start.mjs` with the Node image named by `WUWATERM_WEB_NODE_IMAGE`
@@ -235,7 +240,7 @@ bot runs somewhere else, as long as each has the database.
 **What `--with-telegram` does.** It resolves the product, prints its install
 steps with this installation's paths filled in, and starts nothing. Add
 `--telegram-dir <checkout>` — a clone at the release tag,
-`git clone --branch v0.2.0 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
+`git clone --branch v0.2.8 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
 — and the script also copies `data/terms.db` into that checkout, creates its
 `state/` at mode `0700`, and writes its `.env` at mode `0600` from this one.
 Only the bot's settings travel: the token, the owner id, the model settings and

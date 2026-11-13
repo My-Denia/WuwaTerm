@@ -761,6 +761,10 @@ def _make_deploy_harness(tmp_path):
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.
         "  case \"$*\" in\n"
+        # The standalone Telegram product is its own container; whether it
+        # runs decides whether the legacy in-Core bot may run at all.
+        "    *wuwaterm-telegram*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/telegram-running\" ;;\n"
         "    *State.Running*wuwaterm-api*)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
         "    *State.Running*)\n"
@@ -769,8 +773,10 @@ def _make_deploy_harness(tmp_path):
         "      cat \"$FAKE_DEPLOY_ROOT/api-ref\" ;;\n"
         "    *Config.Image*)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/bot-ref\" ;;\n"
+        "    *wuwaterm-api*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/api-image\" ;;\n"
         "    *)\n"
-        "      cat \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/bot-image\" ;;\n"
         "  esac\n"
         "  exit 0\n"
         "fi\n"
@@ -807,16 +813,48 @@ def _make_deploy_harness(tmp_path):
         "    candidate=$FAKE_DEPLOY_ROOT/data/${candidate#/app/data/}\n"
         "    python3 \"$FAKE_DEPLOY_ROOT/scripts/verify_db.py\" \"$candidate\"\n"
         "    ;;\n"
+        # `compose create` refreshes a stopped container's image reference
+        # without starting it, exactly as the daemon does.
+        "  *' create '*wuwaterm*)\n"
+        "    image=\"${WUWATERM_RUNTIME_IMAGE:-unset}\"\n"
+        "    case \"$image\" in\n"
+        f"      *rollback-*) image_id='{OLD_IMAGE}' ;;\n"
+        f"      *) image_id='{NEW_IMAGE}' ;;\n"
+        "    esac\n"
+        "    for service in \"$@\"; do\n"
+        "      case \"$service\" in\n"
+        "        wuwaterm)\n"
+        "          echo \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "          echo \"$image_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
+        "          echo false > \"$FAKE_DEPLOY_ROOT/bot-running\" ;;\n"
+        "        wuwaterm-api)\n"
+        "          echo \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "          echo \"$image_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
+        "          echo false > \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
+        "      esac\n"
+        "    done\n"
+        "    ;;\n"
         "  *' up -d '*wuwaterm*)\n"
         "    image=\"${WUWATERM_RUNTIME_IMAGE:-unset}\"\n"
         "    case \"$image\" in\n"
-        f"      *rollback-*) echo '{OLD_IMAGE}' > \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
-        f"      *) echo '{NEW_IMAGE}' > \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
+        f"      *rollback-*) image_id='{OLD_IMAGE}' ;;\n"
+        f"      *) image_id='{NEW_IMAGE}' ;;\n"
         "    esac\n"
-        # Both surfaces are created from one image ref per deployment; the
-        # recovery record verifies the observed Config.Image per surface.
-        "    echo \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
-        "    echo \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "    echo \"$image_id\" > \"$FAKE_DEPLOY_ROOT/running-image\"\n"
+        # One image ref per deployment; the recovery record verifies the
+        # observed Config.Image per surface, so only the named services move.
+        "    for service in \"$@\"; do\n"
+        "      case \"$service\" in\n"
+        "        wuwaterm)\n"
+        "          echo \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "          echo \"$image_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
+        "          echo true > \"$FAKE_DEPLOY_ROOT/bot-running\" ;;\n"
+        "        wuwaterm-api)\n"
+        "          echo \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "          echo \"$image_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
+        "          echo true > \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
+        "      esac\n"
+        "    done\n"
         "    ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -896,10 +934,15 @@ def _make_deploy_harness(tmp_path):
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     (root / "bot-ref").write_text("wuwaterm-runtime:old\n", encoding="ascii")
     (root / "api-ref").write_text("wuwaterm-runtime:old\n", encoding="ascii")
-    # Default host state: both surfaces were up when the deployment started.
-    # A test that wants a present-but-stopped surface rewrites these.
+    (root / "bot-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    (root / "api-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    # Default host state: both Core surfaces were up when the deployment
+    # started, and the standalone Telegram product is not installed. A test
+    # that wants a stopped or retired surface rewrites these.
     (root / "api-running").write_text("true\n", encoding="ascii")
     (root / "bot-running").write_text("true\n", encoding="ascii")
+    (root / "telegram-running").write_text("false\n", encoding="ascii")
+    (root / "telegram-ref").write_text("wuwaterm-telegram:old\n", encoding="ascii")
 
     old_hash = hashlib.sha256(old_db.read_bytes()).hexdigest()
     new_hash = hashlib.sha256(seed_db.read_bytes()).hexdigest()
@@ -1261,13 +1304,20 @@ def test_env_example_covers_the_api_surface():
 
 
 def test_vps_update_manages_both_surfaces_together():
-    """Both containers share the terminology database, so both move together."""
+    """Both containers share the database, so both stop, but each starts only
+    if this deployment found it running."""
     text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
 
-    # Down before the shared read-only database is replaced.
+    # Down before the shared read-only database is replaced. Stopping is not
+    # conditional: neither surface may serve while its database is replaced.
     assert "compose stop wuwaterm wuwaterm-api" in text
-    # Up together, from the same validated image.
-    assert "--force-recreate wuwaterm wuwaterm-api" in text
+    # Up per surface, from the same validated image, and only where the
+    # deployment found a running surface; the retired one is re-created
+    # without being started.
+    assert 'if [ "$target_bot_running" = "true" ]; then' in text
+    assert 'if [ "$target_api_running" = "true" ]; then' in text
+    assert "--force-recreate --pull never wuwaterm" in text
+    assert "--force-recreate --pull never wuwaterm-api" in text
     # Smoked in-container over loopback, so nothing has to be exposed, and
     # against readiness rather than liveness: /healthz answers even when the
     # terminology database is missing or mounted at the wrong path.
@@ -1278,9 +1328,13 @@ def test_vps_update_manages_both_surfaces_together():
     # "not yet". The smoke waits, and says why it gave up.
     assert "api readiness never reported ok" in text
     assert "deadline = time.monotonic()" in text
-    # Read back separately, and both must match the validated image id.
-    assert "running_api_image_id=" in text
-    assert "running api container image does not match validated image" in text
+    # Read back per surface, each against what this deployment expected: a
+    # running surface must carry the validated image id, a stopped one must be
+    # stopped on it, and an absent one must stay absent.
+    assert 'bot_surface_state="$(surface_state wuwaterm-bot "$bot_expected")"' in text
+    assert 'api_surface_state="$(surface_state wuwaterm-api "$api_expected")"' in text
+    assert "does not carry the validated image" in text
+    assert 'case "$ss_expected:$ss_running" in' in text
     # Rollback restores the api surface only when the host was RUNNING it.
     # Existence is not the test: a container left stopped by an earlier failed
     # upgrade, or stopped deliberately, still answers `docker inspect`, and
@@ -1602,16 +1656,25 @@ def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
 
     assert result.returncode == 0, result.stdout + result.stderr
     docker_log = (root / "docker.log").read_text(encoding="utf-8")
+    # One combined stop: no surface serves while the shared database moves.
     stop_lines = [
         line for line in docker_log.splitlines() if "stop wuwaterm" in line
     ]
     assert stop_lines
     assert all("wuwaterm-api" in line for line in stop_lines), stop_lines
-    up_lines = [line for line in docker_log.splitlines() if "up -d" in line]
-    assert up_lines
-    assert all("wuwaterm-api" in line for line in up_lines), up_lines
+    # Each surface was running, so each one comes back on its own start.
+    up_commands = [
+        line.split("|", 1)[1]
+        for line in docker_log.splitlines()
+        if "up -d" in line
+    ]
+    assert sorted(command.rsplit(" ", 1)[-1] for command in up_commands) == [
+        "wuwaterm",
+        "wuwaterm-api",
+    ], up_commands
     assert "exec -T wuwaterm-api" in docker_log
-    assert "deployment api container image id:" in result.stdout
+    assert "deployment bot surface: running" in result.stdout
+    assert "deployment api surface: running" in result.stdout
 
 
 def test_api_state_directory_is_not_inside_the_bot_state_tree():
@@ -1940,3 +2003,87 @@ def test_vps_update_refuses_clearly_without_python311(tmp_path: Path) -> None:
     assert log.read_text(encoding="utf-8").splitlines() == [
         "python3 -c import sys; raise SystemExit(sys.version_info < (3, 11))"
     ]
+
+
+def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
+    """The standalone product and the in-Core bot must never both run.
+
+    Two pollers on one bot token answer every update twice, so the deployment
+    refuses before it touches the database, the pointer or any service.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    (root / "telegram-running").write_text("true\n", encoding="ascii")
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "stop legacy wuwaterm-bot first" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    assert not [
+        command
+        for command in commands
+        if " stop " in command
+        or " up -d " in command
+        or " create " in command
+        or command.startswith("rm ")
+    ], commands
+    assert not (root / ".deployments" / ".full-transaction.json").exists()
+
+
+def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harness):
+    """A pointer proves a deployment served here. If nothing serves now, the
+    rollback would have nothing to restore, so the update refuses."""
+    root, env, old_hash, _new_hash = deploy_harness
+    (root / "bot-running").write_text("false\n", encoding="ascii")
+    (root / "api-running").write_text("false\n", encoding="ascii")
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "neither wuwaterm-bot nor wuwaterm-api is running" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    assert not [command for command in commands if " up -d " in command or " stop " in command]
+
+
+def test_full_update_prepare_refuses_a_recorded_host_with_no_serving_surface():
+    """The module refuses the same shape the shell refuses, on its own."""
+    text = (ROOT / "scripts" / "full_update.py").read_text(encoding="utf-8")
+
+    assert 'raise FullUpdateError("no_serving_surface")' in text
+    guard = text.index('raise FullUpdateError("no_serving_surface")')
+    armed = text.index("_write_journal_atomic(journal)", guard)
+    assert guard < armed

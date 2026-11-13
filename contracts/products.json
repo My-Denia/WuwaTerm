@@ -125,7 +125,7 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core 0.8.4 is running in the owner's wuwaterm-api and legacy wuwaterm-bot since 2026-11-12T18:54:03Z (deployment source 0e64a8e, image e16354d). The rebuilt terms.db is sha256 425f8679 with 11,987 terms, including all 655 Term<n>_Title pairs. Telegram 0.2.8 pins 0.8.4; the legacy in-Core bot remains stopped.",
+      "adoption_note": "Deployment source 0e64a8e on 2026-11-12T18:54:03Z updated Core 0.8.4 (image e16354d) and rebuilt the terms.db served by wuwaterm-api: sha256 425f8679, 11,987 terms, including all 655 Term<n>_Title pairs. The legacy in-Core wuwaterm-bot is retired and stays stopped; the standalone WuwaTerm-Telegram 0.2.8 product serves the Telegram surface and pins this Core release.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/0e64a8e4660acbdd0ec5c4fc1baa317318d17614/docs/self-hosting.md",
@@ -208,8 +208,8 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "14f0c36ce1767333a8c7bde0085594d61676ca12",
-        "tree": "26ecdbccb4c780eeff4c7ef63ff252253506a762",
+        "commit": "59b8a5f8eeff2afc947874ab20c7e59f44734348",
+        "tree": "9d4e0f283d42857a1e42222eb4ac910b1bc19826",
         "status": "merged"
       },
       "release": {
@@ -241,9 +241,9 @@
         "manuscript": "wuwaterm-manuscript-v1",
         "note": "Local manuscript editing works offline; online features require a configured API and device credential."
       },
-      "validation": "0.4.2 release build and Windows CI passed; multi-DPI, mixed-DPI, IME and owner visual acceptance remain unverified.",
+      "validation": "0.4.2 official ZIP (824b694c...) passed native Windows (qwindows) and offscreen --self-check on a 150%-DPI host; interactive human visual check, multi-monitor mixed-DPI drag, and live IME composition are not done.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/14f0c36ce1767333a8c7bde0085594d61676ca12/README.md"
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/59b8a5f8eeff2afc947874ab20c7e59f44734348/README.md"
       ],
       "source_version": "0.4.2",
       "previous_release": {
@@ -262,19 +262,60 @@
         "signed": false,
         "note": "Kept as history after v0.4.2; the release and its assets are still published."
       },
-      "adoption_note": "0.4.2 is published, but owner-device multi-DPI, mixed-DPI, IME and visual acceptance are not confirmed."
+      "adoption_note": "0.4.2 is published. 0.4.2 official ZIP (824b694c...) passed native Windows (qwindows) and offscreen --self-check on a 150%-DPI host; interactive human visual check, multi-monitor mixed-DPI drag, and live IME composition are not done."
     },
     {
       "id": "web",
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "3ceab4f593fa5d51a9371d94834d0d0eba6207cd",
-        "tree": "16cca7b4a216df4c96fb52590c6ca933c35f4121",
+        "commit": "5aabe80bee3adda164e151de2da297a01860c301",
+        "tree": "94a27365810c4868159ebbd95398f9639e370990",
         "status": "merged"
       },
       "source_version": "0.2.0",
       "release": {
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0",
+        "published_at": "2026-11-13T04:03:05Z",
+        "source_commit": "5aabe80bee3adda164e151de2da297a01860c301",
+        "source_tree": "94a27365810c4868159ebbd95398f9639e370990",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz": "3747f2e07228be4fd7bc7a8a09baca466c5808447b89ac0758f312425ab88e9b",
+          "manifest-root.json": "61980e9e2420356e285d4f2b2d2af3c5f1252d53697f7eda2a9feb5dadca4631",
+          "SHA256SUMS-root": "9dae20488168c4f6d375ac002a0fbd93f49138d0844230e753514e84cf619246",
+          "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz": "00ceb92fe4720af7514b4b25b58dc387dd345fb7853a47c56a8cf58f27e8efd5",
+          "manifest-prefix.json": "d8c9bbe0df168bde311513c7418b62ff493485d98f4f96f377dfe8ea770dc895",
+          "SHA256SUMS-prefix": "0efb9b838f2841f737634b2cf8312ccbfe530e2d3ac02ce2b8ef350b9478f628"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
+        "note": "v0.2.0 supersedes v0.1.1; the earlier release and its recorded assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.1.1",
         "tag": "v0.1.1",
         "status": "released",
@@ -313,24 +354,7 @@
           "SHA256SUMS-prefix": "5ece536650c46970e2561473eb44687b6d5a3681cdb8cc9ae57d492a4cd5fc35"
         },
         "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
-        "note": "v0.1.1 supersedes v0.1.0; the earlier release and its recorded assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.1.0",
-        "tag": "v0.1.0",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.0",
-        "published_at": "2026-11-08T22:50:52Z",
-        "source_commit": "9f738e717c1b1c1b0fb099247bb4db6e8e811148",
-        "source_tree": "72e0245bbdfd7b66172ab28c4765f244d91ec473",
-        "asset_sha256": {
-          "wuwaterm-web-v0.1.0-linux-x64-root.tar.gz": "4e5e9ba8b4c14b0501b9336b3f46ef90204f127e1a48c7a416d68f3dc4e9eeac",
-          "manifest-root.json": "3a59ccdd9816a1f76113063038e91ac03c412f423477f772a153c2b41158e9f2",
-          "SHA256SUMS-root": "ff1fd2046258ff0602b6b9a25b1dc1a7a56867e2d3280b19dfb055f6c61ee4f0",
-          "wuwaterm-web-v0.1.0-linux-x64-prefix-71708eb255bc.tar.gz": "2dc6d7222a57a037c1351067cc34b657126e2031a93c946246270f860bcd485d",
-          "manifest-prefix.json": "416fea4885b08c08898ab1efc0bc992e1865911a1bd4edac6911052d8bac5f07",
-          "SHA256SUMS-prefix": "216c19215fbba275854b50f86d59288b909c54e39c77235aa1fce5dd0339e0c0"
-        },
-        "note": "Kept as history after v0.1.1; the release and its assets are still published."
+        "note": "v0.1.1 superseded v0.1.0; both releases and their recorded assets are still published."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -366,10 +390,10 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/3ceab4f593fa5d51a9371d94834d0d0eba6207cd/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/3ceab4f593fa5d51a9371d94834d0d0eba6207cd/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/docs/self-hosting.md"
       ],
-      "adoption_note": "The owner deployed the public Sites site from Web main 6e1337f on 2026-11-12. Web main has since advanced to 3ceab4f with #32-#36 (541-1140px header wrap, English hero comma, keyboard skip link, quota-strip CLS reservation, branded 404); those changes are pending a redeploy. This is a source deployment, not a v0.2.0 GitHub release; v0.1.1 remains the published Web product release."
+      "adoption_note": "The owner deployed the public Sites site from Web main 6e1337f on 2026-11-12. Web main has since advanced to 5aabe80 with #32-#37; self-hosted release v0.2.0 (5aabe80) is published on GitHub. Public Sites redeploy of 5aabe80 remains pending console upload. This is a source deployment plus a published GitHub release; v0.2.0 is now the published Web product release."
     }
   ],
   "ci_pins": {

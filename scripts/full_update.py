@@ -658,9 +658,19 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
     """Confirm the observed host matches the complete NEW binding.
 
     A published pointer alone is not success: the manifest must verify
-    against the observed database, and BOTH containers must actually run
-    the target image id under the target reference. Anything less is an
-    unresolved mixed binding, never a clean confirmation.
+    against the observed database, and every surface must sit on the target
+    image id under the target reference. Symmetrical with
+    ``_verify_old_binding``: a surface the transaction recorded as stopped
+    stays stopped, and one it recorded as absent stays absent. Requiring both
+    containers to run instead would refuse a host that legitimately retired
+    the legacy bot in favour of another product, and that refusal used to force
+    a manual ``--recover-full`` on a deployment that had published correctly.
+
+    When no previous deployment was recorded there is no recorded surface
+    state to compare against, so a surface is certified only by the binding it
+    carries: absent, or exactly the target image and reference. A present
+    object on any other image would be a surface this deployment did not
+    publish.
     """
 
     present, value = _pointer_state()
@@ -684,11 +694,23 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
     except ManifestError:
         raise FullUpdateError("full_recovery_unresolved") from None
     for service in SERVICES:
+        image_key, _ref_key, running_key, _rollback_key = SURFACE_KEYS[service]
         state = _container_state(CONTAINERS[service])
-        if (
-            state is None
-            or not state[0]
-            or state[1] != journal["target_image_id"]
+        if journal["old_pointer_present"]:
+            if journal[image_key] is None:
+                if state is not None:
+                    raise FullUpdateError("full_recovery_unresolved")
+                continue
+            if (
+                state is None
+                or state[0] != journal[running_key]
+                or state[1] != journal["target_image_id"]
+                or state[2] != journal["target_image_ref"]
+            ):
+                raise FullUpdateError("full_recovery_unresolved")
+            continue
+        if state is not None and (
+            state[1] != journal["target_image_id"]
             or state[2] != journal["target_image_ref"]
         ):
             raise FullUpdateError("full_recovery_unresolved")
@@ -1131,6 +1153,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             raise FullUpdateError("invalid_full_journal")
         parsed_surfaces.append((image_id, reference, running))
     (bot_id, bot_ref, bot_running), (api_id, api_ref, api_running) = parsed_surfaces
+
+    # A pointer says some deployment serves from this host. If the surfaces
+    # that deployment left running have since all been stopped, there is no
+    # serving binding for this transaction to replace, and a rollback would
+    # restore nothing. Refuse before the journal is armed; a deliberate
+    # retirement is expressed by starting the surface that should serve.
+    if old_pointer_present and not bot_running and not api_running:
+        raise FullUpdateError("no_serving_surface")
 
     present, value = _pointer_state()
     if old_pointer_present:

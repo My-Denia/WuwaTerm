@@ -156,10 +156,11 @@ Update or remove the line:
 WUWATERM_API_PORT=8788
 ```
 
-A normal `deploy/vps-update.sh` run recreates both containers from the current
-Compose file, so on a host whose `.env` does NOT pin the port there is nothing
-to do here. The manual recreate below is only for a host that pinned the old
-one, because an `.env` edit does not reach a container that is already running.
+A normal `deploy/vps-update.sh` run recreates every surface it found running
+from the current Compose file, so on a host whose `.env` does NOT pin the port
+there is nothing to do here. The manual recreate below is only for a host that
+pinned the old one, because an `.env` edit does not reach a container that is
+already running.
 
 **Recreate it on the image it is already on.** The updater creates the serving
 containers with an immutable `WUWATERM_RUNTIME_IMAGE=wuwaterm-runtime:<source
@@ -615,14 +616,24 @@ sh deploy/vps-update.sh --runtime-only
 
 Run this from the normal deployment checkout after reviewing and merging the
 change. The updater requires a clean checkout at freshly fetched `origin/main`.
-It updates **both** serving containers to one immutable image, so the existing
-manifest's single source/image identity continues to describe the bot and API.
-Both services are briefly stopped during the transition. It does not change
-Telegram configuration or send a Telegram test message.
+It moves every serving container it finds to one immutable image, so the
+existing manifest's single source/image identity continues to describe the bot
+and API. Only the surfaces that were serving are stopped and restarted; a
+surface that was already stopped or absent stays that way, and a stopped object
+is re-created (not started) on the new image so a hand start cannot resurrect
+the previous release. It does not change Telegram configuration or send a
+Telegram test message.
 
-Admission requires an existing, consistent pointer, immutable manifest, running
-bot/API pair, and read-only data mounts. It rejects missing or mismatched state,
-an unsupported database, symlinked database paths, and SQLite journal sidecars.
+Admission requires an existing, consistent pointer, an immutable manifest, a
+running API, and read-only data mounts. The in-Core bot may be running, stopped
+or absent: the maintained shape stops it and serves Telegram through the
+separate WuwaTerm-Telegram product, so requiring it would make that host
+undeployable. A host with no running surface at all is refused, because there
+is nothing to restore if the transaction fails. So is a host where both
+`wuwaterm-bot` and a standalone `wuwaterm-telegram` container are running: two
+pollers on one bot token answer every update twice. Admission rejects missing or
+mismatched state, an unsupported database, symlinked database paths, and SQLite
+journal sidecars.
 Database validation uses immutable read-only SQLite access, schema/provenance
 and integrity checks, and file identity plus SHA-256 comparisons. The same
 database must remain unchanged through activation and recovery.
@@ -639,10 +650,13 @@ reviewed checkout; a revision label alone is not proof of source provenance.
 
 Full and runtime-only updates share one deployment lock. Runtime-only progress
 is recorded durably before operations that may partially succeed. Success
-requires both containers to match the new image, readiness and database checks
-to pass, and the manifest and pointer to pass readback. An ordinary failure
-restores the previous pair and pointer. A recovery failure is reported as
-unresolved; it is never described as a successful rollback.
+requires every surface to be in the state the transaction recorded — a surface
+that was running matches the new image and answers its checks, one that was
+stopped is still stopped on that image, one that was absent is still absent —
+and the manifest and pointer to pass readback. An ordinary failure restores the
+previous pair and pointer, including the image reference of a surface that was
+recorded stopped. A recovery failure is reported as unresolved; it is never
+described as a successful rollback.
 Ordinary failures before the first service-stop attempt leave the old pair
 running only after its database, pointer, manifest and runtime binding are
 reverified unchanged. Partial stop failures still require rollback. A completed
@@ -812,7 +826,7 @@ are retained; no historical snapshot or state file is deleted.
 
 ### Interrupted full updates
 
-A full update mutates the database, both serving containers and the pointer,
+A full update mutates the database, the surfaces it starts and the pointer,
 so the updater durably records the transaction BEFORE the first
 serving-binding mutation. The record at `.deployments/.full-transaction.json`
 (schema-versioned, mode 0600, written atomically with fsync) binds:
@@ -846,9 +860,13 @@ ids/references/running states — never by the journal's phase marker alone:
 sh deploy/vps-update.sh --recover-full
 ```
 
-- Observed NEW binding complete (pointer, database, manifest, both surfaces
-  on the target image id and reference): the transaction is confirmed and
-  the record is cleared. No container is stopped and nothing is restored.
+- Observed NEW binding complete (pointer, database, manifest, and every
+  surface in the state this transaction recorded for it: a running one on the
+  target image id and reference, a stopped one still stopped and carrying that
+  binding, an absent one still absent): the transaction is confirmed and the
+  record is cleared. No container is stopped and nothing is restored. A host
+  that retired the in-Core bot therefore confirms the release it published
+  instead of keeping a journal that only a manual recovery could clear.
 - Observed OLD binding: the recorded previous binding is restored — known
   surfaces are quiesced and verified stopped first, the recorded backup is
   re-hashed before any copy and re-verified after promotion, only surfaces

@@ -84,6 +84,7 @@ def _write_full_fake_docker(root: Path) -> None:
         "printf 'docker %s\\n' \"$*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         "service=\n"
         "case \"$*\" in\n"
+        "  *wuwaterm-telegram*) service=telegram ;;\n"
         "  *wuwaterm-api*) service=api ;;\n"
         "  *' wuwaterm '*|*' wuwaterm'|*wuwaterm-bot*) service=bot ;;\n"
         "esac\n"
@@ -143,7 +144,13 @@ def _write_full_fake_docker(root: Path) -> None:
         "    *' create '*)\n"
         "      test -n \"$service\" || exit 2\n"
         "      image=\"${WUWATERM_RUNTIME_IMAGE:?}\"\n"
-        "      resolved=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\"\n"
+        # A rollback ref resolves through the tag store; a release ref is the
+        # image this harness publishes.
+        "      if [ -f \"$FAKE_DEPLOY_ROOT/tag-$image\" ]; then\n"
+        "        resolved=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\"\n"
+        "      else\n"
+        f"        resolved='{NEW_IMAGE}'\n"
+        "      fi\n"
         "      printf '%s\\n' \"$resolved\" > \"$FAKE_DEPLOY_ROOT/$service-image\"\n"
         "      printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/$service-ref\"\n"
         "      printf 'false\\n' > \"$FAKE_DEPLOY_ROOT/$service-running\"\n"
@@ -378,6 +385,15 @@ def _docker_log(root: Path) -> list[str]:
     if not path.exists():
         return []
     return path.read_text(encoding="utf-8").splitlines()
+
+
+def _commands(root: Path) -> list[str]:
+    """The daemon commands, without the image-ref prefix the fake records.
+
+    A `python -c` argument spans several lines in the log, so only the lines
+    that carry the recorded `image-ref|` prefix are commands.
+    """
+    return [line.split("|", 1)[1] for line in _docker_log(root) if "|" in line]
 
 
 @pytest.fixture()
@@ -1547,3 +1563,153 @@ def test_unconfirmed_running_state_refuses_before_mutation(full_harness, service
     assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert not any(" stop " in line for line in _docker_log(root))
+
+
+# --- a retired surface: stopped before, stopped after -----------------------
+#
+# The owner host no longer serves Telegram from the in-Core bot; the standalone
+# product does. The new-binding verifier used to require BOTH containers
+# running, so the shape that publishes correctly was the shape that could not
+# be certified, and every release ended with an armed journal and a manual
+# `--recover-full`.
+
+
+def _published_new_binding(root: Path, *, new_bytes: bytes) -> None:
+    from scripts.deployment_manifest import (
+        build_manifest,
+        publish_commit_pointer,
+        write_manifest,
+    )
+
+    _set_db(root, new_bytes)
+    publish_commit_pointer(root / ".deploy_commit", NEW_COMMIT)
+    write_manifest(
+        root / ".deployments" / f"{NEW_COMMIT}.json",
+        build_manifest(
+            source_commit=NEW_COMMIT,
+            image_ref=f"wuwaterm-runtime:{NEW_COMMIT}",
+            image_id=NEW_IMAGE,
+            image_digest=NEW_IMAGE,
+            image_revision=NEW_COMMIT,
+            db_path=root / "data" / "terms.db",
+            db_display_path="data/terms.db",
+            backup_path="legacy",
+            deployment_utc="2026-10-17T00:00:00Z",
+        ),
+    )
+
+
+def test_a_stopped_surface_is_confirmed_on_the_new_binding(full_harness):
+    root, env, old_hash, _new_hash, _ob, new_bytes, backup_rel = full_harness
+    _plant(root, _journal(
+        root, phase="committed", old_db_sha=old_hash, db_backup=backup_rel,
+        new_db_sha=hashlib.sha256(new_bytes).hexdigest(),
+        candidate_rel=f"data/candidates/terms.{TXN}.db",
+        bot_running=False,
+    ))
+    _published_new_binding(root, new_bytes=new_bytes)
+    _surface(root, "bot", image=NEW_IMAGE,
+             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=False)
+    _surface(root, "api", image=NEW_IMAGE,
+             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
+
+    result = _run_recover(root, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "confirmed on the new binding" in result.stdout
+    assert not (root / JOURNAL_RELPATH).exists()
+    assert not any(" stop " in line for line in _docker_log(root))
+
+
+def test_a_surface_the_journal_recorded_stopped_is_not_certified_running(full_harness):
+    """Symmetry with the old side: the recorded running state is compared.
+
+    A container on the right image that is running when the journal says it was
+    stopped is a binding this transaction did not publish, so recovery must not
+    certify it.
+    """
+    root, env, old_hash, _new_hash, _ob, new_bytes, backup_rel = full_harness
+    _plant(root, _journal(
+        root, phase="committed", old_db_sha=old_hash, db_backup=backup_rel,
+        new_db_sha=hashlib.sha256(new_bytes).hexdigest(),
+        candidate_rel=f"data/candidates/terms.{TXN}.db",
+        bot_running=False,
+    ))
+    _published_new_binding(root, new_bytes=new_bytes)
+    _surface(root, "bot", image=NEW_IMAGE,
+             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
+    _surface(root, "api", image=NEW_IMAGE,
+             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
+
+    result = _run_recover(root, env)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "full_recovery_unresolved" in result.stderr
+    assert (root / JOURNAL_RELPATH).exists()
+
+
+def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_harness):
+    """End to end: the host shape that runs today.
+
+    The legacy bot is present and stopped, the API runs. The deployment must
+    move both to the new release, start only the API, never run the bot smoke,
+    and confirm its own transaction so that `--recover-full` afterwards has
+    nothing to do.
+    """
+    root, env, old_hash, _new_hash, _ob, new_bytes, _backup_rel = full_harness
+    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
+    _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
+
+    result = _run_mode(root, env, [])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = _commands(root)
+    # Never started, and never smoked: the bot is retired on this host.
+    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert not [c for c in commands if "exec -T wuwaterm " in c]
+    # Re-created stopped, on the new release: a hand start cannot resurrect the
+    # previous release.
+    assert [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == NEW_IMAGE
+    assert (root / "bot-ref").read_text(encoding="ascii").strip() == (
+        f"wuwaterm-runtime:{NEW_COMMIT}"
+    )
+    # The API moved and is serving.
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "api-image").read_text(encoding="ascii").strip() == NEW_IMAGE
+    # The transaction certified itself; nothing is left for recovery.
+    assert not (root / JOURNAL_RELPATH).exists()
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
+    assert "deployment bot surface: stopped" in result.stdout
+    assert "deployment api surface: running" in result.stdout
+
+    again = _run_recover(root, env)
+
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "no full transaction to recover" in again.stdout
+
+
+def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(full_harness):
+    """No recorded pointer, and the standalone product already serves Telegram.
+
+    The inline bot would be a second poller for the same token, so a first
+    deployment leaves it absent while the API comes up.
+    """
+    root, env, _old_hash, _new_hash, _ob, _nb, _backup_rel = full_harness
+    (root / ".deploy_commit").unlink()
+    _surface(root, "telegram", image=OLD_IMAGE, ref="wuwaterm-telegram:0.2.8", running=True)
+    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False, present=False)
+    _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=False, present=False)
+    (root / "api-present").write_text("1\n", encoding="ascii")
+    env["FAKE_DEPLOY_ROOT"] = str(root)
+
+    result = _run_mode(root, env, [])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = _commands(root)
+    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert not [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
+    assert not (root / "bot-present").exists()
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+    assert "deployment bot surface: absent" in result.stdout
