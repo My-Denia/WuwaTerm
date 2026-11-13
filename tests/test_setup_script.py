@@ -389,7 +389,9 @@ def test_with_web_without_a_package_stops_before_building_data(install_root):
         "--web-origin",
         "https://wuwaterm.example",
         "--no-adopt",
-        env={"STUB_CURL_FAIL_MATCH": "releases/latest"},
+        # The release host refuses the manifest, whichever release tag the
+        # install resolved; the point is that nothing is built without it.
+        env={"STUB_CURL_FAIL_MATCH": "manifest-root.json"},
     )
 
     assert result.returncode == 1
@@ -822,3 +824,124 @@ def test_recorded_adoption_is_reported_and_not_repeated(install_root):
     assert "deployment metadata already adopted" in second.stdout
     assert "adoption failed" not in second.stderr
     assert "updates:      adopted (deploy/product-update.sh)" in second.stdout
+
+
+# ---------------------------------------------------------------- release defaults
+#
+# The installer names one Telegram release and downloads one Web release. Both
+# were literals inside the script and both went stale while the products moved
+# on, so the default now comes from contracts/products.json when that file is
+# readable and from a constant otherwise. A snapshot bump alone then cannot
+# leave the installer naming last quarter's tag.
+
+def _constants() -> dict[str, str]:
+    text = (ROOT / "deploy" / "setup.sh").read_text(encoding="utf-8")
+    return dict(re.findall(r"^(DEFAULT_(?:TELEGRAM|WEB)_VERSION)=([^\s]+)$", text, re.M))
+
+
+def _recorded_tags() -> dict[str, str]:
+    snapshot = json.loads((ROOT / "contracts" / "products.json").read_text(encoding="utf-8"))
+    return {product["id"]: product["release"]["tag"] for product in snapshot["products"]}
+
+
+def _recommended_tags() -> dict[str, str]:
+    """The tags docs/products.md recommends in its top section."""
+    text = (ROOT / "docs" / "products.md").read_text(encoding="utf-8")
+    top = text.split("## 版本与兼容")[0]
+    return {
+        "telegram": re.search(r"当前\s*`([0-9]+\.[0-9]+\.[0-9]+)`\s*已正式发布", top).group(1),
+        "web": re.search(r"Web\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*发布页", top).group(1),
+    }
+
+
+def test_release_defaults_match_the_recorded_snapshot_and_the_guide():
+    constants = _constants()
+    recorded = _recorded_tags()
+    recommended = _recommended_tags()
+    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.2.8"
+    assert recommended["telegram"] == recorded["telegram"].lstrip("v")
+    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"]
+    assert recommended["web"] == recorded["web"]
+
+
+def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
+    """A checkout carrying the snapshot names the tag the snapshot records."""
+    (install_root / "contracts").mkdir()
+    shutil.copy2(ROOT / "contracts" / "products.json", install_root / "contracts" / "products.json")
+    write_env(install_root, telegram_token="1:stub-token")
+
+    result = run_setup(install_root, "--with-telegram", "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    assert "release v0.2.8" in result.stdout
+    assert "wuwaterm_telegram-0.2.8-py3-none-any.whl" in result.stdout
+
+
+def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
+    write_env(install_root, telegram_token="1:stub-token")
+
+    result = run_setup(install_root, "--with-telegram", "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    assert "release v0.2.8" in result.stdout
+
+
+@pytest.mark.parametrize(("version", "expected"), [
+    ("v0.1.0", "/releases/download/v0.1.0/manifest-root.json"),
+    ("latest", "/releases/latest/download/manifest-root.json"),
+])
+def test_the_web_release_is_an_addressable_version_or_latest(install_root, version, expected):
+    """The manifest URL is the version the install resolved, not a fixed one.
+
+    The curl stub answers every request without writing bytes, so the install
+    stops at its own verification; what this pins is the URL it asked for.
+    """
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+        env={"WUWATERM_WEB_VERSION": version},
+    )
+
+    assert result.returncode == 1
+    log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert expected in log
+    assert not (install_root / "data" / "terms.db").exists()
+
+
+def test_the_default_web_release_is_the_recorded_tag(install_root):
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    log = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert f"/releases/download/{_recorded_tags()['web']}/manifest-root.json" in log
+
+
+@pytest.mark.parametrize("version", ["0.1.1", "v", "vX.Y", "main"])
+def test_an_unusable_web_version_is_refused(install_root, version):
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+        env={"WUWATERM_WEB_VERSION": version},
+    )
+
+    assert result.returncode == 1
+    assert "WUWATERM_WEB_VERSION must be latest or a tag like v0.2.0" in result.stderr
+    assert not (install_root / "data" / "terms.db").exists()

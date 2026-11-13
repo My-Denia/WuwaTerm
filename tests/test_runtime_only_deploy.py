@@ -66,10 +66,21 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "printf 'docker %s\\n' \"$*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         "service=\n"
         "case \"$*\" in\n"
+        # The standalone Telegram product is a separate container; its running
+        # state decides whether the in-Core bot may run beside it.
+        "  *wuwaterm-telegram*) service=telegram ;;\n"
         "  *wuwaterm-api*) service=api ;;\n"
         "  *wuwaterm-bot*|*' wuwaterm '*) service=bot ;;\n"
         "esac\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
+        # A container that does not exist answers with the daemon's own "No
+        # such object", which is PROVEN absence rather than an empty answer.
+        "  if [ ! -f \"$FAKE_DEPLOY_ROOT/$service-present\" ]; then\n"
+        "    name=wuwaterm-bot\n"
+        "    case \"$*\" in *wuwaterm-api*) name=wuwaterm-api ;; *wuwaterm-telegram*) name=wuwaterm-telegram ;; esac\n"
+        "    printf 'Error response from daemon: No such object: %s\\n' \"$name\" >&2\n"
+        "    exit 1\n"
+        "  fi\n"
         "  case \"$*\" in\n"
         "    *State.Running*) cat \"$FAKE_DEPLOY_ROOT/$service-running\" ;;\n"
         "    *Config.Image*) cat \"$FAKE_DEPLOY_ROOT/$service-ref\" ;;\n"
@@ -143,25 +154,58 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "      case \"$image\" in *rollback*) ;; *) printf started > \"$FAKE_DEPLOY_ROOT/new-started\" ;; esac\n"
         "      case \"$image\" in\n"
         "        *rollback*)\n"
-        "          rollback_id=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\"\n"
-        "          printf '%s\\n' \"$rollback_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
-        "          printf '%s\\n' \"$rollback_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
-        "          printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
-        "          printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "          image_id=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\"\n"
         "          ;;\n"
         "        *)\n"
         f"          case \"$image\" in *{ALT_COMMIT}*) image_id='{ALT_RUNTIME_IMAGE_ID}' ;; *{NEXT_COMMIT}*) image_id='{NEXT_RUNTIME_IMAGE_ID}' ;; *) image_id='{NEW_RUNTIME_IMAGE_ID}' ;; esac\n"
-        "          printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
-        "          printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
-        "          printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
-        "          printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
         "          ;;\n"
         "      esac\n"
-        "      printf 'true\\n' > \"$FAKE_DEPLOY_ROOT/bot-running\"\n"
-        "      case \"$image\" in *rollback*) if [ \"${RUNTIME_FAKE_ROLLBACK_START:-}\" = bot ]; then exit 46; fi ;; *) if [ \"${RUNTIME_FAKE_START:-}\" = bot ]; then exit 43; fi ;; esac\n"
-        "      case \"$image\" in *rollback*) if [ \"${RUNTIME_FAKE_ROLLBACK_START:-}\" = api ]; then exit 46; fi ;; esac\n"
-        "      printf 'true\\n' > \"$FAKE_DEPLOY_ROOT/api-running\"\n"
-        "      case \"$image\" in *rollback*) ;; *) if [ \"${RUNTIME_FAKE_START:-}\" = api ]; then exit 43; fi ;; esac\n"
+        # Only the services named on the command line move: a surface this
+        # deployment did not start keeps its own state.
+        "      for service in \"$@\"; do\n"
+        "        case \"$service\" in\n"
+        "          wuwaterm)\n"
+        "            printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
+        "            printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "            printf 'true\\n' > \"$FAKE_DEPLOY_ROOT/bot-running\"\n"
+        "            printf '1\\n' > \"$FAKE_DEPLOY_ROOT/bot-present\"\n"
+        "            case \"$image\" in *rollback*) if [ \"${RUNTIME_FAKE_ROLLBACK_START:-}\" = bot ]; then exit 46; fi ;; *) if [ \"${RUNTIME_FAKE_START:-}\" = bot ]; then exit 43; fi ;; esac\n"
+        "            ;;\n"
+        "          wuwaterm-api)\n"
+        "            case \"$image\" in *rollback*) if [ \"${RUNTIME_FAKE_ROLLBACK_START:-}\" = api ]; then exit 46; fi ;; esac\n"
+        "            printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
+        "            printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "            printf 'true\\n' > \"$FAKE_DEPLOY_ROOT/api-running\"\n"
+        "            printf '1\\n' > \"$FAKE_DEPLOY_ROOT/api-present\"\n"
+        "            case \"$image\" in *rollback*) ;; *) if [ \"${RUNTIME_FAKE_START:-}\" = api ]; then exit 43; fi ;; esac\n"
+        "            ;;\n"
+        "        esac\n"
+        "      done\n"
+        "      ;;\n"
+        # `compose create` refreshes a stopped container's image reference
+        # without starting it, unlike `up`.
+        "    *' create '*wuwaterm*)\n"
+        "      image=\"${WUWATERM_RUNTIME_IMAGE:-unset}\"\n"
+        "      case \"$image\" in\n"
+        "        *rollback*) image_id=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\" ;;\n"
+        f"        *) image_id='{NEW_RUNTIME_IMAGE_ID}' ;;\n"
+        "      esac\n"
+        "      for service in \"$@\"; do\n"
+        "        case \"$service\" in\n"
+        "          wuwaterm)\n"
+        "            printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
+        "            printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "            printf 'false\\n' > \"$FAKE_DEPLOY_ROOT/bot-running\"\n"
+        "            printf '1\\n' > \"$FAKE_DEPLOY_ROOT/bot-present\"\n"
+        "            ;;\n"
+        "          wuwaterm-api)\n"
+        "            printf '%s\\n' \"$image_id\" > \"$FAKE_DEPLOY_ROOT/api-image\"\n"
+        "            printf '%s\\n' \"$image\" > \"$FAKE_DEPLOY_ROOT/api-ref\"\n"
+        "            printf 'false\\n' > \"$FAKE_DEPLOY_ROOT/api-running\"\n"
+        "            printf '1\\n' > \"$FAKE_DEPLOY_ROOT/api-present\"\n"
+        "            ;;\n"
+        "        esac\n"
+        "      done\n"
         "      ;;\n"
         "    *' publish-pointer '*wuwaterm*)\n"
         "      if [ \"${RUNTIME_FAKE_POINTER_FAILURE:-0}\" = 1 ]; then exit 45; fi\n"
@@ -185,6 +229,11 @@ def _write_runtime_fake_docker(root: Path) -> None:
             "wuwaterm-runtime:old\n", encoding="ascii"
         )
         (root / f"{service}-running").write_text("true\n", encoding="ascii")
+        (root / f"{service}-present").write_text("1\n", encoding="ascii")
+    # The standalone Telegram product is absent by default: `--runtime-only`
+    # refuses only when it is PROVEN running, and a test for the dual-poller
+    # state registers the container itself.
+    (root / "telegram-running").write_text("false\n", encoding="ascii")
 
 
 @pytest.fixture()
@@ -1236,3 +1285,85 @@ def test_runtime_only_recovery_quiesces_after_external_db_change(runtime_harness
     assert journal["status"] == "unresolved"
     assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "false"
+
+
+# --- a host that serves the API and no in-Core bot --------------------------
+#
+# The maintained shape of a deployment: the standalone Telegram product serves
+# Telegram, so the in-Core bot is stopped or absent, and the API is the surface
+# that has to move. A runtime-only update used to require BOTH containers
+# running, which made that shape undeployable.
+
+
+def _bot_only_stopped(root: Path) -> None:
+    (root / "bot-running").write_text("false\n", encoding="ascii")
+
+
+def test_runtime_only_updates_an_api_only_host_without_starting_the_bot(runtime_harness):
+    root, env, old_hash, _new_hash = runtime_harness
+    _bot_only_stopped(root)
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 0, result.stderr
+    # The API moved to the new image and runs.
+    assert (root / "api-image").read_text(encoding="ascii").strip() == NEW_RUNTIME_IMAGE_ID
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+    # The bot was never started; its stopped object carries the new reference.
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == NEW_RUNTIME_IMAGE_ID
+    commands = [line.split("|", 1)[1] for line in
+                (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
+    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert [c for c in commands if " create " in c and c.endswith(" wuwaterm")], commands
+    # Nothing moved the database, and the transaction closed itself.
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
+    journal = root / ".deployments" / ".runtime-transaction.json"
+    assert json.loads(journal.read_text(encoding="utf-8"))["status"] == "committed"
+
+
+def test_runtime_only_leaves_an_absent_bot_absent(runtime_harness):
+    """A removed container is not re-created just so its image can move."""
+    root, env, _old_hash, _new_hash = runtime_harness
+    (root / "bot-present").unlink()
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 0, result.stderr
+    assert not (root / "bot-present").exists()
+    commands = [line.split("|", 1)[1] for line in
+                (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
+    assert not [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
+    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+
+
+def test_runtime_only_refuses_the_dual_poller_state(runtime_harness):
+    root, env, old_hash, _new_hash = runtime_harness
+    (root / "telegram-running").write_text("true\n", encoding="ascii")
+    (root / "telegram-present").write_text("1\n", encoding="ascii")
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert "conflicting_telegram_poller" in result.stderr
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [line.split("|", 1)[1] for line in
+                (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
+    assert not [c for c in commands if " stop " in c or " up -d " in c or c.startswith("rm ")]
+    journal = root / ".deployments" / ".runtime-transaction.json"
+    assert not journal.exists()
+
+
+def test_runtime_only_refuses_when_the_api_is_not_running(runtime_harness):
+    """The API is the surface this mode exists for; a host without it refuses."""
+    root, env, old_hash, _new_hash = runtime_harness
+    (root / "api-running").write_text("false\n", encoding="ascii")
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert "service_not_running" in result.stderr
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash

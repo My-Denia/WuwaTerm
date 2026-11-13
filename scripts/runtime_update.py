@@ -50,6 +50,16 @@ JOURNAL_SCHEMA_VERSION = 1
 RUNTIME_BACKUP_SENTINEL = "none"
 SERVICES = ("wuwaterm", "wuwaterm-api")
 CONTAINERS = {"wuwaterm": "wuwaterm-bot", "wuwaterm-api": "wuwaterm-api"}
+# The journal records what each surface was doing when the transaction began,
+# so a restart, a rollback and the final verifier all agree on which surfaces
+# this deployment is responsible for. A host whose legacy in-Core bot was
+# retired (the standalone Telegram product serves instead) records
+# old_bot_running=false and is never started by an update.
+_SURFACE_RUNNING_KEYS = {
+    "wuwaterm": "old_bot_running",
+    "wuwaterm-api": "old_api_running",
+}
+STANDALONE_TELEGRAM_CONTAINER = "wuwaterm-telegram"
 JOURNAL_KEYS = {
     "schema_version",
     "mode",
@@ -529,6 +539,27 @@ def _container_binding(
 ) -> None:
     if _docker_inspect("{{.State.Running}}", service) != "true":
         raise RuntimeUpdateError("service_not_running")
+    _container_image_binding(
+        service,
+        expected_ref=expected_ref,
+        expected_image_id=expected_image_id,
+        expected_revision=expected_revision,
+    )
+
+
+def _container_image_binding(
+    service: str,
+    *,
+    expected_ref: str,
+    expected_image_id: str,
+    expected_revision: str,
+) -> None:
+    """Image, reference, mount and revision checks, without a running state.
+
+    A stopped surface still has to carry the release its deployment published,
+    so the same checks apply; only the "is it running" part is separate.
+    """
+
     actual_id = _image_id(_docker_inspect("{{.Image}}", service))
     actual_ref = _docker_inspect("{{.Config.Image}}", service)
     if actual_id != expected_image_id or actual_ref != expected_ref:
@@ -578,26 +609,215 @@ def _image_binding(reference: str) -> tuple[str, str, str]:
     return image_id, digest, revision
 
 
-def _assert_services(
-    *, expected_ref: str, expected_image_id: str, expected_revision: str
+def _observe(container: str, fmt: str) -> str | None:
+    """One `docker inspect` field, or None when the daemon PROVES absence.
+
+    A nonzero answer is only absence when the daemon says the object does not
+    exist. Any other failure is an observation failure: this module refuses
+    rather than recording an unreadable surface as stopped.
+    """
+
+    try:
+        returncode, stdout, stderr = _execute(
+            ["docker", "inspect", "--format", fmt, container]
+        )
+    except OSError:
+        raise RuntimeUpdateError("command_unavailable") from None
+    if returncode != 0:
+        if re.search(r"no such (?:object|container)", stderr, re.IGNORECASE):
+            return None
+        raise RuntimeUpdateError("inspect_failed")
+    return stdout.strip()
+
+
+def _surface_state(container: str) -> tuple[bool, str, str] | None:
+    """Observed (running, image id, Config.Image), or None when absent."""
+
+    running = _observe(container, "{{.State.Running}}")
+    if running is None:
+        return None
+    if running not in ("true", "false"):
+        raise RuntimeUpdateError("invalid_command_output")
+    image = _observe(container, "{{.Image}}")
+    reference = _observe(container, "{{.Config.Image}}")
+    if not image or not reference:
+        raise RuntimeUpdateError("invalid_command_output")
+    return running == "true", _image_id(image), reference
+
+
+def _observed_surfaces() -> dict[str, tuple[bool, str, str] | None]:
+    return {service: _surface_state(CONTAINERS[service]) for service in SERVICES}
+
+
+def _present_surfaces() -> dict[str, bool]:
+    """Which surface objects exist right now, running or not."""
+
+    return {
+        service: _surface_state(CONTAINERS[service]) is not None
+        for service in SERVICES
+    }
+
+
+def _health_surface(journal: dict[str, Any]) -> str:
+    """A running container that mounts the terminology database read-only."""
+
+    return "wuwaterm" if journal["old_bot_running"] else "wuwaterm-api"
+
+
+def _standalone_telegram_running() -> bool:
+    """Whether the separate Telegram product serves this host's token.
+
+    Two pollers on one bot token answer every update twice, so an update must
+    refuse rather than start a second one. Only a positively observed running
+    state counts: an absent product is the ordinary case.
+    """
+
+    host = STANDALONE_TELEGRAM_CONTAINER
+    running = _observe(host, "{{.State.Running}}")
+    if running is None:
+        return False
+    if running not in ("true", "false"):
+        raise RuntimeUpdateError("invalid_command_output")
+    return running == "true"
+
+
+def _surface_flags(journal: dict[str, Any]) -> dict[str, bool]:
+    """Which surfaces this transaction is responsible for running."""
+
+    return {service: journal[_SURFACE_RUNNING_KEYS[service]] for service in SERVICES}
+
+
+def _assert_running_surface(
+    service: str, *, expected_ref: str, expected_image_id: str, expected_revision: str
 ) -> None:
+    _container_binding(
+        CONTAINERS[service],
+        expected_ref=expected_ref,
+        expected_image_id=expected_image_id,
+        expected_revision=expected_revision,
+    )
+
+
+def _assert_bound_surface(
+    service: str,
+    running: bool,
+    *,
+    expected_ref: str,
+    expected_image_id: str,
+    expected_revision: str,
+) -> None:
+    """Verify the binding; require the running state only where it was recorded."""
+
+    if running:
+        _assert_running_surface(
+            service,
+            expected_ref=expected_ref,
+            expected_image_id=expected_image_id,
+            expected_revision=expected_revision,
+        )
+        return
+    _container_image_binding(
+        CONTAINERS[service],
+        expected_ref=expected_ref,
+        expected_image_id=expected_image_id,
+        expected_revision=expected_revision,
+    )
+
+
+def _assert_surfaces(
+    journal: dict[str, Any],
+    *,
+    expected_ref: str,
+    expected_image_id: str,
+    expected_revision: str,
+) -> None:
+    """Verify each surface against the state this transaction recorded.
+
+    The deployment never decides which surfaces serve; it preserves what it
+    found. So a surface recorded RUNNING must run exactly the expected image
+    and reference, and one recorded STOPPED must not be running - while its
+    object, if it exists at all, already carries the new binding. The API is
+    the surface the HTTP contract lives on, so it must be running; a host that
+    retired the in-Core bot is a supported shape, a host with no API is not.
+    """
+
+    flags = _surface_flags(journal)
+    observed = _observed_surfaces()
     for service in SERVICES:
-        _container_binding(
-            CONTAINERS[service],
+        state = observed[service]
+        if state is None:
+            if service == "wuwaterm-api" or flags[service]:
+                raise RuntimeUpdateError("service_not_running")
+            continue
+        if state[1] != expected_image_id or state[2] != expected_ref:
+            raise RuntimeUpdateError("service_binding_mismatch")
+        if state[0] != flags[service]:
+            raise RuntimeUpdateError("service_state_mismatch")
+        if not state[0] and service == "wuwaterm-api":
+            raise RuntimeUpdateError("service_not_running")
+        _assert_bound_surface(
+            service,
+            state[0],
             expected_ref=expected_ref,
             expected_image_id=expected_image_id,
             expected_revision=expected_revision,
         )
 
 
-def _observed_service_ref(allowed_refs: set[str]) -> str:
-    refs = tuple(
-        _docker_inspect("{{.Config.Image}}", CONTAINERS[service])
-        for service in SERVICES
-    )
-    if len(set(refs)) != 1 or refs[0] not in allowed_refs:
+def _assert_published_surfaces(
+    *, expected_ref: str, expected_image_id: str, expected_revision: str
+) -> dict[str, bool]:
+    """Verify every PRESENT surface carries the published binding.
+
+    Returns which surfaces are running. Used before a mutation and by the
+    idempotent path, where there is no journal to compare a recorded state
+    against: what is certified is that nothing present runs anything else.
+    """
+
+    observed = _observed_surfaces()
+    flags: dict[str, bool] = {}
+    for service in SERVICES:
+        state = observed[service]
+        if state is None:
+            if service == "wuwaterm-api":
+                raise RuntimeUpdateError("service_not_running")
+            flags[service] = False
+            continue
+        if state[1] != expected_image_id or state[2] != expected_ref:
+            raise RuntimeUpdateError("service_binding_mismatch")
+        _assert_bound_surface(
+            service,
+            state[0],
+            expected_ref=expected_ref,
+            expected_image_id=expected_image_id,
+            expected_revision=expected_revision,
+        )
+        flags[service] = state[0]
+    if not flags["wuwaterm-api"]:
+        raise RuntimeUpdateError("service_not_running")
+    return flags
+
+
+def _observed_service_ref(allowed_refs: set[str]) -> tuple[str, dict[str, bool]]:
+    """The published reference this host serves from, plus its running flags.
+
+    Only surface references matter here, and only a RUNNING surface serves;
+    a stopped or absent surface cannot name the published release by itself.
+    """
+
+    observed = _observed_surfaces()
+    refs = {
+        state[2]
+        for state in observed.values()
+        if state is not None
+    }
+    running = {service: bool(state and state[0]) for service, state in observed.items()}
+    if not any(running.values()) or not refs or refs - allowed_refs:
         raise RuntimeUpdateError("service_binding_mismatch")
-    return refs[0]
+    serving = {state[2] for state in observed.values() if state is not None and state[0]}
+    if len(serving) != 1:
+        raise RuntimeUpdateError("service_binding_mismatch")
+    return serving.pop(), running
 
 
 def _assert_directories() -> None:
@@ -763,9 +983,11 @@ def _runtime_env(reference: str, *, source_commit: str | None = None) -> dict[st
     return env
 
 
-def _local_health() -> None:
+def _local_health(*, db_service: str) -> None:
     # Both checks execute inside the corresponding container and never call
-    # Telegram, a provider, or a model endpoint.
+    # Telegram, a provider, or a model endpoint. The database check rides on a
+    # RUNNING surface: both mount /app/data read-only, so whichever serves can
+    # answer for the database, and a retired surface is not started to ask it.
     _compose(
         "exec",
         "-T",
@@ -777,11 +999,38 @@ def _local_health() -> None:
     _compose(
         "exec",
         "-T",
-        "wuwaterm",
+        db_service,
         "python",
         "-c",
         "import os; raise SystemExit(0 if os.path.isfile('/app/data/terms.db') else 1)",
     )
+
+
+def _start_surfaces(
+    flags: dict[str, bool], present: dict[str, bool], reference: str, *, source_commit: str
+) -> None:
+    """Bring each surface to the state the transaction recorded.
+
+    A surface recorded as running is re-created on `reference`; one recorded
+    as stopped is re-created STOPPED (`compose create`), so a released image
+    reference still moves with the deployment without the surface serving; one
+    that was absent stays absent.
+    """
+
+    env = _runtime_env(reference, source_commit=source_commit)
+    for service in SERVICES:
+        if flags[service]:
+            _compose("up", "-d", "--no-build", "--force-recreate", service, env=env)
+        elif present[service]:
+            _compose(
+                "create",
+                "--no-build",
+                "--force-recreate",
+                "--pull",
+                "never",
+                service,
+                env=env,
+            )
 
 
 def _pointer(path: Path) -> str:
@@ -900,7 +1149,8 @@ def _handle_pre_activation_failure(
         )
         if current_manifest != old_manifest:
             raise RuntimeUpdateError("manifest_changed")
-        _assert_services(
+        _assert_surfaces(
+            journal,
             expected_ref=current_old_ref,
             expected_image_id=journal["old_image_id"],
             expected_revision=journal["old_pointer"],
@@ -934,22 +1184,19 @@ def _restore_old(
         _assert_database_unchanged(db_snapshot)
         _set_journal(journal, phase="rollback_restore")
         _ensure_rollback_alias(journal, phase="rollback_tag")
-        _compose(
-            "up",
-            "-d",
-            "--no-build",
-            "--force-recreate",
-            *SERVICES,
-            env=_runtime_env(
-                journal["rollback_image_ref"], source_commit=journal["old_pointer"]
-            ),
+        _start_surfaces(
+            _surface_flags(journal),
+            _present_surfaces(),
+            journal["rollback_image_ref"],
+            source_commit=journal["old_pointer"],
         )
-        _assert_services(
+        _assert_surfaces(
+            journal,
             expected_ref=journal["rollback_image_ref"],
             expected_image_id=journal["old_image_id"],
             expected_revision=journal["old_pointer"],
         )
-        _local_health()
+        _local_health(db_service=_health_surface(journal))
         _assert_database_unchanged(db_snapshot)
         if _pointer(ROOT / ".deploy_commit") != journal["old_pointer"]:
             _set_journal(journal, phase="rollback_pointer")
@@ -998,7 +1245,7 @@ def _idempotent_target(
         immutable=True,
     )
     image = payload["image"]
-    _assert_services(
+    _assert_published_surfaces(
         expected_ref=image["ref"],
         expected_image_id=_image_id(image["id"]),
         expected_revision=source_commit,
@@ -1080,14 +1327,19 @@ def _new_deployment() -> int:
         and existing["old_image_ref"] == old_manifest["image"]["ref"]
     ):
         allowed_old_refs.add(existing["rollback_image_ref"])
-    current_old_ref = _observed_service_ref(allowed_old_refs)
-    _assert_services(
+    current_old_ref, running = _observed_service_ref(allowed_old_refs)
+    if not running["wuwaterm-api"]:
+        raise RuntimeUpdateError("service_not_running")
+    if _standalone_telegram_running() and running["wuwaterm"]:
+        raise RuntimeUpdateError("conflicting_telegram_poller")
+    _assert_published_surfaces(
         expected_ref=current_old_ref,
         expected_image_id=_image_id(old_manifest["image"]["id"]),
         expected_revision=pointer,
     )
-    old_bot_running = True
-    old_api_running = True
+    present = _present_surfaces()
+    old_bot_running = running["wuwaterm"]
+    old_api_running = running["wuwaterm-api"]
     journal = _journal_from_preflight(
         source_commit=source_commit,
         old_pointer=pointer,
@@ -1124,21 +1376,20 @@ def _new_deployment() -> int:
         _assert_database_unchanged(db_snapshot)
         _set_journal(journal, phase="starting")
         new_started = True
-        _compose(
-            "up",
-            "-d",
-            "--no-build",
-            "--force-recreate",
-            *SERVICES,
-            env=_runtime_env(journal["target_image_ref"]),
+        _start_surfaces(
+            _surface_flags(journal),
+            present,
+            journal["target_image_ref"],
+            source_commit=source_commit,
         )
-        _assert_services(
+        _assert_surfaces(
+            journal,
             expected_ref=journal["target_image_ref"],
             expected_image_id=journal["target_image_id"],
             expected_revision=source_commit,
         )
         _set_journal(journal, phase="health")
-        _local_health()
+        _local_health(db_service=_health_surface(journal))
         _assert_database_unchanged(db_snapshot)
         _set_journal(journal, phase="manifest")
         _create_manifest(journal, db_path)
@@ -1226,22 +1477,19 @@ def _recovery() -> int:
         if not _compose_ok("stop", *SERVICES, timeout=60.0):
             raise RuntimeUpdateError("recovery_stop_failed")
         _set_journal(journal, phase="recovery_restore")
-        _compose(
-            "up",
-            "-d",
-            "--no-build",
-            "--force-recreate",
-            *SERVICES,
-            env=_runtime_env(
-                journal["rollback_image_ref"], source_commit=journal["old_pointer"]
-            ),
+        _start_surfaces(
+            _surface_flags(journal),
+            _present_surfaces(),
+            journal["rollback_image_ref"],
+            source_commit=journal["old_pointer"],
         )
-        _assert_services(
+        _assert_surfaces(
+            journal,
             expected_ref=journal["rollback_image_ref"],
             expected_image_id=journal["old_image_id"],
             expected_revision=journal["old_pointer"],
         )
-        _local_health()
+        _local_health(db_service=_health_surface(journal))
         pointer = _pointer(ROOT / ".deploy_commit")
         if pointer != journal["old_pointer"]:
             if pointer != journal["source_commit"]:

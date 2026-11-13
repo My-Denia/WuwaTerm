@@ -100,13 +100,13 @@ lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
-[WuwaTerm-Web v0.1.1](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1)
+[WuwaTerm-Web v0.2.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0)
 package, verifies it against the release checksums, and needs the HTTPS origin
 your proxy serves (`--web-origin`).
 
 ### Windows client
 
-Download the portable package from [WuwaTerm-Windows v0.4.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
+Download the portable package from [WuwaTerm-Windows v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 

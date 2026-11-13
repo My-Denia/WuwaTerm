@@ -37,12 +37,26 @@ python="${PYTHON:-python3}"
 script_sha="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
 
 # A container-driver builder would start a BuildKit container; refuse it.
+# When the daemon's own docker driver answers, BuildKit IS the builder, so it is
+# also the case that needs the attestation flags below.
+buildkit=0
 if docker buildx version >/dev/null 2>&1; then
     driver="$(docker buildx inspect 2>/dev/null | awk -F': *' '$1=="Driver"{print $2; exit}')"
     if [ "$driver" != "docker" ]; then
         echo "build-delivery: the current builder driver is '$driver'; only the daemon's docker driver is allowed" >&2
         exit 2
     fi
+    buildkit=1
+fi
+
+# BuildKit adds provenance/SBOM attestations by default. The saved archive
+# would then be an image index with extra annotated manifests, which the
+# verifier refuses. Disable them where BuildKit is in use, exactly as
+# WuwaTerm-Telegram's builder does; the classic builder has no such flags and
+# emits a single manifest.
+attestation_args=()
+if [ "$buildkit" -eq 1 ]; then
+    attestation_args=(--provenance=false --sbom=false)
 fi
 
 commit="$(git -C "$source" rev-parse --verify "$rev^{commit}")"
@@ -80,7 +94,7 @@ while read -r keyword ref as name _; do
     fi
 done < "$attempt/context/deploy/Dockerfile"
 
-docker build --pull=false --force-rm --target runtime --platform linux/amd64 \
+docker build "${attestation_args[@]}" --pull=false --force-rm --target runtime --platform linux/amd64 \
     --build-arg "SOURCE_COMMIT=$commit" \
     --iidfile "$attempt/state/iid" \
     --file "$attempt/context/deploy/Dockerfile" "$attempt/context" </dev/null >&2

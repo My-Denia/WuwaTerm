@@ -88,8 +88,25 @@ _MAX_CAPTURE = 16 * 1024 * 1024
 _MAX_RESPONSE = 8 * 1024 * 1024
 
 _INDEX_MEDIA = "application/vnd.oci.image.index.v1+json"
-_MANIFEST_MEDIA = "application/vnd.oci.image.manifest.v1+json"
-_CONFIG_MEDIA = "application/vnd.oci.image.config.v1+json"
+# `docker image save` writes an OCI index whose single manifest blob may be
+# either the OCI or the Docker v2 schema, depending on the daemon's store and
+# on who built the image. Both name the same content; the config media type
+# follows the manifest it belongs to. WuwaTerm-Telegram's build_delivery.py
+# accepts the same four values, so a bundle either product seals verifies here.
+_MANIFEST_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+}
+_CONFIG_MEDIA_TYPES = {
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+}
+# An index descriptor may carry the daemon's creation time and the config
+# digest it minted for the image. The config digest is cross-checked against
+# the manifest, so it can be accepted; a name annotation stays refused.
+_INDEX_ANNOTATIONS = {"org.opencontainers.image.created", "config.digest"}
+# Content-addressable layer media types: gzip and plain tar, each in the OCI
+# and the Docker v2 spelling.
 _LAYER_GZIP = {"application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.docker.image.rootfs.diff.tar.gzip"}
 _LAYER_TAR = {"application/vnd.oci.image.layer.v1.tar", "application/vnd.docker.image.rootfs.diff.tar"}
 _NAME_ANNOTATIONS = ("org.opencontainers.image.ref.name", "io.containerd.image.name")
@@ -590,16 +607,27 @@ def read_oci_archive(path: Path) -> OciImage:
             for key in _NAME_ANNOTATIONS:
                 if key in annotations:
                     _fail("OCI archive carries an image name annotation (" + key + ")")
-            if set(annotations) - {"org.opencontainers.image.created"} \
+            if set(annotations) - _INDEX_ANNOTATIONS \
                     or any(type(v) is not str for v in annotations.values()):
                 _fail("unexpected OCI index annotation")
+            config_annotation = annotations.get("config.digest")
+            if config_annotation is not None:
+                _digest(config_annotation, "OCI config digest annotation")
+            descriptor_media = descriptor.get("mediaType")
             plain = {k: descriptor.get(k) for k in ("mediaType", "digest", "size")}
-            manifest_digest, _, manifest_raw = blob(plain, {_MANIFEST_MEDIA})
+            manifest_digest, _, manifest_raw = blob(plain, _MANIFEST_MEDIA_TYPES)
             image = _parse_json(manifest_raw or b"")
             if type(image) is not dict or set(image) != {"schemaVersion", "mediaType", "config", "layers"} \
-                    or image["schemaVersion"] != 2 or image["mediaType"] != _MANIFEST_MEDIA:
+                    or image["schemaVersion"] != 2 or image["mediaType"] not in _MANIFEST_MEDIA_TYPES:
                 _fail("invalid OCI manifest, subject or annotations")
-            config_digest, _, config_raw = blob(image["config"], {_CONFIG_MEDIA})
+            # The index descriptor and the manifest it points at describe one
+            # image. A descriptor that names a different schema than the blob
+            # it addresses is not that image.
+            if image["mediaType"] != descriptor_media:
+                _fail("OCI manifest media type differs from index descriptor")
+            config_digest, _, config_raw = blob(image["config"], _CONFIG_MEDIA_TYPES)
+            if config_annotation is not None and config_annotation != config_digest:
+                _fail("OCI config digest annotation differs")
             config = _parse_json(config_raw or b"")
             if type(config) is not dict or type(config.get("rootfs")) is not dict \
                     or config["rootfs"].get("type") != "layers" or type(config["rootfs"].get("diff_ids")) is not list:

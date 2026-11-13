@@ -3,6 +3,67 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.8.5
+
+### Delivery And Deployment
+
+- A published WuwaTerm-Telegram component bundle can be verified and acquired
+  from this checkout again. `scripts/component_artifact.py` read a saved image
+  archive as OCI only, but `docker image save` writes whichever schema its
+  store produced: the v0.2.8 archive is an OCI index whose descriptor names a
+  Docker v2 manifest and carries a `config.digest` annotation, so the verifier
+  refused it as an unexpected index annotation. Both media types from either
+  schema are read now, that annotation is cross-checked against the manifest's
+  own config descriptor instead of being trusted or refused outright, and a
+  descriptor that names a different schema than the blob it addresses is
+  refused. `scripts/build-delivery.sh` passes `--provenance=false --sbom=false`
+  when BuildKit is the builder, as the Telegram builder already did, so a
+  locally built bundle keeps a single manifest.
+- `deploy/vps-update.sh` publishes a release without resurrecting a surface
+  the operator retired. The success path ran `compose up -d` for `wuwaterm`
+  and `wuwaterm-api` unconditionally, which restarted the legacy in-Core bot on
+  any host that had stopped it — the state this project now runs in, with the
+  standalone Telegram product serving instead. Each surface now follows the
+  running state the deployment found: a retired surface is re-created stopped
+  (`compose create --pull never`) so its image reference still moves with the
+  release, an absent one stays absent, and only the surfaces that run are
+  smoke-checked, verified by `State.Running` and image id, and reported. A
+  deployment that found no running surface refuses instead of guessing, and so
+  does one where `wuwaterm-bot` and a standalone `wuwaterm-telegram` are both
+  running — the dual-poller state that duplicates every update.
+- `scripts/full_update.py` confirms a stopped or absent surface on the new
+  binding after pointer publication, symmetrically with the old binding it
+  already verified: the confirm step required both containers running, so a
+  legitimately retired surface left the journal armed and forced
+  `--recover-full`.
+- `scripts/runtime_update.py --runtime-only` handles an API-only host. It
+  required both containers running, which is no longer the shape of a
+  maintained deployment; it now refuses the dual-poller state, updates the
+  API, and leaves a stopped `wuwaterm` on the new image without starting it.
+
+### Release And Documentation
+
+- `deploy/setup.sh` names the current releases. The Telegram tag it printed
+  (`v0.2.0`) and the Web release it downloaded (the repository's newest) were
+  separate literals inside the script; both defaults now come from
+  `contracts/products.json` when that file is present, and
+  `WUWATERM_WEB_VERSION` accepts a release tag or `latest` under the same
+  validation as `WUWATERM_TELEGRAM_VERSION`.
+- `docs/products.md`, `docs/self-hosting.md`, `README.md`, `README.zh-CN.md`
+  and `docs/release-checklist.md` name the published versions they recommend
+  (Telegram 0.2.8, Windows 0.4.2, Web 0.2.0), and the Core `adoption_note` in
+  `contracts/products.json` no longer says both that 0.8.4 runs in the legacy
+  `wuwaterm-bot` and that the legacy bot is stopped.
+
+### Evaluation Receipts
+
+- An absolute row counts each path's own judged verdicts. When one side of a
+  gold item was still pending, the row counted neither side, so an existing
+  label was reported as `not_judged`: with old at 30 `correct` and new at 29
+  `correct` plus one pending, the old path printed 29 `correct` /
+  1 `not_judged`. Each side now counts its own labels, and the pair-level
+  comparison keeps its both-sides rule unchanged.
+
 ## 0.8.4
 
 ### Terms And Dictionary

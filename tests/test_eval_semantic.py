@@ -723,6 +723,31 @@ def test_one_undecidable_occurrence_keeps_the_gate_from_met(ev):
     assert official["state"] == "undecidable" and official["reason"] == "explicit_undecidable"
 
 
+def test_a_pending_side_does_not_hide_the_other_sides_judged_label(ev):
+    """Old 30 correct, new 29 correct and 1 still pending.
+
+    The absolute row states what each path was actually judged on. Skipping the
+    pair while one side is pending used to report old as 29 correct / 1 not
+    judged, which is the opposite of the evidence: old has 30 verdicts and none
+    of them is pending. The pair-level comparison keeps its both-sides rule, so
+    the gate stays pending rather than claiming anything.
+    """
+    items = _official_items()
+    ids = [item["id"] for item in items]
+    verdicts = _m_verdicts(ids, "correct", "correct")
+    del verdicts[ids[0]]["B"]  # the new path for one occurrence has no verdict
+    result = ev._score_m_translation(_m_inputs(ev, items), verdicts, M_BLIND, {"B9"})
+    official = result["gates"]["M_official_terms"]
+    assert official["state"] == "pending_adjudication"
+    # The comparison counters still demand both sides, exactly as before.
+    assert official["judged"] == 29 and official["pending"] == 1
+    assert official["old_correct"] == 29 and official["new_correct"] == 29
+    row = _m_row(result, "M_official_terms")
+    assert row["denominator"] == 30
+    assert row["paths"]["old"] == {"correct": 30, "wrong": 0, "undecidable": 0, "not_judged": 0}
+    assert row["paths"]["new"] == {"correct": 29, "wrong": 0, "undecidable": 0, "not_judged": 1}
+
+
 def test_a_group_with_no_samples_is_not_executed_never_met(ev):
     """The audit's third gap: no reference/negation/quantity item at all."""
     result = ev._score_m_translation(_m_inputs(ev, []), {}, M_BLIND, {"B9"})

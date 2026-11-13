@@ -96,7 +96,10 @@ Start the shared translation service, and add the surfaces you choose.
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
-steps name (default v0.2.0).
+steps name (default v0.2.8, or the tag recorded in contracts/products.json).
+WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
+v0.2.0, the current published release, or latest (default v0.2.0, or the tag
+recorded in contracts/products.json).
 EOF
 }
 
@@ -378,7 +381,45 @@ ensure_api_device() {
 # verified-wheel and image-build steps in a second repository, where they would
 # drift, so this script routes to that product's own entry instead.
 telegram_product_repo=https://github.com/My-Denia/WuwaTerm-Telegram
-telegram_product_release=${WUWATERM_TELEGRAM_VERSION:-v0.2.0}
+web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
+
+# The releases these instructions name. contracts/products.json is the recorded
+# snapshot and docs/products.md points readers at it, so when that file can be
+# read its release tags ARE the default: a release bump then lands in one place
+# instead of three. The constants stay for a checkout or a host without python3.
+DEFAULT_TELEGRAM_VERSION=v0.2.8
+DEFAULT_WEB_VERSION=v0.2.0
+
+recorded_product_tag() {
+    [ -f "$code_root/contracts/products.json" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$code_root/contracts/products.json" "$1" 2>/dev/null <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        snapshot = json.load(stream)
+    products = snapshot.get("products")
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+if not isinstance(products, list):
+    raise SystemExit(1)
+for product in products:
+    if isinstance(product, dict) and product.get("id") == sys.argv[2]:
+        release = product.get("release")
+        tag = release.get("tag") if isinstance(release, dict) else None
+        if isinstance(tag, str) and tag.startswith("v") and all(part.isdigit() for part in tag[1:].split(".")):
+            print(tag)
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+telegram_product_default=$(recorded_product_tag telegram) || telegram_product_default=$DEFAULT_TELEGRAM_VERSION
+web_product_default=$(recorded_product_tag web) || web_product_default=$DEFAULT_WEB_VERSION
+telegram_product_release=${WUWATERM_TELEGRAM_VERSION:-$telegram_product_default}
+web_product_release=${WUWATERM_WEB_VERSION:-$web_product_default}
 
 # Only the bot's own settings travel to the product .env. The Web and API
 # secrets in this .env belong to other processes; the product's Compose file
@@ -530,7 +571,7 @@ install_telegram() {
     [ "$with_telegram" = 1 ] || return 0
     case "$telegram_product_release" in
         v[0-9]*) ;;
-        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.0, not: $telegram_product_release" ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.8, not: $telegram_product_release" ;;
     esac
     wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
     if [ -n "$telegram_dir" ]; then
@@ -669,7 +710,14 @@ resolve_web_package() {
             fail "--web-package must be a directory or a .tar.gz/.tgz archive"
         fi
     else
-        base="https://github.com/My-Denia/WuwaTerm-Web/releases/latest/download"
+        # The published Web release this install verifies. `latest` follows the
+        # repository's newest release; a tag pins one, which is what a recorded
+        # products.json tag does.
+        case "$web_product_release" in
+            latest) base="$web_product_repo/releases/latest/download" ;;
+            v[0-9]*) base="$web_product_repo/releases/download/$web_product_release" ;;
+            *) fail "WUWATERM_WEB_VERSION must be latest or a tag like v0.2.0, not: $web_product_release" ;;
+        esac
         manifest_url="$base/manifest-$variant.json"
         sums_url="$base/SHA256SUMS-$variant"
         if ! curl -fsSL --max-time 30 "$manifest_url" -o "$manifest"; then

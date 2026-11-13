@@ -117,7 +117,22 @@ def layer(files: dict[str, bytes], *, extra: list[tuple] = (), modes: dict[str, 
 
 
 def oci_archive(layers: list[list[tuple]], *, repo_tags=None, annotations=None, config_extra=None,
-                corrupt_layer: int | None = None, extra_entry: bool = False) -> bytes:
+                corrupt_layer: int | None = None, extra_entry: bool = False, media: str = "oci",
+                config_digest_annotation: str = "absent", descriptor_media: str | None = None) -> bytes:
+    """A saved image archive, in the OCI or the Docker v2 schema.
+
+    ``media`` picks the schema the way a daemon or a builder would: Docker v2
+    manifests name the Docker config type, OCI manifests name the OCI one.
+    ``config_digest_annotation`` controls the index descriptor's
+    ``config.digest``: absent, the exact digest, a different digest, or a value
+    that is not a digest at all. ``descriptor_media`` overrides only the index
+    descriptor's media type, to model a descriptor that disagrees with the
+    blob it points at.
+    """
+    manifest_media = {"oci": "application/vnd.oci.image.manifest.v1+json",
+                      "docker": "application/vnd.docker.distribution.manifest.v2+json"}[media]
+    config_media = {"oci": "application/vnd.oci.image.config.v1+json",
+                    "docker": "application/vnd.docker.container.image.v1+json"}[media]
     blobs: dict[str, bytes] = {}
     descriptors, diff_ids = [], []
     for number, entries in enumerate(layers):
@@ -135,16 +150,23 @@ def oci_archive(layers: list[list[tuple]], *, repo_tags=None, annotations=None, 
     config = json.dumps({"architecture": "amd64", "os": "linux", "config": runtime,
                          "rootfs": {"type": "layers", "diff_ids": diff_ids}}).encode()
     blobs[sha(config)] = config
-    manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                           "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+    manifest = json.dumps({"schemaVersion": 2, "mediaType": manifest_media,
+                           "config": {"mediaType": config_media,
                                       "digest": "sha256:" + sha(config), "size": len(config)},
                            "layers": descriptors}).encode()
     blobs[sha(manifest)] = manifest
+    index_annotations = {"org.opencontainers.image.created": "2026-11-07T00:00:00Z"}
+    index_annotations.update(annotations or {})
+    if config_digest_annotation != "absent":
+        index_annotations["config.digest"] = {
+            "matching": "sha256:" + sha(config),
+            "different": "sha256:" + "0" * 64,
+            "malformed": "sha256:not-a-digest",
+        }[config_digest_annotation]
     index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
-             "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+             "manifests": [{"mediaType": descriptor_media or manifest_media,
                             "digest": "sha256:" + sha(manifest), "size": len(manifest),
-                            "annotations": dict({"org.opencontainers.image.created": "2026-11-07T00:00:00Z"},
-                                                **(annotations or {}))}]}
+                            "annotations": index_annotations}]}
     docker = [{"Config": "blobs/sha256/" + sha(config), "RepoTags": repo_tags,
                "Layers": ["blobs/sha256/" + d["digest"][7:] for d in descriptors]}]
     entries = [("blobs", "dir", None, 0o755), ("blobs/sha256", "dir", None, 0o755)]
@@ -453,6 +475,71 @@ def test_truncated_archive_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "img.tar"
     path.write_bytes(raw[:len(raw) // 2])
     with pytest.raises(art.ArtifactError):
+        art.read_oci_archive(path)
+
+
+# ---------------------------------------------------------------- OCI and Docker v2 schemas
+#
+# The published My-Denia/WuwaTerm-Telegram v0.2.8 archive is an OCI index whose
+# single descriptor names a Docker v2 manifest and carries a `config.digest`
+# annotation; the classifier below accepted only the OCI spelling and refused
+# the archive outright. Both schemas name the same image, so both are read, and
+# the parts that could disagree are still cross-checked rather than trusted.
+
+def test_plain_oci_archive_is_the_control(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})]))
+    image = art.read_oci_archive(path)
+    assert image.platform == {"os": "linux", "architecture": "amd64", "variant": None}
+    assert image.rootfs.regular("/f")[0] == "f"
+
+
+def test_matching_config_digest_annotation_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], config_digest_annotation="matching"))
+    assert art.read_oci_archive(path).rootfs.regular("/f")[0] == "f"
+
+
+def test_docker_v2_manifest_and_config_media_types_are_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], media="docker",
+                                 config_digest_annotation="matching"))
+    image = art.read_oci_archive(path)
+    assert image.rootfs.regular("/f")[0] == "f"
+    assert image.layers[0]["media_type"] == "application/vnd.oci.image.layer.v1.tar+gzip"
+
+
+def test_a_config_digest_annotation_that_disagrees_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], config_digest_annotation="different"))
+    with pytest.raises(art.ArtifactError, match="OCI config digest annotation differs"):
+        art.read_oci_archive(path)
+
+
+def test_a_malformed_config_digest_annotation_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], config_digest_annotation="malformed"))
+    with pytest.raises(art.ArtifactError, match="invalid OCI config digest annotation"):
+        art.read_oci_archive(path)
+
+
+@pytest.mark.parametrize(("media", "descriptor_media"), [
+    ("oci", "application/vnd.docker.distribution.manifest.v2+json"),
+    ("docker", "application/vnd.oci.image.manifest.v1+json"),
+])
+def test_a_descriptor_that_names_another_schema_than_its_blob_is_refused(
+    tmp_path: Path, media: str, descriptor_media: str
+) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], media=media, descriptor_media=descriptor_media))
+    with pytest.raises(art.ArtifactError, match="OCI manifest media type differs from index descriptor"):
+        art.read_oci_archive(path)
+
+
+def test_an_unknown_index_annotation_is_still_refused(tmp_path: Path) -> None:
+    path = tmp_path / "img.tar"
+    path.write_bytes(oci_archive([layer({"f": b"1"})], annotations={"org.example.extra": "x"}))
+    with pytest.raises(art.ArtifactError, match="unexpected OCI index annotation"):
         art.read_oci_archive(path)
 
 

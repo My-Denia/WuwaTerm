@@ -2726,7 +2726,13 @@ def _translation_counts(
 def _absolute_row(
     name: str, state: str, unit: str, denominator: int, paths: Mapping[str, Mapping[str, Any]], note: str
 ) -> dict[str, Any]:
-    """One absolute row: every gold item in the denominator, labels counted."""
+    """One absolute row: every gold item in the denominator, per path.
+
+    ``paths`` holds each side's own labels; the denominator is the gold group,
+    so ``correct + wrong + undecidable + not_judged`` equals it per side and a
+    side with an existing verdict is never reported as unjudged just because
+    the other side is still pending.
+    """
     return {
         "gate": name,
         "state": state,
@@ -2738,13 +2744,32 @@ def _absolute_row(
     }
 
 
-def _path_counts(counted: Mapping[str, Any], path: str) -> dict[str, int]:
+def _path_counts(labels: Mapping[str, int]) -> dict[str, int]:
     return {
-        "correct": counted[f"{path}_correct"],
-        "wrong": counted[f"{path}_wrong"],
-        "undecidable": counted[f"{path}_undecidable"],
-        "not_judged": counted["pending"],
+        "correct": labels["correct"],
+        "wrong": labels["wrong"],
+        "undecidable": labels["undecidable"],
+        "not_judged": labels["not_judged"],
     }
+
+
+def _side_labels(
+    group: Sequence[Mapping[str, Any]], verdicts: Mapping[str, Any], blind_key: Mapping[str, Sequence[str]], path: str
+) -> dict[str, int]:
+    """One path's own labels across the whole group, counted independently.
+
+    Each side is scored on what the annotator actually judged FOR THAT SIDE. A
+    gold item whose other side is still pending is not evidence about this one:
+    skipping the pair here used to hide an existing verdict and report it as
+    ``not_judged``, which understates the old path at exactly the moment the
+    receipt is supposed to state it. The pair-level comparison gate keeps its
+    own both-sides rule in ``_translation_counts``, so nothing about it moves.
+    """
+    counts = {"correct": 0, "wrong": 0, "undecidable": 0, "not_judged": 0}
+    for item in group:
+        value = _verdict(verdicts, blind_key, item, path)
+        counts["not_judged" if value is None else value] += 1
+    return counts
 
 
 def _score_m_translation(
@@ -2766,7 +2791,7 @@ def _score_m_translation(
     gates["M_official_terms"] = _gate_with(state, reason, min_sample=M_MIN_OFFICIAL, **c)
     rows.append(_absolute_row(
         "M_official_terms", state, "official term occurrence", c["n"],
-        {path: _path_counts(c, path) for path in ("old", "new")},
+        {path: _path_counts(_side_labels(official, verdicts, blind_key, path)) for path in ("old", "new")},
         "regression comparison only: met says the new path is not worse, not that it is right",
     ))
     c = _translation_counts(ordinary, verdicts, blind_key)
@@ -2775,7 +2800,7 @@ def _score_m_translation(
     gates["M_ordinary_sense"] = _gate_with(state, reason, min_sample=M_MIN_ORDINARY, **c)
     rows.append(_absolute_row(
         "M_ordinary_sense", state, "ordinary-sense occurrence", c["n"],
-        {path: _path_counts(c, path) for path in ("old", "new")},
+        {path: _path_counts(_side_labels(ordinary, verdicts, blind_key, path)) for path in ("old", "new")},
         "errors drop by half against the old path, or reach at most one in absolute terms",
     ))
     c = _translation_counts(rnn, verdicts, blind_key)
@@ -2786,7 +2811,7 @@ def _score_m_translation(
     gates["M_reference_negation_number"] = _gate_with(state, reason, per_doc=per_doc, without_A3=without_a3, **c)
     rows.append(_absolute_row(
         "M_reference_negation_number", state, "reference, negation or number occurrence", c["n"],
-        {path: _path_counts(c, path) for path in ("old", "new")},
+        {path: _path_counts(_side_labels(rnn, verdicts, blind_key, path)) for path in ("old", "new")},
         "no frozen minimum sample: an empty group is not executed, never met",
     ))
     return {"gates": gates, "absolute": rows}
