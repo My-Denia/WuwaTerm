@@ -162,7 +162,7 @@ def _wait_ready(container: str) -> None:
     raise AssertionError("real API did not become ready")
 
 
-def _owned_cleanup(ids: list[str], owner: str) -> None:
+def _owned_cleanup(ids: list[str], owner: str, label: str = "org.wuwaterm.test-owner") -> None:
     # Inspect each exact resource and its fixture owner before stopping or
     # deleting it. Transaction recovery may already have removed the target.
     for item in ids:
@@ -171,10 +171,20 @@ def _owned_cleanup(ids: list[str], owner: str) -> None:
             continue
         raw = json.loads(result.stdout)[0]
         assert raw["Id"] == item
-        assert raw["Config"]["Labels"].get("org.wuwaterm.test-owner") == owner
+        assert raw["Config"]["Labels"].get(label) == owner
         if raw["State"]["Running"]:
             _docker("stop", item)
         _docker("rm", item)
+
+
+def _probe_cleanup(root: Path) -> None:
+    # Probe containers carry only their own probe label, not the fixture owner.
+    # The records the code under test writes name them, so a failure before the
+    # test's own probe recovery no longer leaves one behind.
+    for record in sorted((root / ".deployments" / "component-adopt-probes").glob("*.json")):
+        for label in ("org.wuwaterm.component-adopt-probe", "org.wuwaterm.component-state-probe"):
+            ids = _docker("ps", "-aq", "--no-trunc", "--filter", f"label={label}={record.stem}").splitlines()
+            _owned_cleanup(ids, record.stem, label)
 
 
 def _interrupt_initial_writer(root: Path, code: str, input_path: Path, predecessor_id: str,
@@ -771,7 +781,10 @@ def test_actual_api_transaction(tmp_path: Path, mode: str) -> None:
     finally:
         matches = _docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner)
         owned.extend(item for item in matches.splitlines() if item not in owned)
-        _owned_cleanup(owned, owner)
+        try:
+            _owned_cleanup(owned, owner)
+        finally:
+            _probe_cleanup(root)
 
 
 @pytest.mark.skipif(not DOCKER_FIXTURE or not RUN_BUILD, reason="real Telegram wheel build not requested")
@@ -1492,7 +1505,10 @@ else:
             process.communicate(timeout=30)
         matches = _docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner)
         owned.extend(item for item in matches.splitlines() if item not in owned)
-        _owned_cleanup(owned, owner)
+        try:
+            _owned_cleanup(owned, owner)
+        finally:
+            _probe_cleanup(root)
 
 
 @pytest.mark.skipif(not DOCKER_FIXTURE or not RUN_BUILD, reason="real adoption and producer builds not requested")
@@ -1568,30 +1584,31 @@ def test_actual_adoption_successor_and_recovery(tmp_path: Path, mode: str) -> No
     config_path.write_text(json.dumps({"services": services}), encoding="utf-8")
     compose_command = [COMPOSE, "--project-name", owner, "--project-directory", str(root),
                        "--file", str(config_path), "create"]
-    _run(compose_command, cwd=root, env={"PATH": os.environ["PATH"], "HOME": str(root), "LANG": "C.UTF-8"})
-    owned = _docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner).splitlines()
-    assert len(owned) == len(services)
-    if mode == "adopt-restarted-api":
-        api_identifier = next(identifier for identifier in owned
-                              if observe._inspect(identifier)["Config"]["Labels"]["com.docker.compose.service"] == "wuwaterm-api")
-        _docker("start", api_identifier)
-        _wait_ready(api_identifier)
-    before: dict[str, dict] = {}
-    for identifier in owned:
-        raw = observe._inspect(identifier)
-        service = raw["Config"]["Labels"]["com.docker.compose.service"]
-        name = "api" if service == "wuwaterm-api" else "telegram"
-        before[name] = observe.observe_container(identifier, expected_image_id=old_image_id, project=owner,
-                                                service=service, expected_command=raw["Config"]["Cmd"],
-                                                expected_entrypoint=raw["Config"]["Entrypoint"],
-                                                env_fingerprint_key=b"x" * 32)
-    adopt_code = ("import component_runtime as r,json; root=pathlib.Path(sys.argv[2]); "
-                  "receipt=None if sys.argv[5]=='-' else sys.argv[5]; "
-                  "d=r.adopt(root,projects=[sys.argv[3]],compose_executable=pathlib.Path(sys.argv[4]),"
-                  "api_receipt=receipt,telegram_receipt=None); print(json.dumps({'deployment_id':d}))")
-    api_receipt = api_build["digest"] if crashing else "-"
+    owned: list[str] = []
     process: subprocess.Popen | None = None
     try:
+        _run(compose_command, cwd=root, env={"PATH": os.environ["PATH"], "HOME": str(root), "LANG": "C.UTF-8"})
+        owned.extend(_docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner).splitlines())
+        assert len(owned) == len(services)
+        if mode == "adopt-restarted-api":
+            api_identifier = next(identifier for identifier in owned
+                                  if observe._inspect(identifier)["Config"]["Labels"]["com.docker.compose.service"] == "wuwaterm-api")
+            _docker("start", api_identifier)
+            _wait_ready(api_identifier)
+        before: dict[str, dict] = {}
+        for identifier in owned:
+            raw = observe._inspect(identifier)
+            service = raw["Config"]["Labels"]["com.docker.compose.service"]
+            name = "api" if service == "wuwaterm-api" else "telegram"
+            before[name] = observe.observe_container(identifier, expected_image_id=old_image_id, project=owner,
+                                                    service=service, expected_command=raw["Config"]["Cmd"],
+                                                    expected_entrypoint=raw["Config"]["Entrypoint"],
+                                                    env_fingerprint_key=b"x" * 32)
+        adopt_code = ("import component_runtime as r,json; root=pathlib.Path(sys.argv[2]); "
+                      "receipt=None if sys.argv[5]=='-' else sys.argv[5]; "
+                      "d=r.adopt(root,projects=[sys.argv[3]],compose_executable=pathlib.Path(sys.argv[4]),"
+                      "api_receipt=receipt,telegram_receipt=None); print(json.dumps({'deployment_id':d}))")
+        api_receipt = api_build["digest"] if crashing else "-"
         if crashing:
             command = ["bash", "-c", 'exec 9>"$1/.deployments/.deployment.lock"; flock -x 9; shift; exec "$@"',
                        "fixture-lock", str(root), sys.executable, "-I", "-B", "-c",
@@ -1957,7 +1974,10 @@ def test_actual_adoption_successor_and_recovery(tmp_path: Path, mode: str) -> No
             process.communicate(timeout=30)
         matches = _docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner)
         owned.extend(item for item in matches.splitlines() if item not in owned)
-        _owned_cleanup(owned, owner)
+        try:
+            _owned_cleanup(owned, owner)
+        finally:
+            _probe_cleanup(root)
 
 
 @pytest.mark.skipif(not DOCKER_FIXTURE or not RUN_BUILD, reason="real unadopted retry requires Docker builds")
@@ -2199,7 +2219,10 @@ def test_unadopted_rollback_a_to_b_uses_fresh_b_legacy_probe(tmp_path: Path, int
             process.communicate(timeout=30)
         matches = _docker("ps", "-aq", "--no-trunc", "--filter", "label=org.wuwaterm.test-owner=" + owner)
         owned.extend(item for item in matches.splitlines() if item not in owned)
-        _owned_cleanup(owned, owner)
+        try:
+            _owned_cleanup(owned, owner)
+        finally:
+            _probe_cleanup(root)
 
 
 def test_full4_leaf_entry_mapper_preserves_symlinks_and_runtime_mapper_stays_strict(tmp_path: Path) -> None:

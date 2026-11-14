@@ -2064,6 +2064,47 @@ def reconcile_attempt_stage(root: Path, kind: str, build_id: str, attempt: dict[
         raise IsolationError("producer journal staging remains unresolved") from exc
 
 
+BUILD_IMAGE_KEEP = 5
+_BUILD_IMAGE_REPOSITORIES = {"source": "wuwaterm-component-build", "wheel": "wuwaterm-wheel-build"}
+_BUILD_TAG = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\Z")
+
+
+def prune_build_images(kind: str, keep_ref: str, run_docker: Callable[[list[str]], subprocess.CompletedProcess[bytes]],
+                       keep: int = BUILD_IMAGE_KEEP) -> list[str]:
+    """Untag per-run build images beyond the newest ``keep`` that no container uses.
+
+    Best effort: any Docker failure leaves that image alone, nothing is forced, and nothing is raised or
+    written to the attempt or ledger. Returns the removed references.
+    """
+    removed: list[str] = []
+    try:
+        repository = _BUILD_IMAGE_REPOSITORIES[kind]
+        listed = run_docker(["image", "ls", "--filter", "reference=" + repository, "--format", "{{.Tag}}"])
+        if listed.returncode:
+            return removed
+        tags = sorted({tag for tag in listed.stdout.decode("ascii").split() if _BUILD_TAG.fullmatch(tag)}, reverse=True)
+        protected = {*tags[:keep], keep_ref.removeprefix(repository + ":")}
+    except Exception:
+        return removed
+    for tag in tags:
+        if tag in protected:
+            continue
+        reference = repository + ":" + tag
+        try:
+            found = run_docker(["image", "inspect", "--format", "{{.Id}}", reference])
+            image_id = found.stdout.decode("ascii").strip()
+            if found.returncode or not image_id:
+                continue
+            users = run_docker(["ps", "-a", "-q", "--no-trunc", "--filter", "ancestor=" + image_id])
+            if users.returncode or users.stdout.strip():
+                continue
+            if not run_docker(["image", "rm", reference]).returncode:
+                removed.append(reference)
+        except Exception:
+            continue
+    return removed
+
+
 class ProducerSession:
     """Persist a single producer's guarded clients and containment intents."""
 
@@ -2337,6 +2378,14 @@ class ProducerSession:
                                   timeout=timeout, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
             raise IsolationError("cannot inspect Docker state") from exc
+
+    def prune_build_images(self) -> list[str]:
+        """Drop superseded build tags after registration; never fails a registered build."""
+        try:
+            return prune_build_images(self.ledger["kind"], self.ledger["retained_reference"]["ref"],
+                                      lambda argv: self.read_docker(argv, timeout=60))
+        except Exception:
+            return []
 
     def inspect_container(self, identifier: str) -> dict[str, Any] | None:
         result = self.read_docker(["container", "inspect", identifier])

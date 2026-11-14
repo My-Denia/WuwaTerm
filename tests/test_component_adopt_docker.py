@@ -1,10 +1,14 @@
 """Explicit local-Docker acceptance for metadata-only adoption.
 
-The test creates stopped, uniquely labelled fixtures and retains their IDs for
-the caller's separate ownership/cleanup preflight. It never starts a service.
+The test creates uniquely labelled compose fixtures, stopped except for the one
+API fixture of the running-api topology. When it ends, pass or fail, it stops and
+deletes the containers of its own compose project and the adoption probe
+containers recorded under its temporary roots, re-checking each exact ID's label
+first. Images and files are not touched.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 import ctypes
 import hashlib
 import json
@@ -30,6 +34,59 @@ from test_deploy_scripts import _deployment_db
 pytestmark = pytest.mark.skipif(
     os.environ.get("WUWATERM_RUN_ADOPT_DOCKER") != "1", reason="explicit real Docker adoption only",
 )
+
+
+def remove_labelled_containers(label: str, value: str) -> list[str]:
+    """Stop and delete every container whose exact ID still carries ``label=value``.
+
+    Each ID is inspected and its label re-verified before it is touched; nothing
+    is selected by name, and no image, volume or network is removed.
+    """
+    def docker(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["docker", "--host", "unix:///run/docker.sock", *arguments], env=clean_env(),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, check=False)
+
+    def labelled() -> list[str]:
+        listing = docker("ps", "-aq", "--no-trunc", "--filter", f"label={label}={value}")
+        assert listing.returncode == 0, "cleanup: container listing failed"
+        return listing.stdout.split()
+
+    removed = []
+    for identifier in labelled():
+        inspected = docker("inspect", "--format", '{{.Id}}|{{index .Config.Labels "' + label + '"}}|{{.State.Running}}',
+                           identifier)
+        if inspected.returncode:
+            continue
+        found, actual, running = inspected.stdout.strip().split("|")
+        if (found, actual) != (identifier, value):
+            continue
+        if running == "true":
+            docker("stop", identifier)
+        if docker("rm", identifier).returncode == 0:
+            removed.append(identifier)
+    assert not labelled(), f"cleanup: containers labelled {label}={value} remain"
+    return removed
+
+
+@pytest.fixture
+def compose_projects(tmp_path: Path) -> Iterator[list[str]]:
+    """Collect this test's compose project names and remove their containers at the end.
+
+    Adoption version probes carry only their own probe label, so they are found
+    through the records the adoption code writes under the test's temporary roots.
+    """
+    projects: list[str] = []
+    yield projects
+    targets = [("com.docker.compose.project", project) for project in projects]
+    targets += [("org.wuwaterm.component-adopt-probe", record.stem)
+                for record in tmp_path.glob("**/.deployments/component-adopt-probes/*.json")]
+    failures = []
+    for label, value in dict.fromkeys(targets):
+        try:
+            remove_labelled_containers(label, value)
+        except (AssertionError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{label}={value}: {exc}")
+    assert not failures, failures
 
 
 def run(args: list[str], root: Path, name: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -256,7 +313,8 @@ def interruptible_adoption(root: Path, args: list[str], expected_commit: str, *,
                                       "legacy-terminal-probe", "env-drift", "leaf-committed", "leaf-pointer-fail",
                                       "leaf-retry-interrupted",
                                       "leaf-crash-manifest", "leaf-crash-current"])
-def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, topology: str) -> None:
+def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, topology: str,
+                                                              compose_projects: list[str]) -> None:
     compose = os.environ["WUWATERM_COMPOSE_EXECUTABLE"]
     root, commit, tree = export_source(REPO, tmp_path)
     source_result = invoke_with_lock(root, commit, tree)
@@ -347,6 +405,7 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
     if topology == "pointer-fail-present":
         (root / ".deploy_commit").write_text("f" * 40 + "\n")
     project = "wuwaterm-adopt-" + uuid.uuid4().hex[:12]
+    compose_projects.append(project)
     config = root / "adopt-compose.yml"
     services = []
     for service, image, command, state_mount in (

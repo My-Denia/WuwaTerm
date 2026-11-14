@@ -744,6 +744,7 @@ def _build_source_v2(root: Path, commit: str, tree: str) -> str:
             receipt = _source_receipt_v2(attempt)
         digest = session.register(receipt, _RECEIPTS)
         verify_registered_build(root, digest)
+        session.prune_build_images()
         return digest
     except BaseException as exc:
         if attempt["status"] == "registered":
