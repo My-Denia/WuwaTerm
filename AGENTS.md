@@ -68,7 +68,7 @@ an instruction to change the pull request. Answer it in the thread.
   limits; inspect silent skip, capacity, and budget-exhaustion paths (channel
   LLM admission can skip posts on `llm_budget` / `queue_full`). Fuzzy lookup
   scoring the full terms table is an unproven CPU backlog; idle bot+api use
-  about 61 MiB (`goal-runs/vps-mem-opt-20260821`, closed no-change).
+  about 61 MiB (measured 2026-08-21, closed no-change).
 - Owner-private web UI is intentionally simple; do not over-invest in visual
   redesign.
 - CI and tests should catch real defects, not grow for volume. When CI is
