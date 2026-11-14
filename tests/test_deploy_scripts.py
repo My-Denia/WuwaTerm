@@ -677,6 +677,7 @@ def _make_deploy_harness(tmp_path):
     shutil.copytree(ROOT / "src", root / "src")
     for relative in (
         "deploy/vps-update.sh",
+        "deploy/backup-retention.sh",
         "deploy/docker-compose.yml",
         "scripts/deployment_admission.py",
         "scripts/deployment_manifest.py",

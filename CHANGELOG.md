@@ -3,6 +3,18 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Delivery And Deployment
+
+- `deploy/vps-update.sh` keeps the newest five snapshots in
+  `data/deployment-backups`. Every full deployment wrote a database copy, a
+  pointer copy and a diff there and nothing ever removed them, so the directory
+  only grew. After a deployment commits, the files of the older snapshots are
+  removed (`deploy/backup-retention.sh`), the snapshot that
+  deployment just wrote always stays, and any other file in the directory is
+  left alone. See `docs/deployment.md`.
+
 ## 0.8.5
 
 ### Delivery And Deployment

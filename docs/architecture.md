@@ -548,8 +548,10 @@ aids for a single writer, not a cluster protocol.
 | Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for both serving containers |
 
 No automatic cross-region failover. Recovery is restart, restore from
-timestamped backups under `data/deployment-backups`, or re-run transactional
-deploy after fixing the root cause.
+timestamped backups under `data/deployment-backups` (the newest five snapshots;
+every successful full deploy prunes older ones, see
+[Deployment](deployment.md)), or re-run transactional deploy after fixing the
+root cause.
 
 ## Data refresh and transactional deploy
 
