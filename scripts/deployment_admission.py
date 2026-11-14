@@ -42,6 +42,18 @@ class AdmissionError(RuntimeError):
     """The deployment state cannot safely admit this operation."""
 
 
+def state_root(code_root: Path) -> Path:
+    """The directory that holds a checkout's mutable deployment state.
+
+    A release checkout `<base>/releases/rN` keeps data/, state/, state-api/,
+    .env, .deployments/ and .deploy_commit in `<base>`, so that state outlives
+    every release. Any other checkout is its own root.
+    """
+    if code_root.parent.name == "releases" and re.fullmatch(r"r[1-9][0-9]*", code_root.name):
+        return code_root.parent.parent
+    return code_root
+
+
 def root_label_value(root: Path) -> str:
     """The one definition of a deployment root's helper scope label value."""
     return hashlib.sha256(os.path.realpath(os.fspath(root)).encode("utf-8")).hexdigest()
@@ -989,9 +1001,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.operation == "legacy":
-            admit_legacy(CODE_ROOT)
+            admit_legacy(state_root(CODE_ROOT))
         else:
-            legacy_metadata_absent(CODE_ROOT)
+            legacy_metadata_absent(state_root(CODE_ROOT))
     except AdmissionError as exc:
         print(f"deployment admission refused: {exc}", file=sys.stderr)
         return 1

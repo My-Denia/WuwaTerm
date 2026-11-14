@@ -3,11 +3,13 @@
 set -eu
 
 mode="full"
+mode_arg=""
 case "${1:-}" in
   "")
     ;;
   --runtime-only)
     mode="runtime-only"
+    mode_arg="--runtime-only"
     shift
     ;;
   --recover-runtime)
@@ -32,6 +34,42 @@ DEPLOY_ROOT="${WUWATERM_DEPLOY_ROOT:-/opt/wuwaterm/current}"
 FAIL_STEP="${WUWATERM_FAIL_STEP:-}"
 
 cd "$DEPLOY_ROOT"
+
+# Release layout: <base>/releases/rN is the checkout and <base> holds the
+# state every release shares (data/, state/, state-api/, .env, .deployments/,
+# .deploy_commit), so a release never carries state and can be removed whole.
+# The updater then runs from <base>, which keeps each state path below in its
+# relative form, and resolves repository paths (scripts/, deploy/, git) against
+# the release. In any other checkout both are the current directory and
+# nothing differs. See deploy/release-layout.sh.
+code_root="$(pwd -P)"
+code_prefix=""
+compose_file="deploy/docker-compose.yml"
+release_name=""
+case "$code_root" in
+  */releases/r[1-9]*)
+    . "$code_root/deploy/release-layout.sh"
+    if release_name_ok "${code_root##*/}"; then
+      release_name="${code_root##*/}"
+      state_root="${code_root%/*/*}"
+      # A release run without its shared state would find no deployment
+      # pointer and start a first deployment of empty state. Refuse first.
+      if [ ! -f "$state_root/.env" ]; then
+        echo "refusing deployment: $code_root is a release, but $state_root" >&2
+        echo "holds no .env; run deploy/migrate-layout.sh first" >&2
+        exit 1
+      fi
+      cd "$state_root"
+      code_prefix="$code_root/"
+      compose_file="$code_root/deploy/docker-compose.yml"
+      WUWATERM_STATE_ROOT="$state_root"
+      export WUWATERM_STATE_ROOT
+      git() {
+        command git -C "$code_root" "$@"
+      }
+    fi
+    ;;
+esac
 
 # These tools need Python 3.11 or newer, and a host's system python3 can be
 # older (Debian 11 ships 3.9, which fails admission with a TypeError rather
@@ -64,6 +102,15 @@ deploy_python=$(select_deploy_python) || {
 WUWATERM_DEPLOY_PYTHON=$deploy_python
 export WUWATERM_DEPLOY_PYTHON
 python3() {
+  # Repository scripts resolve against the release; state paths stay relative.
+  case "${1:-}" in
+    scripts/*) py_script="$code_prefix$1"; shift; set -- "$py_script" "$@" ;;
+    -B)
+      case "${2:-}" in
+        scripts/*) py_script="$code_prefix$2"; shift 2; set -- -B "$py_script" "$@" ;;
+      esac
+      ;;
+  esac
   "$deploy_python" "$@"
 }
 
@@ -147,14 +194,32 @@ fi
 
 python3 -B scripts/deployment_admission.py legacy
 
+# In a release layout an update first moves to a release at the commit it is
+# about to deploy (this call may exec into that release's updater). Recovery
+# must run from the release that wrote the journal, so it never does.
+if [ -n "$release_name" ]; then
+  case "$mode" in
+    full|runtime-only) release_handoff "$code_root" ${mode_arg:+"$mode_arg"} ;;
+  esac
+fi
+
 case "$mode" in
   runtime-only)
+    if [ -n "$release_name" ]; then
+      # Not exec'd: the release is switched and pruned only after this succeeds.
+      cd "$code_root"
+      "$deploy_python" scripts/runtime_update.py --runtime-only
+      release_finish "$state_root" "$release_name"
+      exit 0
+    fi
     exec "$deploy_python" scripts/runtime_update.py --runtime-only
     ;;
   recover-runtime)
+    cd "$code_root"
     exec "$deploy_python" scripts/runtime_update.py --recover-runtime
     ;;
   recover-full)
+    cd "$code_root"
     exec "$deploy_python" scripts/full_update.py recover
     ;;
 esac
@@ -177,7 +242,7 @@ fi
 compose() {
   SOURCE_COMMIT="${SOURCE_COMMIT:-unknown}" \
     WUWATERM_RUNTIME_IMAGE="${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}" \
-    docker compose -f deploy/docker-compose.yml "$@"
+    docker compose -f "$compose_file" "$@"
 }
 
 fail_if() {
@@ -189,7 +254,7 @@ fail_if() {
 
 env_mode="$(stat -c '%a' .env)"
 if [ "$env_mode" != "600" ]; then
-  echo "refusing to use $DEPLOY_ROOT/.env with mode $env_mode; expected 600" >&2
+  echo "refusing to use $canonical_root/.env with mode $env_mode; expected 600" >&2
   exit 1
 fi
 
@@ -549,7 +614,7 @@ rollback_on_failure() {
     echo "restarted. Stop both containers by hand, then roll back." >&2
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-    echo "  sh deploy/vps-update.sh --recover-full" >&2
+    echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
     exit "$status"
   fi
 
@@ -663,7 +728,7 @@ rollback_on_failure() {
   if [ "$rollback_failed" -ne 0 ]; then
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-    echo "  sh deploy/vps-update.sh --recover-full" >&2
+    echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
   else
     # The rollback restored the previous binding completely, so the armed
     # journal no longer describes an open transaction. It may be dropped
@@ -676,7 +741,7 @@ rollback_on_failure() {
     if ! python3 scripts/full_update.py rollback-clear; then
       echo "warning: the restored binding failed observed verification; manual recovery is required" >&2
       echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-      echo "  sh deploy/vps-update.sh --recover-full" >&2
+      echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
     fi
   fi
   exit "$status"
@@ -906,3 +971,6 @@ echo "deployment image digest: $image_digest"
 echo "deployment database sha256: $db_hash"
 echo "deployment manifest: $manifest_path"
 echo "deployment timestamp: $deployment_utc"
+if [ -n "$release_name" ]; then
+  release_finish "$state_root" "$release_name"
+fi

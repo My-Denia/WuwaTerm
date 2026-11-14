@@ -25,9 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT))
+sys.path.insert(0, str(CODE_ROOT / "src"))
 sys.dont_write_bytecode = True
 
 from scripts import deployment_admission  # noqa: E402
@@ -42,6 +42,10 @@ from scripts.deployment_manifest import (  # noqa: E402
 )
 from scripts.full_update import full_journal_exists  # noqa: E402
 
+
+# Where data/, .deployments/ and .deploy_commit live: the checkout itself, or
+# the base directory above `releases/rN`.
+ROOT = deployment_admission.state_root(CODE_ROOT)
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -159,7 +163,7 @@ def _subprocess_options(
     *, env: dict[str, str] | None = None, timeout: float = 300.0
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
-        "cwd": ROOT,
+        "cwd": CODE_ROOT,
         "env": env,
         "text": True,
         "stdout": subprocess.PIPE,
@@ -437,7 +441,7 @@ def _tool_hash() -> str:
         "scripts/runtime_update.py",
         "scripts/deployment_admission.py",
     ):
-        path = ROOT / relative
+        path = CODE_ROOT / relative
         if not path.is_file() or path.is_symlink():
             raise RuntimeUpdateError("tool_missing")
         digest.update(relative.encode("ascii"))
@@ -1148,7 +1152,9 @@ def _publish_pointer(commit: str) -> None:
             "scripts/deployment_manifest.py",
             "publish-pointer",
             "--path",
-            ".deploy_commit",
+            # The child runs in the code checkout; a release keeps the pointer
+            # in its shared state directory, so name it absolutely there.
+            ".deploy_commit" if ROOT == CODE_ROOT else str(ROOT / ".deploy_commit"),
             "--source-commit",
             commit,
         ]

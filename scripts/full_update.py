@@ -52,8 +52,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT))
 sys.dont_write_bytecode = True
 
 from scripts import deployment_admission  # noqa: E402
@@ -66,6 +66,10 @@ from scripts.deployment_manifest import (  # noqa: E402
     verify_commit_pointer,
     verify_manifest,
 )
+
+# Where data/, .deployments/ and .deploy_commit live: the checkout itself, or
+# the base directory above `releases/rN`.
+ROOT = deployment_admission.state_root(CODE_ROOT)
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -147,7 +151,7 @@ def _check_termination() -> None:
 
 def _subprocess_options(env: dict[str, str] | None = None) -> dict[str, Any]:
     options: dict[str, Any] = {
-        "cwd": ROOT,
+        "cwd": CODE_ROOT,
         "env": env,
         "text": True,
         "stdout": subprocess.PIPE,
@@ -468,7 +472,7 @@ def _tool_hash() -> str:
         "scripts/full_update.py",
         "scripts/deployment_admission.py",
     ):
-        path = ROOT / relative
+        path = CODE_ROOT / relative
         if not path.is_file() or path.is_symlink():
             raise FullUpdateError("tool_missing")
         digest.update(relative.encode("ascii"))
