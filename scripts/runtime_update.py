@@ -46,6 +46,13 @@ from scripts.full_update import full_journal_exists  # noqa: E402
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 JOURNAL_NAME = ".runtime-transaction.json"
+# The record gained `old_bot_present`. Closed (`committed` / `rolled_back`)
+# records remain in `.deployments/`, so `_load_journal` accepts both
+# `JOURNAL_KEYS` and `LEGACY_JOURNAL_KEYS` so upgraded hosts do not deadlock on
+# admission or `--check-runtime-journal`. An open record without
+# `old_bot_present` still demands recovery, and `_recovery` refuses it as
+# `recovery_tool_mismatch` alongside `tool_hash` so `scripts/legacy_recovery.py`
+# restores the tool of its own source commit.
 JOURNAL_SCHEMA_VERSION = 1
 RUNTIME_BACKUP_SENTINEL = "none"
 SERVICES = ("wuwaterm", "wuwaterm-api")
@@ -60,6 +67,14 @@ _SURFACE_RUNNING_KEYS = {
     "wuwaterm-api": "old_api_running",
 }
 STANDALONE_TELEGRAM_CONTAINER = "wuwaterm-telegram"
+# The standalone Telegram product is not always called `wuwaterm-telegram`.
+# Telegram v0.2.9 and earlier ship without an explicit container_name, so Compose
+# named the container after its project (`deploy-wuwaterm-telegram-1`). Compose
+# labels every one of them with the service name, which is the only stable way
+# to find an installation the fixed name misses.
+STANDALONE_TELEGRAM_FILTER = (
+    f"label=com.docker.compose.service={STANDALONE_TELEGRAM_CONTAINER}"
+)
 JOURNAL_KEYS = {
     "schema_version",
     "mode",
@@ -75,6 +90,7 @@ JOURNAL_KEYS = {
     "old_manifest_path",
     "old_image_ref",
     "old_image_id",
+    "old_bot_present",
     "old_bot_running",
     "old_api_running",
     "rollback_image_ref",
@@ -82,6 +98,7 @@ JOURNAL_KEYS = {
     "db_stat",
     "tool_hash",
 }
+LEGACY_JOURNAL_KEYS = JOURNAL_KEYS - {"old_bot_present"}
 EXPECTED_DB_SCHEMA = {
     "metadata": (
         ("key", "TEXT", 0, 1),
@@ -306,7 +323,10 @@ def _load_journal(path: Path | None = None) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="ascii"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise RuntimeUpdateError("invalid_journal") from None
-    if type(payload) is not dict or set(payload) != JOURNAL_KEYS:
+    if type(payload) is not dict or set(payload) not in (
+        JOURNAL_KEYS,
+        LEGACY_JOURNAL_KEYS,
+    ):
         raise RuntimeUpdateError("invalid_journal")
     if type(payload["schema_version"]) is not int or payload["schema_version"] != JOURNAL_SCHEMA_VERSION:
         raise RuntimeUpdateError("invalid_journal")
@@ -360,10 +380,17 @@ def _load_journal(path: Path | None = None) -> dict[str, Any]:
         raise RuntimeUpdateError("invalid_journal")
     _image_id(payload["old_image_id"])
     _image_id(payload["target_image_id"])
-    if type(payload["old_bot_running"]) is not bool or type(
-        payload["old_api_running"]
-    ) is not bool:
+    if (
+        type(payload["old_bot_running"]) is not bool
+        or type(payload["old_api_running"]) is not bool
+    ):
         raise RuntimeUpdateError("invalid_journal")
+    if "old_bot_present" in payload:
+        if type(payload["old_bot_present"]) is not bool:
+            raise RuntimeUpdateError("invalid_journal")
+        # A running container is a present one; the two records cannot disagree.
+        if payload["old_bot_running"] and not payload["old_bot_present"]:
+            raise RuntimeUpdateError("invalid_journal")
     if type(payload["target_image_digest"]) is not str or not payload["target_image_digest"]:
         raise RuntimeUpdateError("invalid_journal")
     if type(payload["db_sha256"]) is not str or not re.fullmatch(
@@ -664,21 +691,70 @@ def _health_surface(journal: dict[str, Any]) -> str:
     return "wuwaterm" if journal["old_bot_running"] else "wuwaterm-api"
 
 
+def _standalone_telegram_containers() -> list[str]:
+    """Every container the standalone Telegram product's Compose service owns.
+
+    A refused listing is a failed observation, not an empty host, so it raises
+    instead of answering with no container.
+    """
+
+    try:
+        returncode, stdout, _stderr = _execute(
+            ["docker", "ps", "-aq", "--filter", STANDALONE_TELEGRAM_FILTER]
+        )
+    except OSError:
+        raise RuntimeUpdateError("command_unavailable") from None
+    if returncode != 0:
+        raise RuntimeUpdateError("inspect_failed")
+    _check_termination()
+    return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+
 def _standalone_telegram_running() -> bool:
     """Whether the separate Telegram product serves this host's token.
 
     Two pollers on one bot token answer every update twice, so an update must
     refuse rather than start a second one. Only a positively observed running
     state counts: an absent product is the ordinary case.
+
+    The fixed container name is asked first, because that is what a current
+    release creates. An installation started from a release without an
+    explicit container_name runs as `<project>-wuwaterm-telegram-1`, and the
+    Compose service label is what identifies it; checking only the fixed name
+    missed every one of those hosts and let a second poller start.
     """
 
     host = STANDALONE_TELEGRAM_CONTAINER
-    running = _observe(host, "{{.State.Running}}")
-    if running is None:
-        return False
-    if running not in ("true", "false"):
+    pinned = _observe(host, "{{.State.Running}}")
+    if pinned is not None and pinned not in ("true", "false"):
         raise RuntimeUpdateError("invalid_command_output")
-    return running == "true"
+    if pinned == "true":
+        return True
+    for container in _standalone_telegram_containers():
+        # A container removed between the listing and the inspect answers the
+        # daemon's own "No such object", which _observe reports as absent.
+        running = _observe(container, "{{.State.Running}}")
+        if running is None:
+            continue
+        if running not in ("true", "false"):
+            raise RuntimeUpdateError("invalid_command_output")
+        if running == "true":
+            return True
+    return False
+
+
+def _recorded_presence(journal: dict[str, Any]) -> dict[str, bool]:
+    """Which surface objects existed when the transaction began.
+
+    The API is the surface this updater refuses to run without, so it was
+    present by construction. The bot's existence is recorded, because a bot
+    that was present and stopped before the transaction has to come back in
+    that state after a rollback even when the replacement removed its object.
+    """
+
+    if "old_bot_present" not in journal:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
+    return {"wuwaterm": journal["old_bot_present"], "wuwaterm-api": True}
 
 
 def _surface_flags(journal: dict[str, Any]) -> dict[str, bool]:
@@ -733,22 +809,31 @@ def _assert_surfaces(
 ) -> None:
     """Verify each surface against the state this transaction recorded.
 
-    The deployment never decides which surfaces serve; it preserves what it
-    found. So a surface recorded RUNNING must run exactly the expected image
-    and reference, and one recorded STOPPED must not be running - while its
-    object, if it exists at all, already carries the new binding. The API is
-    the surface the HTTP contract lives on, so it must be running; a host that
-    retired the in-Core bot is a supported shape, a host with no API is not.
+    The deployment never decides which surfaces serve, and it never decides
+    which ones exist: it preserves what it found. So a surface recorded
+    RUNNING must run exactly the expected image and reference, one recorded
+    STOPPED must not be running - while its object, if it exists at all,
+    already carries the new binding - and one recorded ABSENT must still be
+    absent. The API is the surface the HTTP contract lives on, so it must be
+    running; a host that retired the in-Core bot is a supported shape, a host
+    with no API is not.
     """
 
+    if "old_bot_present" not in journal:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
     flags = _surface_flags(journal)
+    present = _recorded_presence(journal)
     observed = _observed_surfaces()
     for service in SERVICES:
         state = observed[service]
         if state is None:
-            if service == "wuwaterm-api" or flags[service]:
+            if present[service]:
                 raise RuntimeUpdateError("service_not_running")
             continue
+        if not present[service]:
+            # Recorded absent, but an object is there: nothing this
+            # transaction did explains it, so the recorded shape is unproven.
+            raise RuntimeUpdateError("service_state_mismatch")
         if state[1] != expected_image_id or state[2] != expected_ref:
             raise RuntimeUpdateError("service_binding_mismatch")
         if state[0] != flags[service]:
@@ -881,6 +966,7 @@ def _journal_from_preflight(
     old_pointer: str,
     old_manifest: dict[str, Any],
     db_snapshot: dict[str, Any],
+    old_bot_present: bool,
     old_bot_running: bool,
     old_api_running: bool,
     target_manifest: dict[str, Any] | None = None,
@@ -923,6 +1009,7 @@ def _journal_from_preflight(
         "old_manifest_path": f".deployments/{old_pointer}.json",
         "old_image_ref": old_ref,
         "old_image_id": old_image_id,
+        "old_bot_present": old_bot_present,
         "old_bot_running": old_bot_running,
         "old_api_running": old_api_running,
         "rollback_image_ref": f"wuwaterm-runtime:rollback-runtime-{transaction_id}",
@@ -1014,7 +1101,9 @@ def _start_surfaces(
     A surface recorded as running is re-created on `reference`; one recorded
     as stopped is re-created STOPPED (`compose create`), so a released image
     reference still moves with the deployment without the surface serving; one
-    that was absent stays absent.
+    that was absent stays absent. Both records come from the journal, so a
+    stopped surface a failed replacement removed is re-created even though it
+    is missing right now.
     """
 
     env = _runtime_env(reference, source_commit=source_commit)
@@ -1186,7 +1275,7 @@ def _restore_old(
         _ensure_rollback_alias(journal, phase="rollback_tag")
         _start_surfaces(
             _surface_flags(journal),
-            _present_surfaces(),
+            _recorded_presence(journal),
             journal["rollback_image_ref"],
             source_commit=journal["old_pointer"],
         )
@@ -1345,6 +1434,7 @@ def _new_deployment() -> int:
         old_pointer=pointer,
         old_manifest=old_manifest,
         db_snapshot=db_snapshot,
+        old_bot_present=present["wuwaterm"],
         old_bot_running=old_bot_running,
         old_api_running=old_api_running,
         target_manifest=target_manifest,
@@ -1437,6 +1527,8 @@ def _recovery() -> int:
     journal = _load_journal()
     if journal["status"] in {"committed", "rolled_back"}:
         raise RuntimeUpdateError("no_recovery_needed")
+    if "old_bot_present" not in journal:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
     if _run_output(
         ["git", "status", "--porcelain", "--untracked-files=all"], allow_empty=True
     ):
@@ -1479,7 +1571,7 @@ def _recovery() -> int:
         _set_journal(journal, phase="recovery_restore")
         _start_surfaces(
             _surface_flags(journal),
-            _present_surfaces(),
+            _recorded_presence(journal),
             journal["rollback_image_ref"],
             source_commit=journal["old_pointer"],
         )

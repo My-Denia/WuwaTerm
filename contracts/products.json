@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-13",
+  "observed_on": "2026-11-14",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The four releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -393,7 +393,7 @@
         "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/README.md",
         "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/docs/self-hosting.md"
       ],
-      "adoption_note": "The owner deployed the public Sites site from Web main 6e1337f on 2026-11-12. Web main has since advanced to 5aabe80 with #32-#37; self-hosted release v0.2.0 (5aabe80) is published on GitHub. Public Sites redeploy of 5aabe80 remains pending console upload. This is a source deployment plus a published GitHub release; v0.2.0 is now the published Web product release."
+      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web main is that same commit, and v0.2.0 is the published Web product release."
     }
   ],
   "ci_pins": {

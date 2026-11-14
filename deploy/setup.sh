@@ -560,10 +560,14 @@ print_telegram_steps() {
     printf "setup:          --telegram-sha256 \"\$telegram_sha\" --output-dir artifacts/docker-context\n"
     step=$((step + 1))
     printf 'setup: %s. start it with the product Compose file. Poll health is opt-in\n' "$step"
-    printf 'setup:    and read from the environment when the container starts:\n'
-    printf 'setup:      WUWATERM_POLL_HEALTH=1 docker compose -f deploy/docker-compose.yml up --build -d\n'
+    printf 'setup:    and read from the environment when the container starts. `-p\n'
+    printf 'setup:    wuwaterm-telegram` pins the Compose project name so it stays\n'
+    printf 'setup:    separate from this checkout\047s `deploy` project; releases\n'
+    printf 'setup:    without an explicit container_name name the container\n'
+    printf 'setup:    `<project>-<service>-1` (until one sets `wuwaterm-telegram`):\n'
+    printf 'setup:      WUWATERM_POLL_HEALTH=1 docker compose -p wuwaterm-telegram -f deploy/docker-compose.yml up --build -d\n'
     printf 'setup:    then check the running container:\n'
-    printf 'setup:      docker compose -f deploy/docker-compose.yml exec -T wuwaterm-telegram \\\n'
+    printf 'setup:      docker compose -p wuwaterm-telegram -f deploy/docker-compose.yml exec -T wuwaterm-telegram \\\n'
     printf 'setup:          python -B -m wuwaterm_telegram.operations health\n'
 }
 
@@ -953,6 +957,35 @@ container_state() {
     docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true
 }
 
+# A release with an explicit container_name runs as `wuwaterm-telegram`; an
+# earlier release without one runs as `<project>-wuwaterm-telegram-1` (such as
+# `deploy-wuwaterm-telegram-1` or `wuwaterm-telegram-wuwaterm-telegram-1`).
+# Compose labels every one of them with the service name, and a running
+# container takes precedence over a leftover stopped one.
+standalone_telegram_state() {
+    sts_first=$(container_state wuwaterm-telegram)
+    if [ "$sts_first" = running ]; then
+        printf '%s' running
+        return 0
+    fi
+    sts_ids=$(docker ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram \
+        2>/dev/null || true)
+    for sts_id in $sts_ids; do
+        sts_state=$(container_state "$sts_id")
+        if [ "$sts_state" = running ]; then
+            printf '%s' running
+            return 0
+        fi
+        if [ -z "$sts_first" ] && [ -n "$sts_state" ]; then
+            sts_first=$sts_state
+        fi
+    done
+    if [ -n "$sts_first" ]; then
+        printf '%s' "$sts_first"
+    fi
+    return 0
+}
+
 file_mode() {
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || printf '?'
 }
@@ -1008,7 +1041,7 @@ print(
             printf 'data version: could not be read (run --check after the API is ready)\n'
         fi
     fi
-    product_state=$(container_state wuwaterm-telegram)
+    product_state=$(standalone_telegram_state)
     if [ -n "$product_state" ]; then
         printf 'telegram:     %s (standalone product)\n' "$product_state"
     else

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from scripts import component_runtime
-from test_deploy_scripts import OLD_COMMIT, _make_deploy_harness
+from test_deploy_scripts import NEW_COMMIT, OLD_COMMIT, _make_deploy_harness
 from test_full_deploy_recovery import (
     API_ROLLBACK_REF,
     BOT_ROLLBACK_REF,
@@ -249,6 +249,8 @@ print(hashlib.sha256(new.read_bytes()).hexdigest())
                    "db_stat": {"ino": info.st_ino, "size": info.st_size,
                                "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns},
                    "tool_hash": hashes["runtime"]}
+        if '"old_bot_present"' in (root / "scripts/runtime_update.py").read_text(encoding="utf-8"):
+            payload["old_bot_present"] = True
         (root / ".deployments/.runtime-transaction.json").write_text(json.dumps(payload))
     lock = root / ".deployments/.deployment.lock"
     lock.touch()
@@ -857,3 +859,114 @@ os.execv("/usr/bin/git", ["git", *args])
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
     assert not journal.exists()
     assert (root / "data/terms.db").read_bytes() == data
+
+
+@pytest.mark.parametrize("terminal_status", ["committed", "rolled_back"])
+def test_closed_legacy_runtime_journal_allows_checks_deploy_and_admission(
+    tmp_path, terminal_status
+):
+    """A pre-`old_bot_present` closed journal must not deadlock upgraded hosts."""
+    root, env, _old_hash, _new_hash = _make_deploy_harness(tmp_path)
+    _write_runtime_fake_docker(root)
+    env["FAKE_DEPLOY_ROOT"] = str(root)
+    env["PYTHONPATH"] = ""
+    paths = tuple(dict.fromkeys((
+        "deploy/vps-update.sh", "deploy/docker-compose.yml",
+        "scripts/deployment_admission.py", "scripts/deployment_manifest.py",
+        "scripts/runtime_update.py", "scripts/full_update.py",
+        "scripts/product_manifest.py", "scripts/package_recovery_source.py",
+        *component_runtime.TOOL_PATHS,
+    )))
+    for name in paths:
+        destination = root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, destination)
+    recovery_path = root / "scripts/component_recovery.py"
+    recovery_text = recovery_path.read_text(encoding="utf-8")
+    recovery_path.write_text(
+        recovery_text.replace("\nRECOVERY_EXECUTION_READY = False\n", "\nRECOVERY_EXECUTION_READY = True\n"),
+        encoding="utf-8",
+    )
+    runtime_path = root / "scripts/component_runtime.py"
+    runtime_text = runtime_path.read_text(encoding="utf-8")
+    entrypoint = 'if __name__ == "__main__":\n'
+    if "\nCAPSULE_RECOVERY_PROTOCOL = 1\n" not in runtime_text:
+        runtime_path.write_text(
+            runtime_text.replace(entrypoint, "CAPSULE_RECOVERY_PROTOCOL = 1\n\n" + entrypoint, 1),
+            encoding="utf-8",
+        )
+    old_manifest_path = root / ".deployments" / f"{OLD_COMMIT}.json"
+    old_manifest_path.chmod(0o600)
+    old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+    old_manifest["image"]["id"] = OLD_RUNTIME_IMAGE_ID
+    old_manifest["image"]["digest"] = OLD_RUNTIME_IMAGE_ID
+    old_manifest_path.write_text(json.dumps(old_manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    old_manifest_path.chmod(0o444)
+    (root / "state-api").mkdir()
+
+    db = root / "data/terms.db"
+    info = db.stat()
+    txn = OLD_COMMIT[:12] + "-99"
+    rollback_ref = f"wuwaterm-runtime:rollback-runtime-{txn}"
+    legacy_journal = {
+        "schema_version": 1, "mode": "runtime-only",
+        "status": terminal_status, "phase": terminal_status,
+        "transaction_id": txn, "source_commit": OLD_COMMIT,
+        "target_image_ref": f"wuwaterm-runtime:{OLD_COMMIT}",
+        "target_image_id": OLD_RUNTIME_IMAGE_ID,
+        "target_image_digest": OLD_RUNTIME_IMAGE_ID,
+        "target_image_revision": OLD_COMMIT,
+        "old_pointer": OLD_COMMIT,
+        "old_manifest_path": f".deployments/{OLD_COMMIT}.json",
+        "old_image_ref": "wuwaterm-runtime:old",
+        "old_image_id": OLD_RUNTIME_IMAGE_ID,
+        "old_bot_running": True, "old_api_running": True,
+        "rollback_image_ref": rollback_ref,
+        "db_sha256": hashlib.sha256(db.read_bytes()).hexdigest(),
+        "db_stat": {"ino": info.st_ino, "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns},
+        "tool_hash": "0" * 64,
+    }
+    assert "old_bot_present" not in legacy_journal
+    if terminal_status == "rolled_back":
+        (root / f"tag-{rollback_ref}").write_text(f"{OLD_RUNTIME_IMAGE_ID}\n", encoding="ascii")
+        for service in ("bot", "api"):
+            (root / f"{service}-ref").write_text(f"{rollback_ref}\n", encoding="ascii")
+    journal_path = root / ".deployments/.runtime-transaction.json"
+    journal_path.write_text(json.dumps(legacy_journal) + "\n", encoding="ascii")
+    lock_path = root / ".deployments/.deployment.lock"
+    lock_path.touch()
+
+    locked_check = r"""
+import fcntl, os, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+fd = os.open(root / '.deployments/.deployment.lock', os.O_RDWR)
+if fd != 9:
+    os.dup2(fd, 9)
+    os.close(fd)
+fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+sys.path[:0] = [str(root), str(root / 'src')]
+from scripts import deployment_admission as admission
+admission.admit_component(root, operation='adopt', code_root=root)
+check = subprocess.run(
+    [sys.executable, '-B', str(root / 'scripts/runtime_update.py'), '--check-runtime-journal'],
+    cwd=root, pass_fds=(9,), capture_output=True, text=True, check=False,
+)
+assert check.returncode == 0, check.stderr
+"""
+    admitted = subprocess.run(
+        [sys.executable, "-B", "-c", locked_check, str(root)],
+        cwd=root, env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+
+    deployed = subprocess.run(
+        ["sh", str(root / "deploy/vps-update.sh"), "--runtime-only"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert deployed.returncode == 0, deployed.stdout + deployed.stderr
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
+    updated_journal = json.loads(journal_path.read_text(encoding="ascii"))
+    assert updated_journal["status"] == "committed"
+    assert updated_journal["old_bot_present"] is True
+

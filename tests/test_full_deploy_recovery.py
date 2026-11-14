@@ -82,6 +82,16 @@ def _write_full_fake_docker(root: Path) -> None:
         "printf '%s|%s\\n' \"${WUWATERM_RUNTIME_IMAGE:-unset}\" \"$*\" "
         ">> \"$FAKE_DEPLOY_ROOT/docker.log\"\n"
         "printf 'docker %s\\n' \"$*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
+        # The deploy guard finds the standalone Telegram product by its Compose
+        # service label, so that a release without an explicit container_name
+        # (`deploy-wuwaterm-telegram-1`) still counts as serving.
+        "if [ \"${1:-}\" = ps ]; then\n"
+        "  case \"$*\" in\n"
+        "    *com.docker.compose.service=wuwaterm-telegram*)"
+        " cat \"$FAKE_DEPLOY_ROOT/telegram-label-ids\" 2>/dev/null || true ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
         "service=\n"
         "case \"$*\" in\n"
         "  *wuwaterm-telegram*) service=telegram ;;\n"

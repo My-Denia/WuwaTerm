@@ -1,6 +1,6 @@
 # WuwaTerm 产品入口
 
-WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责共享词典、翻译与审校逻辑、HTTP API、数据构建验证以及通用部署恢复工具。各产品独立维护源码和发布；[机器可读索引](../contracts/products.json)记录了截至 2026-11-13 的源码、制品和接口快照，四个仓库的正式版 tag、commit 和资产 SHA-256 都在其中。要安装新版本，请再核对各仓库的发布页与说明。
+WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责共享词典、翻译与审校逻辑、HTTP API、数据构建验证以及通用部署恢复工具。各产品独立维护源码和发布；[机器可读索引](../contracts/products.json)记录了截至 2026-11-14 的源码、制品和接口快照，四个仓库的正式版 tag、commit 和资产 SHA-256 都在其中。要安装新版本，请再核对各仓库的发布页与说明。
 
 ## 选择使用方式
 
@@ -20,7 +20,7 @@ WuwaTerm 可以按需要选择 Telegram、Windows 或 Web。核心仓库负责�
 | Core / API | `c5d9c46`，源码版本 `0.8.5` | [v0.8.5](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.8.5) 已发布（wheel `74273dac…`，sdist `66578b52…`，manifest 与 SHA256SUMS 齐全），来源 `c5d9c46`，运行时镜像 `sha256:199e36eb…` 与构建器 `sha256:9cec5a55…` 已按 `v0.8.5`、`0.8` 重新打标；交付路径对齐已退役内置 Bot 的拓扑，无 API 形状、提示词、重试策略或数据 pin 变化 | 已采用：API 0.8.5（部署源 `c5d9c46`，镜像 `sha256:3a331149…`，词库 11,987 条、含 655 条 `Term<n>_Title`；旧内置 Bot 保持停止，Telegram 由独立产品 0.2.9 承载） |
 | Telegram | `43e7cb6`，源码版本 `0.2.9` | [v0.2.9](https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.9) 已发布（wheel `a392aa4c…`，sdist、bundle、镜像与安装探针齐全），来源 `646e1e3`，pin 到 Core `v0.8.5`（wheel `74273dac…`），CI 与发布流程校验 Core 制品交接；`v0.2.8` 与更早版本仍保留 | 已采用：独立 Telegram 0.2.9 + Core 0.8.5（2026-11-13；轮询健康 ready，旧内置 Bot 保持停止） |
 | Windows | `59b8a5f`，源码版本 `0.4.2` | [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2) 已发布（zip `824b694c…`，manifest 与 SHA256SUMS 齐全），来源 `14f0c36`，修复空状态卡片行高与查词 Tab 顺序；[v0.4.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.1)（zip `4d248a0e…`）与 `v0.4.0`、`v0.3.0` 仍保留 | 150% DPI 原生与离屏 `--self-check` 已通过；人工交互视觉、多屏混合 DPI 拖窗与输入法上屏没做 |
-| Web | `5aabe80`，源码版本 `0.2.0`（已发布） | [v0.2.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0) 是最新 GitHub 发布，来源 `5aabe80`；CI 契约 pin 仍为 `31fdc14b` / `v0.1.1`。`v0.1.1` 与 `v0.1.0` 仍在发布页上。Web main `5aabe80` 含 #32–#37，当前公测 Sites 仍部署 `6e1337f` | 已部署旧源 `6e1337f`；`5aabe80` 待 owner 重新部署 |
+| Web | `5aabe80`，源码版本 `0.2.0`（已发布） | [v0.2.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0) 是最新 GitHub 发布，来源 `5aabe80`；CI 契约 pin 仍为 `31fdc14b` / `v0.1.1`。`v0.1.1` 与 `v0.1.0` 仍在发布页上。Web main `5aabe80` 含 #32–#37 | 已部署：Sites saved version 30（2026-11-13，状态 `succeeded`，源 `5aabe80` / Web `v0.2.0`；根路径 <https://wuwaterm.denia-official.chatgpt.site> 返回 HTTP 200） |
 
 四个正式版资产的 SHA-256 按发布页逐个记录在[索引](../contracts/products.json)。Web 发布包里 `archive.name` 指向归档，入口是 `bundle/start.mjs`，路径前缀记在 manifest 与 `bundle/BUILD-INFO.json`；`deploy/setup.sh` 按这份真实结构安装和检查，不再要求早期设想中实际并不存在的 `start`、`port`、`health_path` 字段（本地包若提供仍会采用）。
 

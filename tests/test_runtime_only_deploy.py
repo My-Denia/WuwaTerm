@@ -64,8 +64,20 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "printf '%s|%s\\n' \"${WUWATERM_RUNTIME_IMAGE:-unset}\" \"$*\" "
         ">> \"$FAKE_DEPLOY_ROOT/docker.log\"\n"
         "printf 'docker %s\\n' \"$*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
+        # A release without an explicit container_name runs under the Compose
+        # project prefix; the service label is what identifies it, and the
+        # lookup answers container ids one per line like `docker ps -aq`.
+        "if [ \"${1:-}\" = ps ]; then\n"
+        "  case \"$*\" in\n"
+        "    *com.docker.compose.service=wuwaterm-telegram*)"
+        " cat \"$FAKE_DEPLOY_ROOT/telegram-label-ids\" 2>/dev/null || true ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
         "service=\n"
         "case \"$*\" in\n"
+        # An auto-named product container is its own object with its own state.
+        "  *deploy-wuwaterm-telegram-1*) service=deploy-wuwaterm-telegram-1 ;;\n"
         # The standalone Telegram product is a separate container; its running
         # state decides whether the in-Core bot may run beside it.
         "  *wuwaterm-telegram*) service=telegram ;;\n"
@@ -144,6 +156,24 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "      printf done > \"$FAKE_DEPLOY_ROOT/target-image-created\"\n"
         "      ;;\n"
         "    *' up -d '*wuwaterm*)\n"
+        # A stopped bot object that vanishes while the replacement starts is
+        # the state a rollback has to repair from its own record. The opposite
+        # injection puts an object back where the record says there is none.
+        "      case \"$*\" in *wuwaterm-api*)\n"
+        "        if [ \"${RUNTIME_FAKE_BOT_VANISHES_ON_API_UP:-0}\" = 1 ] \\\n"
+        "          && [ ! -f \"$FAKE_DEPLOY_ROOT/bot-vanished\" ]; then\n"
+        "          printf gone > \"$FAKE_DEPLOY_ROOT/bot-vanished\"\n"
+        "          rm -f \"$FAKE_DEPLOY_ROOT/bot-present\"\n"
+        "        fi\n"
+        "        if [ \"${RUNTIME_FAKE_BOT_APPEARS_ON_API_UP:-0}\" = 1 ] \\\n"
+        "          && [ ! -f \"$FAKE_DEPLOY_ROOT/bot-appeared\" ]; then\n"
+        "          printf present > \"$FAKE_DEPLOY_ROOT/bot-appeared\"\n"
+        "          printf '1\\n' > \"$FAKE_DEPLOY_ROOT/bot-present\"\n"
+        f"          printf '{NEW_RUNTIME_IMAGE_ID}\\n' > \"$FAKE_DEPLOY_ROOT/bot-image\"\n"
+        "          printf '%s\\n' \"${WUWATERM_RUNTIME_IMAGE:-unset}\" > \"$FAKE_DEPLOY_ROOT/bot-ref\"\n"
+        "          printf 'false\\n' > \"$FAKE_DEPLOY_ROOT/bot-running\"\n"
+        "        fi ;;\n"
+        "      esac\n"
         "      if [ \"${RUNTIME_FAKE_BLOCK_PHASE:-}\" = start ]; then\n"
         "        if [ -n \"${RUNTIME_FAKE_CHILD_PID_FILE:-}\" ]; then printf '%s' \"$$\" > \"$RUNTIME_FAKE_CHILD_PID_FILE\"; fi\n"
         "        printf ready > \"${RUNTIME_FAKE_BLOCK_FILE:?}\"\n"
@@ -186,6 +216,9 @@ def _write_runtime_fake_docker(root: Path) -> None:
         # without starting it, unlike `up`.
         "    *' create '*wuwaterm*)\n"
         "      image=\"${WUWATERM_RUNTIME_IMAGE:-unset}\"\n"
+        "      case \"$image\" in *rollback*)\n"
+        "        if [ \"${RUNTIME_FAKE_ROLLBACK_CREATE_FAIL:-0}\" = 1 ]; then exit 46; fi ;;\n"
+        "      esac\n"
         "      case \"$image\" in\n"
         "        *rollback*) image_id=\"$(cat \"$FAKE_DEPLOY_ROOT/tag-$image\")\" ;;\n"
         f"        *) image_id='{NEW_RUNTIME_IMAGE_ID}' ;;\n"
@@ -1367,3 +1400,217 @@ def test_runtime_only_refuses_when_the_api_is_not_running(runtime_harness):
     assert result.returncode == 1
     assert "service_not_running" in result.stderr
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
+
+
+def test_runtime_only_refuses_a_poller_named_after_its_compose_project(
+    runtime_harness,
+):
+    """`docker compose up` names that product container after its project.
+
+    Telegram v0.2.9 and earlier ship without an explicit container_name, so the
+    container runs as `deploy-wuwaterm-telegram-1` carrying the Compose service
+    label. Asking only for `wuwaterm-telegram` found nothing there and let the
+    in-Core bot start beside a working poller.
+    """
+    root, env, old_hash, _new_hash = runtime_harness
+    (root / "deploy-wuwaterm-telegram-1-present").write_text("1\n", encoding="ascii")
+    (root / "deploy-wuwaterm-telegram-1-running").write_text(
+        "true\n", encoding="ascii"
+    )
+    (root / "telegram-label-ids").write_text(
+        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
+    )
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert "conflicting_telegram_poller" in result.stderr
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    assert [
+        command
+        for command in commands
+        if command.startswith(
+            "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram"
+        )
+    ], commands
+    assert not [c for c in commands if " stop " in c or " up -d " in c or c.startswith("rm ")]
+    assert not (root / ".deployments" / ".runtime-transaction.json").exists()
+
+
+# --- a stopped surface that disappears during the replacement ---------------
+#
+# The journal records which surfaces existed before the transaction, so a
+# rollback restores that shape even when the host no longer shows it. Reading
+# the live host instead certified `rolled_back` on a bot it had lost.
+
+
+def _stopped_bot_that_vanishes(root: Path, env: dict[str, str]) -> None:
+    """A present-but-stopped bot whose object disappears mid-transaction."""
+
+    (root / "bot-running").write_text("false\n", encoding="ascii")
+    env["RUNTIME_FAKE_BOT_VANISHES_ON_API_UP"] = "1"
+
+
+def test_runtime_only_rollback_recreates_a_stopped_bot_that_disappeared(
+    runtime_harness,
+):
+    root, env, old_hash, _new_hash = runtime_harness
+    _stopped_bot_that_vanishes(root, env)
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert "service_not_running" in result.stderr
+    # The object really disappeared, and the rollback put it back: the recorded
+    # existence, not the observed one, decided that.
+    assert (root / "bot-vanished").exists()
+    assert (root / "bot-present").exists()
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_RUNTIME_IMAGE_ID
+    docker_log = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    assert [
+        line
+        for line in docker_log
+        if " create " in line
+        and "rollback-runtime-" in line
+        and line.split("|", 1)[1].endswith(" wuwaterm")
+    ], docker_log
+    journal = json.loads(
+        (root / ".deployments" / ".runtime-transaction.json").read_text(
+            encoding="ascii"
+        )
+    )
+    assert journal["status"] == "rolled_back"
+    assert journal["old_bot_present"] is True
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+
+
+def test_runtime_only_rollback_refuses_to_certify_a_lost_stopped_bot(
+    runtime_harness,
+):
+    """A bot the rollback cannot rebuild keeps the journal unresolved."""
+    root, env, _old_hash, _new_hash = runtime_harness
+    _stopped_bot_that_vanishes(root, env)
+    env["RUNTIME_FAKE_ROLLBACK_CREATE_FAIL"] = "1"
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert (root / "bot-vanished").exists()
+    assert not (root / "bot-present").exists()
+    journal = json.loads(
+        (root / ".deployments" / ".runtime-transaction.json").read_text(
+            encoding="ascii"
+        )
+    )
+    assert journal["status"] == "unresolved"
+    assert journal["old_bot_present"] is True
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+
+
+def test_runtime_only_recovery_recreates_a_stopped_bot_that_disappeared(
+    runtime_harness,
+):
+    root, env, _old_hash, _new_hash = runtime_harness
+    _stopped_bot_that_vanishes(root, env)
+    env["RUNTIME_FAKE_ROLLBACK_CREATE_FAIL"] = "1"
+    assert _run_runtime(root, env).returncode == 1
+    assert not (root / "bot-present").exists()
+
+    recovery_env = dict(env)
+    recovery_env.pop("RUNTIME_FAKE_ROLLBACK_CREATE_FAIL")
+    result = _run_runtime(root, recovery_env, recover=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (root / "bot-present").exists()
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_RUNTIME_IMAGE_ID
+    journal = json.loads(
+        (root / ".deployments" / ".runtime-transaction.json").read_text(
+            encoding="ascii"
+        )
+    )
+    assert journal["status"] == "rolled_back"
+
+
+def test_runtime_only_refuses_a_bot_object_that_appeared_where_none_existed(
+    runtime_harness,
+):
+    """The third shape: a bot the journal recorded as absent stays absent.
+
+    An object nobody announced is not something this transaction created, so
+    the rollback keeps the journal unresolved instead of certifying it.
+    """
+    root, env, _old_hash, _new_hash = runtime_harness
+    (root / "bot-present").unlink()
+    env["RUNTIME_FAKE_BOT_APPEARS_ON_API_UP"] = "1"
+
+    result = _run_runtime(root, env)
+
+    assert result.returncode == 1
+    assert "service_state_mismatch" in result.stderr
+    assert (root / "bot-appeared").exists()
+    journal = json.loads(
+        (root / ".deployments" / ".runtime-transaction.json").read_text(
+            encoding="ascii"
+        )
+    )
+    assert journal["status"] == "unresolved"
+    assert journal["old_bot_present"] is False
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+
+
+def test_legacy_open_journal_refuses_current_recovery_as_tool_mismatch(
+    runtime_harness,
+):
+    """An open pre-`old_bot_present` journal demands historical-source recovery."""
+    root, env, _old_hash, _new_hash = runtime_harness
+    db = root / "data" / "terms.db"
+    info = db.stat()
+    txn = f"{NEW_COMMIT[:12]}-77"
+    journal_path = root / ".deployments" / ".runtime-transaction.json"
+    legacy = {
+        "schema_version": 1,
+        "mode": "runtime-only",
+        "status": "unresolved",
+        "phase": "unresolved",
+        "transaction_id": txn,
+        "source_commit": NEW_COMMIT,
+        "target_image_ref": f"wuwaterm-runtime:{NEW_COMMIT}",
+        "target_image_id": NEW_RUNTIME_IMAGE_ID,
+        "target_image_digest": NEW_RUNTIME_IMAGE_ID,
+        "target_image_revision": NEW_COMMIT,
+        "old_pointer": OLD_COMMIT,
+        "old_manifest_path": f".deployments/{OLD_COMMIT}.json",
+        "old_image_ref": "wuwaterm-runtime:old",
+        "old_image_id": OLD_RUNTIME_IMAGE_ID,
+        "old_bot_running": True,
+        "old_api_running": True,
+        "rollback_image_ref": f"wuwaterm-runtime:rollback-runtime-{txn}",
+        "db_sha256": hashlib.sha256(db.read_bytes()).hexdigest(),
+        "db_stat": {
+            "ino": info.st_ino,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "ctime_ns": info.st_ctime_ns,
+        },
+        "tool_hash": "0" * 64,
+    }
+    journal_path.write_text(json.dumps(legacy) + "\n", encoding="ascii")
+
+    deploy_attempt = _run_runtime(root, env)
+    assert deploy_attempt.returncode == 1
+    assert "recovery_required" in deploy_attempt.stderr
+
+    recovery_attempt = _run_runtime(root, env, recover=True)
+    assert recovery_attempt.returncode == 1
+    assert "recovery_tool_mismatch" in recovery_attempt.stderr
+    assert not (root / "docker.log").exists()
+

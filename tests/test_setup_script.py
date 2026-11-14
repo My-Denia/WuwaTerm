@@ -28,6 +28,9 @@ case "$*" in
   *"build-db"*) : > "$STUB_ROOT/data/terms.candidate.db" ;;
   "inspect -f {{.State.Status}} wuwaterm-bot") printf '%s\\n' "${STUB_BOT_STATE:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_STATE:-}" ;;
+  "inspect -f {{.State.Status}} deploy-wuwaterm-telegram-1") printf '%s\\n' "${STUB_AUTO_PRODUCT_STATE:-}" ;;
+  "inspect -f {{.State.Status}} wuwaterm-telegram-wuwaterm-telegram-1") printf '%s\\n' "${STUB_PROJECT_PRODUCT_STATE:-}" ;;
+  "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_LABEL_IDS:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-web") printf '%s\\n' "${STUB_WEB_STATE:-running}" ;;
   "inspect -f {{.State.Status}} wuwaterm-api") printf '%s\\n' "running" ;;
   *"com.docker.compose.project"*) printf '%s\\n' "${STUB_COMPOSE_PROJECT-wuwaterm}" ;;
@@ -289,6 +292,30 @@ def test_with_telegram_routes_to_the_standalone_product_and_starts_no_bot(instal
     assert "up -d --no-build wuwaterm-api" in log
     # The inline bot is neither built, pulled nor started.
     assert not re.search(r"(build|pull|up -d --no-build) wuwaterm$", log, re.MULTILINE), log
+
+
+def test_telegram_steps_pin_the_compose_project_name(install_root):
+    """The printed commands pin the Compose project name.
+
+    Passing `-p wuwaterm-telegram` keeps releases without a top-level Compose
+    `name:` off this checkout's `deploy` project; without an explicit
+    `container_name:`, Compose names the container `<project>-<service>-1`.
+    """
+    write_env(install_root)
+
+    result = run_setup(install_root, "--with-telegram", "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    assert "`<project>-<service>-1`" in result.stdout, result.stdout
+    assert "so the container is `wuwaterm-telegram`" not in result.stdout
+    assert (
+        "WUWATERM_POLL_HEALTH=1 docker compose -p wuwaterm-telegram "
+        "-f deploy/docker-compose.yml up --build -d" in result.stdout
+    ), result.stdout
+    assert (
+        "docker compose -p wuwaterm-telegram -f deploy/docker-compose.yml "
+        "exec -T wuwaterm-telegram" in result.stdout
+    ), result.stdout
 
 
 def test_with_legacy_bot_keeps_the_deprecated_inline_bot_explicit(install_root):
@@ -631,6 +658,77 @@ def test_status_tells_the_two_telegram_installations_apart(install_root):
     assert result.returncode == 0
     assert "telegram:     running (standalone product)" in result.stdout
     assert "legacy bot:   exited (deprecated inline bot)" in result.stdout
+
+
+def test_status_finds_a_product_container_named_after_its_compose_project(
+    install_root,
+):
+    """A release without an explicit container_name still reports as installed.
+
+    `docker compose up` names that container after its project
+    (`deploy-wuwaterm-telegram-1`), so asking only for `wuwaterm-telegram`
+    reported a running product as not installed. The Compose service label is
+    what identifies it.
+    """
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--status",
+        env={
+            "STUB_PRODUCT_LABEL_IDS": "deploy-wuwaterm-telegram-1",
+            "STUB_AUTO_PRODUCT_STATE": "running",
+        },
+    )
+
+    assert result.returncode == 0
+    assert "telegram:     running (standalone product)" in result.stdout
+    assert "legacy bot:   not installed" in result.stdout
+    assert (
+        "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram"
+        in docker_log(install_root)
+    )
+    for mutation in ("up -d", " build", "run --rm", "rm -f", " pull"):
+        assert mutation not in docker_log(install_root)
+
+
+def test_status_prefers_a_running_product_container_over_an_exited_one(
+    install_root,
+):
+    """An earlier exited container must not mask a running labelled container."""
+    write_env(install_root)
+
+    result = run_setup(
+        install_root,
+        "--status",
+        env={
+            "STUB_PRODUCT_LABEL_IDS": (
+                "deploy-wuwaterm-telegram-1\n"
+                "wuwaterm-telegram-wuwaterm-telegram-1"
+            ),
+            "STUB_AUTO_PRODUCT_STATE": "exited",
+            "STUB_PROJECT_PRODUCT_STATE": "running",
+        },
+    )
+
+    assert result.returncode == 0
+    assert "telegram:     running (standalone product)" in result.stdout
+
+    stopped = run_setup(
+        install_root,
+        "--status",
+        env={
+            "STUB_PRODUCT_LABEL_IDS": (
+                "deploy-wuwaterm-telegram-1\n"
+                "wuwaterm-telegram-wuwaterm-telegram-1"
+            ),
+            "STUB_AUTO_PRODUCT_STATE": "exited",
+            "STUB_PROJECT_PRODUCT_STATE": "created",
+        },
+    )
+
+    assert stopped.returncode == 0
+    assert "telegram:     exited (standalone product)" in stopped.stdout
 
 
 def test_check_fails_when_the_api_is_not_ready(install_root):
