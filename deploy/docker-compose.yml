@@ -1,3 +1,6 @@
+# Bind sources and the env file default to the directory above this one. A
+# release checkout <base>/releases/rN keeps its state in <base>, which
+# deploy/vps-update.sh and the tools it runs select with WUWATERM_STATE_ROOT.
 services:
   # The inline bot this repository still carries. It is DEPRECATED: the
   # supported Telegram surface is the standalone WuwaTerm-Telegram product,
@@ -22,7 +25,7 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - ../.env
+      - ${WUWATERM_STATE_ROOT:-..}/.env
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db
       WUWATERM_STATE_DIR: /app/state
@@ -39,8 +42,8 @@ services:
       WUWATERM_API_WEB_DEVICE_TOKEN: ""
       WUWATERM_API_WEB_EDGE_SECRET: ""
     volumes:
-      - ../data:/app/data:ro
-      - ../state:/app/state
+      - ${WUWATERM_STATE_ROOT:-..}/data:/app/data:ro
+      - ${WUWATERM_STATE_ROOT:-..}/state:/app/state
     command: ["bot"]
 
   # Same image, same read-only terminology database, separate process and
@@ -69,7 +72,7 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - ../.env
+      - ${WUWATERM_STATE_ROOT:-..}/.env
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db
       WUWATERM_API_STATE_DIR: /app/state-api
@@ -94,8 +97,8 @@ services:
       # write a store the serving container never sees.
       WUWATERM_API_DEVICE_DB_PATH: ""
     volumes:
-      - ../data:/app/data:ro
-      - ../state-api:/app/state-api
+      - ${WUWATERM_STATE_ROOT:-..}/data:/app/data:ro
+      - ${WUWATERM_STATE_ROOT:-..}/state-api:/app/state-api
     command: ["api"]
 
   wuwaterm-builder:
@@ -117,5 +120,5 @@ services:
       WUWATERM_DATA_DIR: /app/data/wutheringdata
       WUWATERM_SOURCE_PROFILE: ${WUWATERM_SOURCE_PROFILE:-arikatsu}
     volumes:
-      - ../data:/app/data
+      - ${WUWATERM_STATE_ROOT:-..}/data:/app/data
     command: ["verify-db"]

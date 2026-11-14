@@ -21,16 +21,79 @@
 ## VPS Docker Compose
 
 The VPS target uses Docker Compose because the current system Python there is
-older than the project target. `/opt/wuwaterm/current` must be a clean Git
-checkout with an `origin` remote and a `main` ref; the updater fetches and
-requires `HEAD == origin/main`, so an exported source copy without `.git` is
-intentionally not deployable. The updater's own host-side tools still need
+older than the project target. The code lives in release checkouts (see
+[Release layout](#release-layout)); each is a clean Git checkout with an
+`origin` remote, and the updater fetches and requires `HEAD == origin/main`, so
+an exported source copy without `.git` is intentionally not deployable. The
+updater's own host-side tools still need
 Python 3.11 or newer: `deploy/vps-update.sh` runs them, recovery included,
 under `WUWATERM_DEPLOY_PYTHON` when that is set, otherwise under the first of
 `python3`, `python3.13`, `python3.12` and `python3.11` on `PATH` that is new
-enough, and refuses with a clear message when there is none. Create `/opt/wuwaterm/current/.env` from
-`.env.example` or `deploy/env.example`, and set it to mode `600`. These two
-template files are intentionally identical and tested for drift.
+enough, and refuses with a clear message when there is none. Create
+`/opt/wuwaterm/.env` from `.env.example` or `deploy/env.example`, and set it to
+mode `600`. These two template files are intentionally identical and tested
+for drift.
+
+### Release layout
+
+```text
+/opt/wuwaterm/
+  releases/rN        one checkout per release; N counts up and is never reused
+  current            symlink to releases/rN, the release that last passed its health check
+  data/              terms.db, deployment-backups/, candidates/
+  state/ state-api/  bot state; API device store
+  .env  .deployments/  .deploy_commit
+```
+
+Everything that changes at runtime lives next to `releases/`, never inside a
+release, so a release can be deleted whole. Compose reads its bind sources and
+`.env` from `${WUWATERM_STATE_ROOT:-..}`: the updater exports
+`WUWATERM_STATE_ROOT=/opt/wuwaterm`, and a manual `docker compose` command run
+from `/opt/wuwaterm/current` must export it too (the commands below do).
+Without it Compose looks for `data/` inside the release and would create an
+empty one. A release run without `/opt/wuwaterm/.env` beside `releases/`
+refuses before it writes anything.
+
+`sh /opt/wuwaterm/current/deploy/vps-update.sh` deploys what `origin/main` is
+now. When the release it runs from is not at that commit, the updater clones
+it into `releases/rN+1` (N is the highest existing number; the clone is
+independent, so releases never depend on each other), records the commit in
+`.release-commit`, and continues from the new release's own copy of the
+updater, holding the same deployment lock. The `current` link is switched, by a
+rename, only after the health check passed and the pointer and manifest were
+read back: a failed update leaves `current` on the release that is serving.
+Each release also records the release it replaced in `.release-previous`.
+Only then does the updater prune: it keeps `current` and that previous release
+and removes every other `rN` and its own unfinished `.incoming-rN` clones. It
+never removes a directory that holds real `data`, `state`, `state-api`, `.env`
+or `.deployments`, and it does not touch images. A failed update keeps the
+release it built, because an unresolved transaction journal binds a fingerprint
+of the updater's files and can only be recovered by byte-identical copies, which
+that release always has:
+`sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full` (the failure
+message prints the exact command). The next update that passes removes it.
+
+A host that still runs the old in-place checkout (`/opt/wuwaterm/current` as a
+directory holding its own `data/`, `.env` and `.deployments/`) moves with
+`deploy/migrate-layout.sh`:
+
+```bash
+sh deploy/migrate-layout.sh --dry-run /opt/wuwaterm   # prints every step and its undo, writes nothing
+sh deploy/migrate-layout.sh /opt/wuwaterm
+```
+
+It refuses unless the deployment lock is free and no runtime or full
+transaction journal is open, then renames the checkout to `releases/r1`,
+renames the shared state and `.env*` files up to `/opt/wuwaterm`, and creates
+`current`. Only renames inside one filesystem happen; nothing is copied and no
+container is touched. Until the containers are recreated, links inside
+`releases/r1` keep their old mount paths resolving (the first update that
+passes removes them), and `telegram/data` is repointed at
+`/opt/wuwaterm/data`. Running it again changes nothing. The first
+update afterwards must be a full one (it recreates bot and API, a pause of a
+few seconds): `--runtime-only` refuses while a container still mounts the old
+paths. Source-capsule recovery with `scripts/legacy_recovery.py` expects a
+checkout that holds its own state, so it does not apply to a release.
 
 Both serving services read that one file through Compose `env_file`; the
 builder has no `env_file` at all, and `.env` is ignored and excluded from the
@@ -79,6 +142,7 @@ Prepare and verify a candidate without changing the serving database:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
@@ -94,6 +158,7 @@ owner-gated:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
@@ -143,6 +208,7 @@ read it back from that container rather than assuming the default:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
 
@@ -173,6 +239,7 @@ the other source for it) and forbid building:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
@@ -317,6 +384,7 @@ like a broken runbook. Resolve the reference exactly as the recreate above does
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
@@ -390,6 +458,7 @@ collector that captures only stdout will not:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
 ```
 
@@ -614,8 +683,10 @@ terminology database already matches the reviewed source's schema and data pin:
 sh deploy/vps-update.sh --runtime-only
 ```
 
-Run this from the normal deployment checkout after reviewing and merging the
-change. The updater requires a clean checkout at freshly fetched `origin/main`.
+Run this from `/opt/wuwaterm/current` after reviewing and merging the change.
+The updater requires the release it deploys to be clean and at freshly fetched
+`origin/main`, and builds that release first when `current` is behind (see
+[Release layout](#release-layout)).
 It moves every serving container it finds to one immutable image, so the
 existing manifest's single source/image identity continues to describe the bot
 and API. Only the surfaces that were serving are stopped and restarted; a
@@ -671,11 +742,12 @@ Component adoption, updates, builds and recovery are not yet enabled. Do not
 delete a record or run an older raw updater to bypass this boundary.
 
 Manifest CLI write commands require the same inherited FD 9 and confine their
-write paths to the script's physical deployment checkout. Its `verify` and
+write paths to the physical deployment root: the directory above `releases/`.
+Its `verify` and
 `verify-pointer` commands are lock-free and read-only; `verify` refuses a
 SQLite database with journal sidecars rather than creating or changing them.
 
-When an orchestration wrapper advances the checkout, it must acquire that same
+When an orchestration wrapper prepares the source, it must acquire that same
 root's `.deployments/.deployment.lock` **before** admission, fetch or fast-forward,
 and retain it through the updater's exit. Pass the locked open-file description
 as FD 9 to each source-mutating child and the updater. The supported shell entry
@@ -683,7 +755,7 @@ validates an inherited FD 9 against the canonical root, regular-file type and
 device/inode, preserves it without reopening, and still performs nonblocking
 `flock`. Foreign or replaced descriptors are refused. With no inherited FD 9,
 the updater opens and acquires its own lock as usual. Do not release the wrapper's
-lock between checkout advancement and activation, or use a flag to skip locking.
+lock between source preparation and activation, or use a flag to skip locking.
 
 After an interrupted runtime-only transaction, use the explicit recovery entry:
 
@@ -694,7 +766,8 @@ sh deploy/vps-update.sh --recover-runtime
 Recovery validates the saved transaction, trusted local tool/Compose binding,
 old manifest and images, and unchanged database. It can handle stopped or
 partially switched containers; it does not require network access or the latest
-remote `main`. Keep the trusted deployment checkout and recovery images intact.
+remote `main`. Keep the trusted release checkout that wrote the journal, and
+the recovery images, intact; run recovery from that release.
 Normal deployment refuses an unresolved transaction until recovery succeeds.
 Uncatchable termination or host power loss is not an atomic Docker operation:
 the durable record makes the unfinished transition explicit and recoverable.
@@ -787,18 +860,18 @@ so it needs the same stop-or-online-backup treatment as `state-api/devices.db`.
 The backup, restore and cross-host migration procedure that covers all four is
 in [Backup And Restore](self-hosting.md#backup-and-restore).
 
-For a normal live upgrade, run `deploy/vps-update.sh` from the deploy root:
+For a normal live upgrade, run `deploy/vps-update.sh` from the current release:
 
 ```bash
-cd /opt/wuwaterm/current
-WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
+sh /opt/wuwaterm/current/deploy/vps-update.sh
 ```
 
-`WUWATERM_DEPLOY_ROOT` defaults to `/opt/wuwaterm/current`. Before any stop the
-updater:
+`WUWATERM_DEPLOY_ROOT` names the release to run from and defaults to
+`/opt/wuwaterm/current`. Before any stop the updater:
 
-1. fetches `origin/main`, requires clean `HEAD == origin/main`, and records the
-   full source commit;
+1. fetches `origin/main`, builds the next release when `current` is behind it
+   (see [Release layout](#release-layout)), requires that release to be clean
+   at `HEAD == origin/main`, and records the full source commit;
 2. rebuilds the mutable local builder image from that exact clean checkout,
    then proves the builder container has none of the runtime secret variables;
 3. refreshes source data, builds a unique candidate, and runs the strong DB
@@ -811,7 +884,8 @@ rollback, stops the runtime, promotes the candidate, validates/migrates state,
 starts the exact validated image, and runs `scripts/deploy_smoke.py` with
 diagnostic message sending explicitly disabled. Only after smoke and running
 image-ID checks pass does it create and read back
-`.deployments/<source-commit>.json`, then atomically publish `.deploy_commit`.
+`.deployments/<source-commit>.json`, then atomically publish `.deploy_commit`;
+`current` is switched and old releases are pruned after that.
 The manifest contains source commit, image ref/ID/digest/revision, DB SHA-256,
 DB source profile/commit/game/resource/changelist, deployment UTC, and backup
 path. It is mode read-only and never overwritten with different content.
@@ -852,7 +926,9 @@ sh deploy/vps-update.sh            # refused: a transaction journal requires rec
 sh deploy/vps-update.sh --runtime-only   # refused likewise
 ```
 
-The explicit recovery entry classifies the host by what is actually observed
+Recovery runs from the release that wrote the journal, which is not
+necessarily `current` (the failure message names it). The explicit
+recovery entry classifies the host by what is actually observed
 — pointer, live database hash, manifest, and both containers' image
 ids/references/running states — never by the journal's phase marker alone:
 
@@ -928,8 +1004,9 @@ perform the same validated, atomic one-time migration during startup:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml stop wuwaterm
-mkdir -p state
+mkdir -p "$WUWATERM_STATE_ROOT/state"
 docker compose -f deploy/docker-compose.yml up -d --build wuwaterm
 ```
 
@@ -966,13 +1043,14 @@ After an owner-authorized deployment, read the pointer and its immutable
 manifest together:
 
 ```bash
-cd /opt/wuwaterm/current
+cd /opt/wuwaterm
+export WUWATERM_STATE_ROOT=/opt/wuwaterm
 cat .deploy_commit
 python3 -m json.tool ".deployments/$(cat .deploy_commit).json"
 docker inspect --format '{{.Image}}' wuwaterm-bot
 docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
-docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api \
+docker compose -f current/deploy/docker-compose.yml exec -T wuwaterm-api \
   python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8788'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
 ```
 

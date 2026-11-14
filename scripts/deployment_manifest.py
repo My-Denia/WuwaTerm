@@ -13,14 +13,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(CODE_ROOT))
+sys.path.insert(0, str(CODE_ROOT / "src"))
 
 from scripts import deployment_admission  # noqa: E402
 from wuwaterm.constants import get_source_profile  # noqa: E402
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
+
+# Where data/, .deployments/ and .deploy_commit live: the checkout itself, or
+# the base directory above `releases/rN`.
+ROOT = deployment_admission.state_root(CODE_ROOT)
 
 
 MANIFEST_SCHEMA_VERSION = 1
