@@ -26,7 +26,7 @@ from .constants import (
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
 )
-from .english_plural import plural_forms
+from .english_plural import number_variants, plural_forms
 from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
@@ -51,6 +51,11 @@ VERDICT_NOT_EVALUATED = "not_evaluated"
 _SURROGATE_MIN = "\ud800"
 _SURROGATE_MAX = "\udfff"
 _SENTENCE_END = re.compile(r"[。．.！？!?\n]")
+
+# Categories whose English form is a proper name. A translation spells such a
+# name in its plural or not at all; accepting a reversed singular would make the
+# name answer to an unrelated word (Mars / Mar, Wishes / Wish).
+_PLURAL_ONLY_CATEGORIES = frozenset({"resonator", "speaker"})
 
 
 class ReviewRequestError(ValueError):
@@ -516,6 +521,12 @@ def _collect_mentions(
             entries = surfaces[surface]
             if not any(entry.en == surface for entry in entries):
                 continue
+            # Sentence locking admits the same bounded plural through
+            # plural_forms and nothing else, so review reads exactly the
+            # spellings the translator was told about. Reversing a plural here
+            # would invent mentions the lock set never had ("Mar" for the
+            # speaker "Mars", "Message" for "Messages") and spend findings on
+            # text the translator never referenced.
             for inflected in plural_forms(surface):
                 start = source.find(inflected)
                 while start != -1:
@@ -1059,13 +1070,32 @@ def _judge_mention_v2(
     }
 
     # direction == "en": the target may spell an official English form as its
-    # bounded plural ("Resonators", "Echoes", "Type-S Restoratives"), and the
-    # span then covers the whole inflected word. A variant that is itself
-    # another candidate's exact form stays exact, so an ambiguous dictionary
-    # keeps its existing exact-form verdicts.
+    # bounded singular/plural variant ("Resonators", "Waveworn Phenomenon",
+    # "Main Quest"), and the span then covers the whole inflected word. A
+    # variant that is itself another candidate's exact form stays exact, so an
+    # ambiguous dictionary keeps its existing exact-form verdicts.
+    #
+    # Names take the plural-only rule: reversing a name would manufacture a
+    # different proper noun, so the speaker "Mars" must never accept the month
+    # "Mar" and "Wishes" must never accept "Wish". Every other category also
+    # accepts the singular, because a Chinese term is just as often translated
+    # in the singular (海蚀 -> "Waveworn Phenomenon").
+    name_forms = {
+        _official_form(candidate, direction)
+        for candidate in candidates
+        if candidate.category in _PLURAL_ONLY_CATEGORIES
+    }
     plural_variants = {
         form: (
-            tuple(variant for variant in plural_forms(form) if variant not in forms)
+            tuple(
+                variant
+                for variant in (
+                    plural_forms(form)
+                    if form in name_forms
+                    else number_variants(form)
+                )
+                if variant not in forms
+            )
             if direction == "en"
             else ()
         )

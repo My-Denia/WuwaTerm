@@ -68,6 +68,19 @@ neither referenced to the model nor reported by review. The everyday-character
 set joins the compound supplement in the MATCHER_REVISION payload; the lexicon
 slice is unchanged, and stored resolution contexts carrying v4 go stale by the
 existing freshness rule.
+
+wuwaterm-cjk-matcher-v6 lets a zh->en target answer with the singular of a
+plural dictionary entry (海蚀 -> "Waveworn Phenomenon", 潮汐任务 -> "Main Quest")
+in every category except resonator and speaker names, which keep the plural only
+so the speaker Mars never answers to the month Mar. number_variants() strips
+only a suffix that cannot belong to the stem, so Prizes becomes Prize and Toes
+becomes Toe instead of Priz and To. Source admission is unchanged at the
+sentence lock rule (one orthodox trailing s/es): review reads exactly the
+spellings sentence.py references, and a reversed plural there would invent
+mentions the translator never saw (Mar for Mars, Message for Messages). The
+lexicon slice, the CJK boundary policy and the everyday-character set are
+unchanged; resolution contexts carrying v5 go stale by the existing freshness
+rule.
 """
 
 from __future__ import annotations
@@ -66512,7 +66525,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v5", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        ["wuwaterm-cjk-matcher-v6", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

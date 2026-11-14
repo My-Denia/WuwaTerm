@@ -21,9 +21,12 @@ from wuwaterm.review import (
     VERDICT_NOT_EVALUATED,
     VERDICT_VERIFIED,
     ReviewRequestError,
+    _collect_mentions,
     _sentence_ranges,
     _sentence_ranges_v2,
+    _surface_index,
 )
+from wuwaterm.sentence import exact_lockable_sources, select_term_spans
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN = {
@@ -1168,6 +1171,88 @@ def test_review_v2_english_plural_source_mention_is_verified(tmp_path):
     assert _finding_for(resolved, "Type-S Restoratives").verdict == (
         VERDICT_NOT_EVALUATED
     )
+
+
+def test_review_v2_plural_dictionary_entries_accept_singular_target(
+    tmp_path,
+):
+    # A Chinese source term is just as often translated in the singular, so a
+    # dictionary entry stored in the plural also answers with its singular.
+    service = _plural_service(
+        tmp_path,
+        TermRecord("core_term", "fixture", "waveworn", "waveworn", "海蚀", "Waveworn Phenomena"),
+        TermRecord("core_term", "fixture", "main_quest", "main_quest", "潮汐任务", "Main Quests"),
+        TermRecord("core_term", "fixture", "companion", "companion", "伴星任务", "Companion Stories"),
+    )
+    report = review_pair(
+        service,
+        "完成潮汐任务与伴星任务，调查海蚀。",
+        "Complete the Main Quest and Companion Story to investigate the Waveworn Phenomenon.",
+        "en",
+        review_version=RULE_VERSION_V2,
+    )
+    assert {
+        (item.source_span.text, item.verdict, item.target_span.text)
+        for item in report.findings
+    } == {
+        ("潮汐任务", VERDICT_VERIFIED, "Main Quest"),
+        ("伴星任务", VERDICT_VERIFIED, "Companion Story"),
+        ("海蚀", VERDICT_VERIFIED, "Waveworn Phenomenon"),
+    }
+
+
+def test_review_v2_english_source_mentions_are_the_sentence_lock_set(tmp_path):
+    # The en->zh source is read with exactly the spellings sentence.py locks: a
+    # forward plural only. Reversing a plural here invented mentions the
+    # translator never saw, so review spent findings on untouched text.
+    service = _plural_service(
+        tmp_path,
+        TermRecord("speaker", "fixture", "mars", "mars", "玛尔斯", "Mars"),
+        TermRecord("item", "fixture", "messages", "messages", "讯息", "Messages"),
+    )
+    source = (
+        "Mars briefed the Resonators, then read every Message on the Mar 15 board."
+    )
+    entries = service.entries()
+    locked = select_term_spans(
+        source,
+        exact_lockable_sources(entries),
+        source,
+        0,
+        allow_plural_inflection=True,
+    )
+    mentioned = _collect_mentions(
+        source, _surface_index(entries), allow_plural_inflection=True
+    )
+    # Same bounds. The lock span carries the matched text because restore
+    # replaces the inflected word whole, while the review mention keeps the
+    # dictionary surface so its candidates are the singular entry.
+    assert [(span.start, span.end) for span in mentioned] == [
+        (span.start, span.end) for span in locked
+    ]
+    assert [span.source for span in mentioned] == ["Mars", "Resonator"]
+    assert [span.source for span in locked] == ["Mars", "Resonators"]
+    # The forward plural the lock set admits is a mention; the reversed
+    # singulars "Mar" and "Message" the lock set never produces are not.
+    assert {span.source for span in mentioned} == {"Mars", "Resonator"}
+    assert mentioned[-1].end - mentioned[-1].start == len("Resonators")
+
+    report = review_pair(
+        service,
+        source,
+        "玛尔斯向共鸣者做了简述，然后查看了3月15日板上的讯息。",
+        "zh",
+        review_version=RULE_VERSION_V2,
+    )
+    # Two findings, one per locked spelling. "Mar 15" is not a mention of
+    # 玛尔斯 and "Message" is not a mention of 讯息, so neither spends one.
+    assert {
+        (item.source_span.text, item.verdict, item.target_span.text)
+        for item in report.findings
+    } == {
+        ("Mars", VERDICT_VERIFIED, "玛尔斯"),
+        ("Resonators", VERDICT_VERIFIED, "共鸣者"),
+    }
 
 
 def test_review_v2_exact_dictionary_plural_beats_synthesized_plural(tmp_path):
