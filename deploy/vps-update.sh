@@ -252,6 +252,10 @@ fail_if() {
   fi
 }
 
+# Loaded before anything is changed, so a missing file refuses here rather than
+# after the deployment has committed.
+. "$code_root/deploy/backup-retention.sh"
+
 env_mode="$(stat -c '%a' .env)"
 if [ "$env_mode" != "600" ]; then
   echo "refusing to use $canonical_root/.env with mode $env_mode; expected 600" >&2
@@ -962,6 +966,11 @@ trap - EXIT
 # image ids/refs/running states must match the new binding before the
 # journal (and the now-consumed confined candidate) is removed.
 python3 scripts/full_update.py confirm
+
+# The deployment is committed, so retention is housekeeping and never fails it.
+# The newest 5 snapshots stay, and this deployment's own is always one of them.
+backup_retention_prune "$backup_dir" 5 "$deployment_id" ||
+  echo "warning: backup retention did not finish; older snapshots were left in place" >&2
 
 echo "deployment source commit: $source_commit"
 echo "deployment image id: $image_id"

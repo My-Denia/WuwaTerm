@@ -899,8 +899,30 @@ commit instead of deleting or rewriting the historical manifest.
 
 Any post-promotion state/start/smoke/manifest/pointer failure restores the old
 DB, recreates the runtime from the tagged old image, and restores or removes
-the commit pointer. Timestamped DB and pointer backups and rollback image tags
-are retained; no historical snapshot or state file is deleted.
+the commit pointer. Rollback image tags and manifests are retained.
+
+`data/deployment-backups` keeps the newest five snapshots. A snapshot is the
+files of one full deployment, all named by its deployment id
+`<YYYYmmddTHHMMSSZ>-<pid>`: `terms.<id>.<sha256>.db` (the database it
+replaced), `db-diff.<id>.json` and `<id>.deploy_commit` (the pointer it
+replaced). After a full deployment has committed, `deploy/backup-retention.sh`
+removes the files of every older snapshot, one `backup retention: removed
+<path>` line each, and always keeps the snapshot that deployment just wrote.
+Newest means the later time in the id, then the larger pid as a number; file
+mtimes are never read. Only those three name forms are ever removed: any other
+file, a symlink or a directory in that directory is left alone. A failed or
+rolled-back deployment prunes nothing (its own snapshot stays until a later
+success pushes it out), `--runtime-only` writes no snapshot and prunes nothing,
+and a prune that fails warns without failing the deployment.
+
+Rolling back to the previous release needs the database as it was before the
+deployment that made the current release. That is the snapshot that deployment
+wrote, and its manifest `.deployments/<source-commit>.json` names it in
+`backup_path`. It was the newest snapshot when it was written, and only a later
+successful deployment prunes, which is also the one that replaces the current
+release, so the snapshot a rollback needs is always kept. The `backup_path` of
+an older manifest can name a snapshot that has since been removed; nothing
+reads it for recovery.
 
 ### Interrupted full updates
 
