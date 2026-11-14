@@ -30,6 +30,9 @@ from scripts.deployment_manifest import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Where the Compose file looks for data/, state/, state-api/ and .env: next to
+# its own deploy/ directory unless a release layout names its shared state.
+STATE_ROOT = "${WUWATERM_STATE_ROOT:-..}"
 
 
 def test_vps_update_uses_atomic_database_build():
@@ -433,8 +436,8 @@ def test_compose_uses_readonly_data_for_runtime_and_writable_data_for_builder():
     assert "target: builder" in text
     assert "wuwaterm-runtime:local" in text
     assert "wuwaterm-builder:local" in text
-    assert "../data:/app/data:ro" in text
-    assert "../state:/app/state" in text
+    assert f"{STATE_ROOT}/data:/app/data:ro" in text
+    assert f"{STATE_ROOT}/state:/app/state" in text
     assert "WUWATERM_STATE_DIR: /app/state" in text
     assert "WUWATERM_SOURCE_PROFILE: ${WUWATERM_SOURCE_PROFILE:-arikatsu}" in text
     assert "WUWATERM_SETTINGS_PATH: /app/state/chat_settings.json" in text
@@ -442,7 +445,7 @@ def test_compose_uses_readonly_data_for_runtime_and_writable_data_for_builder():
         "WUWATERM_CHANNEL_REPLY_INDEX_PATH: /app/state/channel_replies.json"
         in text
     )
-    assert "../data:/app/data\n" in text
+    assert f"{STATE_ROOT}/data:/app/data\n" in text
     builder_section = text.split("  wuwaterm-builder:", 1)[1]
     assert "env_file:" not in builder_section
     assert "${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}" in text
@@ -1286,11 +1289,11 @@ def test_compose_api_service_is_loopback_only_with_separate_state():
     assert "network_mode: host" in api_section
     assert "restart: unless-stopped" in api_section
     # Same terminology database, read-only; its own writable state directory.
-    assert "../data:/app/data:ro" in api_section
+    assert f"{STATE_ROOT}/data:/app/data:ro" in api_section
     # A SIBLING of the bot's state tree, never a child of it: the bot mounts
     # the whole of ../state read-write.
-    assert "../state-api:/app/state-api" in api_section
-    assert "../state/" not in api_section
+    assert f"{STATE_ROOT}/state-api:/app/state-api" in api_section
+    assert f"{STATE_ROOT}/state:" not in api_section
     assert "WUWATERM_API_STATE_DIR: /app/state-api" in api_section
     # The bind is fixed in this file, not interpolated: with host networking an
     # environment knob would make a public exposure a one-line edit.
@@ -1711,9 +1714,9 @@ def test_api_state_directory_is_not_inside_the_bot_state_tree():
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
     bot_section = compose.split("  wuwaterm:", 1)[1].split("  wuwaterm-api:", 1)[0]
-    assert "../state:/app/state" in bot_section
+    assert f"{STATE_ROOT}/state:/app/state" in bot_section
     api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
-    assert "../state-api:/app/state-api" in api_section
+    assert f"{STATE_ROOT}/state-api:/app/state-api" in api_section
     assert ":/app/state" + chr(10) not in api_section
 
     assert "WUWATERM_API_STATE_DIR=state-api" in env_example

@@ -271,6 +271,10 @@ def _write_runtime_fake_docker(root: Path) -> None:
 
 @pytest.fixture()
 def runtime_harness(tmp_path):
+    return _make_runtime_harness(tmp_path)
+
+
+def _make_runtime_harness(tmp_path):
     root, env, old_hash, new_hash = _make_deploy_harness(tmp_path)
     _write_runtime_fake_docker(root)
     env["FAKE_DEPLOY_ROOT"] = str(root)
