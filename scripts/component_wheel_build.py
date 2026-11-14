@@ -1359,6 +1359,7 @@ def build_wheel_image(root: Path, operations_commit: str, operations_tree: str, 
             receipt = _receipt_v2(attempt)
         digest = session.register(receipt, _RECEIPTS)
         verify_registered_wheel_build(root, digest)
+        session.prune_build_images()
         return digest
     except BaseException as exc:
         if attempt["status"] == "registered":

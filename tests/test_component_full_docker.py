@@ -7,11 +7,18 @@ absolute JSON file beneath goal-runs/full3-implementation. Its object has
 same directory with two genuine already-registered API receipts, named
 ``api_old_receipt`` and ``api_new_receipt``. The interruption cases also need
 ``source_b_commit``, an already-present local commit distinct from source A.
+The registered build tags (``image_ref`` of ``api_old_receipt`` and
+``api_new_receipt``) are pruned by the producer's retention (``BUILD_IMAGE_KEEP``
+newest per family in ``scripts/component_build_isolation.py``; images used by any
+container are never pruned), so register every receipt a run needs within one
+retention window and keep the old receipt's image in use before the next build.
 
 Case keys: normal-running, normal-stopped, crash-promotion,
 handoff-runtime-to-full, handoff-full-to-runtime. These tests never build,
-fetch, send Telegram messages, remove Docker objects or clean fixture files.
-They retain a per-case ledger for a separately authorized cleanup preflight.
+fetch, send Telegram messages, remove images or clean fixture files. When a
+case ends, pass or fail, ``Case.finish()`` stops and deletes the containers
+that still carry that case's own owner label, and nothing else. The per-case
+ledger, which records the removed IDs, is retained.
 """
 from __future__ import annotations
 
@@ -49,6 +56,7 @@ _USED_ROOTS: set[Path] = set()
 _OWNER_LABEL = "org.wuwaterm.test-owner"
 _RUNTIME = ".component-runtime-transaction.json"
 _FULL = ".component-full-transaction.json"
+_OWNER_FORMAT = '{{.Id}}|{{index .Config.Labels "' + _OWNER_LABEL + '"}}|{{.State.Running}}'
 
 
 def _physical(value: Any, *, directory: bool) -> Path:
@@ -111,8 +119,40 @@ def _contains(path: Path, needle: bytes) -> bool:
     return False
 
 
+def _docker_cli(environment: dict[str, str], *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", "--host", "unix:///run/docker.sock", *arguments], env=environment,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, check=False)
+
+
+def _remove_owned_containers(owner: str, environment: dict[str, str]) -> list[str]:
+    """Stop and delete every container whose exact ID still carries this owner label.
+
+    Each ID is inspected and its label re-verified before it is touched; nothing
+    is selected by name, and no image, volume or network is removed.
+    """
+    def owned() -> list[str]:
+        listing = _docker_cli(environment, "ps", "-aq", "--no-trunc", "--filter", f"label={_OWNER_LABEL}={owner}")
+        assert listing.returncode == 0, "cleanup: owned-container listing failed"
+        return listing.stdout.split()
+
+    removed = []
+    for identifier in owned():
+        inspected = _docker_cli(environment, "inspect", "--format", _OWNER_FORMAT, identifier)
+        if inspected.returncode:
+            continue  # Transaction recovery may already have removed it.
+        found, label, running = inspected.stdout.strip().split("|")
+        if (found, label) != (identifier, owner):
+            continue
+        if running == "true":
+            _docker_cli(environment, "stop", identifier)
+        if _docker_cli(environment, "rm", identifier).returncode == 0:
+            removed.append(identifier)
+    assert not owned(), "cleanup: owned containers remain"
+    return removed
+
+
 class Case:
-    """Own one isolated project; never tear it down implicitly."""
+    """Own one isolated project; ``finish()`` removes its owner-labelled containers."""
 
     def __init__(self, name: str):
         config = _config()
@@ -389,8 +429,13 @@ class Case:
             self.inventory()
         except Exception as exc:
             self.event("inventory-error", {"error_type": type(exc).__name__})
-        self.event("retained", {"root": str(self.root), "owner": self.owner,
-                                "cleanup": "not performed; inspect exact recorded owner and IDs"})
+        try:
+            removed = _remove_owned_containers(self.owner, self.environment)
+        except Exception as exc:
+            self.event("cleanup-error", {"owner": self.owner, "error_type": type(exc).__name__})
+            raise
+        self.event("cleaned", {"root": str(self.root), "owner": self.owner, "removed": removed,
+                               "retained": "images, fixture files and this ledger"})
 
 
 class _Registers(ctypes.Structure):
