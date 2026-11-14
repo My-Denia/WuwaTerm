@@ -569,6 +569,7 @@ def _active_runtime_journal() -> dict:
         "target_image_digest": image, "target_image_revision": NEXT_COMMIT,
         "old_pointer": COMMIT, "old_manifest_path": ".deployments/" + COMMIT + ".json",
         "old_image_ref": "fixture:old", "old_image_id": image,
+        "old_bot_present": True,
         "old_bot_running": True, "old_api_running": True,
         "rollback_image_ref": "wuwaterm-runtime:rollback-runtime-" + "a" * 12 + "-1",
         "db_sha256": "1" * 64, "db_stat": {"ino": 1, "size": 1, "mtime_ns": 1, "ctime_ns": 1},
@@ -629,15 +630,20 @@ print('admitted')
 
 @pytest.mark.parametrize(("old_state", "allowed"), [
     ("absent", True), ("committed", True), ("rolled_back", True),
-    ("active", False), ("malformed", False), ("link", False), ("full", False),
+    ("committed-legacy", True), ("rolled_back-legacy", True),
+    ("active", False), ("active-legacy", False),
+    ("malformed", False), ("link", False), ("full", False),
 ])
 def test_component_admission_respects_old_journal_without_rewriting_it(checkout, old_state, allowed):
     root, env, spy = checkout
     _set_recovery_capability(root, kind="runtime", ready=True)
     old = root / ".deployments/.runtime-transaction.json"
-    if old_state in ("committed", "rolled_back", "active"):
+    base_state = old_state.removesuffix("-legacy")
+    if base_state in ("committed", "rolled_back", "active"):
         journal = _active_runtime_journal()
-        journal.update(status=old_state, phase=old_state if old_state != "active" else "pointer")
+        if old_state.endswith("-legacy"):
+            journal.pop("old_bot_present")
+        journal.update(status=base_state, phase=base_state if base_state != "active" else "pointer")
         old.write_text(json.dumps(journal), encoding="ascii")
     elif old_state == "malformed":
         old.write_bytes(b"{malformed\n")
@@ -654,6 +660,8 @@ def test_component_admission_respects_old_journal_without_rewriting_it(checkout,
     else:
         assert result.returncode != 0
         assert "admission refused" in result.stderr
+        if old_state == "active-legacy":
+            assert "legacy runtime transaction requires recovery" in result.stderr
     assert _snapshot(root) == before
     assert not spy.exists()
 

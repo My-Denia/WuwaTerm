@@ -733,6 +733,17 @@ def _make_deploy_harness(tmp_path):
         # One ordered stream across both fakes, so a test can assert that a
         # container stop happens BEFORE the database is touched.
         "echo \"docker $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
+        # The standalone Telegram product is found by its Compose service label,
+        # because a release without an explicit container_name runs under the
+        # project prefix (`deploy-wuwaterm-telegram-1`). The lookup answers
+        # container ids, one per line, exactly as `docker ps -aq` does.
+        "if [ \"${1:-}\" = ps ]; then\n"
+        "  case \"$*\" in\n"
+        "    *com.docker.compose.service=wuwaterm-telegram*)"
+        " cat \"$FAKE_DEPLOY_ROOT/telegram-label-ids\" 2>/dev/null || true ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
         # Fail only the SECOND stop: the deployment's own stop must succeed so
         # the run reaches the rollback whose stop is under test.
         "if [ \"${FAKE_ALL_STOPS_FAIL:-0}\" = 1 ]; then\n"
@@ -761,6 +772,22 @@ def _make_deploy_harness(tmp_path):
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.
         "  case \"$*\" in\n"
+        # An auto-named Telegram container is a different object from a pinned
+        # `wuwaterm-telegram`; a test that registers one writes its own state
+        # files, and one that does not gets the daemon's proven absence.
+        "    *deploy-wuwaterm-telegram-1*)\n"
+        "      if [ \"${FAKE_TELEGRAM_AUTO_INSPECT_ERROR:-0}\" = 1 ]; then\n"
+        "        echo 'Error response from daemon: permission denied while trying to connect' >&2\n"
+        "        exit 1\n"
+        "      fi\n"
+        "      if [ ! -f \"$FAKE_DEPLOY_ROOT/telegram-auto-present\" ]; then\n"
+        "        echo 'Error response from daemon: No such object: deploy-wuwaterm-telegram-1' >&2\n"
+        "        exit 1\n"
+        "      fi\n"
+        "      case \"$*\" in\n"
+        "        *State.Running*) cat \"$FAKE_DEPLOY_ROOT/telegram-auto-running\" ;;\n"
+        "        *) cat \"$FAKE_DEPLOY_ROOT/telegram-auto-image\" ;;\n"
+        "      esac ;;\n"
         # The standalone Telegram product is its own container; whether it
         # runs decides whether the legacy in-Core bot may run at all.
         "    *wuwaterm-telegram*)\n"
@@ -2047,6 +2074,116 @@ def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
     assert not (root / ".deployments" / ".full-transaction.json").exists()
 
 
+def test_vps_update_refuses_a_poller_named_after_its_compose_project(deploy_harness):
+    """A Telegram release without an explicit container_name still serves.
+
+    `docker compose up` names that container after its project
+    (`deploy-wuwaterm-telegram-1`, Compose service label
+    `com.docker.compose.service=wuwaterm-telegram`), so a guard that asked only
+    for `wuwaterm-telegram` found no product at all on those hosts and started
+    the in-Core bot beside the working poller.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    (root / "telegram-auto-present").write_text("1\n", encoding="ascii")
+    (root / "telegram-auto-running").write_text("true\n", encoding="ascii")
+    (root / "telegram-label-ids").write_text(
+        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
+    )
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "stop legacy wuwaterm-bot first" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    # The guard ran before any surface or data command, and it found the
+    # product through the Compose service label rather than the fixed name.
+    assert [
+        command
+        for command in commands
+        if command.startswith(
+            "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram"
+        )
+    ], commands
+    assert not [
+        command
+        for command in commands
+        if " stop " in command
+        or " up -d " in command
+        or " create " in command
+        or command.startswith("rm ")
+    ], commands
+
+
+def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
+    deploy_harness,
+):
+    """With no recorded pointer, a labelled product decides the bot's fate.
+
+    The first `full` deployment of a host that already runs the standalone
+    product has no `.deploy_commit` to read the surfaces from. The product's
+    Compose label is what stops it from starting a second poller there.
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    (root / ".deploy_commit").unlink()
+    (root / "telegram-auto-present").write_text("1\n", encoding="ascii")
+    (root / "telegram-auto-running").write_text("true\n", encoding="ascii")
+    (root / "telegram-label-ids").write_text(
+        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
+    )
+    # No in-Core bot container on this host: `docker inspect` proves absence.
+    env["FAKE_NO_BOT_CONTAINER"] = "1"
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    assert not [
+        command
+        for command in commands
+        if " up -d " in command and command.endswith(" wuwaterm")
+    ], commands
+    assert not [
+        command
+        for command in commands
+        if " create " in command and command.endswith(" wuwaterm")
+    ], commands
+    assert [
+        command
+        for command in commands
+        if " up -d " in command and command.endswith(" wuwaterm-api")
+    ], commands
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
+
+
 def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harness):
     """A pointer proves a deployment served here. If nothing serves now, the
     rollback would have nothing to restore, so the update refuses."""
@@ -2087,3 +2224,64 @@ def test_full_update_prepare_refuses_a_recorded_host_with_no_serving_surface():
     guard = text.index('raise FullUpdateError("no_serving_surface")')
     armed = text.index("_write_journal_atomic(journal)", guard)
     assert guard < armed
+
+
+@pytest.mark.parametrize("first_install", [False, True])
+def test_vps_update_refuses_when_labelled_poller_inspect_errors(
+    deploy_harness, first_install
+):
+    """A daemon error inspecting a labelled poller must fail closed, not read as stopped."""
+    root, env, old_hash, _new_hash = deploy_harness
+    if first_install:
+        (root / ".deploy_commit").unlink()
+        env["FAKE_NO_BOT_CONTAINER"] = "1"
+    (root / "telegram-label-ids").write_text(
+        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
+    )
+    env["FAKE_TELEGRAM_AUTO_INSPECT_ERROR"] = "1"
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "deploy-wuwaterm-telegram-1 running state could not be confirmed"
+        in result.stderr
+    )
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    if first_install:
+        assert not (root / ".deploy_commit").exists()
+    else:
+        assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    commands = [
+        line.split("|", 1)[1]
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "|" in line
+    ]
+    assert (
+        len(
+            [
+                c
+                for c in commands
+                if c == "inspect --format {{.State.Running}} deploy-wuwaterm-telegram-1"
+            ]
+        )
+        == 3
+    ), commands
+    assert not [
+        c
+        for c in commands
+        if " build " in c or " stop " in c or " up -d " in c or " create " in c
+    ], commands
+    assert not (root / ".deployments" / ".full-transaction.json").exists()
+

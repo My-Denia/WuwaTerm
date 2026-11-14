@@ -328,13 +328,61 @@ capture_running_state() {
   echo "refusing deployment: $cap_name running state could not be confirmed; not recording it as stopped" >&2
   exit 1
 }
+
+# The standalone Telegram product is not always called `wuwaterm-telegram`.
+# Telegram v0.2.9 and earlier ship without an explicit container_name, so
+# `docker compose -f deploy/docker-compose.yml up -d` named the container after
+# its project (`deploy-wuwaterm-telegram-1`, or `<project>-wuwaterm-telegram-1`).
+# Compose labels every one of them with the service name, so the label finds
+# the installation the fixed name misses; the fixed name is asked first because
+# it is what a current release creates.
+#
+# A listing the daemon refused is not "no container": it is retried like an
+# inspect, and if it stays unconfirmed the update refuses instead of reading
+# the silence as an absent product.
+capture_standalone_telegram_running() {
+  sat_pinned="$(capture_running_state wuwaterm-telegram)" || return 1
+  if [ "$sat_pinned" = "true" ]; then
+    printf '%s' true
+    return 0
+  fi
+  sat_attempt=0
+  while [ "$sat_attempt" -lt 3 ]; do
+    sat_attempt=$((sat_attempt + 1))
+    sat_err="/tmp/wuwaterm-telegram-ps.$$"
+    set +e
+    sat_containers="$(docker ps -aq \
+      --filter label=com.docker.compose.service=wuwaterm-telegram \
+      2>"$sat_err")"
+    sat_status="$?"
+    set -e
+    if [ "$sat_status" -eq 0 ]; then
+      rm -f "$sat_err"
+      for sat_container in $sat_containers; do
+        # A container deleted between the listing and the inspect answers
+        # "No such object", which capture_running_state reports as stopped.
+        sat_running="$(capture_running_state "$sat_container")" || return 1
+        if [ "$sat_running" = "true" ]; then
+          printf '%s' true
+          return 0
+        fi
+      done
+      printf '%s' false
+      return 0
+    fi
+    rm -f "$sat_err"
+  done
+  echo "refusing deployment: standalone wuwaterm-telegram containers could not" >&2
+  echo "be listed; not recording the product as absent" >&2
+  exit 1
+}
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_bot_running="$(capture_running_state wuwaterm-bot)"
 old_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 old_api_running="$(capture_running_state wuwaterm-api)"
 old_api_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null || true)"
-standalone_telegram_running="$(capture_running_state wuwaterm-telegram)"
+standalone_telegram_running="$(capture_standalone_telegram_running)"
 
 # A deployment publishes code and data; it does not decide which surfaces
 # serve. The legacy in-Core bot is retired on a host where the standalone
