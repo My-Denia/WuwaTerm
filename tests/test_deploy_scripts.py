@@ -1293,7 +1293,7 @@ def test_compose_api_service_is_loopback_only_with_separate_state():
     # A SIBLING of the bot's state tree, never a child of it: the bot mounts
     # the whole of ../state read-write.
     assert f"{STATE_ROOT}/state-api:/app/state-api" in api_section
-    assert f"{STATE_ROOT}/state:" not in api_section
+    assert f"{STATE_ROOT}/state/" not in api_section
     assert "WUWATERM_API_STATE_DIR: /app/state-api" in api_section
     # The bind is fixed in this file, not interpolated: with host networking an
     # environment knob would make a public exposure a one-line edit.

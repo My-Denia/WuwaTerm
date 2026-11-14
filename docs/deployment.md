@@ -50,8 +50,8 @@ release, so a release can be deleted whole. Compose reads its bind sources and
 `.env` from `${WUWATERM_STATE_ROOT:-..}`: the updater exports
 `WUWATERM_STATE_ROOT=/opt/wuwaterm`, and a manual `docker compose` command run
 from `/opt/wuwaterm/current` must export it too (the commands below do).
-Without it Compose looks for `data/` inside the release and would create an
-empty one. A release run without `/opt/wuwaterm/.env` beside `releases/`
+Without it every Compose command fails: it looks for `.env` inside the release.
+A release run without `/opt/wuwaterm/.env` beside `releases/`
 refuses before it writes anything.
 
 `sh /opt/wuwaterm/current/deploy/vps-update.sh` deploys what `origin/main` is
@@ -70,8 +70,9 @@ or `.deployments`, and it does not touch images. A failed update keeps the
 release it built, because an unresolved transaction journal binds a fingerprint
 of the updater's files and can only be recovered by byte-identical copies, which
 that release always has:
-`sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full` (the failure
-message prints the exact command). The next update that passes removes it.
+`sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full` (a rollback
+that fails prints the exact command; otherwise the `release: created rN` line
+of the run names the release). The next update that passes removes it.
 
 A host that still runs the old in-place checkout (`/opt/wuwaterm/current` as a
 directory holding its own `data/`, `.env` and `.deployments/`) moves with
@@ -82,14 +83,17 @@ sh deploy/migrate-layout.sh --dry-run /opt/wuwaterm   # prints every step and it
 sh deploy/migrate-layout.sh /opt/wuwaterm
 ```
 
-It refuses unless the deployment lock is free and no runtime or full
-transaction journal is open, then renames the checkout to `releases/r1`,
+It refuses unless the deployment lock is free, no runtime or full
+transaction journal is open, the checkout is clean and has this layout's
+scripts, and git ignores nothing in it but caches (anything else would be
+deleted with the release). It then renames the checkout to `releases/r1`,
 renames the shared state and `.env*` files up to `/opt/wuwaterm`, and creates
 `current`. Only renames inside one filesystem happen; nothing is copied and no
 container is touched. Until the containers are recreated, links inside
 `releases/r1` keep their old mount paths resolving (the first update that
 passes removes them), and `telegram/data` is repointed at
-`/opt/wuwaterm/data`. Running it again changes nothing. The first
+`/opt/wuwaterm/data` (a link through `current` in any other form makes it
+refuse). Running it again changes nothing, and an interrupted run resumes. The first
 update afterwards must be a full one (it recreates bot and API, a pause of a
 few seconds): `--runtime-only` refuses while a container still mounts the old
 paths. Source-capsule recovery with `scripts/legacy_recovery.py` expects a
@@ -927,7 +931,7 @@ sh deploy/vps-update.sh --runtime-only   # refused likewise
 ```
 
 Recovery runs from the release that wrote the journal, which is not
-necessarily `current` (the failure message names it). The explicit
+necessarily `current`. The explicit
 recovery entry classifies the host by what is actually observed
 — pointer, live database hash, manifest, and both containers' image
 ids/references/running states — never by the journal's phase marker alone:

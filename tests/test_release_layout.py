@@ -176,6 +176,11 @@ class Host:
         self.current = self.base / "current"
         root.rename(self.current)
         (self.current / ".deployments" / ".deployment.lock").touch(mode=0o600)
+        # A secret backup that is git-ignored, and the standalone Telegram
+        # product's data directory: a hand-made link through current.
+        (self.current / ".env.bak-test").write_text("backup\n")
+        (self.base / "telegram" / "state").mkdir(parents=True)
+        (self.base / "telegram" / "data").symlink_to(self.current / "data")
         shutil.copy2(ROOT / ".gitignore", self.current / ".gitignore")
         for name in ("release-layout.sh", "migrate-layout.sh"):
             shutil.copy2(ROOT / "deploy" / name, self.current / "deploy" / name)
@@ -224,7 +229,7 @@ class Host:
         )
 
     def migrate(self, *args: str) -> subprocess.CompletedProcess:
-        return self.run(self.current / "deploy" / "migrate-layout.sh", *args, str(self.base))
+        return self.run(MIGRATE, *args, str(self.base))
 
     def deploy(self, *args: str, **env: str) -> subprocess.CompletedProcess:
         return self.run(self.base / "current" / "deploy" / "vps-update.sh", *args, **env)
@@ -287,6 +292,100 @@ def test_migration_moves_state_out_of_the_release_and_is_idempotent(host):
     assert again.returncode == 0, again.stderr
     assert "already migrated" in again.stdout
     assert host.tree() == after_first
+
+
+def test_migration_keeps_env_backups_and_points_telegram_at_the_shared_data(host):
+    assert host.migrate().returncode == 0
+    base = host.base
+    assert (base / ".env.bak-test").read_text() == "backup\n"
+    assert not os.path.lexists(base / "releases/r1/.env.bak-test")
+    assert os.readlink(base / "telegram/data") == str(base / "data")
+    assert (base / "telegram/data/terms.db").is_file()
+
+
+def test_migration_refuses_git_ignored_files_it_would_delete_with_the_release(host):
+    (host.current / "chat_settings.json").write_text("{}")
+    before = host.tree()
+    for args in ((), ("--dry-run",)):
+        result = host.migrate(*args)
+        assert result.returncode == 1
+        assert "chat_settings.json" in result.stderr
+    assert host.tree() == before
+
+
+def test_migration_refuses_a_checkout_older_than_the_layout(host):
+    host.git(host.current, "rm", "-q", "deploy/release-layout.sh")
+    host.git(host.current, "commit", "-q", "-m", "older")
+    before = host.tree()
+    result = host.migrate()
+    assert result.returncode == 1
+    assert "release-layout.sh" in result.stderr
+    assert host.tree() == before
+
+
+def test_migration_refuses_a_telegram_link_through_current_in_any_other_form(host):
+    link = host.base / "telegram/data"
+    link.unlink()
+    link.symlink_to("current/data")
+    before = host.tree()
+    result = host.migrate()
+    assert result.returncode == 1
+    assert "telegram/data" in result.stderr
+    assert host.tree() == before
+
+
+def interrupted(host: Host, stage: str) -> None:
+    """Leave the host as an interrupted migration would have."""
+    base, release = host.base, host.base / "releases/r1"
+    if stage == "checkout":
+        (base / "releases").mkdir(exist_ok=True)
+        host.current.rename(release)
+        return
+    assert host.migrate().returncode == 0
+    if stage == "current":  # everything but the telegram link
+        link = base / "telegram/data"
+        link.unlink()
+        link.symlink_to(base / "current/data")
+    elif stage == "state":  # state moved out, nothing else done
+        (base / "current").unlink()
+        for name in ("data", "state"):
+            (release / name).unlink()
+        (release / ".release-commit").unlink()
+        (release / ".git/info/exclude").write_text("")
+        for name in ("data", "state", ".deployments", ".env", ".deploy_commit", ".env.bak-test"):
+            (base / name).rename(release / name)
+        (base / "telegram/data").unlink()
+        (base / "telegram/data").symlink_to(base / "current/data")
+
+
+@pytest.mark.parametrize("stage", ["checkout", "state", "current"])
+def test_an_interrupted_migration_resumes_to_the_same_layout(host, stage):
+    interrupted(host, stage)
+    resumed = host.migrate()
+    assert resumed.returncode == 0, resumed.stderr
+    base, release = host.base, host.base / "releases/r1"
+    assert os.readlink(base / "current") == "releases/r1"
+    for name in ("data", "state"):
+        assert (base / name).is_dir() and not (base / name).is_symlink()
+        assert os.readlink(release / name) == f"../../{name}"
+    for name in (".deployments", ".env", ".deploy_commit", ".env.bak-test"):
+        assert (base / name).exists() and not os.path.lexists(release / name)
+    assert os.readlink(base / "telegram/data") == str(base / "data")
+    assert (release / ".release-commit").read_text().strip() == host.head
+    assert host.git(release, "status", "--porcelain", "--untracked-files=all") == ""
+    assert "nothing to do" in host.migrate().stdout
+
+
+def test_migrating_again_after_later_updates_is_still_a_no_op(host):
+    assert host.migrate().returncode == 0
+    host.push("c2")
+    assert host.deploy().returncode == 0
+    assert os.readlink(host.base / "current") == "releases/r2"
+    before = host.tree()
+    again = host.migrate()
+    assert again.returncode == 0, again.stderr
+    assert "nothing to do" in again.stdout
+    assert host.tree() == before
 
 
 def test_migration_refuses_while_a_deployment_holds_the_lock(host):

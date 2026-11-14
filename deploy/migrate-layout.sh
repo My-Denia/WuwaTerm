@@ -43,21 +43,27 @@ act() {
 [ "$dry_run" -eq 0 ] || say "DRY RUN: only reads; nothing below is executed"
 [ -d "$base" ] || refuse "$base is not a directory"
 base="$(cd "$base" && pwd -P)"
-rel="$base/releases/r1"
 state_dirs="data state state-api state-web"
 
-# Where the checkout is now: still <base>/current, or already moved to r1.
+# Where the checkout is now: still <base>/current, already moved to r1 by an
+# interrupted run, or a finished layout whose `current` names some release.
 if [ -L "$base/current" ]; then
-  [ "$(readlink "$base/current")" = "releases/r1" ] || refuse "$base/current points at $(readlink "$base/current"), not releases/r1"
+  target=$(readlink "$base/current")
+  release_name_ok "${target#releases/}" && [ "$target" = "releases/${target#releases/}" ] \
+    || refuse "$base/current points at $target, not at a release"
+  rel="$base/$target"
   code="$rel"
 elif [ -d "$base/current" ]; then
+  rel="$base/releases/r1"
   [ ! -e "$rel" ] || refuse "$rel and a real $base/current both exist"
   code="$base/current"
-elif [ -d "$rel/.git" ]; then
+elif [ -d "$base/releases/r1/.git" ]; then
+  rel="$base/releases/r1"
   code="$rel"
 else
-  refuse "$base has neither a current checkout nor $rel"
+  refuse "$base has neither a current checkout nor releases/r1"
 fi
+rname=${rel##*/}
 [ -d "$code/.git" ] || refuse "$code is not a git checkout"
 
 # Items of mutable state still sitting in the checkout.
@@ -71,9 +77,20 @@ for item in $state_dirs .deployments .env .deploy_commit "$code"/.env.*; do
     pending="$pending $item"
   fi
 done
-if [ "$code" = "$rel" ] && [ -z "$pending" ] && [ -L "$base/current" ] && [ -d "$base/.deployments" ] \
+[ "$rname" = r1 ] || [ -z "$pending" ] || refuse "$rname holds state ($pending); only a first migration moves state"
+
+# telegram/data was made by hand as a link through current. It has to point at
+# the shared directory before an update moves current away from this release.
+tg_move=0
+tlink=$(readlink "$base/telegram/data" 2>/dev/null || true)
+case "${tlink%/}" in
+  "$base/current/data"|../current/data) tg_move=1 ;;
+  *current*) refuse "telegram/data points at $tlink, through current; point it at $base/data first" ;;
+esac
+
+if [ -z "$pending" ] && [ "$tg_move" -eq 0 ] && [ -L "$base/current" ] && [ -d "$base/.deployments" ] \
     && [ -f "$base/.env" ]; then
-  say "already migrated: $base/current -> releases/r1, state in $base; nothing to do"
+  say "already migrated: $base/current -> $target, state in $base; nothing to do"
   exit 0
 fi
 
@@ -110,9 +127,30 @@ else
     || refuse "an unresolved full transaction journal needs recovery first"
   say "no open runtime or full transaction"
 fi
+[ -f "$code/deploy/release-layout.sh" ] \
+  || refuse "$code has no deploy/release-layout.sh; advance it to a commit that has this layout first"
 [ -z "$(GIT_OPTIONAL_LOCKS=0 command git -C "$code" status --porcelain --untracked-files=all)" ] \
   || refuse "$code has modifications or untracked files"
 say "checkout is clean at $(command git -C "$code" rev-parse HEAD)"
+# Whatever else git ignores stays in the release and is deleted with it when it
+# is pruned. Only caches may go that way.
+stray=""
+ignored=$(GIT_OPTIONAL_LOCKS=0 command git -C "$code" status --porcelain --ignored | sed -n 's/^!! //p')
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  name=${entry%/}
+  case "${name##*/}" in
+    __pycache__|.venv|.pytest_cache|.mypy_cache|.ruff_cache|*.egg-info|.release-commit|.release-previous) continue ;;
+  esac
+  if in_pending "$name"; then continue; fi
+  case "$name" in
+    data|state|state-api|state-web) [ -L "$code/$name" ] && continue ;;
+  esac
+  stray="$stray $name"
+done <<IGNORED
+$ignored
+IGNORED
+[ -z "$stray" ] || refuse "git-ignored files in $code would be deleted with it: $stray; move or remove them first"
 base_dev=$(stat -c %d "$base")
 for item in $pending; do
   [ "$(stat -c %d "$code/$item")" = "$base_dev" ] || refuse "$item is on another filesystem than $base; a rename would copy it"
@@ -131,24 +169,25 @@ for item in $pending; do
   act "move shared state $item out of the release" "mv $base/$item $rel/$item" \
     mv -T "$rel/$item" "$base/$item"
 done
-for item in $state_dirs; do
-  if { in_pending "$item" || [ -d "$base/$item" ]; } && [ ! -L "$rel/$item" ]; then
-    act "leave $item resolvable at its old path until the containers are recreated" \
-      "rm $rel/$item" ln -s "../../$item" "$rel/$item"
-  fi
-done
+# Before the links below, so git never sees them as untracked.
 say "record the commit in $rel/.release-commit and keep the links out of git status"
 if [ "$dry_run" -eq 0 ]; then
   [ -f "$rel/.release-commit" ] || command git -C "$rel" rev-parse HEAD > "$rel/.release-commit"
   grep -qx '/.release-commit' "$rel/.git/info/exclude" 2>/dev/null \
     || release_exclude "$rel" "/data" "/state" "/state-api" "/state-web"
 fi
+for item in $state_dirs; do
+  if { in_pending "$item" || [ -d "$base/$item" ]; } && [ ! -L "$rel/$item" ]; then
+    act "leave $item resolvable at its old path until the containers are recreated" \
+      "rm $rel/$item" ln -s "../../$item" "$rel/$item"
+  fi
+done
 if [ ! -L "$base/current" ]; then
-  act "build the current link beside it" "rm $base/.current.new" ln -s releases/r1 "$base/.current.new"
+  act "build the current link beside it" "rm $base/.current.new" ln -s "releases/$rname" "$base/.current.new"
   act "point current at the release" "rm $base/current && mv $rel $base/current" \
     mv -T "$base/.current.new" "$base/current"
 fi
-if [ -L "$base/telegram/data" ] && [ "$(readlink "$base/telegram/data")" = "$base/current/data" ]; then
+if [ "$tg_move" -eq 1 ]; then
   act "build telegram's data link beside it" "rm $base/telegram/.data.new" \
     ln -s "$base/data" "$base/telegram/.data.new"
   act "point telegram/data at the shared data directory (its container keeps its mount)" \
@@ -157,19 +196,14 @@ if [ -L "$base/telegram/data" ] && [ "$(readlink "$base/telegram/data")" = "$bas
 fi
 
 if [ "$dry_run" -eq 0 ]; then
-  [ "$(readlink "$base/current")" = "releases/r1" ] || refuse "current was not switched"
+  [ "$(readlink "$base/current")" = "releases/$rname" ] || refuse "current was not switched"
   [ -z "$(command git -C "$rel" status --porcelain --untracked-files=all)" ] \
     || refuse "$rel is not clean after the move"
   for item in $pending .deployments .env; do
     [ -e "$base/$item" ] || refuse "$base/$item is missing after the move"
   done
-  say "done: $base/current -> releases/r1; state in $base"
+  say "done: $base/current -> releases/$rname; state in $base"
 else
   say "dry run complete"
-fi
-if [ -d "$code/.git" ]; then
-  left=$(GIT_OPTIONAL_LOCKS=0 command git -C "$code" status --porcelain --ignored | sed -n 's/^!! //p' \
-    | grep -vxE 'data|state|state-api|state-web|\.release-commit' | tr '\n' ' ' || true)
-  [ -z "$left" ] || say "ignored files that stay in $code and go when it is pruned: $left"
 fi
 say "next: run a full deploy (sh $base/current/deploy/vps-update.sh). It recreates the containers on the shared paths; --runtime-only refuses until then"
