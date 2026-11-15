@@ -5,6 +5,23 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Terms And Dictionary
+
+- The builder imports the pinned `Area_<n>_Title` keys that no
+  `area/area.json` row references as locations, so place names such as
+  拉贝尔学部 / Rabelle College and the rest of the Startorch campus reach
+  `terms.db` (21 rows on the pinned data; 15 carry names the dictionary
+  lacked, 14 distinct pairs).
+- A complete four-tier item family in `item/iteminfo.json` (初级X / 中级X /
+  高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y")
+  adds its base pair as a derived item row (`tier-base:<basic id>`), unless
+  that exact pair already exists: 15 rows on the pinned data, such as
+  密音筒 / Sealed Tube and 能源核心 / Energy Core. "Energy Cores" now locks
+  the whole material instead of leaving "Energy" and locking 核心 / Core.
+  The derived 调谐器 / Tuner row outranks the speaker 调音师 / Tuner, so
+  English "Tuner" now locks to 调谐器. The free-text exclusion metadata of
+  the pinned build is unchanged.
+
 ### Compatibility and distribution
 
 - The Web and Windows contract pins (`contracts/web-ref.txt`,

@@ -493,6 +493,28 @@ def test_measure_free_text_zh_exclusions_aligns_singular_and_plural_variants(
     assert excluded == [["索拉里斯", 12, 0]]
 
 
+def _write_arikatsu(
+    root: Path,
+    texts: dict[str, tuple[str, str]],
+    table_rows: dict[str, list[dict[str, object]]],
+) -> Path:
+    """Write a synthetic Arikatsu checkout; every spec table not given is empty."""
+    for lang, idx in (("zh-Hans", 0), ("en", 1)):
+        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps([{"Id": k, "Content": v[idx]} for k, v in texts.items()]),
+            encoding="utf-8",
+        )
+    for spec in ARIKATSU_BIN_SPECS:
+        cfg = root / "BinData" / spec.config_file
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            json.dumps(table_rows.get(spec.config_file, [])), encoding="utf-8"
+        )
+    return root
+
+
 def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     root = tmp_path / "arikatsu"
     texts = {
@@ -512,13 +534,6 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
         "t_sonic": ("索尼克", "Sonic"),
         "t_shadow": ("夏特", "Shadow"),
     }
-    for lang, idx in (("zh-Hans", 0), ("en", 1)):
-        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps([{"Id": k, "Content": v[idx]} for k, v in texts.items()]),
-            encoding="utf-8",
-        )
     table_rows = {
         "PhoneMsg/chattheme.json": [
             {"Id": 80891001, "SortId": 0, "ItemAccess": [], "BgDescription": "", "Name": "t_def_theme"},
@@ -543,12 +558,7 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
         "skill/skilltype.json": [{"Id": 1, "TypeName": "t_skill_norm"}],
         "gacha/gachaviewtypeinfo.json": [{"Type": 2, "TypeText": "t_gacha_res"}],
     }
-    for spec in ARIKATSU_BIN_SPECS:
-        cfg = root / "BinData" / spec.config_file
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(
-            json.dumps(table_rows.get(spec.config_file, [])), encoding="utf-8"
-        )
+    _write_arikatsu(root, texts, table_rows)
     # A cosmetic table may still exist in the checkout; no spec reads it, which
     # is how one table import cannot drag an unrelated everyday word in.
     for config_file, row in (
@@ -575,3 +585,135 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     }
     # The ordinary words those cosmetic tables also carry never enter.
     assert {r.en for r in records} & {"Sonic", "Shadow"} == set()
+
+
+def _tier_rows(first_id: int, key: str) -> list[dict[str, object]]:
+    return [{"Id": first_id + tier, "Name": f"{key}_{tier}"} for tier in range(4)]
+
+
+def _tier_texts(key: str, zh: str, en: str, *, en_premium: str | None = None):
+    names = [("初级", "Basic"), ("中级", "Medium"), ("高级", "Advanced"), ("特级", "Premium")]
+    texts = {
+        f"{key}_{tier}": (f"{zh_prefix}{zh}", f"{en_prefix} {en}")
+        for tier, (zh_prefix, en_prefix) in enumerate(names)
+    }
+    if en_premium is not None:
+        texts[f"{key}_3"] = (f"特级{zh}", f"Premium {en_premium}")
+    return texts
+
+
+@pytest.fixture()
+def names_checkout(tmp_path: Path) -> Path:
+    # Upstream names on synthetic keys and ids.
+    texts = {
+        "Area_2103_Title": ("泊金港", "Gold's Landing"),
+        "Area_41037_Title": ("拉贝尔学部", "Rabelle College"),
+        "Term900001_Title": ("核心", "Core"),
+        "Term900002_Title": ("调谐器", "Tuner"),
+        **_tier_texts("core", "能源核心", "Energy Core"),
+        # Only three tiers ship: no base row.
+        **{
+            key: value
+            for key, value in _tier_texts("potion", "共鸣促剂", "Resonance Potion").items()
+            if not key.endswith("_3")
+        },
+        # Same Chinese base, a different English suffix on one tier: no base row.
+        **_tier_texts("tube", "密音筒", "Sealed Tube", en_premium="Sealed Canister"),
+        # The base pair is already an official record: kept once.
+        **_tier_texts("tuner", "调谐器", "Tuner"),
+    }
+    table_rows = {
+        "area/area.json": [{"AreaId": 2103, "Title": "Area_2103_Title"}],
+        "item/iteminfo.json": [
+            # Two Basic rows: the derived id is the smallest one.
+            {"Id": 43020009, "Name": "core_0"},
+            *_tier_rows(43020001, "core"),
+            *_tier_rows(43010001, "potion")[:3],
+            *_tier_rows(36000001, "tube"),
+            *_tier_rows(36000011, "tuner"),
+        ],
+    }
+    return _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+
+
+def test_arikatsu_imports_area_titles_no_area_row_references(names_checkout: Path):
+    records = iter_records(names_checkout, "arikatsu")
+    area_records = sorted(
+        (r.category, r.source_file, r.source_id, r.zh, r.en)
+        for r in records
+        if r.text_key.startswith("Area_")
+    )
+    assert area_records == [
+        ("location", "BinData/area/area.json", "2103", "泊金港", "Gold's Landing"),
+        (
+            "location",
+            "Textmaps/multi_text/MultiText.json",
+            "Area_41037_Title",
+            "拉贝尔学部",
+            "Rabelle College",
+        ),
+    ]
+
+
+def test_arikatsu_derives_base_row_only_for_complete_tier_families(
+    names_checkout: Path,
+):
+    records = iter_records(names_checkout, "arikatsu")
+    assert [r for r in records if r.source_id.startswith("tier-base:")] == [
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:43020001",
+            "tier-base:43020001",
+            "能源核心",
+            "Energy Core",
+        )
+    ]
+    assert [(r.category, r.source_id) for r in records if r.zh == "调谐器"] == [
+        ("core_term", "Term900002_Title")
+    ]
+
+
+def test_tier_base_row_owns_its_span_in_both_directions(
+    names_checkout: Path, tmp_path: Path
+):
+    # MY-18: "Energy Cores" is one material, not "Energy" plus 核心 / Core,
+    # and the lowercase ordinary phrase stays prose.
+    from wuwaterm.sentence import SentenceTranslator
+
+    profile = get_source_profile("arikatsu")
+    db_path = tmp_path / "names.db"
+    create_database(
+        db_path,
+        iter_records(names_checkout, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    translator = SentenceTranslator(db_path)
+
+    def lock(text: str, *, to_chinese: bool):
+        return translator._lock_terms_with_references(
+            translator.prepare_text(text),
+            to_chinese=to_chinese,
+            allow_plural_inflection=to_chinese,
+            allow_nfkc_spelling=True,
+        )
+
+    plural = lock("Farm Energy Cores.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in plural.locks] == [("能源核心", "Energy Core")]
+    assert plural.restore(plural.locked_text, to_en=False) == "Farm 能源核心."
+
+    ordinary = lock("The energy core of a star.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())
+    assert ordinary.locked_text == "The energy core of a star."
+
+    zh_source = lock("今天去刷能源核心。", to_chinese=False)
+    assert zh_source.locks == ()
+    assert zh_source.references == (("能源核心", "能源核心", "Energy Core", "item"),)
