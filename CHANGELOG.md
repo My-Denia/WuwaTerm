@@ -67,16 +67,6 @@ does not distribute generated game data or generated SQLite databases.
   review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is the
   default; an unknown value logs a warning naming the variable and uses
   `omit`.
-- With `WUWATERM_TRANSLATION_THINKING_ZH_EN=disabled`, a Chinese-to-English
-  request describes a one-character dictionary reference (such as a
-  one-character resonator name) as a name only where the character stands on
-  its own, and asks the model to translate the word by its meaning where the
-  character is part of another word. This applies only with `disabled`: with
-  thinking on, the model resolves the ambiguity itself, and the wording was
-  measured only with thinking off. In every other mode, the default `omit`
-  included, the reference is the plain line and the request is the same as
-  before this setting existed. Multi-character references and
-  English-to-Chinese requests are never changed.
 
 ### Delivery And Deployment
 

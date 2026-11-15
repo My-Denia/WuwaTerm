@@ -110,14 +110,10 @@ Optional LLM environment variables:
   it removed the long-segment timeouts, which occur only into English; into
   Chinese there is no timeout problem and it lowered translation quality;
   into English it also let a one-character name be applied to an ordinary
-  word that contains the character. For that reason, with
-  `WUWATERM_TRANSLATION_THINKING_ZH_EN=disabled`, and only then, a
-  one-character dictionary reference in the request says to use the official
-  name only where the character names the term on its own; every other mode,
-  `omit` included, sends the plain reference line. `low` and `high` turn
-  thinking on at that `reasoning_effort`. Translation requests only; a blank
-  value is the default and an unknown value logs a warning naming the
-  variable and uses `omit`. Read on every request.
+  word that contains the character. `low` and `high` turn thinking on at that
+  `reasoning_effort`. Translation requests only; a blank value is the default
+  and an unknown value logs a warning naming the variable and uses `omit`.
+  Read on every request.
 
 ## Configuration Validation
 

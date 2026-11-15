@@ -1624,9 +1624,7 @@ def _translation_thinking_mode(to_chinese: bool) -> str:
     The mode comes from ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` for a request
     into Chinese and ``WUWATERM_TRANSLATION_THINKING_ZH_EN`` for one into
     English, read per call. An unknown value falls back to ``omit`` rather
-    than failing every translation. Resolved once per request, because both
-    the reasoning fields and the wording of a one-character reference depend
-    on it.
+    than failing every translation.
     """
     env = TRANSLATION_THINKING_EN_ZH_ENV if to_chinese else TRANSLATION_THINKING_ZH_EN_ENV
     mode = os.getenv(env, "").strip() or TRANSLATION_THINKING_DEFAULT
@@ -1651,33 +1649,6 @@ def _translation_thinking_body(mode: str) -> dict:
     return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
 
 
-def _reference_line(
-    source: str, target: str, category: str, scope_one_character: bool = False
-) -> str:
-    """One dictionary reference line as the model sees it.
-
-    A single Chinese character is also part of many ordinary words (a plant,
-    a dish, a skill or an effect), and the bare line ``X = Name (resonator)``
-    does not say which use a given occurrence is. With thinking off the model
-    cannot work that out and applied a one-character resonator name to an
-    ordinary plant word, so ``scope_one_character`` (set only for a
-    Chinese-to-English request whose thinking mode is ``disabled``) makes the
-    line say up front where the official name applies. The rule is general,
-    not a word list. In every other mode thinking resolves the ambiguity, and
-    the scoped wording was measured only with ``disabled``, so the plain form
-    is kept and the request is the one made before the scoped line existed.
-    English-to-Chinese lines and multi-character sources are always plain.
-    """
-    if scope_one_character and len(source) == 1 and _is_cjk_character(source):
-        return (
-            f"{source} = {target} ({category}; one-character name: use {target} "
-            f"only where {source} on its own names this {category}; where "
-            f"{source} is part of another word, such as a plant, flower, food, "
-            f"skill or effect name, translate that word by its meaning)"
-        )
-    return f"{source} = {target} ({category})"
-
-
 async def _call_llm_async_with_client(
     client: httpx.AsyncClient,
     locked_text: str,
@@ -1692,13 +1663,9 @@ async def _call_llm_async_with_client(
     # official term in the TARGET language so the locked placeholder maps to
     # the right side on restore.
     official_index = 1 if to_chinese else 2
-    thinking_mode = _translation_thinking_mode(to_chinese)
-    scope_one_character = not to_chinese and thinking_mode == "disabled"
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     reference_lines = "\n".join(
-        _reference_line(
-            source, (zh, en)[official_index - 1], category, scope_one_character
-        )
+        f"{source} = {(zh, en)[official_index - 1]} ({category})"
         for source, zh, en, category in references
     )
     if to_chinese:
@@ -1741,7 +1708,7 @@ async def _call_llm_async_with_client(
     ]
     # Only add the keyword when there is a field to send, so ``omit`` is the
     # exact call (and request) this function made before the setting existed.
-    extra_body = _translation_thinking_body(thinking_mode)
+    extra_body = _translation_thinking_body(_translation_thinking_mode(to_chinese))
     options = {"extra_body": extra_body} if extra_body else {}
     return await llm_transport.post_chat_completion(
         client, messages, purpose="translation", **options

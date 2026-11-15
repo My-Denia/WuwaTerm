@@ -55,11 +55,7 @@ def model_server(monkeypatch):
                     if not sep or not rest.endswith(")"):
                         continue
                     official, _, category = rest.rpartition(" (")
-                    # A one-character reference carries a scope note after the
-                    # category ("resonator; one-character name: ..."); the
-                    # category is what precedes it.
-                    category = category[:-1].partition(";")[0]
-                    if not official or not category.replace("_", "").islower():
+                    if not official or not category[:-1].replace("_", "").islower():
                         continue
                     content = content.replace(source, official, 1)
             tokens = re.findall(r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4,}__", content)
