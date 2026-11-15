@@ -5,6 +5,18 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Compatibility and distribution
+
+- The Web and Windows contract pins (`contracts/web-ref.txt`,
+  `contracts/windows-ref.txt`) and the split revisions in
+  `contracts/ci-source-epochs.json` move to the main commits that carry
+  manuscript v3 (`wuwaterm-manuscript-v3`, resumable long-manuscript review).
+  `contracts/products.json` declares v1, v2 and v3 as the manuscript formats
+  the clients use, and ADR 0015 records that the v3 segment-result rule
+  supersedes part of its imported-history rule. No Core API, review or
+  manuscript behavior changes; the shipped Windows 0.4.2 and Web 0.2.0
+  records are unchanged.
+
 ### Delivery And Deployment
 
 - `deploy/migrate-layout.sh` can be run again after a run was cut off between

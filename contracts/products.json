@@ -26,12 +26,17 @@
       "windows_and_web_request": "review-v2"
     },
     "manuscript": {
-      "format": "wuwaterm-manuscript-v1",
+      "formats": [
+        "wuwaterm-manuscript-v1",
+        "wuwaterm-manuscript-v2",
+        "wuwaterm-manuscript-v3"
+      ],
       "consumers": [
         "windows",
         "web"
       ],
-      "note": "Interchange of saved manuscripts does not certify historical reports against the current dictionary."
+      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/3b9faa1c6024b19c7a71e5382f56c4f607216a21/contracts/manuscript-v3/SPEC.md",
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. The v3 contract is in Web and Windows main, not in Windows 0.4.2 or Web 0.2.0; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -401,13 +406,13 @@
         "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/README.md",
         "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/docs/self-hosting.md"
       ],
-      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web main is that same commit, and v0.2.0 is the published Web product release."
+      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web main was that same commit at the time, and v0.2.0 is the published Web product release."
     }
   ],
   "ci_pins": {
-    "core_tests_web": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
-    "core_tests_windows": "cda93f01bf7803efe66ca695701cae678b320ef1",
-    "web_tests_core": "3c51ca340f0e5c1dc0c0cf4e32ff6703af9ba841",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs."
+    "core_tests_web": "3b9faa1c6024b19c7a71e5382f56c4f607216a21",
+    "core_tests_windows": "e8880eb27b6117ff30d3bf134022303fe5f1a441",
+    "web_tests_core": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web and Windows pins are main commits after their latest releases (Web 0.2.0, Windows 0.4.2) and carry manuscript v3."
   }
 }

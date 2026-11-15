@@ -2,7 +2,9 @@
 
 > Migration notice (2026-11-06): desktop ownership moved from the [Core source at cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client) to [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), released as [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0). The [Windows source provenance](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/provenance/client-source.json) maps the original files. This record preserves the original design rationale.
 
-- Status: Accepted
+> 部分被取代（2026-11-16）：稿件格式 v3（`wuwaterm-manuscript-v3`）改变了下文「工作稿」一条和 Consequences 首条里「导入的历史报告与当前可信状态分开」的规则，规范见 [manuscript v3 SPEC](https://github.com/My-Denia/WuwaTerm-Web/blob/3b9faa1c6024b19c7a71e5382f56c4f607216a21/contracts/manuscript-v3/SPEC.md)。长稿件（任一侧超过 2,000 个 Unicode 字符）按段落保存的术语结果，只有在内容哈希、审校依据和请求输入都与一次实时 review-v2 依据一致时才复用，其余仍按历史处理：v1、v2 文件、整篇模式下的选择与历史报告，以及状态不是已完成、或哈希、依据、请求输入有一项不一致的段落记录，都不当作新检查。下文保留 2026-11-04 的原决定。
+
+- Status: Accepted；导入历史不认证一条自 2026-11-16 起被稿件 v3 部分取代（见上方说明）
 - Date: 2026-11-04
 - 关联：[ADR 0011](0011-pc-client-stack.md)（客户端与传输）、
   [ADR 0013](0013-client-ui-visual-and-layout.md)（已签收的客户端界面）

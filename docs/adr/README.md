@@ -20,7 +20,7 @@ records are intentionally absent.
 | [0012](0012-client-transport-selection.md) | How the desktop client reaches the service | Accepted |
 | [0013](0013-client-ui-visual-and-layout.md) | 桌面客户端的视觉系统与布局选型 | Partly superseded by 0016 |
 | [0014](0014-private-web-presentation-layer.md) | Private web presentation layer | Accepted |
-| [0015](0015-desktop-manuscript-workflow.md) | 桌面稿件审校与保存 | Accepted |
+| [0015](0015-desktop-manuscript-workflow.md) | 桌面稿件审校与保存 | Accepted; import rule partly superseded by manuscript v3 |
 | [0016](0016-desktop-resonance-workbench.md) | 以双语稿件为中心的桌面工作台 | Accepted direction; implementation subject to validation |
 | [0017](0017-contextual-term-references.md) | Contextual term references on the model path | Accepted; amends 0006 |
 | [0018](0018-semantic-review.md) | Semantic review keeps model findings and dictionary constraints apart | Accepted (contract); engine pending |
