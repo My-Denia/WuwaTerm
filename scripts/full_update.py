@@ -133,6 +133,17 @@ JOURNAL_KEYS = {
     "updated_utc",
 }
 
+# Machine-readable recovery outcome. `deploy/vps-update.sh` settles the
+# `current` link from this, so it is printed on stdout and only after the
+# binding was verified AND the record was closed; every human line moves to
+# stderr while the option is on. The grammar is one line,
+# `settle-result v1 kind=<kind> pointer=<absent|present:SHA>`, with the kinds
+# `old-verified`, `new-verified`, `no-journal` and `failed`; a `failed` line
+# carries no pointer and always accompanies a non-zero exit, so a zero exit
+# with any other shape is a contradiction the caller must refuse.
+SETTLE_RESULT_PREFIX = "settle-result v1"
+
+_settle_result = False
 _termination_requested = False
 
 
@@ -1455,11 +1466,48 @@ def cmd_rollback_clear(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _human(text: str) -> None:
+    """Human log line: stdout normally, stderr while the result owns stdout."""
+
+    print(text, file=sys.stderr if _settle_result else sys.stdout)
+
+
+def _settle_pointer_token() -> str:
+    """The pointer as the outcome line names it: missing, present or unreadable.
+
+    Both verified sides read the pointer, so `invalid` only ever accompanies
+    `no-journal`. It is an answer rather than an exception because "unreadable"
+    is not "nothing deployed", and the settlement must be able to say so.
+    """
+
+    present, value = _pointer_state()
+    if not present:
+        return "absent"
+    if value is None:
+        return "invalid"
+    return f"present:{value}"
+
+
+def _settle(kind: str) -> int:
+    """Report the outcome of a completed run; the caller keeps the exit status."""
+
+    if _settle_result:
+        print(f"{SETTLE_RESULT_PREFIX} kind={kind} pointer={_settle_pointer_token()}")
+    return 0
+
+
+def _report_settle_failure() -> None:
+    """A failed recovery keeps its exit status and claims no outcome."""
+
+    if _settle_result:
+        print(f"{SETTLE_RESULT_PREFIX} kind=failed")
+
+
 def cmd_recover(_args: argparse.Namespace) -> int:
     _require_held_lock()
     if not full_journal_exists():
-        print("no full transaction to recover")
-        return 0
+        _human("no full transaction to recover")
+        return _settle("no-journal")
     journal = _load_journal()
     _require_tool_match(journal)
     side = _classify(journal)
@@ -1474,13 +1522,13 @@ def cmd_recover(_args: argparse.Namespace) -> int:
             # unknown data/services and unobservable state never bypass it.
         else:
             _clear_journal(journal)
-            print("full transaction confirmed on the new binding; journal cleared")
-            return 0
+            _human("full transaction confirmed on the new binding; journal cleared")
+            return _settle("new-verified")
     if side in ("old", "shared"):
         _restore_old_binding(journal)
         _clear_journal(journal)
-        print("full transaction rolled back to the previous binding")
-        return 0
+        _human("full transaction rolled back to the previous binding")
+        return _settle("old-verified")
     raise FullUpdateError("full_recovery_unresolved")
 
 
@@ -1542,13 +1590,16 @@ def main(argv: list[str] | None = None) -> int:
 
     commands.add_parser("confirm")
     commands.add_parser("rollback-clear")
-    commands.add_parser("recover")
+    recover = commands.add_parser("recover")
+    recover.add_argument("--settle-result", action="store_true")
     commands.add_parser("restore-db")
     commands.add_parser("check")
     commands.add_parser("published")
     commands.add_parser("pointer")
 
     args = parser.parse_args(argv)
+    global _settle_result
+    _settle_result = bool(getattr(args, "settle_result", False))
     try:
         deployment_admission.admit_legacy(ROOT)
     except deployment_admission.AdmissionError as exc:
@@ -1573,6 +1624,7 @@ def main(argv: list[str] | None = None) -> int:
         return handlers[args.command](args)
     except FullUpdateError as exc:
         print(f"full-data transaction failed: {exc.code}", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             import traceback
 
@@ -1580,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except Exception:
         print("full-data transaction failed: internal_error", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             import traceback
 

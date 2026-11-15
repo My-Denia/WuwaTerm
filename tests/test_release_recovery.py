@@ -316,6 +316,14 @@ def test_a_rollback_keeps_current_on_the_serving_release(full_host):
         ),
     )
 
+    # Recovery's own outcome line names the side it really settled, and it is
+    # the whole of stdout while the flag is in use.
+    raw = _run_recovery_script(
+        host, release, "full_update.py", "recover", "--settle-result"
+    )
+    assert raw.returncode == 0, raw.stderr
+    assert raw.stdout == f"settle-result v1 kind=old-verified pointer=present:{old_pointer}\n"
+
     result = recover(host, release, "--recover-full")
 
     assert result.returncode == 0, result.stderr
@@ -360,19 +368,32 @@ def _assert_the_marker_leads_the_pointer(host: Host) -> None:
     )
 
 
-def test_a_per_surface_rollback_reports_success_without_moving_current(full_host):
+@pytest.mark.parametrize("layout", ["full_host", "migrated_host"])
+def test_a_per_surface_old_binding_is_settled_without_moving_current(
+    request, layout
+):
     """One image per manifest cannot re-express a host that ran two old ones.
 
     The bot was stopped on the image its commit's manifest records and the API
     was serving a different, older one - a state a hand-recovered host really
-    has. Recovery restores each recorded image and verifies that binding, so
-    the link, already on the commit the pointer names, has nothing to settle;
-    refusing here would report a failure of a recovery that succeeded.
+    has. Recovery restores each recorded image and verifies that binding step by
+    step, so the single-image `published` prover never has to re-express it.
+
+    The two layouts differ in what `current` can be asked: on an aligned host
+    the release r1 carries the commit the pointer names and the link needs no
+    change at all; after a migration r1's marker is the in-place HEAD, so no
+    release's source corresponds to the restored commit and the settlement says
+    that instead of inventing one. Both are a completed recovery with the link
+    where it was, and both stay that way when the command is repeated.
     """
 
-    host = full_host
+    host = request.getfixturevalue(layout)
     base = host.base
-    old_pointer = host.head
+    if layout == "migrated_host":
+        _assert_the_marker_leads_the_pointer(host)
+        old_pointer = OLD_COMMIT
+    else:
+        old_pointer = host.head
     commit = push_tool_change(host)
     assert create_release(host, commit) == "r2"
     release = base / "releases" / "r2"
@@ -406,7 +427,7 @@ def test_a_per_surface_rollback_reports_success_without_moving_current(full_host
     result = recover(host, release, "--recover-full")
 
     assert result.returncode == 0, result.stderr
-    assert "rolled back to the previous binding" in result.stdout
+    assert "rolled back to the previous binding" in result.stdout + result.stderr
     assert current_target(base) == "releases/r1"
     assert not (base / JOURNAL_RELPATH).exists()
     assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{old_pointer}\n"
@@ -415,7 +436,33 @@ def test_a_per_surface_rollback_reports_success_without_moving_current(full_host
     assert (base / "api-image").read_text(encoding="ascii").strip() == API_ALT_IMAGE
     assert (base / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (base / "api-running").read_text(encoding="ascii").strip() == "true"
-    assert "needs no change" in result.stdout
+    if layout == "full_host":
+        # The link already names the commit the rollback restored.
+        assert "needs no change" in result.stdout
+    else:
+        # The restored commit is the one the in-place checkout deployed, and no
+        # release's source carries it: named as such, never invented.
+        assert "no release" in result.stderr
+        assert "is not switched on a guess" in result.stderr
+        assert "predates" not in result.stderr
+
+    # The journal is gone, so the repeat has nothing to recover. It reads the
+    # link's own evidence and reports a no-op - still with the link unmoved,
+    # and still without claiming anything it did not verify.
+    before = stops(base / "docker.log")
+    again = recover(host, release, "--recover-full")
+    assert again.returncode == 0, again.stderr
+    assert current_target(base) == "releases/r1"
+    assert stops(base / "docker.log") == before
+    assert "no full transaction to recover" in again.stderr
+    if layout == "full_host":
+        assert "no transaction is pending" in again.stdout
+        assert "needs no adjustment" in again.stdout
+    else:
+        assert "no source entry was found to adjust" in again.stderr
+        assert "predates" not in again.stderr
+    assert "recovery restored" not in again.stdout
+    assert "recovery restored" not in again.stderr
 
 
 def test_a_migrated_full_rollback_reports_success_without_switching_current(
@@ -469,7 +516,7 @@ def test_a_migrated_full_rollback_reports_success_without_switching_current(
     result = recover(host, release, "--recover-full")
 
     assert result.returncode == 0, result.stderr
-    assert "rolled back to the previous binding" in result.stdout
+    assert "rolled back to the previous binding" in result.stdout + result.stderr
     assert current_target(base) == "releases/r1"
     assert not (base / JOURNAL_RELPATH).exists()
     assert (base / "data" / "terms.db").read_bytes() == old_bytes
@@ -677,6 +724,14 @@ def test_the_runtime_tail_window_is_completed_from_the_recorded_binding(runtime_
             process.communicate(timeout=30)
 
     release = base / "releases" / "r2"
+    # The runtime entry reports its own outcome line: a committed record is the
+    # NEW binding re-proved, not a rollback.
+    raw = _run_recovery_script(
+        host, release, "runtime_update.py", "--recover-runtime", "--settle-result"
+    )
+    assert raw.returncode == 0, raw.stderr
+    assert raw.stdout == f"settle-result v1 kind=new-verified pointer=present:{commit}\n"
+
     result = recover(host, release, "--recover-runtime")
 
     assert result.returncode == 0, result.stderr
@@ -687,3 +742,343 @@ def test_the_runtime_tail_window_is_completed_from_the_recorded_binding(runtime_
     assert again.returncode == 0, again.stderr
     assert current_target(base) == "releases/r2"
     assert stops(base / "docker.log") == before
+
+
+# --- what the settlement accepts as evidence -------------------------------
+#
+# Settling the link is the last step of a recovery, and the one state it must
+# never produce is a link moved on evidence it did not read. These cases take
+# the same completed deployment - the transaction is closed and `current` is one
+# release behind - and break one read at a time.
+
+
+def _break_candidate_auth(host: Host, release: Path, defect: str) -> None:
+    """One way a candidate checkout stops being the source of its commit."""
+
+    marker = release / ".release-commit"
+    if defect == "marker-missing":
+        marker.unlink()
+    elif defect == "marker-wrong":
+        marker.write_text("0" * 40 + "\n", encoding="ascii")
+    elif defect == "head-moved":
+        host.git(release, "checkout", "-q", "--detach", host.head)
+    elif defect == "dirty":
+        (release / "release.txt").write_text("uncommitted\n", encoding="utf-8")
+    elif defect == "status-unreadable":
+        # A corrupt index is exactly what makes `git status` exit non-zero while
+        # HEAD still reads: the state that used to pass as "clean".
+        (release / ".git" / "index").write_bytes(b"not an index\n")
+    else:  # pragma: no cover - the parameter list is exhaustive
+        raise AssertionError(defect)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["marker-missing", "marker-wrong", "head-moved", "dirty", "status-unreadable"],
+)
+def test_a_candidate_that_cannot_be_authenticated_never_moves_current(
+    full_host, defect
+):
+    """A near miss is refused as a source-entry problem, not as "no carrier".
+
+    The deployment is complete and this release records its commit somewhere:
+    at HEAD with a missing or wrong marker (`marker-missing`, `marker-wrong`),
+    in the marker with a moved HEAD (`head-moved`), or in both from a tree that
+    is dirty or whose status cannot be read. None of that proves the checkout IS
+    that source, and a half answer must become neither a switch nor the "no
+    release carries it" no-op.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    release = base / "releases" / "r2"
+    assert commit not in (base / "releases" / "r1" / ".release-commit").read_text(
+        encoding="ascii"
+    )
+    _break_candidate_auth(host, release, defect)
+
+    result = recover(host, release, "--recover-full")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert current_target(base) == "releases/r1"
+    assert "no release" not in result.stderr
+
+
+def test_a_missing_marker_does_not_hide_the_release_that_carries_the_commit(
+    full_host,
+):
+    """The scan reads HEAD as well as the marker.
+
+    A checkout whose `.release-commit` was removed still holds the commit at
+    HEAD. Running the settlement from an unrelated release must name that one,
+    not report that no release carries the commit.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    (base / "releases" / "r2" / ".release-commit").unlink()
+    assert create_release(host, host.head) == "r3"
+
+    refused = recover(host, base / "releases" / "r3", "--recover-full")
+
+    assert refused.returncode == 1
+    assert current_target(base) == "releases/r1"
+    assert commit in refused.stderr
+    assert "run recovery from r2" in refused.stderr
+    # A runtime record is always terminal for a second recovery here, so the
+    # hint names the mode that can settle it.
+    assert "--recover-runtime" not in refused.stderr
+
+
+def test_the_current_marker_alone_does_not_make_the_link_right(full_host):
+    """A marker is a label; the link is right only when the source matches.
+
+    Here `current` labels the deployed commit while its HEAD is still the
+    release before it - a checkout that cannot serve what the marker claims.
+    The settlement must not read that label as "already current" and stop: it
+    names the release whose source really carries the commit.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    (base / "releases" / "r1" / ".release-commit").write_text(
+        f"{commit}\n", encoding="ascii"
+    )
+    # An unrelated release, so the candidate's own record is not the one the
+    # settlement is asked about.
+    assert create_release(host, host.head) == "r3"
+
+    refused = recover(host, base / "releases" / "r3", "--recover-full")
+
+    assert refused.returncode == 1
+    assert current_target(base) == "releases/r1"
+    assert "is current for" not in refused.stdout
+    assert "does not carry" in refused.stderr
+    assert "run recovery from r2" in refused.stderr
+
+
+def _write_outcome_mangling_python(fake_bin: Path, sed_expression: str) -> None:
+    """A python3 wrapper that corrupts the recovery command's outcome line.
+
+    The settlement reads that line from a separate process, so the boundary is
+    where a wrong or truncated answer can arrive. Only the recovery invocation
+    is piped through `sed`; every other call runs unchanged.
+    """
+
+    assert "'" not in sed_expression
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "set -u\n"
+        f"real_python={sys.executable!r}\n"
+        'case "$*" in\n'
+        "  *'full_update.py recover --settle-result'*)\n"
+        f"    \"$real_python\" \"$@\" | sed -e '{sed_expression}'\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        'exec "$real_python" "$@"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected", "why"),
+    [
+        (
+            "s/^settle-result.*/settle-result v1 kind=rolled-back pointer=absent/",
+            "not a result this settlement can act on",
+            "an unknown kind",
+        ),
+        (
+            "s/^settle-result.*/settle-result v1 kind=new-verified pointer=present:"
+            + "0" * 40
+            + "/",
+            "they disagree",
+            "a commit the pointer does not name",
+        ),
+        ("s/^settle-result.*/recovery done/", "not a result", "no outcome at all"),
+    ],
+)
+def test_an_outcome_the_settlement_cannot_act_on_is_refused(
+    full_host, expression, expected, why
+):
+    """Nothing moves on an outcome that is unknown or contradicts the pointer."""
+
+    host = full_host
+    base = host.base
+    interrupted_full_deploy(host, "after")
+    _write_outcome_mangling_python(host.fake_bin, expression)
+
+    result = recover(host, base / "releases" / "r2", "--recover-full")
+
+    assert result.returncode == 1, why
+    assert current_target(base) == "releases/r1"
+    assert expected in result.stderr
+
+
+def test_a_settlement_with_nothing_to_do_claims_no_recovery(full_host):
+    """A no-op is a no-op: it verified the link, not the deployment.
+
+    After the tail window was completed the journal is gone and `current` names
+    the serving release. The live database no longer matches the published
+    manifest, which the settlement does not read for standing still - so it is
+    still a no-op with the link where it is, and it says only that much: no
+    recovery happened on this run.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    released = recover(host, base / "releases" / "r2", "--recover-full")
+    assert released.returncode == 0, released.stderr
+    assert current_target(base) == "releases/r2"
+    with (base / "data" / "terms.db").open("ab") as stream:
+        stream.write(b"drift")
+
+    result = recover(host, base / "releases" / "r2", "--recover-full")
+
+    assert result.returncode == 0, result.stderr
+    assert current_target(base) == "releases/r2"
+    assert "no transaction is pending" in result.stdout
+    assert "releases/r2 is current" in result.stdout
+    assert commit in result.stdout
+    assert "needs no adjustment" in result.stdout
+    assert "recovery restored" not in result.stdout
+    assert "recovery restored" not in result.stderr
+    assert "confirmed on the new binding" not in result.stderr
+
+
+@pytest.mark.parametrize("pointer", ["missing", "invalid"])
+def test_the_settlement_never_reads_a_pointer_it_cannot_read(
+    full_host, pointer
+):
+    """Missing and unreadable are different answers, and neither is a switch."""
+
+    host = full_host
+    base = host.base
+    interrupted_full_deploy(host, "after")
+    if pointer == "missing":
+        (base / ".deploy_commit").unlink()
+    else:
+        # The pointer is published read-only; the content is what is wrong here.
+        (base / ".deploy_commit").chmod(0o644)
+        (base / ".deploy_commit").write_text("not a deployment\n", encoding="ascii")
+
+    result = recover(host, base / "releases" / "r2", "--recover-full")
+
+    assert current_target(base) == "releases/r1"
+    if pointer == "missing":
+        # Nothing is deployed to name, and no recovery happened on this run.
+        assert result.returncode == 0, result.stderr
+        assert "no deployment is recorded" in result.stdout
+        assert "recovery restored" not in result.stdout
+    else:
+        # An unreadable pointer is not "nothing deployed".
+        assert result.returncode == 1
+        assert "deployment pointer cannot be read" in result.stderr
+
+
+def test_the_recovery_entry_also_settles_from_a_relative_invocation(full_host):
+    """The settlement must not depend on how the entry was spelled.
+
+    A relative `./deploy/vps-update.sh` inside the release resolves to the same
+    checkout as an absolute path, so it settles from that release's record
+    instead of following `current` into the release that is still serving.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    release = base / "releases" / "r2"
+
+    result = subprocess.run(
+        ["sh", "./deploy/vps-update.sh", "--recover-full"],
+        cwd=release,
+        env=fresh_shell_env(host),
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert current_target(base) == "releases/r2"
+    assert commit in result.stdout
+
+
+def _run_recovery_script(host: Host, release: Path, script: str, *args: str):
+    """Run one recovery tool directly, under the deployment lock it requires.
+
+    The updater opens the lock on fd 9 and the tools inherit it, so a direct run
+    has to bind that descriptor itself - the same way `migrate-layout.sh` does.
+    """
+
+    return subprocess.run(
+        [
+            "sh",
+            "-c",
+            'set -eu\nexec 9>>"$1/.deployments/.deployment.lock"\nshift\nexec "$@"',
+            "sh",
+            str(host.base),
+            sys.executable,
+            str(release / "scripts" / script),
+            *args,
+        ],
+        cwd=release,
+        env=fresh_shell_env(host),
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_the_outcome_line_is_the_whole_of_stdout(full_host):
+    """One machine line on stdout, and only after the record was closed.
+
+    The settlement reads this line, so nothing else may share stdout with it,
+    and the human log of the same run belongs on stderr.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "before")
+    release = base / "releases" / "r2"
+
+    result = _run_recovery_script(
+        host, release, "full_update.py", "recover", "--settle-result"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"settle-result v1 kind=new-verified pointer=present:{commit}\n"
+    assert "confirmed on the new binding" in result.stderr
+    assert not (base / JOURNAL_RELPATH).exists()
+
+    # Without the option the tool logs where it always did, so a human running
+    # it directly reads the same output and exit status as before.
+    plain = _run_recovery_script(host, release, "full_update.py", "recover")
+    assert plain.returncode == 0
+    assert plain.stdout == "no full transaction to recover\n"
+
+
+def test_a_failed_recovery_reports_no_outcome_and_keeps_its_status(full_host):
+    """A refused recovery is not a result: same non-zero status, no claim."""
+
+    host = full_host
+    base = host.base
+    interrupted_full_deploy(host, "before")
+    release = base / "releases" / "r1"
+    # The record binds the fingerprint of the release that wrote it.
+    result = _run_recovery_script(
+        host, release, "full_update.py", "recover", "--settle-result"
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == "settle-result v1 kind=failed\n"
+    assert "full_recovery_tool_mismatch" in result.stderr
+    assert (base / JOURNAL_RELPATH).exists()

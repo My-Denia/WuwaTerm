@@ -133,6 +133,16 @@ EXPECTED_DB_INDEXES = {
         "sqlite_autoindex_terms_1": (1, "u"),
     },
 }
+# Machine-readable recovery outcome, the same one-line grammar
+# `scripts/full_update.py` prints for `recover --settle-result`:
+# `settle-result v1 kind=<kind> pointer=<absent|present:SHA>`. The runtime
+# record has no `no-journal` answer (a missing record is not a recovery), so
+# the kinds here are `old-verified` (the rollback this run completed),
+# `new-verified` (the committed binding it re-proved) and `failed`, which
+# always accompanies a non-zero exit.
+SETTLE_RESULT_PREFIX = "settle-result v1"
+
+_settle_result = False
 _termination_requested = False
 _in_rollback = False
 _termination_signal: int | None = None
@@ -1529,7 +1539,30 @@ def _new_deployment() -> int:
         raise RuntimeUpdateError("internal_error") from None
 
 
-def _recovery() -> int:
+def _human(text: str) -> None:
+    """Human log line: stdout normally, stderr while the result owns stdout."""
+
+    print(text, file=sys.stderr if _settle_result else sys.stdout)
+
+
+def _settle_pointer_token() -> str:
+    """The deployment pointer as the outcome line names it."""
+
+    path = ROOT / ".deploy_commit"
+    if not path.exists() and not path.is_symlink():
+        return "absent"
+    return f"present:{_pointer(path)}"
+
+
+def _report_settle_failure() -> None:
+    """A failed recovery keeps its exit status and claims no outcome."""
+
+    if _settle_result:
+        print(f"{SETTLE_RESULT_PREFIX} kind=failed")
+
+
+def _recovery() -> str:
+    """Recover from the record; the returned kind is the side this run settled."""
     journal = _load_journal()
     if journal["status"] == "rolled_back":
         raise RuntimeUpdateError("no_recovery_needed")
@@ -1558,8 +1591,8 @@ def _recovery() -> int:
             _pointer(ROOT / ".deploy_commit"),
         ):
             raise RuntimeUpdateError("invalid_pointer")
-        print("runtime-only transaction already committed; nothing to restore")
-        return 0
+        _human("runtime-only transaction already committed; nothing to restore")
+        return "new-verified"
     global _in_rollback, _termination_requested
     _in_rollback = True
     _termination_requested = False
@@ -1612,7 +1645,7 @@ def _recovery() -> int:
             _verify_pointer(journal["old_pointer"])
         _assert_database_unchanged(db_snapshot)
         _set_journal(journal, phase="recovered", status="rolled_back")
-        return 0
+        return "old-verified"
     except Exception:
         try:
             _set_journal(journal, phase="unresolved", status="unresolved")
@@ -1630,7 +1663,10 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--runtime-only", action="store_true")
     group.add_argument("--recover-runtime", action="store_true")
     group.add_argument("--check-runtime-journal", action="store_true")
+    parser.add_argument("--settle-result", action="store_true")
     args = parser.parse_args(argv)
+    global _settle_result
+    _settle_result = bool(args.settle_result)
     try:
         deployment_admission.admit_legacy(ROOT)
     except deployment_admission.AdmissionError as exc:
@@ -1654,14 +1690,21 @@ def main(argv: list[str] | None = None) -> int:
         # recovery has verified the observed binding and cleared it.
         if full_journal_exists():
             raise RuntimeUpdateError("full_recovery_required")
-        return _new_deployment() if args.runtime_only else _recovery()
+        if args.runtime_only:
+            return _new_deployment()
+        kind = _recovery()
+        if _settle_result:
+            print(f"{SETTLE_RESULT_PREFIX} kind={kind} pointer={_settle_pointer_token()}")
+        return 0
     except RuntimeUpdateError as exc:
         print(f"runtime-only deployment failed: {exc.code}", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             traceback.print_exc()
         return 1
     except Exception:
         print("runtime-only deployment failed: internal_error", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             traceback.print_exc()
         return 1

@@ -124,7 +124,7 @@ def test_same_source_sigkill_after_stop_and_real_promotion_recovers(full_harness
         result = _run_recover(root, env)
 
         assert result.returncode == 0, result.stderr
-        assert "rolled back" in result.stdout
+        assert "rolled back" in result.stderr
         assert not (root / JOURNAL_RELPATH).exists()
         assert (root / "data" / "terms.db").read_bytes() == old_bytes
         for surface in ("bot", "api"):
@@ -146,7 +146,7 @@ def test_shared_pointer_complete_new_binding_confirms_without_restore(full_harne
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stderr
-    assert "confirmed on the new binding" in result.stdout
+    assert "confirmed on the new binding" in result.stderr
     assert not _mutations(root)
     assert not (root / JOURNAL_RELPATH).exists()
     assert manifest.read_bytes() == before
@@ -167,7 +167,7 @@ def test_shared_pointer_known_incomplete_binding_restores_old(full_harness, obse
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stderr
-    assert "rolled back" in result.stdout
+    assert "rolled back" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == old_bytes
     for surface in ("bot", "api"):

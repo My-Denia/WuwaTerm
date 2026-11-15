@@ -1006,20 +1006,32 @@ Recovery also settles the release link, because a committed transaction and
 `current` are one binding. The normal path switches `current` after the
 transaction committed, so a kill between those two steps leaves a host whose
 pointer, database and surfaces already run the new deployment while `current`
-still names the release that was serving. `--recover-full` therefore ends by
-proving the published binding again from observation — pointer, the manifest
-that must match it, the live database hash and every present surface — and
-switches `current` when that commit is the commit of the release the command
-was run from. The record's own exit status never selects a release. A link that
-already names the pointer's commit needs no move and is left alone, including
-when the restored binding cannot be re-proven by the single-image prover
-(a rollback may legitimately put the surfaces back on different old images). A
-pointer naming a commit no release carries — a host migrated from the in-place
-checkout records its own HEAD as the release's commit — is reported and left
-unswitched, because no checkout's source corresponds to it. A commit this
-release does not carry while another release does, and an unprovable state,
-still refuse instead of reporting a completion, and `current` stays exactly
-where it was. Repeating the command after it succeeded changes nothing.
+still names the release that was serving. The recovery tool therefore reports
+which side this run actually settled — `old-verified`, `new-verified`, or
+`no-journal` when the full entry found no record — on one line of stdout, and
+only after it verified a binding and finished the record; the human log of the
+same run goes to stderr. That line is what the entry settles from, with its own
+reads of the pointer and of every release checkout. An exit status never
+selects a release: a recovery that exits 0 says nothing about which commit the
+link should name.
+
+A link that is already the source of the settled commit — that release's
+marker and its HEAD are the commit, from a clean tree — needs no move and is
+left alone, and saying so needs no published binding: a rollback may
+legitimately restore surfaces that carried different old images, which the
+single-image prover cannot re-express. Moving needs the published binding
+re-proven from observation (pointer, the manifest that must match it, the live
+database hash, every present surface), the proven commit being the settled one,
+and this checkout being its source. A commit this release does not carry while
+another release does refuses and names that release, never `--recover-runtime`,
+which a second run cannot settle. A pointer naming a commit no release's source
+carries — a host migrated from the in-place checkout records its own HEAD as
+the release's commit — is reported as the binding that was restored with
+nothing to switch to. Every read the settlement needs that fails — the record,
+the pointer, a release's marker, its HEAD or its `git status` — refuses instead
+of counting as "nothing deployed", "no carrier" or "clean". Repeating the
+command after it succeeded changes nothing, and that no-op says only what it
+verified: no transaction is pending and the link needs no adjustment.
 
 Before any of that, recovery establishes an admissibility preflight that
 mutates nothing: every journal-referenced path (backup, old manifest) is

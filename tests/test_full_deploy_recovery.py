@@ -1646,7 +1646,9 @@ def test_a_stopped_surface_is_confirmed_on_the_new_binding(full_harness):
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "confirmed on the new binding" in result.stdout
+    # Recovery reports on stderr now: stdout carries the outcome line the
+    # settlement reads, not a log the shell parses.
+    assert "confirmed on the new binding" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert not any(" stop " in line for line in _docker_log(root))
 
@@ -1717,7 +1719,7 @@ def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_har
     again = _run_recover(root, env)
 
     assert again.returncode == 0, again.stdout + again.stderr
-    assert "no full transaction to recover" in again.stdout
+    assert "no full transaction to recover" in again.stderr
 
 
 def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(full_harness):
@@ -1806,6 +1808,8 @@ def test_a_first_deployment_with_an_absent_bot_and_serving_api_confirms(
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "confirmed on the new binding" in result.stdout
+    # Recovery reports on stderr now: stdout carries the outcome line the
+    # settlement reads, not a log the shell parses.
+    assert "confirmed on the new binding" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert not any(" stop " in line for line in _docker_log(root))

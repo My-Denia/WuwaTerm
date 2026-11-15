@@ -245,121 +245,262 @@ if [ -n "$release_name" ]; then
 fi
 
 # A completed transaction and the `current` link are ONE binding: the pointer
-# names a commit, and `current` names the release whose code carries it. The
-# normal path switches the link after the transaction committed, so an
-# interruption in between leaves a host that already serves the new deployment
-# while `current` still names the release that was serving. Recovery therefore
-# settles the link too, and settles it from EVIDENCE rather than from its own
-# exit status: `published` re-proves the observed binding (pointer, matching
-# manifest, live database, every present surface) and prints the commit it
-# proves. The link moves only to a release authenticated for that commit, so a
-# rolled-back binding, an unresolved one, or a candidate that never deployed
-# it never moves `current`.
+# names a commit and `current` names the release whose code carries it. A kill
+# between the commit and the link switch leaves the new deployment serving while
+# `current` still names the old release, so recovery settles the link too.
 #
-# Two recoveries leave the link alone and still succeed, because the link needs
-# no move and saying otherwise would report a failure that did not happen. A
-# migration records the in-place HEAD as the release's commit while the
-# pointer keeps naming what was actually deployed, so a rollback can restore a
-# commit no release carries; and a rollback can restore surfaces that
-# legitimately sat on different old images, which the single-image prover above
-# cannot re-express even though recovery just verified that binding step by
-# step. Both are narrowed to "the pointer says the existing link is right", or
-# "no release's source can correspond to it": neither ever selects a release.
+# It settles from an OUTCOME, not from an exit status: the recovery command
+# prints one line on stdout, only after it verified a binding and closed the
+# record, naming the side this run actually settled (`old-verified`,
+# `new-verified`) or that it found no record (`no-journal`, full mode only). An
+# exit status cannot answer that - "needs no move" and "cannot be authenticated"
+# both leave it 0 - and a recovery that exits 0 says nothing about which commit
+# the link should name.
+#
+# Everything else is read here, and read strictly: the pointer (missing,
+# present, unreadable) and, per release checkout, its marker, HEAD and
+# `git status`. A failed read is never "no carrier", "clean" or "nothing
+# deployed", and `current` is the source of a commit only when that release's
+# marker AND HEAD are the commit from a clean tree. The steps run in order and
+# none falls through, so a state they do not name leaves `current` where it was.
+
+# settle_refuse LINE...: one refusal that also says where the link stays. Always
+# ends with `|| return 1`; nothing below it runs for that state.
+settle_refuse() {
+  for settle_msg in "$@"; do echo "$settle_msg" >&2; done
+  echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
+  return 1
+}
+
+# settle_unreadable NAME: evidence that could not be read is not an answer.
+settle_unreadable() {
+  settle_refuse "release: $1 cannot be read (marker, HEAD or git status);" \
+    "  nothing is settled on evidence that could not be read"
+}
+
+# settle_parse LINE: 0 with $settle_kind/$settle_token only for one well-formed
+# outcome line. An unknown kind, a missing or malformed commit or a second line
+# is refused instead of guessed at.
+settle_parse() {
+  case "$1" in
+    "settle-result v1 kind="*" pointer="*) ;;
+    *) return 1 ;;
+  esac
+  settle_rest=${1#settle-result v1 kind=}
+  settle_kind=${settle_rest%% pointer=*}
+  settle_token=${settle_rest##* pointer=}
+  case "$settle_kind" in
+    old-verified|new-verified) ;;
+    # A runtime record always exists when it is recovered; only the full entry
+    # can report that there was nothing to settle.
+    no-journal) [ "$mode" != recover-runtime ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$settle_token" in
+    absent|invalid) ;;
+    present:*)
+      settle_sha=${settle_token#present:}
+      [ "${#settle_sha}" -eq 40 ] || return 1
+      case "$settle_sha" in *[!0-9a-f]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# release_probe BASE NAME: one release checkout's source evidence, in
+# $pr_marker, $pr_head and $pr_dirty. 0 when every read succeeded, 1 when the
+# directory is not a release checkout, 2 when a read failed - a failed read must
+# never be mistaken for an absent marker or a clean tree.
+release_probe() {
+  pr_dir="$1/releases/$2"
+  pr_marker=""
+  pr_dirty=""
+  [ -d "$pr_dir" ] && [ ! -L "$pr_dir" ] && [ -e "$pr_dir/.git" ] || return 1
+  if [ -e "$pr_dir/.release-commit" ]; then
+    pr_marker=$(cat "$pr_dir/.release-commit" 2>/dev/null) || return 2
+  fi
+  pr_head=$(command git -C "$pr_dir" rev-parse HEAD 2>/dev/null) || return 2
+  pr_dirty=$(command git -C "$pr_dir" status --porcelain --untracked-files=all \
+    2>/dev/null) || return 2
+}
+
 release_settle() {
+  # (a) A recovery that did not finish never reaches here: the caller keeps its
+  # exit status and no half transaction is settled from a guess.
   [ -n "$release_name" ] || return 0
-  settle_current=$(readlink "$state_root/current" 2>/dev/null || true)
-  settle_current_commit=""
-  if [ -n "$settle_current" ] && \
-    [ -f "$state_root/$settle_current/.release-commit" ]; then
-    settle_current_commit=$(tr -d '\n' < "$state_root/$settle_current/.release-commit")
+  settle_current=""
+  settle_current_name=""
+  if [ -L "$state_root/current" ]; then
+    settle_current=$(readlink "$state_root/current" 2>/dev/null) \
+      || settle_refuse "release: $state_root/current is a link that cannot be read" \
+      || return 1
+    case "$settle_current" in
+      releases/*) settle_current_name=${settle_current#releases/} ;;
+    esac
   fi
-  # An open runtime-only transaction can have moved the pointer without
-  # committing it, so a settlement must not read it: the record is recovered
-  # first, and only a closed transaction may contribute evidence here.
-  if ! "$deploy_python" scripts/runtime_update.py --check-runtime-journal \
-    >/dev/null 2>&1; then
-    echo "release: an open runtime-only transaction must be recovered first;" >&2
-    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
-    return 1
-  fi
-  settle_pointer=$("$deploy_python" scripts/full_update.py pointer 2>/dev/null) || \
-    settle_pointer=""
-  if settle_published=$("$deploy_python" scripts/full_update.py published); then
-    :
-  else
+
+  # (b) A record, an outcome or a pointer that cannot be read is not evidence.
+  "$deploy_python" scripts/runtime_update.py --check-runtime-journal \
+    >/dev/null 2>&1 || settle_refuse \
+    "release: an open runtime-only transaction must be recovered first" || return 1
+  settle_parse "${1:-}" || settle_refuse \
+    "release: the recovery outcome is not a result this settlement can act on" \
+    || return 1
+  settle_present=0
+  settle_pointer=""
+  settle_pointer=$("$deploy_python" scripts/full_update.py pointer 2>/dev/null) || {
     settle_status=$?
-    if [ "$settle_status" -eq 10 ]; then
-      echo "release: no deployment is published; $state_root/current stays at" \
-        "${settle_current:-nothing}"
-      return 0
-    fi
-    # `published` proves one image per manifest, and the recovery that just
-    # exited 0 verified a binding whose surfaces may have carried different old
-    # images. That is not a failed settlement: the pointer names the commit the
-    # link already carries, so nothing moves and none of the proof above is
-    # needed for standing still.
-    if [ -n "$settle_pointer" ] && [ "$settle_current_commit" = "$settle_pointer" ]; then
-      echo "release: recovery restored $settle_pointer, the commit $settle_current"
-      echo "  already carries; the release link needs no change and is not touched"
-      return 0
-    fi
-    echo "release: the published binding could not be proven from observation" >&2
-    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
-    echo "release: run recovery from the release that wrote the record, with" >&2
-    echo "  its records intact: sh $code_root/deploy/vps-update.sh --$mode" >&2
-    return 1
+    settle_pointer=""
+    [ "$settle_status" -eq 10 ] || settle_refuse \
+      "release: the deployment pointer cannot be read; nothing is settled from it" \
+      || return 1
+  }
+  if [ -n "$settle_pointer" ]; then
+    settle_present=1
+    settle_named="present:$settle_pointer"
+  else
+    settle_named="absent"
   fi
-  if [ "$settle_current_commit" = "$settle_published" ]; then
-    echo "release: $settle_current is current for $settle_published"
+  [ "$settle_token" = "$settle_named" ] || settle_refuse \
+    "release: the recovery reported $settle_token, the pointer is now $settle_named;" \
+    "  they disagree, so nothing is settled" || return 1
+
+  # (c) Nothing is deployed. A certified new binding without a pointer is a
+  # contradiction, not a link to move.
+  if [ "$settle_present" -eq 0 ]; then
+    if [ "$settle_kind" = new-verified ]; then
+      settle_refuse \
+        "release: the recovery certified a new binding, but no pointer exists" \
+        || return 1
+    fi
+    if [ "$settle_kind" = old-verified ]; then
+      echo "release: recovery restored the binding it recorded, which deployed" \
+        "nothing; $state_root/current stays at ${settle_current:-nothing}"
+    else
+      echo "release: no deployment is recorded, so there is no commit to name;" \
+        "$state_root/current stays at ${settle_current:-nothing}"
+    fi
     return 0
   fi
-  settle_release_commit=$(tr -d '\n' \
-    < "$state_root/releases/$release_name/.release-commit" 2>/dev/null || true)
-  settle_head=$(git rev-parse HEAD 2>/dev/null || true)
-  settle_dirty=$(git status --porcelain --untracked-files=all 2>/dev/null || true)
-  if [ "$settle_release_commit" = "$settle_published" ] && \
-    [ "$settle_head" = "$settle_published" ] && [ -z "$settle_dirty" ]; then
-    if release_publish "$state_root" "$release_name"; then
-      echo "release: $release_name (current) for $settle_published"
-      return 0
+
+  # (d)(g) The link's own answer, authenticated rather than labelled: only a
+  # release whose marker AND HEAD are this commit, from a clean tree, is its
+  # source. A read that fails refuses instead of counting as "not clean".
+  settle_current_auth=0
+  if [ -n "$settle_current_name" ]; then
+    settle_rc=0
+    release_probe "$state_root" "$settle_current_name" || settle_rc=$?
+    [ "$settle_rc" -ne 2 ] || settle_unreadable "$settle_current" || return 1
+    if [ "$settle_rc" -eq 0 ] && [ "$pr_marker" = "$settle_pointer" ] \
+      && [ "$pr_head" = "$settle_pointer" ] && [ -z "$pr_dirty" ]; then
+      settle_current_auth=1
     fi
-    echo "release: the deployment is complete, but $state_root/current could not" >&2
-    echo "be switched to $release_name; it stays at ${settle_current:-nothing}" >&2
-    return 1
   fi
-  # The link moves only to a release authenticated for the published commit, so
-  # name the release that carries it instead of moving `current` to a checkout
-  # nobody can authenticate for that commit.
-  settle_carrier=""
+  if [ "$settle_current_auth" -eq 1 ]; then
+    case "$settle_kind" in
+      old-verified)
+        # The single-image prover cannot re-express a rollback whose surfaces
+        # carried different old images, and standing still needs no proof: the
+        # recovery verified that binding step by step.
+        echo "release: recovery restored $settle_pointer; $settle_current is current" \
+          "for it and the release link needs no change" ;;
+      new-verified)
+        echo "release: $settle_current is current for $settle_pointer" ;;
+      *)
+        # Nothing was pending and the link is already right: say exactly that.
+        echo "release: no transaction is pending and $settle_current is current for" \
+          "$settle_pointer; the release link needs no adjustment" ;;
+    esac
+    return 0
+  fi
+
+  # Does the release this recovery ran from carry the settled commit? Its marker
+  # OR its HEAD saying so is a reason to prove and move, never proof on its own.
+  settle_self_rc=0
+  release_probe "$state_root" "$release_name" || settle_self_rc=$?
+  [ "$settle_self_rc" -ne 2 ] || settle_unreadable "$release_name" || return 1
+  if [ "$settle_self_rc" -eq 0 ] && { [ "$pr_marker" = "$settle_pointer" ] \
+    || [ "$pr_head" = "$settle_pointer" ]; }; then
+    # (h) Move to this release, and only on the complete published proof plus
+    # this checkout being the source of that commit. A failure here is never
+    # re-read as "no release carries it".
+    settle_proven=$("$deploy_python" scripts/full_update.py published) \
+      || settle_proven=""
+    [ -n "$settle_proven" ] || settle_refuse \
+      "release: the published binding could not be proven from observation;" \
+      "  recovery must run from the release that wrote the record, with its" \
+      "  records intact: sh $code_root/deploy/vps-update.sh --$mode" || return 1
+    [ "$settle_proven" = "$settle_pointer" ] || settle_refuse \
+      "release: the published binding is $settle_proven, not the commit recovery" \
+      "  settled ($settle_pointer)" || return 1
+    if [ "$pr_marker" != "$settle_pointer" ] || [ "$pr_head" != "$settle_pointer" ] \
+      || [ -n "$pr_dirty" ]; then
+      settle_refuse \
+        "release: $release_name carries $settle_pointer in its marker or at HEAD," \
+        "  but that checkout is not its source: its marker, its HEAD and a clean" \
+        "  tree must all say so, and no candidate release is switched to instead" \
+        || return 1
+    fi
+    release_publish "$state_root" "$release_name" || settle_refuse \
+      "release: the deployment is complete, but the link could not be switched" \
+      "  to $release_name" || return 1
+    echo "release: $release_name (current) for $settle_pointer"
+    return 0
+  fi
+
+  # Another release carries it. A read that fails while looking refuses here; it
+  # must not become "no release carries it" below.
+  settle_other=""
   for settle_dir in "$state_root"/releases/r[1-9]*; do
     [ -d "$settle_dir" ] && [ ! -L "$settle_dir" ] || continue
-    case "$(tr -d '\n' < "$settle_dir/.release-commit" 2>/dev/null || true)" in
-      "$settle_published") settle_carrier=$settle_dir ;;
-    esac
+    settle_scan=${settle_dir##*/}
+    release_name_ok "$settle_scan" && [ "$settle_scan" != "$release_name" ] || continue
+    settle_rc=0
+    release_probe "$state_root" "$settle_scan" || settle_rc=$?
+    [ "$settle_rc" -ne 2 ] || settle_unreadable "$settle_scan" || return 1
+    [ "$settle_rc" -eq 0 ] || continue
+    if [ "$pr_marker" = "$settle_pointer" ] || [ "$pr_head" = "$settle_pointer" ]; then
+      settle_other=$settle_scan
+    fi
   done
-  if [ -z "$settle_carrier" ]; then
-    # A migrated host records the in-place HEAD as its release's commit while
-    # the pointer keeps naming the commit that was deployed in place, so a
-    # rollback restores a commit no release carries. No checkout's source
-    # corresponds to it: say so, leave the link where it is, and report the
-    # recovery that did happen rather than failing on a link that cannot move.
-    echo "release: the deployment pointer names $settle_published, which no release" >&2
-    echo "  carries; that commit's source predates the release layout, so no" >&2
-    echo "  release corresponds to it. $state_root/current stays at" >&2
-    echo "  ${settle_current:-nothing}, and is not switched on a guess." >&2
-    return 0
+  if [ "$settle_other" = "$settle_current_name" ] && [ -n "$settle_other" ]; then
+    # (f) The link is the source entry for this commit but does not hold it.
+    settle_refuse \
+      "release: $settle_pointer is deployed and $settle_current is the source" \
+      "  entry for it, but that checkout is not authenticated for it" || return 1
   fi
-  if [ "$settle_release_commit" = "$settle_published" ]; then
-    echo "release: $settle_published is $release_name's commit, but that checkout" >&2
-    echo "  cannot be authenticated for it (HEAD or uncommitted changes);" >&2
-    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
-    return 1
+  if [ -n "$settle_other" ]; then
+    # (i) This entry is not the one to settle from.
+    settle_refuse \
+      "release: the deployment pointer names $settle_pointer, which $release_name" \
+      "  does not carry; run recovery from $settle_other so that release settles" \
+      "  the link:" \
+      "  sh $state_root/releases/$settle_other/deploy/vps-update.sh --recover-full" \
+      || return 1
   fi
-  echo "release: the deployment pointer names $settle_published, which $release_name" >&2
-  echo "does not carry; $state_root/current stays at ${settle_current:-nothing}" >&2
-  echo "release: run recovery from ${settle_carrier##*/}:" >&2
-  echo "  sh $settle_carrier/deploy/vps-update.sh --recover-full" >&2
-  return 1
+
+  # (e)(j)(k) No release's source corresponds to the settled commit.
+  case "$settle_kind" in
+    old-verified)
+      # A migrated host records the in-place HEAD as its release's commit while
+      # the pointer keeps naming what that checkout deployed, so a rollback
+      # restores a commit no release carries. Nothing can be moved to it, and no
+      # checkout is invented for it.
+      echo "release: recovery restored $settle_pointer, which no release's source" \
+        "carries: a host migrated from the in-place checkout records its own HEAD" \
+        "as its release's commit and keeps the deployed commit in the pointer." \
+        "$state_root/current stays at ${settle_current:-nothing} and is not" \
+        "switched on a guess." >&2
+      return 0 ;;
+    new-verified)
+      settle_refuse \
+        "release: the recovery certified $settle_pointer, but no release's source" \
+        "  carries it" || return 1 ;;
+    *)
+      echo "release: no transaction is pending and no release's source corresponds" \
+        "to $settle_pointer; no source entry was found to adjust, and" \
+        "$state_root/current stays at ${settle_current:-nothing}" >&2
+      return 0 ;;
+  esac
 }
 
 case "$mode" in
@@ -375,14 +516,15 @@ case "$mode" in
     ;;
   recover-runtime)
     cd "$code_root"
-    "$deploy_python" scripts/runtime_update.py --recover-runtime
-    release_settle
+    settle_out=$("$deploy_python" scripts/runtime_update.py --recover-runtime \
+      --settle-result)
+    release_settle "$settle_out"
     exit 0
     ;;
   recover-full)
     cd "$code_root"
-    "$deploy_python" scripts/full_update.py recover
-    release_settle
+    settle_out=$("$deploy_python" scripts/full_update.py recover --settle-result)
+    release_settle "$settle_out"
     exit 0
     ;;
 esac
