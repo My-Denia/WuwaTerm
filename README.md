@@ -95,9 +95,10 @@ when you point it at that checkout (`--telegram-dir`), then prints the
 product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
-A clone of the Core v0.8.6 tag installs Telegram v0.2.9 by default, the release
-that tag records; `main` and later maintenance releases record v0.2.10. To pair
-the tagged Core with the newer Telegram release, name the tag explicitly:
+A clone of the Core v0.8.6 tag prints the install steps of Telegram v0.2.9,
+the release that tag records; `main` records v0.2.10, which the next formal
+release will carry. To pair the tagged Core with the newer Telegram release,
+name the tag explicitly:
 
 ```bash
 WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram

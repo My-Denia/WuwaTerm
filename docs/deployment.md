@@ -1010,11 +1010,16 @@ still names the release that was serving. `--recover-full` therefore ends by
 proving the published binding again from observation — pointer, the manifest
 that must match it, the live database hash and every present surface — and
 switches `current` when that commit is the commit of the release the command
-was run from. The record's own exit status never selects a release: a
-binding that was rolled back, a commit this checkout does not carry, a second
-release with a different commit, or an unprovable state leaves `current`
-exactly where it was, and the last two refuse instead of reporting a
-completion. Repeating the command after it succeeded changes nothing.
+was run from. The record's own exit status never selects a release. A link that
+already names the pointer's commit needs no move and is left alone, including
+when the restored binding cannot be re-proven by the single-image prover
+(a rollback may legitimately put the surfaces back on different old images). A
+pointer naming a commit no release carries — a host migrated from the in-place
+checkout records its own HEAD as the release's commit — is reported and left
+unswitched, because no checkout's source corresponds to it. A commit this
+release does not carry while another release does, and an unprovable state,
+still refuse instead of reporting a completion, and `current` stays exactly
+where it was. Repeating the command after it succeeded changes nothing.
 
 Before any of that, recovery establishes an admissibility preflight that
 mutates nothing: every journal-referenced path (backup, old manifest) is

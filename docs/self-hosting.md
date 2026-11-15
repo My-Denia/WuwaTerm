@@ -81,11 +81,11 @@ from a moving branch is possible and is a worse idea than it looks: the data pin
 and the schema version travel with the source, so a tag is what makes a working
 install describable later.
 
-A clone of the v0.8.6 tag installs Telegram v0.2.9 by default, because that
-Core release records v0.2.9 in `contracts/products.json` and `deploy/setup.sh`
-takes the recorded tag. `main` and later maintenance releases record v0.2.10.
-To pair the tagged Core with the newer Telegram release, name it on the install
-command:
+A clone of the v0.8.6 tag prints the install steps of Telegram v0.2.9,
+because that Core release records v0.2.9 in `contracts/products.json` and
+`deploy/setup.sh` takes the recorded tag. `main` records v0.2.10, which the next
+formal release will carry. To pair the tagged Core with the newer Telegram
+release, name it on the install command:
 
 ```bash
 WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram

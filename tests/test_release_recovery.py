@@ -31,6 +31,7 @@ import pytest
 from test_deploy_scripts import NEW_IMAGE, OLD_COMMIT, OLD_IMAGE
 from scripts.deployment_manifest import build_manifest, publish_commit_pointer, write_manifest
 from test_full_deploy_recovery import (
+    API_ALT_IMAGE,
     API_ROLLBACK_REF,
     BOT_ROLLBACK_REF,
     JOURNAL_RELPATH,
@@ -327,6 +328,213 @@ def test_a_rollback_keeps_current_on_the_serving_release(full_host):
     assert (base / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
     assert (base / "api-image").read_text(encoding="ascii").strip() == OLD_IMAGE
     assert "r1 is current" in result.stdout
+
+
+@pytest.fixture()
+def migrated_host(tmp_path):
+    """The release layout as `migrate-layout.sh` left it.
+
+    The migration records the in-place HEAD as r1's commit while the deployment
+    pointer keeps naming the commit that was deployed before it, so r1's marker
+    legitimately leads the pointer and a rollback restores a commit no release
+    carries.
+    """
+
+    host = Host(tmp_path)
+    _write_full_fake_docker(host.fake_bin.parent / "install")
+    _write_full_fake_python(host.fake_bin.parent / "install")
+    assert host.migrate().returncode == 0
+    _surface(host.base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=True)
+    _surface(host.base, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
+    return host
+
+
+def _assert_the_marker_leads_the_pointer(host: Host) -> None:
+    base = host.base
+    assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (
+        (base / "releases" / "r1" / ".release-commit")
+        .read_text(encoding="ascii")
+        .strip()
+        == host.head
+    )
+
+
+def test_a_per_surface_rollback_reports_success_without_moving_current(full_host):
+    """One image per manifest cannot re-express a host that ran two old ones.
+
+    The bot was stopped on the image its commit's manifest records and the API
+    was serving a different, older one - a state a hand-recovered host really
+    has. Recovery restores each recorded image and verifies that binding, so
+    the link, already on the commit the pointer names, has nothing to settle;
+    refusing here would report a failure of a recovery that succeeded.
+    """
+
+    host = full_host
+    base = host.base
+    old_pointer = host.head
+    commit = push_tool_change(host)
+    assert create_release(host, commit) == "r2"
+    release = base / "releases" / "r2"
+    old_bytes = (base / "data" / "terms.db").read_bytes()
+    old_hash = hashlib.sha256(old_bytes).hexdigest()
+    backup_rel = f"data/deployment-backups/terms.{TXN}.{old_hash}.db"
+    (base / backup_rel).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(base / "data" / "terms.db", base / backup_rel)
+    _surface(base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
+    _surface(base, "api", image=API_ALT_IMAGE, ref=OLD_REF, running=True)
+    (base / f"tag-{BOT_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    (base / f"tag-{API_ROLLBACK_REF}").write_text(f"{API_ALT_IMAGE}\n", encoding="ascii")
+    _plant(
+        base,
+        _journal(
+            release,
+            phase="armed",
+            old_db_sha=old_hash,
+            db_backup=backup_rel,
+            old_pointer=old_pointer,
+            source_commit=commit,
+            new_db_sha="0" * 64,
+            candidate_rel=f"data/candidates/terms.{TXN}.db",
+            bot_id=OLD_IMAGE,
+            api_id=API_ALT_IMAGE,
+            bot_running=False,
+            api_running=True,
+        ),
+    )
+
+    result = recover(host, release, "--recover-full")
+
+    assert result.returncode == 0, result.stderr
+    assert "rolled back to the previous binding" in result.stdout
+    assert current_target(base) == "releases/r1"
+    assert not (base / JOURNAL_RELPATH).exists()
+    assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{old_pointer}\n"
+    assert (base / "data" / "terms.db").read_bytes() == old_bytes
+    assert (base / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    assert (base / "api-image").read_text(encoding="ascii").strip() == API_ALT_IMAGE
+    assert (base / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (base / "api-running").read_text(encoding="ascii").strip() == "true"
+    assert "needs no change" in result.stdout
+
+
+def test_a_migrated_full_rollback_reports_success_without_switching_current(
+    migrated_host,
+):
+    """The pointer names a commit no release's source carries.
+
+    The migration never rewrites the pointer, so a full rollback restores the
+    commit that was deployed in place. There is no checkout to switch to, and
+    the recovery did restore the host; naming the absent correspondence and
+    leaving `current` alone is the honest outcome.
+    """
+
+    host = migrated_host
+    base = host.base
+    _assert_the_marker_leads_the_pointer(host)
+    commit = push_tool_change(host)
+    assert create_release(host, commit) == "r2"
+    release = base / "releases" / "r2"
+    old_bytes = (base / "data" / "terms.db").read_bytes()
+    new_bytes = (base / "data" / "candidate-seed.db").read_bytes()
+    old_hash = hashlib.sha256(old_bytes).hexdigest()
+    backup_rel = f"data/deployment-backups/terms.{TXN}.{old_hash}.db"
+    (base / backup_rel).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(base / "data" / "terms.db", base / backup_rel)
+    # The interruption: the database and both surfaces already run the
+    # candidate, so recovery has to put the recorded old binding back.
+    (base / "data" / "terms.db").write_bytes(new_bytes)
+    _surface(
+        base, "bot", image=NEW_IMAGE, ref=f"wuwaterm-runtime:{commit}", running=True
+    )
+    _surface(
+        base, "api", image=NEW_IMAGE, ref=f"wuwaterm-runtime:{commit}", running=True
+    )
+    (base / f"tag-{BOT_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    (base / f"tag-{API_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    _plant(
+        base,
+        _journal(
+            release,
+            phase="started",
+            old_db_sha=old_hash,
+            db_backup=backup_rel,
+            old_pointer=OLD_COMMIT,
+            source_commit=commit,
+            new_db_sha=hashlib.sha256(new_bytes).hexdigest(),
+            candidate_rel=f"data/candidates/terms.{TXN}.db",
+        ),
+    )
+
+    result = recover(host, release, "--recover-full")
+
+    assert result.returncode == 0, result.stderr
+    assert "rolled back to the previous binding" in result.stdout
+    assert current_target(base) == "releases/r1"
+    assert not (base / JOURNAL_RELPATH).exists()
+    assert (base / "data" / "terms.db").read_bytes() == old_bytes
+    assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert "no release" in result.stderr
+    assert "is not switched on a guess" in result.stderr
+
+
+@pytest.fixture()
+def migrated_runtime_host(tmp_path):
+    host = Host(tmp_path, runtime=True)
+    assert host.migrate().returncode == 0
+    return host
+
+
+def test_a_migrated_runtime_rollback_reports_success_without_switching_current(
+    migrated_runtime_host,
+):
+    """The same misalignment after a runtime-only rollback.
+
+    The runtime record restores the pointer it recorded, which is the commit
+    the in-place deployment published, not the commit the migrated release
+    carries. The rollout did roll back and the link does need no move.
+    """
+
+    host = migrated_runtime_host
+    base = host.base
+    _assert_the_marker_leads_the_pointer(host)
+    push_tool_change(host)
+    failed = subprocess.run(
+        ["sh", str(host.current / "deploy" / "vps-update.sh"), "--runtime-only"],
+        cwd=base,
+        env={
+            **host.env,
+            "RUNTIME_FAKE_READINESS_FAIL": "1",
+            "RUNTIME_FAKE_ROLLBACK_START": "api",
+        },
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    assert failed.returncode != 0
+    assert '"status": "unresolved"' in (base / RUNTIME_JOURNAL).read_text(
+        encoding="utf-8"
+    )
+    assert current_target(base) == "releases/r1"
+
+    result = recover(host, base / "releases" / "r2", "--recover-runtime")
+
+    assert result.returncode == 0, result.stderr
+    assert '"status": "rolled_back"' in (base / RUNTIME_JOURNAL).read_text(
+        encoding="utf-8"
+    )
+    assert current_target(base) == "releases/r1"
+    assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert "is not switched on a guess" in result.stderr
+
+    # A rolled-back runtime record stays closed: repeating the recovery is
+    # refused exactly as before, and the settlement never runs. This change
+    # added no idempotency to that path.
+    again = recover(host, base / "releases" / "r2", "--recover-runtime")
+    assert again.returncode == 1
+    assert "no_recovery_needed" in again.stderr
+    assert current_target(base) == "releases/r1"
 
 
 def test_an_unprovable_binding_is_refused_without_moving_current(full_host):

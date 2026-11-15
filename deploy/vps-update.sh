@@ -255,6 +255,16 @@ fi
 # proves. The link moves only to a release authenticated for that commit, so a
 # rolled-back binding, an unresolved one, or a candidate that never deployed
 # it never moves `current`.
+#
+# Two recoveries leave the link alone and still succeed, because the link needs
+# no move and saying otherwise would report a failure that did not happen. A
+# migration records the in-place HEAD as the release's commit while the
+# pointer keeps naming what was actually deployed, so a rollback can restore a
+# commit no release carries; and a rollback can restore surfaces that
+# legitimately sat on different old images, which the single-image prover above
+# cannot re-express even though recovery just verified that binding step by
+# step. Both are narrowed to "the pointer says the existing link is right", or
+# "no release's source can correspond to it": neither ever selects a release.
 release_settle() {
   [ -n "$release_name" ] || return 0
   settle_current=$(readlink "$state_root/current" 2>/dev/null || true)
@@ -272,6 +282,8 @@ release_settle() {
     echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
     return 1
   fi
+  settle_pointer=$("$deploy_python" scripts/full_update.py pointer 2>/dev/null) || \
+    settle_pointer=""
   if settle_published=$("$deploy_python" scripts/full_update.py published); then
     :
   else
@@ -281,10 +293,20 @@ release_settle() {
         "${settle_current:-nothing}"
       return 0
     fi
+    # `published` proves one image per manifest, and the recovery that just
+    # exited 0 verified a binding whose surfaces may have carried different old
+    # images. That is not a failed settlement: the pointer names the commit the
+    # link already carries, so nothing moves and none of the proof above is
+    # needed for standing still.
+    if [ -n "$settle_pointer" ] && [ "$settle_current_commit" = "$settle_pointer" ]; then
+      echo "release: recovery restored $settle_pointer, the commit $settle_current"
+      echo "  already carries; the release link needs no change and is not touched"
+      return 0
+    fi
     echo "release: the published binding could not be proven from observation" >&2
     echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
     echo "release: run recovery from the release that wrote the record, with" >&2
-    echo "  its records intact: sh $code_root/deploy/vps-update.sh --recover-full" >&2
+    echo "  its records intact: sh $code_root/deploy/vps-update.sh --$mode" >&2
     return 1
   fi
   if [ "$settle_current_commit" = "$settle_published" ]; then
@@ -305,20 +327,38 @@ release_settle() {
     echo "be switched to $release_name; it stays at ${settle_current:-nothing}" >&2
     return 1
   fi
-  # The pointer names a commit this checkout does not carry: refuse, and name
-  # the release that does, instead of moving `current` to a checkout nobody can
-  # authenticate for that commit.
-  echo "release: the deployment pointer names $settle_published, which $release_name" >&2
-  echo "does not carry; $state_root/current stays at ${settle_current:-nothing}" >&2
+  # The link moves only to a release authenticated for the published commit, so
+  # name the release that carries it instead of moving `current` to a checkout
+  # nobody can authenticate for that commit.
+  settle_carrier=""
   for settle_dir in "$state_root"/releases/r[1-9]*; do
     [ -d "$settle_dir" ] && [ ! -L "$settle_dir" ] || continue
     case "$(tr -d '\n' < "$settle_dir/.release-commit" 2>/dev/null || true)" in
-      "$settle_published")
-        echo "release: run recovery from ${settle_dir##*/}:" >&2
-        echo "  sh $settle_dir/deploy/vps-update.sh --recover-full" >&2
-        ;;
+      "$settle_published") settle_carrier=$settle_dir ;;
     esac
   done
+  if [ -z "$settle_carrier" ]; then
+    # A migrated host records the in-place HEAD as its release's commit while
+    # the pointer keeps naming the commit that was deployed in place, so a
+    # rollback restores a commit no release carries. No checkout's source
+    # corresponds to it: say so, leave the link where it is, and report the
+    # recovery that did happen rather than failing on a link that cannot move.
+    echo "release: the deployment pointer names $settle_published, which no release" >&2
+    echo "  carries; that commit's source predates the release layout, so no" >&2
+    echo "  release corresponds to it. $state_root/current stays at" >&2
+    echo "  ${settle_current:-nothing}, and is not switched on a guess." >&2
+    return 0
+  fi
+  if [ "$settle_release_commit" = "$settle_published" ]; then
+    echo "release: $settle_published is $release_name's commit, but that checkout" >&2
+    echo "  cannot be authenticated for it (HEAD or uncommitted changes);" >&2
+    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
+    return 1
+  fi
+  echo "release: the deployment pointer names $settle_published, which $release_name" >&2
+  echo "does not carry; $state_root/current stays at ${settle_current:-nothing}" >&2
+  echo "release: run recovery from ${settle_carrier##*/}:" >&2
+  echo "  sh $settle_carrier/deploy/vps-update.sh --recover-full" >&2
   return 1
 }
 

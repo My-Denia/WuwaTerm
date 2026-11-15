@@ -31,7 +31,8 @@ This module owns that window:
 * ``published`` proves which commit the host is actually serving, from the
   pointer, its immutable manifest, the live database and every present
   surface. The release link (`current`) is settled from that answer, never
-  from a recovery exit status.
+  from a recovery exit status, and ``pointer`` names the commit the pointer
+  records when a link that already carries it needs no move at all.
 
 Everything here is driven from ``deploy/vps-update.sh`` under the shared
 deployment lock. The tests exercise it against isolated fake-docker
@@ -1403,6 +1404,34 @@ def cmd_published(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pointer(_args: argparse.Namespace) -> int:
+    """Print the commit the deployment pointer records, certifying nothing.
+
+    ``published`` has to prove a complete binding before the release link may
+    move, and one manifest image per commit cannot re-express a rollback whose
+    surfaces legitimately carried different old images. The settlement also
+    asks the narrower question this answers: which commit does the pointer
+    name? A recovery that exited 0 has already verified the binding it
+    restored, so a link already naming that commit needs no move - and text
+    alone is never evidence FOR a move, which is why this never switches
+    anything.
+
+    Exit codes: 0 with the commit on stdout, 10 when no pointer exists, and 1
+    when a pointer exists but cannot be read or parsed.
+    """
+
+    _require_held_lock()
+    present, value = _pointer_state()
+    if not present:
+        print("no deployment pointer: nothing is deployed", file=sys.stderr)
+        return 10
+    if value is None:
+        print("deployment pointer is unreadable", file=sys.stderr)
+        return 1
+    print(value)
+    return 0
+
+
 def cmd_rollback_clear(_args: argparse.Namespace) -> int:
     """Clear the journal only through the observed-binding verifier.
 
@@ -1517,6 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("restore-db")
     commands.add_parser("check")
     commands.add_parser("published")
+    commands.add_parser("pointer")
 
     args = parser.parse_args(argv)
     try:
@@ -1537,6 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
         "restore-db": cmd_restore_db,
         "check": cmd_check,
         "published": cmd_published,
+        "pointer": cmd_pointer,
     }
     try:
         return handlers[args.command](args)
