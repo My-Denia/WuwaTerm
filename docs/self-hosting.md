@@ -83,9 +83,9 @@ install describable later.
 
 A clone of the v0.8.6 tag prints the install steps of Telegram v0.2.9,
 because that Core release records v0.2.9 in `contracts/products.json` and
-`deploy/setup.sh` takes the recorded tag. `main` records v0.2.10, which the next
-formal release will carry. To pair the tagged Core with the newer Telegram
-release, name it on the install command:
+`deploy/setup.sh` takes the recorded tag. Core v0.8.7 records Telegram v0.2.10
+as its default. To pair Core v0.8.6 with the newer Telegram release, name it on
+the install command:
 
 ```bash
 WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram

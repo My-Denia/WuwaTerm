@@ -12,12 +12,12 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current source version is `0.8.7`, a deployment-recovery
+  published tag. The latest published Core release is `v0.8.7`, a deployment-recovery
   maintenance release on top of `v0.8.6`: recovery runs the release that was
   invoked rather than `current`, a transaction that had committed and the
   release link are settled from the side that run verified, the layout
   migration's temporary links are reentrant, and the tag names Telegram
-  `v0.2.10`. The latest published Core release is `v0.8.6`, a delivery and
+  `v0.2.10`. The previous release, `v0.8.6`, is a delivery and
   dictionary release on top of `v0.8.5`: it bounds per-run build images,
   detects the standalone Telegram container by Compose label, records
   `old_bot_present` for stopped-bot rollback, adopts the `/opt/wuwaterm`
@@ -28,9 +28,9 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Do not edit `products.core.release` to the prospective
-  `0.8.7` before that release is published, and do not invent an asset name or
-  SHA-256 for it: the release's own step records it afterwards. Leave the
+  target-version file. Core `0.8.7` and its published asset hashes are recorded
+  there. For a future release, update `products.core.release` only after it is
+  published, using its actual asset names and SHA-256 values. Leave the
   `products.telegram` and `products.web` entries on their published releases.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to

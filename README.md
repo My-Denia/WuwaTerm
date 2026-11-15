@@ -96,8 +96,8 @@ product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
 A clone of the Core v0.8.6 tag prints the install steps of Telegram v0.2.9,
-the release that tag records; `main` records v0.2.10, which the next formal
-release will carry. To pair the tagged Core with the newer Telegram release,
+the release that tag records; Core v0.8.7 records Telegram v0.2.10 as its
+default. To pair Core v0.8.6 with the newer Telegram release,
 name the tag explicitly:
 
 ```bash
