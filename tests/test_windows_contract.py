@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import ast
 import copy
-import importlib.util
+import importlib
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,8 @@ from tests.test_api import bearer, build_client_app, call, disable_llm, issue_de
 from wuwaterm_api import API_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
-CONSUMER_FILES = ("src/wuwaterm_client/api.py", "src/wuwaterm_client/manuscript.py")
+CONSUMER_FILES = ("src/wuwaterm_client/api.py", "src/wuwaterm_client/manuscript.py",
+                  "src/wuwaterm_client/semantic.py", "src/wuwaterm_client/__init__.py")
 
 
 def supported_versions(source: str) -> tuple[str, ...]:
@@ -131,9 +133,15 @@ def test_windows_speaks_current_api_and_openapi(windows_root, tmp_path, sample_d
 
 @pytest.mark.cross_component
 def test_real_review_report_is_accepted_by_windows(windows_root, tmp_path, sample_db, monkeypatch):
-    spec = importlib.util.spec_from_file_location("windows_manuscript_contract", windows_root / CONSUMER_FILES[1])
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The pinned manuscript module imports its stdlib-only sibling `.semantic`, so
+    # it is loaded as part of its package, from the pinned checkout only.
+    monkeypatch.syspath_prepend(str(windows_root / "src"))
+    try:
+        module = importlib.import_module("wuwaterm_client.manuscript")
+    finally:
+        for name in [m for m in sys.modules if m == "wuwaterm_client" or m.startswith("wuwaterm_client.")]:
+            sys.modules.pop(name)
+    assert Path(module.__file__).resolve() == (windows_root / CONSUMER_FILES[1]).resolve()
     disable_llm(monkeypatch)
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "contract reviewer")

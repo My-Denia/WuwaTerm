@@ -2,7 +2,9 @@
 
 > Migration notice (2026-11-06): desktop ownership moved from the [Core source at cc5743d](https://github.com/My-Denia/WuwaTerm/tree/cc5743df0e807c42e4b669564fd8b4d0a465b79c/client) to [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), released as [v0.3.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.3.0). The [Windows source provenance](https://github.com/My-Denia/WuwaTerm-Windows/blob/cda93f01bf7803efe66ca695701cae678b320ef1/provenance/client-source.json) maps the original files. This record preserves the original design rationale.
 
-- Status: Accepted
+> 部分被取代（2026-11-16）：原规则「报告历史与当前可信状态分开，避免把导入的旧结果当作新检查」（Consequences 首条）和「工作稿」一条里导入的选择「不自动应用或认证」，解决的是把过期报告误当成刚做过的检查。改动原因：长稿要能保存、关闭、重新打开后接着处理，不再反复审校已经完成的部分（2026-11-15 阶段要求「不用反复审校已经完成的部分」）。现在由稿件格式 v3（`wuwaterm-manuscript-v3`）承担这件事，规范见 [manuscript v3 SPEC](https://github.com/My-Denia/WuwaTerm-Web/blob/3b9faa1c6024b19c7a71e5382f56c4f607216a21/contracts/manuscript-v3/SPEC.md)：长稿件（任一侧超过 2,000 个 Unicode 字符）按段落保存的术语结果，只有在状态为已完成、且内容哈希、审校依据和请求输入都与一次实时 review-v2 依据一致时才作为当前结果复用；这样的当前记录里已确认的选择（含 `not_a_term`）直接生效，不再要求重新确认。其余仍按历史处理：v1、v2 文件、整篇模式下的选择与历史报告，以及状态不是已完成、或哈希、依据、请求输入有一项不一致的段落记录，都不当作新检查。下文保留 2026-11-04 的原决定。
+
+- Status: Accepted；导入历史不认证一条自 2026-11-16 起被稿件 v3 部分取代（见上方说明）
 - Date: 2026-11-04
 - 关联：[ADR 0011](0011-pc-client-stack.md)（客户端与传输）、
   [ADR 0013](0013-client-ui-visual-and-layout.md)（已签收的客户端界面）
