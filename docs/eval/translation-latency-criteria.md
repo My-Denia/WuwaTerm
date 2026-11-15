@@ -120,3 +120,93 @@ upstream names, never a per-word list. It is accepted when:
   ordinary word (MY-18), on synthetic or pre-3.7 text.
 - N4: the dictionary diff (`scripts/diff_terms_db.py`) is reported with its
   row counts per category.
+
+## Replan, 2026-11-16: per-direction arm
+
+Written after the rule above was applied and before any call of the new arm.
+The sections above are unchanged.
+
+### What the rule found
+
+All calls went through the ADR 0020 runner at production settings (45 s
+timeout) and are in the evaluation ledger log.
+
+| Criterion | `disabled` (D 17 + R 34 calls) | `low` (R 34 calls) |
+| --- | --- | --- |
+| L1, L2 timeouts | 0 | 0 on R1 |
+| L3 pooled p95 | 8.6 s (max 9.2 s) | not met: 2 of 16 R1 calls over 30 s (40.8 s, 33.5 s) |
+| Q1 zh→en | 122/128 (baseline 38/128) | not run |
+| Q1 en→zh | not met: 94/99 (baseline 97/99) | not run |
+| Q2 zh→en / en→zh | 36/39 / not met: 94/99 | not run |
+| Q3 | 3 / 1 | not run |
+| Q4 M-Gold, Set 1, Set 2 | not met: 664/675; 120/124; 38/39 | 671/675; 119/124; 38/39 |
+
+The 35 baseline items re-judged blind in the same round were all usable, so
+judge drift does not explain the en→zh loss. Rule step 4 applied: the shipped
+default stays `omit`.
+
+### What changes and why
+
+- Thinking is set per direction. Chinese→English requests use `disabled`;
+  English→Chinese requests stay `omit`, byte-identical to today. The timeouts
+  happen only on long zh→en segments, where `disabled` removed them; en→zh had
+  no timeout problem and lost quality under `disabled`.
+- In zh→en prompts, a reference whose source is one Chinese character says
+  that it applies only where the character alone names the term, not where
+  the character is part of another word. Under `disabled`, three M-Gold
+  losses were the ordinary 椿 inside a plant-derived mechanic name rendered as
+  the resonator Camellya (MY-18); thinking used to absorb that ambiguity. The
+  matcher, its revision and the plant-compound and lowercase rules are
+  unchanged; no word list is added.
+
+### Frozen criteria for the per-direction arm
+
+- P-L1: 0 timeouts on every zh→en call of D and R1 at production settings. A
+  call answered from an earlier output under the full ADR 0020 reuse key
+  counts with the outcome and elapsed time of the call that produced it (the
+  same request in the `disabled` run).
+- P-L2: pooled p95 at most 30 s over those calls (nearest rank).
+- P-Q1: D zh→en usable rate on the full D zh→en set (128 scored paragraphs;
+  `run_failed` counts as not usable) at least the baseline's 38/128. The
+  39-paragraph baseline-judged subset is reported beside it as information,
+  not as a gate.
+- P-Q2: no new C-grade class, meaning no systematic error class introduced
+  by the arm (for example an ordinary word rendered as an official name, or
+  clauses dropped across many segments). Single C grades on resampled outputs
+  are reported item by item and already count in the usable rate.
+- P-Q3: en→zh requests are byte-identical to the baseline: every en→zh call
+  of the D run is answered from the baseline output under the full reuse key
+  (0 calls), so en→zh results equal the baseline's.
+- P-Q4: the M-Gold score under the frozen cue list is reported exactly. The
+  guard passes if that score is at least 670/675, or if a blind adjudication
+  finds that the candidate's count of real meaning errors on M-Gold items is
+  at most the baseline's. The adjudication takes every M-Gold miss of the
+  baseline (the five misses of 670/675) and of the candidate, hides which
+  arm each came from, and has independent judges in fresh contexts classify
+  each as a real error (an ADR 0020 C trigger) or as meaning kept with
+  different cue wording; a disagreement gets a third judgment with a reason.
+  Set 1 at least 119/124 and Set 2 at least 38/39 as before.
+
+Why the M-Gold alternative: changing the thinking setting resamples every
+output, and literal cue matching counts reworded but correct negations as
+losses (3 of the 9 `disabled` losses). A symmetric blind comparison keeps
+the guard about real regressions. The cue list is not changed.
+
+Decided by the batch planner on 2026-11-16: the per-direction arm, the
+reading of "C-grade class" (a systematic class, not single resampled C
+grades, because the 89 formerly failed paragraphs have no baseline output to
+compare against), and the M-Gold alternative.
+
+Projection, written before the run: only segments with a one-character name
+reference change (R1-A3 segments 2–3, R1-A5, R1-B1 both segments, D-003);
+every other call is reused. The literal M-Gold score is expected at 667–669:
+the A1 Rover loss sits in a reused segment, and 670 needs every B1 loss back,
+including three reworded negations.
+
+### Official names, measured on their own
+
+The dictionary change is a separate branch on `main` with the shipped
+default. Comparing the request bodies against an echo gateway, old and new
+dictionary, it changes only D-004 segment 1 and D-009 segment 1 and no R
+request. So N2 is measured on D-004 and D-009 only: their usable count is at
+least the baseline's minus 2, and R is unaffected by construction.
