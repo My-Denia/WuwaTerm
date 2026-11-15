@@ -23,19 +23,33 @@ Choices the ADR leaves open (each is exercised by a test):
 * An ``adj`` record is accepted only for an item whose ``j1`` and ``j2`` both
   exist and differ; anything else is invalid.
 * Metrics 2, 3 and 4 count final-judged, non-``run_failed`` paragraphs only.
+* A judgment is consistent only if grade A comes with naturalness ``natural`` and
+  grade B does not come with ``disfluent``; anything else is invalid.
+* An items file may list ``partial_arms`` (a drift sample). Such an arm skips the
+  one-item-per-scored-paragraph completeness check (at most one item per
+  paragraph still holds) and its cells cover its own items only. An arm is
+  partial if any items file lists it.
+* ``documents`` counts the distinct documents of all items of a cell or genre,
+  ``run_failed`` and pending items included, as ``n`` does.
 * ``scan`` stdout is ``{"schema", "window", "rows": [...]}``.
+* ``scan --audit-out PATH`` writes one JSON line per uncleared (window, sealed
+  set, input, location): the SHA-256 of the window, never its text. The same
+  window at the same location collapses to one line. The file is written, empty
+  if need be, before stdout is printed.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import subprocess
 import sys
 import unicodedata
+from bisect import bisect_left, bisect_right
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -304,10 +318,19 @@ def load_names(
     return found
 
 
-def load_items(path: str, paragraphs: dict[str, Paragraph], seen: set[str]) -> list[Item]:
+def load_items(
+    path: str, paragraphs: dict[str, Paragraph], seen: set[str]
+) -> tuple[list[Item], set[str]]:
+    """The items of one file and the arms it lists as partial (a drift sample)."""
     data = obj(load_json(path), path)
     check_schema(data, ITEMS_SCHEMA, path)
     need_keys(data, path, ("items",))
+    partial: set[str] = set()
+    if "partial_arms" in data:
+        listed = arr(data["partial_arms"], f"{path}: partial_arms")
+        if not all(isinstance(arm, str) and arm for arm in listed):
+            fail(path, "partial_arms must be an array of non-empty strings")
+        partial.update(listed)
     found: list[Item] = []
     for index, raw in enumerate(arr(data["items"], f"{path}: items")):
         where = f"{path}: items[{index}]"
@@ -328,7 +351,7 @@ def load_items(path: str, paragraphs: dict[str, Paragraph], seen: set[str]) -> l
         if run_failed != (translation is None):
             fail(where, "run_failed must be true exactly when translation is null")
         found.append(Item(item, paragraph.id, get_str(row, "arm", where), translation, run_failed))
-    return found
+    return found, partial
 
 
 def parse_judgment(
@@ -384,6 +407,10 @@ def parse_judgment(
 
     if (critical or any(n.misleading for n in names.values())) and grade != "C":
         fail(where, "a critical error or a misleading name requires grade C")
+    if grade == "A" and naturalness != "natural":
+        fail(where, "grade A requires naturalness natural")
+    if grade == "B" and naturalness == "disfluent":
+        fail(where, "grade B is not allowed with naturalness disfluent")
     reason = row["reason"] if "reason" in row else None
     if reason is not None and not isinstance(reason, str):
         fail(where, "reason must be a string")
@@ -551,10 +578,13 @@ def resolve_finals(
     return finals
 
 
-def usable_block(n: int, usable: int, grades: Counter[str], failed: int, pending: int) -> dict[str, Any]:
+def usable_block(
+    n: int, documents: int, usable: int, grades: Counter[str], failed: int, pending: int
+) -> dict[str, Any]:
     interval = wilson(usable, n) if pending == 0 else None
     return {
         "n": n,
+        "documents": documents,
         "usable": usable,
         "rate": ratio(usable, n) if pending == 0 else None,
         "wilson95": list(interval) if interval else None,
@@ -583,17 +613,17 @@ def cell_report(
 
     genres: dict[str, Any] = {}
     for genre in GENRES:
-        in_genre = {it.item for it in cell_items if paragraphs[it.paragraph].genre == genre}
+        genre_items = [it for it in cell_items if paragraphs[it.paragraph].genre == genre]
+        in_genre = {it.item for it in genre_items}
         good = sum(1 for it, j in judged if it.item in in_genre and j.grade in ("A", "B"))
-        waiting = sum(
-            1
-            for it in cell_items
-            if it.item in in_genre and not it.run_failed and finals[it.item] is None
-        )
+        waiting = sum(1 for it in genre_items if not it.run_failed and finals[it.item] is None)
+        genre_interval = wilson(good, len(in_genre)) if waiting == 0 else None
         genres[genre] = {
             "n": len(in_genre),
+            "documents": len({paragraphs[it.paragraph].doc for it in genre_items}),
             "usable": good,
             "rate": ratio(good, len(in_genre)) if waiting == 0 else None,
+            "wilson95": list(genre_interval) if genre_interval else None,
         }
 
     name_count = official = 0
@@ -628,7 +658,14 @@ def cell_report(
         matched += hit
 
     return {
-        "usable": usable_block(len(cell_items), usable, grades, len(failed), pending),
+        "usable": usable_block(
+            len(cell_items),
+            len({paragraphs[it.paragraph].doc for it in cell_items}),
+            usable,
+            grades,
+            len(failed),
+            pending,
+        ),
         "names": {
             "occurrences": name_count,
             "official": official,
@@ -679,8 +716,11 @@ def cmd_score(args: argparse.Namespace) -> int:
 
     items: dict[str, Item] = {}
     seen_items: set[str] = set()
+    partial_arms: set[str] = set()
     for path in args.items:
-        for item in load_items(path, paragraphs, seen_items):
+        found, partial = load_items(path, paragraphs, seen_items)
+        partial_arms |= partial
+        for item in found:
             items[item.item] = item
     if not items:
         fail("items", "no items")
@@ -688,7 +728,14 @@ def cmd_score(args: argparse.Namespace) -> int:
     per_slot = Counter((item.paragraph, item.arm) for item in items.values())
     for paragraph in paragraphs.values():
         for arm in arms if paragraph.scored else ():
-            if per_slot[(paragraph.id, arm)] != 1:
+            count = per_slot[(paragraph.id, arm)]
+            if arm in partial_arms:
+                if count > 1:
+                    fail(
+                        "items",
+                        f"scored paragraph {paragraph.id!r} has several items for arm {arm!r}",
+                    )
+            elif count != 1:
                 fail(
                     "items",
                     f"scored paragraph {paragraph.id!r} needs exactly one item for arm {arm!r}",
@@ -742,6 +789,7 @@ class InputSource:
     label: str
     units: list[str]
     unit_ids: list[str] | None  # input paragraph id per unit, for --input-sample
+    locate: Callable[[int, int], str]  # (unit, scalar offset) -> where it is, for the audit file
 
 
 def windows(text: str, size: int) -> Iterator[str]:
@@ -749,11 +797,33 @@ def windows(text: str, size: int) -> Iterator[str]:
         yield text[start : start + size]
 
 
-def added_lines(diff: str) -> str:
-    """The added lines of a unified diff, without the leading '+', joined by newline."""
-    return "\n".join(
-        line[1:] for line in diff.split("\n") if line.startswith("+") and not line.startswith("+++")
-    )
+def line_locator(text: str) -> Callable[[int, int], str]:
+    """Locations of a text as "line <n>": 1-based, newline characters only count."""
+    newlines = [pos for pos, char in enumerate(text) if char == "\n"]
+    return lambda _unit, offset: f"line {bisect_left(newlines, offset) + 1}"
+
+
+def id_locator(ids: list[str]) -> Callable[[int, int], str]:
+    return lambda unit, _offset: ids[unit]
+
+
+def added_lines(diff: str) -> tuple[str, Callable[[int, int], str]]:
+    """The added lines of a unified diff, without the leading '+', joined by newline.
+
+    The locator names the diff-file line of the added line a text offset falls on; the
+    joining newline belongs to the added line before it.
+    """
+    pieces: list[str] = []
+    starts: list[int] = []
+    numbers: list[int] = []
+    offset = 0
+    for number, line in enumerate(diff.split("\n"), start=1):
+        if line.startswith("+") and not line.startswith("+++"):
+            pieces.append(line[1:])
+            starts.append(offset)
+            numbers.append(number)
+            offset += len(line)  # the text without '+', plus the joining newline
+    return "\n".join(pieces), lambda _unit, off: f"line {numbers[bisect_right(starts, off) - 1]}"
 
 
 def git_output(spec: str, repo: str, args: list[str]) -> bytes:
@@ -785,6 +855,45 @@ def git_blob_texts(spec: str) -> Iterator[str]:
             continue
 
 
+def audit_records(
+    source: InputSource,
+    uncleared_by_label: dict[str, set[str]],
+    size: int,
+    index: dict[str, list[int]],
+    paragraph_label: list[str],
+    paragraph_ids: list[str],
+) -> list[dict[str, Any]]:
+    """One record per uncleared (window, sealed set, location) of one input.
+
+    A record holds the SHA-256 of the window, never the window or any input text.
+    """
+    wanted = set().union(*uncleared_by_label.values())
+    seen: set[tuple[str, str, str]] = set()
+    records: list[dict[str, Any]] = []
+    for unit_no, unit in enumerate(source.units):
+        for start, window in enumerate(windows(unit, size)):
+            if window not in wanted:
+                continue
+            location = source.locate(unit_no, start)
+            digest = hashlib.sha256(window.encode("utf-8")).hexdigest()
+            for label, uncleared in uncleared_by_label.items():
+                if window not in uncleared or (digest, label, location) in seen:
+                    continue
+                seen.add((digest, label, location))
+                records.append(
+                    {
+                        "window_sha256": digest,
+                        "sealed": label,
+                        "sealed_paragraph_ids": sorted(
+                            {paragraph_ids[g] for g in index[window] if paragraph_label[g] == label}
+                        ),
+                        "input": source.label,
+                        "location": location,
+                    }
+                )
+    return records
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     size = args.window
     if size < 1:
@@ -793,9 +902,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     sources: list[InputSource] = []
     for path in args.input or ():
-        sources.append(InputSource(path, [read_text(path)], None))
+        text = read_text(path)
+        sources.append(InputSource(path, [text], None, line_locator(text)))
     for path in args.diff or ():
-        sources.append(InputSource(path, [added_lines(read_text(path))], None))
+        text, locate = added_lines(read_text(path))
+        sources.append(InputSource(path, [text], None, locate))
     for path in args.input_sample or ():
         sample = load_sample(path)
         units: list[str] = []
@@ -805,7 +916,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 if text is not None:
                     units.append(text)
                     ids.append(paragraph.id)
-        sources.append(InputSource(sample.label, units, ids))
+        sources.append(InputSource(sample.label, units, ids, id_locator(ids)))
     if not sources:
         fail("scan", "give at least one of --input, --diff, --input-sample")
 
@@ -815,6 +926,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     labels: list[str] = []
     paragraph_label: list[str] = []
+    paragraph_ids: list[str] = []
     index: dict[str, list[int]] = {}
     for sample in sealed:
         if sample.label not in labels:
@@ -822,6 +934,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         for paragraph in sample.paragraphs:
             gid = len(paragraph_label)
             paragraph_label.append(sample.label)
+            paragraph_ids.append(paragraph.id)
             for text in (paragraph.source, paragraph.reference):
                 for window in windows(text or "", size):
                     owners = index.setdefault(window, [])
@@ -841,7 +954,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 break
 
     rows: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = []
     for source, per_unit in zip(sources, unit_hits):
+        uncleared_by_label: dict[str, set[str]] = {}
         for label in labels:
             hit = {
                 w
@@ -850,6 +965,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 if any(paragraph_label[gid] == label for gid in index[w])
             }
             uncleared = hit - cleared
+            uncleared_by_label[label] = uncleared
             row: dict[str, Any] = {
                 "input": source.label,
                 "sealed": label,
@@ -871,7 +987,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     {pid for pid, h in zip(source.unit_ids, per_unit) if h & uncleared}
                 )
             rows.append(row)
+        if args.audit_out and any(uncleared_by_label.values()):
+            audit.extend(
+                audit_records(source, uncleared_by_label, size, index, paragraph_label, paragraph_ids)
+            )
 
+    if args.audit_out:
+        lines = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in audit)
+        try:
+            Path(args.audit_out).write_bytes(lines.encode("utf-8"))
+        except OSError:
+            fail(args.audit_out, "cannot write audit file")
     print(json.dumps({"schema": SCAN_SCHEMA, "window": size, "rows": rows}, ensure_ascii=False, indent=2))
     return EXIT_SCAN_HIT if any(row["windows_uncleared"] for row in rows) else EXIT_OK
 
@@ -899,6 +1025,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--clear", action="append", metavar="PATH")
     scan.add_argument("--clear-git", action="append", metavar="REPO:COMMIT")
     scan.add_argument("--window", type=int, default=DEFAULT_WINDOW)
+    scan.add_argument(
+        "--audit-out",
+        metavar="PATH",
+        help="write one JSON line per uncleared window hit (hash and location, no text) here",
+    )
     scan.set_defaults(func=cmd_scan)
     return parser
 

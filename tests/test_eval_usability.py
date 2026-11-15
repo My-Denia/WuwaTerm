@@ -6,6 +6,7 @@ Synthetic strings only, invented for these tests; no corpus text, no network.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -297,6 +298,11 @@ def score_wilson(k, n):
     return ((centre - half) / denom, (centre + half) / denom)
 
 
+def plain(genre):
+    """A genre cell without its interval (compared separately, with a tolerance)."""
+    return {key: value for key, value in genre.items() if key != "wilson95"}
+
+
 def test_usable_rate_counts_undecidable_failed_and_c_as_not_usable(score):
     world = base_world()
     over = {
@@ -316,15 +322,52 @@ def test_usable_rate_counts_undecidable_failed_and_c_as_not_usable(score):
     assert zh["usable"]["run_failed"] == 1 and zh["usable"]["pending"] == 0
     assert zh["excluded_from_metrics_2_5"] == 1
     assert zh["undecidable_items"] == ["x:docA#p3"]
-    assert zh["genres"]["announcement"] == {"n": 1, "usable": 1, "rate": 1.0}
-    assert zh["genres"]["guide"] == {"n": 2, "usable": 1, "rate": 0.5}
-    assert zh["genres"]["mixed"] == {"n": 2, "usable": 0, "rate": 0.0}
-    assert zh["genres"]["story"] == {"n": 0, "usable": 0, "rate": None}
+    assert plain(zh["genres"]["announcement"]) == {"n": 1, "documents": 1, "usable": 1, "rate": 1.0}
+    assert plain(zh["genres"]["guide"]) == {"n": 2, "documents": 1, "usable": 1, "rate": 0.5}
+    assert plain(zh["genres"]["mixed"]) == {"n": 2, "documents": 1, "usable": 0, "rate": 0.0}
+    assert plain(zh["genres"]["story"]) == {"n": 0, "documents": 0, "usable": 0, "rate": None}
+    assert zh["genres"]["announcement"]["wilson95"] == pytest.approx(score_wilson(1, 1))
+    assert zh["genres"]["guide"]["wilson95"] == pytest.approx(score_wilson(1, 2))
+    assert zh["genres"]["mixed"]["wilson95"] == pytest.approx(score_wilson(0, 2))
+    assert zh["genres"]["story"]["wilson95"] is None
+    assert zh["usable"]["documents"] == 1
     en = cell(res, direction="en-zh")
-    assert en["usable"]["n"] == 3 and en["usable"]["rate"] == 1.0
+    assert en["usable"]["n"] == 3 and en["usable"]["rate"] == 1.0 and en["usable"]["documents"] == 1
     for direction in ("zh-en", "en-zh"):
         u = cell(res, direction=direction)["usable"]
         assert sum(u["grades"].values()) + u["run_failed"] + u["pending"] == u["n"]
+
+
+def test_documents_and_genre_intervals(score):
+    paras = [
+        para("a#p0", "zh-en", "guide", "雨停了。"),
+        para("a#p1", "zh-en", "guide", "风停了。"),
+        para("b#p0", "zh-en", "guide", "雪停了。"),
+        para("c#p0", "zh-en", "story", "他走了。"),
+        para("d#p0", "zh-en", "mixed", "她笑了。"),
+        para("e#p0", "en-zh", "announcement", "Maintenance ends at noon."),
+    ]
+    world = W(paras)
+    world.fail("x:c#p0")
+    over = {"x:a#p1": {"grade": "C", "reason": REASON}, "x:b#p0": {"grade": "B"}}
+    res = score(world, [world.jf("j1", over), world.jf("j2", over, skip={"x:d#p0"})])
+    assert res.code == 3 and res.report["pending_items"] == 1
+    zh, genres = cell(res), cell(res)["genres"]
+    # documents count every item of the cell: the run_failed one (doc c) and the pending one (doc d) too
+    assert zh["usable"]["n"] == 5 and zh["usable"]["documents"] == 4
+    assert plain(genres["guide"]) == {"n": 3, "documents": 2, "usable": 2, "rate": pytest.approx(2 / 3)}
+    assert genres["guide"]["wilson95"] == pytest.approx(score_wilson(2, 3))
+    assert plain(genres["story"]) == {"n": 1, "documents": 1, "usable": 0, "rate": 0.0}
+    assert genres["story"]["wilson95"] == pytest.approx(score_wilson(0, 1))
+    # a pending item nulls its own genre only
+    assert plain(genres["mixed"]) == {"n": 1, "documents": 1, "usable": 0, "rate": None}
+    assert genres["mixed"]["wilson95"] is None
+    assert plain(genres["announcement"]) == {"n": 0, "documents": 0, "usable": 0, "rate": None}
+    assert genres["announcement"]["wilson95"] is None
+    en = cell(res, direction="en-zh")
+    assert en["usable"]["documents"] == 1 and en["genres"]["announcement"]["documents"] == 1
+    assert en["genres"]["announcement"]["wilson95"] == pytest.approx(score_wilson(1, 1))
+    assert en["genres"]["guide"]["documents"] == 0
 
 
 def test_direction_without_scored_paragraphs_has_null_rate(score):
@@ -333,6 +376,7 @@ def test_direction_without_scored_paragraphs_has_null_rate(score):
     assert res.code == 0
     empty = cell(res, direction="en-zh")
     assert empty["usable"]["n"] == 0 and empty["usable"]["rate"] is None
+    assert empty["usable"]["documents"] == 0
     assert empty["usable"]["wilson95"] is None
 
 
@@ -443,7 +487,7 @@ SIGIL = [nm("o1", "official", "Sigil")]
         ({"names": SIGIL}, {"names": [nm("o1", "official", "sigil.")]}, True),
         ({"names": SIGIL}, {"names": [nm("o1", "official", " ＳＩＧＩＬ ")]}, True),
         ({}, {"grade": "B"}, False),
-        ({}, {"naturalness": "stiff"}, False),
+        ({"grade": "B"}, {"grade": "B", "naturalness": "stiff"}, False),
         (
             {"grade": "C", "critical": [err("omission")], "reason": REASON},
             {"grade": "C", "critical": [err("addition")], "reason": REASON},
@@ -545,13 +589,43 @@ def test_critical_errors_per_1000_source_scalars(score):
 def test_naturalness_distribution(score):
     world = base_world()
     over = {
-        "x:docA#p1": {"naturalness": "stiff"},
-        "x:docA#p2": {"naturalness": "disfluent"},
-        "x:docA#p3": {"naturalness": "undecidable"},
+        "x:docA#p1": {"grade": "B", "naturalness": "stiff"},
+        "x:docA#p2": {"grade": "C", "naturalness": "disfluent", "reason": REASON},
+        "x:docA#p3": {"grade": "B", "naturalness": "undecidable"},
     }
     res = score(world, world.agree(over))
     assert cell(res)["naturalness"] == {"natural": 1, "stiff": 1, "disfluent": 1, "undecidable": 1}
     assert cell(res, direction="en-zh")["naturalness"]["natural"] == 3
+
+
+@pytest.mark.parametrize(
+    ("grade", "naturalness"),
+    [
+        ("A", "natural"),
+        ("B", "natural"),
+        ("B", "stiff"),
+        ("B", "undecidable"),
+        ("C", "natural"),
+        ("C", "stiff"),
+        ("C", "disfluent"),
+        ("C", "undecidable"),
+        ("undecidable", "natural"),
+        ("undecidable", "disfluent"),
+        ("undecidable", "undecidable"),
+    ],
+)
+def test_rubric_allows_these_grade_and_naturalness_pairs(score, grade, naturalness):
+    world = base_world()
+    over = {"x:docA#p0": {"grade": grade, "naturalness": naturalness, "reason": REASON}}
+    res = score(world, world.agree(over))
+    assert res.code == 0 and cell(res)["naturalness"][naturalness] >= 1
+
+
+def test_rubric_consistency_also_applies_to_adjudication_records(score):
+    world = base_world()
+    j2 = world.jf("j2", {"x:docA#p0": {"grade": "C", "reason": REASON}})
+    adj = world.adj({"x:docA#p0": {"grade": "A", "naturalness": "stiff", "reason": REASON}})
+    assert score(world, [world.jf("j1"), j2, adj]).code == 2
 
 
 def test_literal_sentence_match_per_direction(score):
@@ -591,6 +665,10 @@ BAD_RECORDS = {
     "undecidable-grade-without-reason": lambda r: r.update(grade="undecidable"),
     "unknown-grade": lambda r: r.update(grade="D"),
     "unknown-naturalness": lambda r: r.update(naturalness="fine"),
+    "grade-A-with-stiff-naturalness": lambda r: r.update(naturalness="stiff"),
+    "grade-A-with-disfluent-naturalness": lambda r: r.update(naturalness="disfluent"),
+    "grade-A-with-undecidable-naturalness": lambda r: r.update(naturalness="undecidable"),
+    "grade-B-with-disfluent-naturalness": lambda r: r.update(grade="B", naturalness="disfluent"),
     "unknown-label": lambda r: r["names"][0].update(label="maybe"),
     "unknown-error-type": lambda r: r.update(grade="C", reason=REASON, critical_errors=[err("typo")]),
     "error-count-zero": lambda r: r.update(grade="C", reason=REASON, critical_errors=[err("omission", 0)]),
@@ -684,6 +762,63 @@ def test_an_arm_missing_an_item_is_refused(score):
     assert score(world, world.agree()).code == 2
 
 
+def drift_world():
+    """Arm x covers all four scored paragraphs, arm y only d0#p0 (a drift sample)."""
+    paras = [para(f"d{n}#p0", "zh-en", "guide", f"雨停了，第{n}天。") for n in range(4)]
+    paras.append(para("d4#p0", "zh-en", "mixed", "123", exclusion="no_letter"))
+    world = W(paras, arms=("x", "y"))
+    world.items = [i for i in world.items if i["arm"] == "x" or i["paragraph"] == "d0#p0"]
+    return world
+
+
+def items_file(world, *partial, items=None):
+    doc = {**world.files()["items"], "items": world.items if items is None else items}
+    return {**doc, "partial_arms": list(partial)} if partial else doc
+
+
+def test_a_partial_arm_is_scored_over_its_own_items(score):
+    world = drift_world()
+    res = score(world, world.agree(), items=[items_file(world, "y")])
+    assert res.code == 0 and res.report["state"] == "complete"
+    assert cell(res, "x")["usable"]["n"] == 4
+    assert cell(res, "y")["usable"]["n"] == 1 and cell(res, "y")["usable"]["rate"] == 1.0
+    assert cell(res, "y", "en-zh")["usable"]["n"] == 0
+
+
+def test_an_arm_that_is_not_listed_as_partial_must_be_complete(score):
+    world = drift_world()
+    assert score(world, world.agree(), items=[items_file(world)]).code == 2
+    assert score(world, world.agree(), items=[items_file(world, "x")]).code == 2
+
+
+def test_partial_arm_listed_in_another_items_file_still_applies(score):
+    world = drift_world()
+    only_y = [i for i in world.items if i["arm"] == "y"]
+    only_x = [i for i in world.items if i["arm"] == "x"]
+    items = [items_file(world, items=only_y), items_file(world, "y", items=only_x)]
+    res = score(world, world.agree(), items=items)
+    assert res.code == 0 and cell(res, "y")["usable"]["n"] == 1
+
+
+PARTIAL_BAD = {
+    "two-items-for-one-paragraph": lambda w: w.items.append({**w.item("y:d0#p0"), "item": "e"}),
+    "item-for-an-unscored-paragraph": lambda w: w.items.append({**w.item("y:d0#p0"), "item": "e", "paragraph": "d4#p0"}),
+    "item-for-an-unknown-paragraph": lambda w: w.items.append({**w.item("y:d0#p0"), "item": "e", "paragraph": "nope#p9"}),
+    "duplicate-item-id": lambda w: w.items.append({**w.item("y:d0#p0"), "paragraph": "d1#p0"}),
+    "run-failed-with-translation": lambda w: w.item("y:d0#p0").update(run_failed=True),
+    "null-translation-not-failed": lambda w: w.item("y:d0#p0").update(translation=None),
+}
+
+
+@pytest.mark.parametrize("mutate", PARTIAL_BAD.values(), ids=list(PARTIAL_BAD))
+def test_a_partial_arm_keeps_the_other_item_rules(score, mutate):
+    world = drift_world()
+    judgments = world.agree()
+    mutate(world)
+    res = score(world, judgments, items=[items_file(world, "y")])
+    assert res.code == 2 and res.report is None and res.err.strip()
+
+
 MALFORMED = [
     ("sample", lambda f: "not json {"),
     ("sample", lambda f: '{"schema": "usability-sample-v1", "schema": "usability-sample-v1"}'),
@@ -701,6 +836,9 @@ MALFORMED = [
     ("items", lambda f: {**f, "items": [None]}),
     ("items", lambda f: {**f, "items": [{**f["items"][0], "run_failed": 0}]}),
     ("items", lambda f: {**f, "items": [{**f["items"][0], "translation": 5}]}),
+    ("items", lambda f: {**f, "partial_arms": "x"}),
+    ("items", lambda f: {**f, "partial_arms": ["x", 1]}),
+    ("items", lambda f: {**f, "partial_arms": [""]}),
     ("judgment", lambda f: {**f, "records": "x"}),
     ("judgment", lambda f: {**f, "records": [{**f["records"][0], "names": "x"}]}),
     ("judgment", lambda f: {**f, "records": [{**f["records"][0], "critical_errors": ["x"]}]}),
@@ -771,6 +909,17 @@ class Scan:
                 assert text[start : start + WINDOW] not in captured.out + captured.err
         rows = json.loads(captured.out)["rows"] if code in (0, 1) else None
         return ScanResult(code, rows, captured.out, captured.err)
+
+
+    def audit(self, *argv, forbidden=SEALED_TEXTS):
+        """Run with --audit-out; the audit file must hold no 12-scalar window of the sealed text."""
+        path = self.tmp_path / f"{next(self.counter)}-audit.jsonl"
+        res = self.run(*argv, "--audit-out", str(path), forbidden=forbidden)
+        text = path.read_text(encoding="utf-8")
+        for sealed in forbidden:
+            for start in range(len(sealed) - WINDOW + 1):
+                assert sealed[start : start + WINDOW] not in text
+        return res, [json.loads(line) for line in text.splitlines()], text
 
 
 @pytest.fixture()
@@ -972,3 +1121,186 @@ def test_scan_script_runs_as_a_program(scan):
     assert done.returncode == 1
     assert json.loads(done.stdout)["rows"][0]["windows_hit"] == len(SEALED_SRC) - WINDOW + 1
     assert SEALED_SRC[:WINDOW] not in done.stdout + done.stderr
+
+
+# ------------------------------------------------------------------ scan audit
+
+
+def sha(window):
+    return hashlib.sha256(window.encode("utf-8")).hexdigest()
+
+
+def audit_line(window, ids, input_, location, sealed="H1"):
+    return {
+        "window_sha256": sha(window),
+        "sealed": sealed,
+        "sealed_paragraph_ids": ids,
+        "input": input_,
+        "location": location,
+    }
+
+
+def test_audit_for_input_files_lists_each_window_and_line(scan):
+    win, other = SEALED_SRC[3:15], SEALED_REF[2:14]
+    sealed = scan.sealed(
+        paragraphs=[
+            *sealed_paras(),
+            para("z#b", "zh-en", "story", f"#{win}$"),  # same window, a second sealed paragraph
+            para("a#a", "zh-en", "story", "head two", f"%{win}^"),  # ... found in a reference
+        ]
+    )
+    text = f"filler-zzmarkerzz\nx <{win}> and again <{win}>\nplain\n<{other}> <{win}>\n"  # <> match nothing sealed
+    path = scan.file("in.txt", text)
+    res, lines, raw = scan.audit(*sealed, "--input", path)
+    assert res.code == 1
+    two = ["a#a", "s#p0", "z#b"]  # sorted ids of every sealed paragraph that holds the window
+    assert lines == [
+        audit_line(win, two, path, "line 2"),  # twice on one line: one record
+        audit_line(other, ["s#p0"], path, "line 4"),
+        audit_line(win, two, path, "line 4"),
+    ]
+    assert "zzmarkerzz" not in raw and list(lines[0]) == [
+        "window_sha256", "sealed", "sealed_paragraph_ids", "input", "location",
+    ]  # fmt: skip
+
+
+def test_audit_reports_the_line_where_a_window_starts(scan):
+    text = "alpha beta gamma\ndelta epsilon zeta"  # newline at index 16, 24 windows
+    sealed = scan.sealed(paragraphs=[para("a#p0", "zh-en", "story", text)])
+    path = scan.file("in.txt", f"head\n{text}")
+    res, lines, _ = scan.audit(*sealed, "--input", path, forbidden=[text])
+    expected = [
+        audit_line(text[i : i + WINDOW], ["a#p0"], path, "line 2" if i <= 16 else "line 3")
+        for i in range(len(text) - WINDOW + 1)
+    ]
+    assert lines == expected  # the window that starts on the newline itself belongs to line 2
+    assert [line["location"] for line in lines].count("line 2") == 17
+
+
+def test_audit_counts_newlines_only(scan):
+    text = "one two three\u2028four five six\x0cseven eight nine\r\nten eleven twelve"
+    sealed = scan.sealed(paragraphs=[para("a#p0", "zh-en", "story", text)])
+    path = scan.file("in.txt", f"first\r\n{text}")
+    _, lines, _ = scan.audit(*sealed, "--input", path, forbidden=[text])
+    lf = text.index("\n")
+    assert [line["location"] for line in lines] == [
+        "line 2" if i <= lf else "line 3" for i in range(len(text) - WINDOW + 1)
+    ]
+
+
+def test_audit_for_a_diff_uses_diff_file_line_numbers(scan):
+    win = SEALED_SRC[3:15]
+    patch = (
+        "diff --git a/f b/f\n"  # 1
+        "--- a/f\n"  # 2
+        "+++ b/f\n"  # 3
+        "@@ -1,3 +1,2 @@\n"  # 4
+        f" context {SEALED_SRC}\n"  # 5
+        f"-removed {SEALED_SRC}\n"  # 6
+        "+plain added line\n"  # 7
+        " more context\n"  # 8
+        f"+kept {win}\n"  # 9
+    )
+    path = scan.file("a.patch", patch)
+    res, lines, _ = scan.audit(*scan.sealed(), "--diff", path)
+    assert res.code == 1
+    assert lines == [audit_line(win, ["s#p0"], path, "line 9")]
+
+
+def test_audit_for_a_diff_follows_windows_across_added_lines(scan):
+    text = "alpha beta gamma\ndelta epsilon zeta"
+    sealed = scan.sealed(paragraphs=[para("a#p0", "zh-en", "story", text)])
+    patch = (
+        "--- a/f\n"  # 1
+        "+++ b/f\n"  # 2
+        "@@ -0,0 +1,2 @@\n"  # 3
+        "+alpha beta gamma\n"  # 4
+        " context line\n"  # 5
+        "-removed line\n"  # 6
+        "+delta epsilon zeta\n"  # 7
+    )
+    path = scan.file("a.patch", patch)
+    _, lines, _ = scan.audit(*sealed, "--diff", path, forbidden=[text])
+    # the added lines are joined by a newline; a window starting on that newline belongs to line 4
+    assert [(line["window_sha256"], line["location"]) for line in lines] == [
+        (sha(text[i : i + WINDOW]), "line 4" if i <= 16 else "line 7") for i in range(len(text) - WINDOW + 1)
+    ]
+
+
+def test_audit_for_an_input_sample_names_the_input_paragraph(scan):
+    win_src, win_ref, win_unscored = SEALED_SRC[3:15], SEALED_REF[2:14], SEALED_UNSCORED[:12]
+    d_doc = sample_doc(
+        "D",
+        [
+            para("d#p0", "zh-en", "story", f"x {win_src} x", f"y {win_src} {win_ref} y"),  # one line per window
+            para("d#p1", "zh-en", "story", "nothing shared here at all"),
+            para("d#p2", "en-zh", "mixed", win_unscored, exclusion="duplicate"),
+            para("d#p3", "en-zh", "mixed", f"again {win_src}"),
+        ],
+    )
+    d_path = scan.file("d.json", d_doc)
+    in_path = scan.file("in.txt", f"a\n{win_unscored}")
+    res, lines, _ = scan.audit(*scan.sealed(), "--input-sample", d_path, "--input", in_path)
+    assert res.code == 1
+    assert lines == [
+        audit_line(win_unscored, ["s#p1"], in_path, "line 2"),
+        audit_line(win_src, ["s#p0"], "D", "d#p0"),
+        audit_line(win_ref, ["s#p0"], "D", "d#p0"),
+        audit_line(win_unscored, ["s#p1"], "D", "d#p2"),
+        audit_line(win_src, ["s#p0"], "D", "d#p3"),
+    ]
+
+
+def test_audit_keeps_each_input_sample_its_own_paragraph_ids(scan):
+    win_a, win_b = SEALED_SRC[3:15], SEALED_REF[2:14]
+    first = scan.file("one.json", sample_doc("D1", [para("one#p0", "zh-en", "story", f"<{win_a}>")]))
+    second = scan.file("two.json", sample_doc("D2", [para("two#p0", "zh-en", "story", f"<{win_b}>")]))
+    _, lines, _ = scan.audit(*scan.sealed(), "--input-sample", first, "--input-sample", second)
+    assert lines == [audit_line(win_a, ["s#p0"], "D1", "one#p0"), audit_line(win_b, ["s#p0"], "D2", "two#p0")]
+
+
+def test_audit_has_a_line_per_sealed_set(scan):
+    win = SEALED_SRC[3:15]
+    h2 = scan.sealed("H2", [para("t#p0", "en-zh", "guide", f"other {win} words"), para("t#p1", "en-zh", "guide", "nope")])
+    path = scan.file("in.txt", f"{win}")
+    _, lines, _ = scan.audit(*scan.sealed(), *h2, "--input", path, forbidden=[*SEALED_TEXTS, f"other {win} words"])
+    assert lines == [
+        audit_line(win, ["s#p0"], path, "line 1", "H1"),
+        audit_line(win, ["t#p0"], path, "line 1", "H2"),
+    ]
+
+
+def test_audit_lists_only_uncleared_windows(scan):
+    shared = SEALED_SRC[3:23]  # 9 windows; the clear file covers the first 3
+    path = scan.file("in.txt", shared)
+    clear = scan.file("clear.txt", shared[:14])
+    res, lines, _ = scan.audit(*scan.sealed(), "--input", path, "--clear", clear)
+    assert res.code == 1 and res.rows[0]["windows_uncleared"] == 6
+    assert [line["window_sha256"] for line in lines] == [sha(shared[i : i + WINDOW]) for i in range(3, 9)]
+    whole = scan.file("clear.txt", shared)
+    res, lines, text = scan.audit(*scan.sealed(), "--input", path, "--clear", whole)
+    assert res.code == 0 and lines == [] and text == ""  # the file is still written, empty
+
+
+def test_audit_out_leaves_stdout_and_exit_code_alone(scan):
+    path = scan.file("in.txt", f"zz {SEALED_SRC[3:23]} zz")
+    plain_run = scan.run(*scan.sealed(), "--input", path)
+    audited, lines, _ = scan.audit(*scan.sealed(), "--input", path)
+    assert lines and (audited.code, audited.out) == (plain_run.code, plain_run.out)
+
+
+def test_no_audit_file_is_written_without_audit_out(scan, tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    path = scan.file("in.txt", SEALED_SRC)
+    sealed = scan.sealed()
+    before = set(tmp_path.rglob("*"))
+    assert scan.run(*sealed, "--input", path).code == 1
+    assert set(tmp_path.rglob("*")) == before and list(cwd.iterdir()) == []
+
+
+def test_unwritable_audit_path_exits_2_before_any_output(scan, tmp_path):
+    path = scan.file("in.txt", SEALED_SRC)
+    res = scan.run(*scan.sealed(), "--input", path, "--audit-out", str(tmp_path / "missing" / "audit.jsonl"))
+    assert res.code == 2 and res.out == "" and "cannot write audit file" in res.err

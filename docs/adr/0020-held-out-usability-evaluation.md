@@ -1,8 +1,9 @@
 # ADR 0020: Held-out usability evaluation of translations
 
 - Status: Accepted (evaluation protocol). Frozen before the first evaluation
-  model call; not edited afterwards. A change needs a new decision that says
-  what changed and why.
+  model call (ledger `f2336b90…`), revised once after independent review and
+  still before any model call (first entry of the ledger log). Not edited
+  afterwards; a change needs a new decision that says what changed and why.
 - Date: 2026-11-16
 - Related: [ADR 0018](0018-semantic-review.md) (frozen-criteria mechanism,
   report states), [ADR 0019](0019-document-context-and-human-precedents.md)
@@ -27,16 +28,18 @@ tuning loop.
 1. Three sets of new texts: **D** (development; the people who change Core may
    read it), **H1** (held-out acceptance) and **H2** (held-out reserve, sealed).
    The texts live in a private evaluation directory outside every repository
-   and worktree. Only aggregate counts leave it.
+   and worktree. Only aggregate counts and the exported D bundle leave it.
 2. Each scored unit is one paragraph of one translation. Blind judges grade it
    A, B or C with the rubric below. Usable = A or B.
 3. The primary result is the usable rate per direction on H1, with a Wilson 95%
-   interval, plus four separate metrics. The first H1 result of a candidate
-   Core is the official number.
+   interval, plus four separate metrics. Only the first candidate run on H1 in
+   the ledger is official; every later H1 run of any Core is labelled
+   "held-out used".
 4. A leakage scan with frozen parameters runs before every Core quality merge.
-5. The rubric, metric definitions, scorer, scan, set manifests and name
-   annotations are hashed into the evaluation ledger before the first
-   evaluation model call.
+5. The rubric, metric definitions, scorer, scan, set manifests, name
+   annotations, judging instructions and the tools that build judging inputs
+   are hashed into the evaluation ledger before the first evaluation model
+   call.
 
 ## Texts
 
@@ -51,10 +54,9 @@ Genres are assigned by source, mechanically:
 | 攻略 guide | community text whose stated purpose (title or the source's own category) is instruction about play: build, team, mechanics, walkthrough, farming, pulling advice | TapTap posts (zh); Steam community guides (en) | none |
 | 混合语境 mixed | community text about the game that is not a guide: user reviews, discussion, opinion, story commentary, version impressions | TapTap posts and Steam reviews (zh); Steam reviews (en) | none |
 
-"Mixed" means everyday language, game names and their ordinary-word
-homographs in the same text, written by players. This genre tests
-the difference between an official name and the same surface in its ordinary
-sense.
+Player text is used because it mixes official names with ordinary words; the
+per-genre name-occurrence counts show how many names each mixed document
+holds.
 
 Directions: a zh source is translated zh→en, an en source en→zh. Each
 bilingual unit (an announcement pair, a TextMap key) is used once, in one
@@ -137,6 +139,13 @@ scored, and is counted separately, when:
   segmentation-v1 with L = 1800), direction forced by the set. A segment whose
   core is wholly a dictionary exact hit makes no call. One call covers many
   paragraphs.
+- **Binding.** Core comes from a git tree detached at `e97b997` (for a
+  candidate: at its commit) or from the frozen `git archive` tar of that
+  commit. The runner refuses to start unless `src` and `pyproject.toml` are
+  clean and `HEAD:src` equals the frozen tree (`10b4997…`), or the tar's
+  SHA-256 and embedded commit id match and the runner extracts it itself; and
+  unless `wuwaterm.application` is then imported from that tree. Its output
+  directory must be new or empty.
 - **Settings.** Production model, temperature and request options as the
   translation path sends them (no extra thinking field today). They go into the
   reuse key, and secrets never go into any file.
@@ -158,22 +167,33 @@ scored, and is counted separately, when:
   dictionary SHA-256, `MATCHER_REVISION`, the selected term references, model,
   temperature and thinking setting. An earlier output is reused only on an
   identical key; any change reruns the call. A prompt change therefore
-  invalidates every earlier output.
-- **Size.** With the frozen sets, one run of H1 is 31 calls (15 zh→en, 16
-  en→zh) and one run of D is 17, counted by a dry run of the runner against an
-  echo gateway that sends nothing out.
+  invalidates every earlier output. The runner answers a call from an earlier
+  output when, and only when, the full key matches; such a call makes no POST
+  and is listed as reused.
+- **Size.** Q1 is two runs with separate inputs and outputs, so D's failure
+  analysis never touches H1 translations: H1 is 31 calls (15 zh→en, 16 en→zh)
+  and D is 17, counted by dry runs of the runner against an echo gateway that
+  sends nothing out.
 - **Budget.** Every attempted POST to the product model gateway counts,
   retries and failures included, through the transport's pre-send hook. One
   ledger for the batch: cap 500 calls, stop at 450 and ask the owner. Q0 makes
   no call; Q0 and the Q1 baseline together use at most 200. Judging and
   annotation run on the Claude subscription and are not calls.
+- **Ledger log.** `ledger.json` is never rewritten. Every later event (a
+  protocol revision, a real run, a judgment file, a scan) is one line of an
+  append-only `ledger-log.jsonl`: the first line points at the ledger's
+  SHA-256, each later line at the previous line's. The runner reads the log,
+  refuses to start once the batch has used 450 calls or phase q1 has used 200,
+  lowers its cap to what is left, and writes the entry for its own run; a dry
+  run never enters the log.
 
 ## Judging
 
 ### Rubric (per paragraph)
 
-- **A** usable as is.
+- **A** usable as is. Naturalness must be "natural".
 - **B** needs only light polishing: wording, word order, punctuation, style.
+  A disfluent paragraph cannot be B.
 - **C** needs substantive change. Always C: a change of meaning; an omission or
   an addition; a wrong subject or reference relation; a wrong number or
   quantity; a lost or added negation; an official-name error that misleads
@@ -181,16 +201,24 @@ scored, and is counted separately, when:
 - **undecidable** the judge cannot decide; the reason is required. In the
   usable rate it counts as not usable, and it is listed for the owner's spot
   check. The spot-check outcome is reported next to the number and does not
-  change it.
+  change it. This differs from ADR 0018, where an undecidable gate is a report
+  state of its own: here an undecidable paragraph is simply not usable.
 
 ### Protocol
 
+- Judges and adjudicators follow [usability-judging](../eval/usability-judging.md)
+  unchanged. Their packets are built mechanically from the run outputs:
+  each scored paragraph gets its own output paragraph, or the whole segment
+  output when the segment did not keep its paragraph count; unscored
+  paragraphs get no item; a failed document gives `run_failed` items; item
+  ids are random and packets are shuffled and carry no arm, round or version.
 - Judges are Claude agents in fresh contexts, separate from the people who
   change Core. A judge never sees which arm, round or Core version produced a
   translation: items carry random ids and are shuffled across documents.
   When a candidate is judged, its round also contains a seeded 25% of the
-  baseline items, re-judged blind; their results are reported as a drift
-  check and do not replace the baseline numbers.
+  baseline items, re-judged blind under new ids; they form a partial arm that
+  the scorer scores over its own items, reported as a drift check that does
+  not replace the baseline numbers.
 - A judge receives the source document, the item's paragraph and translation,
   the official reference when one exists (aligned paragraph and the whole
   reference document), and the name annotation of the paragraph.
@@ -202,6 +230,24 @@ scored, and is counted separately, when:
   that needs adjudication and has none is **pending**, not undecidable. An
   adjudication record for an item whose two judgments agree is a protocol
   error; the scorer refuses the file (exit 2).
+- Each `j1`, `j2` and `adj` file's SHA-256 is appended to the ledger log when
+  the file is written and is never replaced. Once a paragraph of an arm has a
+  hashed judgment in a pass, it is not judged again in that pass.
+
+### Who may read what
+
+- People and agents who change Core (Q2 fixers) read only the D bundle
+  exported outside the private directory
+  (`goal-runs/real-manuscript-eval-20261115-D/` in the evaluator's checkout):
+  D's sample, documents and name annotations, and later D's run outputs and
+  judgments. Their tuning material is that bundle plus the earlier samples
+  (A1–A6, B1–B3, S01–S18, M-Gold).
+- Off limits to them: H1 and H2 (documents, samples, annotations), `raw/`,
+  `pool/`, run outputs other than D's, judgment files other than D's, scan
+  residue and audit files; and the populations H was drawn from: 3.7-new story
+  keys outside D, zh and en website announcements published from 2025-01-01
+  up to the cutoff, Steam and TapTap texts in the window. New tests and
+  fixtures use synthetic or pre-3.7 text.
 
 ### Judgment record (schema `usability-judgment-v1`)
 
@@ -241,7 +287,9 @@ directions. Genre breakdowns are descriptive.
 1. **Usable rate.** Unit: scored paragraph. (A + B) / scored paragraphs.
    Undecidable, `run_failed` and C are not usable. 95% interval: Wilson score
    interval, z = 1.959964. With n = 120 and a rate near 80% the interval is
-   about ±7 points.
+   about ±7 points. Paragraphs of one document are not independent, so every
+   rate is reported with its document count; per genre the report gives n,
+   the document count and the interval.
 2. **Official names and their consistency.** Unit: annotated occurrence in a
    scored paragraph. Accuracy = occurrences labelled `official` / all
    occurrences (`not_official`, `omitted` and `undecidable` are not
@@ -276,10 +324,14 @@ directions. Genre breakdowns are descriptive.
   at least 80% (point estimate; the interval, the baseline value and the
   undecidable count are reported with it). 90% is the stretch target.
 - Below 80% is reported as it is; the rules do not change. One more repair
-  round may be measured only on H2. A rerun on H1 is labelled "held-out used
-  in repair" and does not count toward the 80%.
+  round may be measured only on H2. Only the first candidate run on H1 in the
+  ledger is official; every later H1 run of any Core is labelled "held-out
+  used" and does not count toward the 80%.
 - Report states follow ADR 0018: met, not met, undecidable, pending
   adjudication, not executed. A round with a pending item is not finished.
+- An H2 report states that H2 is not independent of H1 for announcements:
+  H2 shares 1,841 uncleared 12-scalar windows with H1, 1,623 of them in
+  announcements (shared templates).
 - The four metrics have no thresholds. They are reported per direction for
   baseline and candidate.
 - Regression guards (M-Gold frozen 670/675, Set 1 resident 119/124, Set 2
@@ -307,8 +359,11 @@ directions. Genre breakdowns are descriptive.
   name, number or other content specific to its sealed paragraph and the
   scanned sentence around it is not a copy of that paragraph. Only the
   evaluator, never the person who changes Core, looks at matched windows; the
-  ledger gets the class and the count, never the text. Anything else stops
-  the work and goes to the owner.
+  ledger gets the class and the count, never the text. Every cleared window
+  is recorded with its SHA-256, the sealed paragraph ids and the input
+  location (file and line; `scan --audit-out`), and the audit file's hash
+  goes into the ledger log. Anything else stops the work and goes to the
+  owner.
 - **What the clearances cost.** Of the 70,034 distinct 12-scalar windows in
   H1 and H2, the Core tree pre-clears 3.0% and the name file brings that to
   4.6%; 4 sealed source or reference texts are fully pre-cleared either way
@@ -340,5 +395,8 @@ directions. Genre breakdowns are descriptive.
 ## Evidence
 
 - `scripts/eval_usability.py` (`score`, `scan`), `tests/test_eval_usability.py`
-- The evaluation ledger (private) records the SHA-256 of this file, the
-  scorer, the set manifests and the annotation files, and the call counter.
+- [usability-judging](../eval/usability-judging.md): judge and adjudicator
+  instructions
+- The evaluation ledger and ledger log (private) record the SHA-256 of this
+  file, the scorer, the judging instructions, the set manifests, the
+  annotation files and the run, packet and export tools, and every call.
