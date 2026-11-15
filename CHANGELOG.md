@@ -3,6 +3,18 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Delivery And Deployment
+
+- `deploy/migrate-layout.sh` can be run again after a run was cut off between
+  writing `releases/r1/.release-commit` and hiding it from git. The clean
+  checkout gate refused that rerun because of the untracked marker, the dry
+  run included. The gate now overlooks exactly that one entry, and only when
+  it is a regular file holding the checkout's HEAD; a marker with other
+  content, a link, or any other untracked file is still refused and left
+  untouched. The rerun then installs the git exclude and finishes.
+
 ## 0.8.7
 
 ### Delivery And Deployment
