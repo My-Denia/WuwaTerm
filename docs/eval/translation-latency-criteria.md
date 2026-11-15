@@ -223,3 +223,40 @@ all nine en→zh segments, the request bodies of the baseline code (`e97b997`)
 and of the candidate, with the placeholder prefix fixed, are byte-identical
 (9 of 9 SHA-256 equal). The en→zh documents are not sent again, and en→zh
 results stay the baseline's. Only the zh→en D documents run.
+
+## Results, 2026-11-16
+
+### Per-direction arm (`853eaec`, zh→en `disabled`, en→zh `omit`)
+
+6 new calls; every other zh→en call was answered from the `disabled` run
+under the full reuse key, and the en→zh documents were not sent.
+
+| Criterion | Result | Met |
+| --- | --- | --- |
+| P-L1 timeouts, zh→en D + R1 | 0 of 24 | yes |
+| P-L2 pooled p95 | 9.0 s (max 9.2 s) | yes |
+| P-Q1 D zh→en usable, full set | 124/128 (baseline 38/128); baseline-judged subset 36/39 (baseline 38/39) | yes |
+| P-Q2 new systematic C class | none; the 4 C grades are single items in reused outputs (two in one document) | yes |
+| P-Q3 en→zh request identity | 9 of 9 bodies identical with the placeholder prefix fixed | yes |
+| P-Q4 M-Gold, frozen cues | 667/675 | no |
+| P-Q4 blind adjudication | real errors: candidate 2, baseline 1 (both judges agreed on all 13 misses) | no |
+| Set 1, Set 2 | 120/124, 38/39 | yes |
+
+The scoped one-character reference brought back two of the three ordinary-word
+items; one still renders the flower inside the mechanic name as the resonator.
+The other real error is a lost system name in a title, which the `low` run
+also lost. P-Q4 is not met, so the shipped default stays `omit`.
+
+### Official names (`611d405`, on `main` with the shipped default)
+
+| Document | Names official | Usable (baseline) |
+| --- | --- | --- |
+| D-009 en→zh | 14/15 (10/15) | 27/28 (27/28) |
+| D-004 zh→en | two timeouts at production settings, `run_failed` | 0/10 (10/10) |
+| D-004 zh→en, same change with zh→en `disabled` | 33/35 (33/35; Rabelle College gained, a resonator name misspelled) | 7/10 (10/10) |
+
+N1 is met: the four D-009 misses of the item bases and the area title of
+D-004 are now official; lowercase "sealed tubes" is not matched. N2 is not
+met for D-004: at the shipped default it timed out, and under `disabled` its
+three C grades are of the kinds the `disabled` run had without the dictionary
+change. N3 and N4 are met (36 added rows, no exclusion change).
