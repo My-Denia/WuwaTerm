@@ -81,6 +81,14 @@ mentions the translator never saw (Mar for Mars, Message for Messages). The
 lexicon slice, the CJK boundary policy and the everyday-character set are
 unchanged; resolution contexts carrying v5 go stale by the existing freshness
 rule.
+
+wuwaterm-cjk-matcher-v7 changes no matcher input. review-v2 now judges terms
+through paragraph pairing when the source and target sentence counts differ
+(a translation that writes the list marker "I." where the source has "一、"
+no longer leaves every term unassessed), so the same input gave a different
+report under v6 and the basis must change. Stored resolution contexts and
+saved manuscript-v3 segment results carrying v6 go stale by the existing
+freshness rule and are re-reviewed.
 """
 
 from __future__ import annotations
@@ -66525,7 +66533,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v6", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        ["wuwaterm-cjk-matcher-v7", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

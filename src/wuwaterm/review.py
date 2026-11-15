@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -48,6 +49,13 @@ VERDICT_VERIFIED = "verified_constraint"
 VERDICT_CONFLICT = "confirmed_conflict"
 VERDICT_NEEDS_REVIEW = "needs_review"
 VERDICT_NOT_EVALUATED = "not_evaluated"
+# Why review-v2 left a mention unassessed. Internal: the HTTP projection does
+# not carry it, because both clients reject unknown finding keys.
+REASON_NOT_A_TERM = "not_a_term"
+REASON_ORDINARY_WORD = "ordinary_word"
+REASON_NO_TARGET_REGION = "no_target_region"
+REASON_FOUND_OUTSIDE_REGION = "found_outside_region"
+REASON_AMBIGUOUS_REPEAT = "ambiguous_repeat"
 _SURROGATE_MIN = "\ud800"
 _SURROGATE_MAX = "\udfff"
 _SENTENCE_END = re.compile(r"[。．.！？!?\n]")
@@ -107,6 +115,7 @@ class ReviewFinding:
     target_span: ReviewSpan | None
     candidates: tuple[ReviewCandidate, ...]
     candidates_truncated: bool = False
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -669,6 +678,56 @@ def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
+# Exactly the scalars of the spec (docs/segmentation-v1.md); str.isspace() has a
+# different set. The paragraph definition lives here because review-v2 pairs
+# paragraphs when sentence counts differ, and segmentation already imports this
+# module for the sentence boundaries.
+WHITESPACE: frozenset[str] = frozenset(
+    "\t\n\x0b\x0c\r \u00a0\u1680"
+    + "".join(chr(code) for code in range(0x2000, 0x200B))
+    + "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _core(text: str, start: int, end: int) -> tuple[int, int]:
+    """Core of [start, end): WS trimmed; an all-WS region has core (start, start)."""
+    a = start
+    while a < end and text[a] in WHITESPACE:
+        a += 1
+    if a == end:
+        return start, start
+    b = end
+    while text[b - 1] in WHITESPACE:
+        b -= 1
+    return a, b
+
+
+def _paragraph_ranges(text: str) -> list[tuple[int, int]]:
+    """Paragraph regions; empty when the text has no non-WS scalar."""
+    length = len(text)
+    cuts: list[int] = []
+    i = 0
+    while i < length:
+        if text[i] not in WHITESPACE:
+            i += 1
+            continue
+        j = i
+        newlines = 0
+        while j < length and text[j] in WHITESPACE:
+            if text[j] == "\n":
+                newlines += 1
+            j += 1
+        # A leading run belongs to the first region and a trailing run to the
+        # last one, so neither produces a cut.
+        if newlines >= 2 and i > 0 and j < length:
+            cuts.append(j)
+        i = j
+    if _core(text, 0, length)[0] == _core(text, 0, length)[1]:
+        return []
+    bounds = [0, *cuts, length]
+    return list(zip(bounds, bounds[1:], strict=False))
+
+
 def _coerce_alignment_span(name: str, item: object, text: str) -> ReviewSpan:
     if not isinstance(item, dict) or set(item) != {"start", "end", "text"}:
         raise ReviewRequestError("invalid_request", f"{name} span is not valid")
@@ -732,19 +791,75 @@ def _coerce_alignments(
     return tuple(alignments)
 
 
-def _mapped_target_range(
+def _mapped_alignment(
     mention: _TermSpan,
     alignments: Sequence[ReviewAlignment],
-) -> tuple[int, int] | None:
+) -> ReviewAlignment | None:
     for alignment in alignments:
         if (
             alignment.source.start <= mention.start
             and mention.end <= alignment.source.end
         ):
-            if alignment.target is None:
-                return None
-            return (alignment.target.start, alignment.target.end)
+            return alignment
     return None
+
+
+def _mapped_target_range(
+    mention: _TermSpan,
+    alignments: Sequence[ReviewAlignment],
+) -> tuple[int, int] | None:
+    alignment = _mapped_alignment(mention, alignments)
+    if alignment is None or alignment.target is None:
+        return None
+    return (alignment.target.start, alignment.target.end)
+
+
+def _paragraph_pairing(
+    source: str, target: str
+) -> tuple[tuple[ReviewAlignment, ...], frozenset[tuple[int, int]]]:
+    """Pair regions by paragraph when the two sentence counts differ.
+
+    A translation often writes a list marker the source does not ("I." for
+    "一、"), so the sentence counts differ although every paragraph still
+    answers its own. Paragraph regions are the segmentation-v1 ones, and when
+    both sides have the same number of them, paragraph i pairs with paragraph
+    i. Inside a pair whose sentence counts agree the sentences pair one to
+    one, exactly as on the equal-count path. Inside a pair whose counts still
+    differ the whole paragraph is one region, and its source range is returned
+    in the guarded set because the sentence order no longer says which
+    mention answers which occurrence. A different number of paragraphs, or a
+    side with none, maps nothing.
+    """
+    source_paragraphs = _paragraph_ranges(source)
+    target_paragraphs = _paragraph_ranges(target)
+    if not source_paragraphs or len(source_paragraphs) != len(target_paragraphs):
+        return (), frozenset()
+    regions: list[ReviewAlignment] = []
+    guarded: set[tuple[int, int]] = set()
+    for (s_lo, s_hi), (t_lo, t_hi) in zip(
+        source_paragraphs, target_paragraphs, strict=True
+    ):
+        source_sentences = _sentence_ranges_v2(source[s_lo:s_hi])
+        target_sentences = _sentence_ranges_v2(target[t_lo:t_hi])
+        if len(source_sentences) == len(target_sentences):
+            for (a, b), (c, d) in zip(
+                source_sentences, target_sentences, strict=True
+            ):
+                regions.append(
+                    ReviewAlignment(
+                        source=_span_at(source, s_lo + a, s_lo + b),
+                        target=_span_at(target, t_lo + c, t_lo + d),
+                    )
+                )
+        else:
+            regions.append(
+                ReviewAlignment(
+                    source=_span_at(source, s_lo, s_hi),
+                    target=_span_at(target, t_lo, t_hi),
+                )
+            )
+            guarded.add((s_lo, s_hi))
+    return tuple(regions), frozenset(guarded)
 
 
 def _sentence_index(ranges: Sequence[tuple[int, int]], start: int) -> int | None:
@@ -795,6 +910,108 @@ def _find_occurrences_v2(
 
 def _official_form(candidate: ReviewCandidate, direction: str) -> str:
     return candidate.en if direction == "en" else candidate.zh
+
+
+def _candidate_forms(
+    candidates: Sequence[ReviewCandidate], direction: str
+) -> tuple[str, ...]:
+    """Every official form of every candidate, in candidate order."""
+    return tuple(
+        dict.fromkeys(_official_form(candidate, direction) for candidate in candidates)
+    )
+
+
+def _target_occurrences(
+    candidates: Sequence[ReviewCandidate],
+    direction: str,
+    forms: Sequence[str],
+) -> Callable[[str, str], list[tuple[int, int]]]:
+    """Return the one qualified-occurrence finder review-v2 uses on a target.
+
+    The judge and the repeat guard both read targets through this, so a form
+    that counts as an occurrence for one counts for the other. ``forms`` are
+    the forms being searched for: a bounded English plural or singular variant
+    that is itself one of them stays exact.
+    """
+    # Restrict compound qualification to actual one-character resonator
+    # candidate forms, both automatic and selected and in elsewhere search.
+    # Selection does not make a substring an occurrence of the chosen name.
+    single_character_names = {
+        candidate.zh for candidate in candidates
+        if direction == "zh" and candidate.category == "resonator"
+        and len(candidate.zh) == 1 and _is_cjk_character(candidate.zh)
+    }
+
+    # direction == "en": the target may spell an official English form as its
+    # bounded singular/plural variant ("Resonators", "Waveworn Phenomenon",
+    # "Main Quest"), and the span then covers the whole inflected word. A
+    # variant that is itself another candidate's exact form stays exact, so an
+    # ambiguous dictionary keeps its existing exact-form verdicts.
+    #
+    # Names take the plural-only rule: reversing a name would manufacture a
+    # different proper noun, so the speaker "Mars" must never accept the month
+    # "Mar" and "Wishes" must never accept "Wish". Every other category also
+    # accepts the singular, because a Chinese term is just as often translated
+    # in the singular (海蚀 -> "Waveworn Phenomenon").
+    name_forms = {
+        _official_form(candidate, direction)
+        for candidate in candidates
+        if candidate.category in _PLURAL_ONLY_CATEGORIES
+    }
+    plural_variants = {
+        form: (
+            tuple(
+                variant
+                for variant in (
+                    plural_forms(form)
+                    if form in name_forms
+                    else number_variants(form)
+                )
+                if variant not in forms
+            )
+            if direction == "en"
+            else ()
+        )
+        for form in forms
+    }
+
+    def occurrences(text: str, form: str) -> list[tuple[int, int]]:
+        found = _find_occurrences_v2(
+            text, form, single_character_name=form in single_character_names
+        )
+        for variant in plural_variants.get(form, ()):
+            found.extend(_find_occurrences_v2(text, variant))
+        return sorted(found)
+
+    return occurrences
+
+
+def _available_occurrences(
+    target: str,
+    region: tuple[int, int],
+    forms: Sequence[str],
+    occurrences: Callable[[str, str], list[tuple[int, int]]],
+) -> int:
+    """Count distinct non-overlapping occurrences of any form wholly in region.
+
+    Qualification runs on the full target, as the judge does, and the already
+    used spans are deliberately not subtracted: the count describes the region,
+    not how far the review has got.
+    """
+    lo, hi = region
+    spans = {
+        span
+        for form in forms
+        for span in occurrences(target, form)
+        if lo <= span[0] and span[1] <= hi
+    }
+    count = 0
+    last_end = lo
+    for start, end in sorted(spans, key=lambda span: (span[1], span[0])):
+        if start >= last_end:
+            count += 1
+            last_end = end
+    return count
 
 
 def _span_at(text: str, start: int, end: int) -> ReviewSpan:
@@ -1009,11 +1226,20 @@ def _judge_mention_v2(
     used_target: set[tuple[int, int]],
     resolution: ReviewResolution | None,
     automatic_term_excluded: bool = False,
+    competing_mentions: int | None = None,
 ) -> ReviewFinding:
+    """Judge one mention against its mapped target range.
+
+    ``competing_mentions`` is set only for a guarded paragraph region: the
+    number of mentions in that source paragraph that could take the same
+    official form. When the paragraph holds fewer qualified occurrences than
+    that, the paragraph cannot say which mention an occurrence answers, so the
+    mention is left unassessed instead of being credited or blamed.
+    """
     finding_id = _span_mention_id(source, mention.start, mention.end)
     source_span = _span_at(source, mention.start, mention.end)
 
-    if resolution is not None and resolution.choice == CHOICE_NOT_A_TERM:
+    def not_evaluated(reason: str) -> ReviewFinding:
         return ReviewFinding(
             id=finding_id,
             verdict=VERDICT_NOT_EVALUATED,
@@ -1021,7 +1247,11 @@ def _judge_mention_v2(
             source_span=source_span,
             target_span=None,
             candidates=candidates,
+            reason=reason,
         )
+
+    if resolution is not None and resolution.choice == CHOICE_NOT_A_TERM:
+        return not_evaluated(REASON_NOT_A_TERM)
 
     selected: ReviewCandidate | None = None
     if resolution is not None and resolution.choice == CHOICE_OFFICIAL_PAIR:
@@ -1041,84 +1271,31 @@ def _judge_mention_v2(
         # finding stays, with every candidate, but nothing is evaluated and
         # no target span is claimed. An explicit official_pair resolution
         # runs the authoritative check above; not_a_term is user intent.
-        return ReviewFinding(
-            id=finding_id,
-            verdict=VERDICT_NOT_EVALUATED,
-            rule_id=RULE_TERM_PAIR,
-            source_span=source_span,
-            target_span=None,
-            candidates=candidates,
-        )
+        return not_evaluated(REASON_ORDINARY_WORD)
 
     forms = (
         (_official_form(selected, direction),)
         if selected is not None
-        else tuple(
-            dict.fromkeys(
-                _official_form(candidate, direction) for candidate in candidates
-            )
-        )
+        else _candidate_forms(candidates, direction)
     )
-
-    # Restrict compound qualification to actual one-character resonator
-    # candidate forms, both automatic and selected and in elsewhere search.
-    # Selection does not make a substring an occurrence of the chosen name.
-    single_character_names = {
-        candidate.zh for candidate in candidates
-        if direction == "zh" and candidate.category == "resonator"
-        and len(candidate.zh) == 1 and _is_cjk_character(candidate.zh)
-    }
-
-    # direction == "en": the target may spell an official English form as its
-    # bounded singular/plural variant ("Resonators", "Waveworn Phenomenon",
-    # "Main Quest"), and the span then covers the whole inflected word. A
-    # variant that is itself another candidate's exact form stays exact, so an
-    # ambiguous dictionary keeps its existing exact-form verdicts.
-    #
-    # Names take the plural-only rule: reversing a name would manufacture a
-    # different proper noun, so the speaker "Mars" must never accept the month
-    # "Mar" and "Wishes" must never accept "Wish". Every other category also
-    # accepts the singular, because a Chinese term is just as often translated
-    # in the singular (海蚀 -> "Waveworn Phenomenon").
-    name_forms = {
-        _official_form(candidate, direction)
-        for candidate in candidates
-        if candidate.category in _PLURAL_ONLY_CATEGORIES
-    }
-    plural_variants = {
-        form: (
-            tuple(
-                variant
-                for variant in (
-                    plural_forms(form)
-                    if form in name_forms
-                    else number_variants(form)
-                )
-                if variant not in forms
-            )
-            if direction == "en"
-            else ()
-        )
-        for form in forms
-    }
-
-    def occurrences(text: str, form: str) -> list[tuple[int, int]]:
-        found = _find_occurrences_v2(
-            text, form, single_character_name=form in single_character_names
-        )
-        for variant in plural_variants.get(form, ()):
-            found.extend(_find_occurrences_v2(text, variant))
-        return sorted(found)
+    occurrences = _target_occurrences(candidates, direction, forms)
 
     if corresponding is None:
-        return ReviewFinding(
-            id=finding_id,
-            verdict=VERDICT_NOT_EVALUATED,
-            rule_id=RULE_TERM_PAIR,
-            source_span=source_span,
-            target_span=None,
-            candidates=candidates,
+        return not_evaluated(REASON_NO_TARGET_REGION)
+
+    if competing_mentions is not None:
+        # Every candidate's form, whatever the resolution picked: a confirmed
+        # conflict on a translation that is in fact correct is the outcome to
+        # avoid, so a selected pair does not lift the guard.
+        all_forms = _candidate_forms(candidates, direction)
+        available = _available_occurrences(
+            target,
+            corresponding,
+            all_forms,
+            _target_occurrences(candidates, direction, all_forms),
         )
+        if 0 < available < competing_mentions:
+            return not_evaluated(REASON_AMBIGUOUS_REPEAT)
 
     lo, hi = corresponding
     in_region: dict[str, list[tuple[int, int]]] = {}
@@ -1154,14 +1331,7 @@ def _judge_mention_v2(
         if _elsewhere_has_form(
             target, corresponding, forms, occurrences=occurrences
         ):
-            return ReviewFinding(
-                id=finding_id,
-                verdict=VERDICT_NOT_EVALUATED,
-                rule_id=RULE_TERM_PAIR,
-                source_span=source_span,
-                target_span=None,
-                candidates=candidates,
-            )
+            return not_evaluated(REASON_FOUND_OUTSIDE_REGION)
         mismatch = None
         for form, hits in in_region.items():
             if form == chosen_form:
@@ -1211,14 +1381,7 @@ def _judge_mention_v2(
     if _elsewhere_has_form(
         target, corresponding, forms, occurrences=occurrences
     ):
-        return ReviewFinding(
-            id=finding_id,
-            verdict=VERDICT_NOT_EVALUATED,
-            rule_id=RULE_TERM_PAIR,
-            source_span=source_span,
-            target_span=None,
-            candidates=candidates,
-        )
+        return not_evaluated(REASON_FOUND_OUTSIDE_REGION)
     return ReviewFinding(
         id=finding_id,
         verdict=VERDICT_NEEDS_REVIEW,
@@ -1402,6 +1565,7 @@ def _review_pair_v2(
         # "Its" is never an "It" mention.
         excluded_sources=automatic_exclusions,
     )
+    guarded_regions: frozenset[tuple[int, int]] = frozenset()
     if alignments is None:
         source_sentences = _sentence_ranges_v2(source)
         target_sentences = _sentence_ranges_v2(target)
@@ -1416,7 +1580,7 @@ def _review_pair_v2(
                 )
             )
         else:
-            mappings = ()
+            mappings, guarded_regions = _paragraph_pairing(source, target)
     else:
         mappings = _coerce_alignments(alignments, source, target, mentions)
 
@@ -1431,12 +1595,41 @@ def _review_pair_v2(
             )
         by_id[resolution.mention_id] = resolution
 
+    planned: list[
+        tuple[
+            _TermSpan,
+            tuple[ReviewCandidate, ...],
+            ReviewResolution | None,
+            tuple[int, int] | None,
+        ]
+    ] = []
+    # Per guarded source paragraph: how many mentions that still assert a
+    # constraint carry each set of official forms.
+    competing: dict[tuple[int, int], Counter[frozenset[str]]] = {}
     for mention in mentions:
         candidates = _candidates_for(surfaces[mention.source], include_id=True)
         finding_id = _span_mention_id(source, mention.start, mention.end)
         resolution = by_id.get(finding_id)
         if resolution is not None:
             seen_resolution_ids.add(finding_id)
+        region = _mapped_alignment(mention, mappings)
+        guard = None
+        if region is not None:
+            key = (region.source.start, region.source.end)
+            guard = key if key in guarded_regions else None
+        # A mention the judge sets aside without a verdict does not compete.
+        asserts_constraint = not (
+            (resolution is not None and resolution.choice == CHOICE_NOT_A_TERM)
+            or (resolution is None and mention.source in automatic_exclusions)
+        )
+        if guard is not None and asserts_constraint:
+            competing.setdefault(guard, Counter())[
+                frozenset(_candidate_forms(candidates, direction))
+            ] += 1
+        planned.append((mention, candidates, resolution, guard))
+
+    for mention, candidates, resolution, guard in planned:
+        own_forms = frozenset(_candidate_forms(candidates, direction))
         findings.append(
             _judge_mention_v2(
                 source=source,
@@ -1448,6 +1641,15 @@ def _review_pair_v2(
                 used_target=used_target,
                 resolution=resolution,
                 automatic_term_excluded=mention.source in automatic_exclusions,
+                competing_mentions=(
+                    None
+                    if guard is None
+                    else sum(
+                        count
+                        for forms, count in competing.get(guard, {}).items()
+                        if not forms.isdisjoint(own_forms)
+                    )
+                ),
             )
         )
 

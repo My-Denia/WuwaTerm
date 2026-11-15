@@ -15,6 +15,11 @@ from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.review import (
+    REASON_AMBIGUOUS_REPEAT,
+    REASON_FOUND_OUTSIDE_REGION,
+    REASON_NO_TARGET_REGION,
+    REASON_NOT_A_TERM,
+    REASON_ORDINARY_WORD,
     RULE_VERSION_V2,
     VERDICT_CONFLICT,
     VERDICT_NEEDS_REVIEW,
@@ -22,6 +27,7 @@ from wuwaterm.review import (
     VERDICT_VERIFIED,
     ReviewRequestError,
     _collect_mentions,
+    _paragraph_ranges,
     _sentence_ranges,
     _sentence_ranges_v2,
     _surface_index,
@@ -185,18 +191,27 @@ def test_frozen_explicit_merge_and_split_cover_both_terms(v2_service, case_id):
     assert len({item.target_span.start for item in findings if item.target_span}) == 2
 
 
-@pytest.mark.parametrize("case_id", ("merge", "split", "unmatched"))
-def test_frozen_mismatched_counts_without_mapping_are_unassessed(v2_service, case_id):
+@pytest.mark.parametrize(
+    ("case_id", "verdict", "spans"),
+    (
+        ("merge", VERDICT_VERIFIED, ["Jinhsi", "Echo"]),
+        ("split", VERDICT_VERIFIED, ["Jinhsi", "Echo"]),
+        ("unmatched", VERDICT_NEEDS_REVIEW, [None, None]),
+    ),
+)
+def test_frozen_mismatched_counts_pair_the_single_paragraph(
+    v2_service, case_id, verdict, spans
+):
+    """Unequal sentence counts in one paragraph pair that paragraph as one region."""
     report = _v2(v2_service, case_id)
     findings = _term_findings(report)
 
-    assert [item.verdict for item in findings] == [
-        VERDICT_NOT_EVALUATED,
-        VERDICT_NOT_EVALUATED,
-    ]
-    assert report.coverage.evaluated == 0
-    assert report.coverage.not_evaluated == 3
-    assert all(item.target_span is None for item in findings)
+    assert [item.verdict for item in findings] == [verdict, verdict]
+    assert [item.target_span.text if item.target_span else None for item in findings] == spans
+    assert report.coverage.evaluated == 2
+    assert report.coverage.not_evaluated == 1
+    starts = {item.target_span.start for item in findings if item.target_span}
+    assert len(starts) == len([span for span in spans if span])
 
 
 def test_frozen_repeat_shortage_does_not_reuse_target_span(v2_service):
@@ -265,6 +280,203 @@ def test_explicit_null_target_is_unassessed(v2_service):
     )
     assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
     assert report.findings[0].target_span is None
+
+
+def _pair(service: TermService, source: str, target: str, **overrides):
+    return review_pair(
+        service,
+        source,
+        target,
+        "en",
+        review_version=RULE_VERSION_V2,
+        **overrides,
+    )
+
+
+def _official_pair_for(report, index: int) -> dict[str, object]:
+    finding = report.findings[index]
+    return {
+        "resolutions": (
+            {
+                "mention_id": finding.id,
+                "choice": "official_pair",
+                "candidate_id": finding.candidates[0].candidate_id,
+            },
+        ),
+        "resolution_context": {
+            "source_revision": report.source_revision,
+            "rule_version": report.rule_version,
+            "dictionary_revision": report.dictionary.revision,
+            "matcher_revision": report.matcher_revision,
+        },
+    }
+
+
+def _differing_counts(source: str, target: str) -> None:
+    """The pair reaches paragraph pairing: sentence counts differ."""
+    assert len(_sentence_ranges_v2(source)) != len(_sentence_ranges_v2(target))
+
+
+def test_paragraph_pairing_survives_a_list_marker_the_source_lacks(v2_service):
+    source = "一、机制\n\n1. 今汐登场。\n\n声骸出现。"
+    target = "I. Mechanics\n\n1. Jinhsi appears.\n\nAn Echo appears."
+    _differing_counts(source, target)
+    source_paragraphs = _paragraph_ranges(source)
+    target_paragraphs = _paragraph_ranges(target)
+    assert len(source_paragraphs) == len(target_paragraphs) == 3
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_VERIFIED,
+    ]
+    for finding, paragraph in zip(report.findings, target_paragraphs[1:], strict=True):
+        assert finding.target_span is not None
+        assert paragraph[0] <= finding.target_span.start
+        assert finding.target_span.end <= paragraph[1]
+    assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
+    assert report.coverage.evaluated == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (
+        # Strict region pairs: the sentence counts agree inside each paragraph.
+        ("一、机制\n\n今汐登场。\n\n声骸出现。", "I. Mechanics\n\nAn Echo appears.\n\nJinhsi appears."),
+        # The first paragraph pair is guarded, its form is in the other paragraph.
+        ("今汐登场。\n\n声骸出现。", "An Echo appears. Truly.\n\nJinhsi appears."),
+    ),
+)
+def test_form_found_only_in_another_paragraph_is_not_credited(v2_service, source, target):
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_FOUND_OUTSIDE_REGION] * 2
+    assert all(item.target_span is None for item in report.findings)
+
+
+def test_unequal_paragraph_counts_map_nothing(v2_service):
+    source = "今汐登场。\n\n声骸出现。"
+    target = "Jinhsi appears. An Echo appears. Truly."
+    _differing_counts(source, target)
+    assert len(_paragraph_ranges(source)) != len(_paragraph_ranges(target))
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_NO_TARGET_REGION] * 2
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 3
+
+
+def test_guarded_paragraph_with_fewer_occurrences_than_mentions_is_ambiguous(v2_service):
+    source, target = "今汐与今汐。", "Jinhsi. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+    assert all(item.target_span is None for item in report.findings)
+    assert all(item.candidates for item in report.findings)
+
+    # A confirmed pair on the second mention would otherwise be a conflict that
+    # the correct translation does not deserve: the first mention took the only
+    # occurrence.
+    resolved = _pair(v2_service, source, target, **_official_pair_for(report, 1))
+    assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in resolved.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+
+    # The same shortage inside agreeing sentence counts keeps its old verdicts.
+    equal = _v2(v2_service, "repeat-shortage")
+    assert [item.verdict for item in equal.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_NEEDS_REVIEW,
+    ]
+
+
+def test_guarded_paragraph_with_no_form_anywhere_keeps_the_ordinary_verdicts(v2_service):
+    source = "今汐登场。\n\n声骸出现。"
+    target = "Someone appears. Truly.\n\nSomething appears."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NEEDS_REVIEW] * 2
+    assert all(item.target_span is None for item in report.findings)
+
+    resolved = _pair(v2_service, source, target, **_official_pair_for(report, 0))
+    assert [item.verdict for item in resolved.findings] == [
+        VERDICT_CONFLICT,
+        VERDICT_NEEDS_REVIEW,
+    ]
+
+
+def test_v2_reason_is_internal_and_only_on_not_evaluated_findings(v2_service):
+    reasons = {
+        REASON_NOT_A_TERM,
+        REASON_ORDINARY_WORD,
+        REASON_NO_TARGET_REGION,
+        REASON_FOUND_OUTSIDE_REGION,
+        REASON_AMBIGUOUS_REPEAT,
+    }
+    baseline = _v2(v2_service, "basic-zh-en")
+    case = FROZEN["basic-zh-en"]
+    by_reason = {
+        REASON_NOT_A_TERM: _v2(
+            v2_service,
+            "basic-zh-en",
+            resolutions=(
+                {"mention_id": baseline.findings[0].id, "choice": "not_a_term"},
+            ),
+            resolution_context=_official_pair_for(baseline, 0)["resolution_context"],
+        ),
+        REASON_NO_TARGET_REGION: _v2(
+            v2_service,
+            "basic-zh-en",
+            alignments=[
+                {"source": _span(case["source"], 0, len(case["source"])), "target": None}
+            ],
+        ),
+        REASON_FOUND_OUTSIDE_REGION: _v2(v2_service, "swapped"),
+        REASON_AMBIGUOUS_REPEAT: _pair(v2_service, "今汐与今汐。", "Jinhsi. Indeed."),
+    }  # ordinary_word is pinned with the exclusion fixtures
+    for reason, report in by_reason.items():
+        assert {item.reason for item in report.findings} == {reason}
+
+    unmatched = _v2(v2_service, "unmatched")
+    conflict = _v2(v2_service, "unmatched", **_official_pair_for(unmatched, 0))
+    assert VERDICT_CONFLICT in {item.verdict for item in conflict.findings}
+    for report in (
+        *by_reason.values(),
+        baseline,
+        unmatched,
+        conflict,
+        _v2(v2_service, "repeat-shortage"),
+    ):
+        for item in report.findings:
+            if item.verdict == VERDICT_NOT_EVALUATED:
+                assert item.reason in reasons
+            else:
+                assert item.reason is None
+
+    v1 = review_pair(v2_service, **DECIMAL_WORD_CASE)
+    assert [item.verdict for item in v1.findings] == [VERDICT_NOT_EVALUATED]
+    assert v1.findings[0].reason is None
+
+    body = project_review_report(by_reason[REASON_FOUND_OUTSIDE_REGION], "request-reason")
+    assert body["findings"]
+    for finding in body["findings"]:
+        assert set(finding) == {
+            "candidates",
+            "candidates_truncated",
+            "id",
+            "rule_id",
+            "source_span",
+            "target_span",
+            "verdict",
+        }
 
 
 def test_v2_wire_additions_are_raw_hex_and_top_level_is_unchanged(v2_service):
