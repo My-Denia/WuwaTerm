@@ -260,6 +260,25 @@ def _write_full_fake_python(root: Path) -> None:
         "    fi\n"
         "    exec \"$real_python\" \"$@\"\n"
         "    ;;\n"
+        # The tail of a full deployment: the transaction has committed and only
+        # `current` is left. The before-barrier leaves the record in place; the
+        # after-barrier runs the real confirm first and then waits, so the
+        # record is already cleared. Either way a test SIGKILLs the process
+        # group inside that window instead of guessing at the state an
+        # interruption would have left behind.
+        "  *'full_update.py confirm'*)\n"
+        "    if [ -n \"${FULL_TAIL_BEFORE_BARRIER_FILE:-}\" ]; then\n"
+        "      printf ready > \"$FULL_TAIL_BEFORE_BARRIER_FILE\"\n"
+        "      while [ ! -e \"${FULL_TAIL_RELEASE_FILE:?}\" ]; do sleep 0.05; done\n"
+        "    fi\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    rc=$?\n"
+        "    if [ -n \"${FULL_TAIL_AFTER_BARRIER_FILE:-}\" ]; then\n"
+        "      printf ready > \"$FULL_TAIL_AFTER_BARRIER_FILE\"\n"
+        "      while [ ! -e \"${FULL_TAIL_RELEASE_FILE:?}\" ]; do sleep 0.05; done\n"
+        "    fi\n"
+        "    exit \"$rc\"\n"
+        "    ;;\n"
         "  *'deployment_manifest.py durable-replace --source data/candidates/'*)\n"
         "    \"$real_python\" \"$@\"\n"
         "    rc=$?\n"
@@ -298,6 +317,7 @@ def _journal(
     old_db_sha: str | None,
     db_backup: str = "none",
     old_pointer_present: bool = True,
+    old_pointer: str = OLD_COMMIT,
     source_commit: str = NEW_COMMIT,
     new_db_sha: str,
     candidate_rel: str,
@@ -315,8 +335,8 @@ def _journal(
         "source_commit": source_commit,
         "phase": phase,
         "old_pointer_present": old_pointer_present,
-        "old_pointer": OLD_COMMIT if old_pointer_present else None,
-        "old_manifest_path": f".deployments/{OLD_COMMIT}.json"
+        "old_pointer": old_pointer if old_pointer_present else None,
+        "old_manifest_path": f".deployments/{old_pointer}.json"
         if old_pointer_present
         else None,
         "db_backup": db_backup,
@@ -1626,7 +1646,9 @@ def test_a_stopped_surface_is_confirmed_on_the_new_binding(full_harness):
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "confirmed on the new binding" in result.stdout
+    # Recovery reports on stderr now: stdout carries the outcome line the
+    # settlement reads, not a log the shell parses.
+    assert "confirmed on the new binding" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert not any(" stop " in line for line in _docker_log(root))
 
@@ -1697,7 +1719,7 @@ def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_har
     again = _run_recover(root, env)
 
     assert again.returncode == 0, again.stdout + again.stderr
-    assert "no full transaction to recover" in again.stdout
+    assert "no full transaction to recover" in again.stderr
 
 
 def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(full_harness):
@@ -1786,6 +1808,8 @@ def test_a_first_deployment_with_an_absent_bot_and_serving_api_confirms(
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "confirmed on the new binding" in result.stdout
+    # Recovery reports on stderr now: stdout carries the outcome line the
+    # settlement reads, not a log the shell parses.
+    assert "confirmed on the new binding" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert not any(" stop " in line for line in _docker_log(root))

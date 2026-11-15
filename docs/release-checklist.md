@@ -12,7 +12,12 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.8.6`, a delivery and
+  published tag. The current source version is `0.8.7`, a deployment-recovery
+  maintenance release on top of `v0.8.6`: recovery runs the release that was
+  invoked rather than `current`, a transaction that had committed and the
+  release link are settled from the side that run verified, the layout
+  migration's temporary links are reentrant, and the tag names Telegram
+  `v0.2.10`. The latest published Core release is `v0.8.6`, a delivery and
   dictionary release on top of `v0.8.5`: it bounds per-run build images,
   detects the standalone Telegram container by Compose label, records
   `old_bot_present` for stopped-bot rollback, adopts the `/opt/wuwaterm`
@@ -22,6 +27,20 @@ release. That boundary has not moved.
   `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1` and `v0.7.0`. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
+- `contracts/products.json` is a dated snapshot of releases that exist, not a
+  target-version file. Do not edit `products.core.release` to the prospective
+  `0.8.7` before that release is published, and do not invent an asset name or
+  SHA-256 for it: the release's own step records it afterwards. Leave the
+  `products.telegram` and `products.web` entries on their published releases.
+- The Telegram release a checkout of this tag prints comes from
+  `products.telegram.release.tag` in `contracts/products.json`, falling back to
+  `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
+  read. Before publishing, verify that recorded tag, that constant and
+  `docs/self-hosting.md` name the same published release: this tag records and
+  prints `v0.2.10`, while a clone of `v0.8.6` records `v0.2.9` and needs
+  `WUWATERM_TELEGRAM_VERSION=v0.2.10` to pair the tagged Core with the newer
+  Telegram release. The tag always names a published release; there is no
+  `latest`.
 - Windows product: [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -155,7 +174,9 @@ The 0.8.0 capability checks still apply to this release:
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.2.10 pins the published Core
   `v0.8.6` wheel and is deployed, so the 0.8.6 library reaches Telegram users
-  through that product's own release.
+  through that product's own release. `0.8.7` is not in that pin; it reaches
+  Telegram users only after WuwaTerm-Telegram moves its lock to `v0.8.7` and
+  releases, which this checklist does not assume.
 
 The installer and Web checks from 0.7.x still apply to this release:
 

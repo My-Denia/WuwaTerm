@@ -40,6 +40,46 @@ act() {
   if [ "$dry_run" -eq 0 ]; then "$@"; fi
 }
 
+# link_state PATH TARGET: 0 when PATH is already the symlink this step builds,
+# 1 when nothing is there, and 2 when something else is - an object this script
+# cannot prove it made. Nothing here follows PATH, so a temporary link left by
+# an interrupted run is recognised instead of being resolved.
+link_state() {
+  if [ -L "$1" ]; then
+    [ "$(readlink "$1")" = "$2" ] && return 0
+    return 2
+  fi
+  if [ -e "$1" ]; then return 2; fi
+  return 1
+}
+
+# link_check PATH TARGET: preflight for one temporary link. The link this
+# script's own earlier run left behind is reused; anything else at PATH is
+# refused before the first step, dry run included, so the printed plan and the
+# real run agree about it.
+link_check() {
+  lc_state=0
+  link_state "$1" "$2" || lc_state=$?
+  [ "$lc_state" -ne 2 ] \
+    || refuse "$1 exists and is not a link to $2; move it away and run again"
+  [ "$lc_state" -ne 0 ] || say "$1 already is the link this step builds; keeping it"
+}
+
+# link_beside PATH TARGET: build the temporary link the rename below moves into
+# place, and build it again harmlessly after an interruption. GNU `ln -T` never
+# treats PATH as a directory, so a re-run cannot create a link inside the
+# release or the data directory a leftover already points at. Nothing at PATH is
+# overwritten or removed.
+link_beside() {
+  lb_state=0
+  link_state "$1" "$2" || lb_state=$?
+  case "$lb_state" in
+    0) ;;
+    1) ln -sT "$2" "$1" ;;
+    *) refuse "$1 appeared during the run and is not a link to $2" ;;
+  esac
+}
+
 [ "$dry_run" -eq 0 ] || say "DRY RUN: only reads; nothing below is executed"
 [ -d "$base" ] || refuse "$base is not a directory"
 base="$(cd "$base" && pwd -P)"
@@ -158,6 +198,18 @@ done
 [ "$(stat -c %d "$code")" = "$base_dev" ] || refuse "$code is on another filesystem than $base"
 say "everything is on one filesystem; moves are renames, nothing is copied"
 
+# The two temporary links below are built beside their destination and renamed
+# into place. A run that died between building one and renaming it leaves a
+# symlink that already resolves to a directory, and following it would create a
+# link inside that directory - in the release checkout, or in the shared data
+# directory. Decide both paths here, before anything is moved.
+if [ ! -L "$base/current" ]; then
+  link_check "$base/.current.new" "releases/$rname"
+fi
+if [ "$tg_move" -eq 1 ]; then
+  link_check "$base/telegram/.data.new" "$base/data"
+fi
+
 # The checkout moves first. From here until `current` is back, a deploy that
 # starts finds no such directory and stops; running containers are unaffected.
 if [ "$code" != "$rel" ]; then
@@ -183,13 +235,14 @@ for item in $state_dirs; do
   fi
 done
 if [ ! -L "$base/current" ]; then
-  act "build the current link beside it" "rm $base/.current.new" ln -s "releases/$rname" "$base/.current.new"
+  act "build the current link beside it" "rm $base/.current.new" \
+    link_beside "$base/.current.new" "releases/$rname"
   act "point current at the release" "rm $base/current && mv $rel $base/current" \
     mv -T "$base/.current.new" "$base/current"
 fi
 if [ "$tg_move" -eq 1 ]; then
   act "build telegram's data link beside it" "rm $base/telegram/.data.new" \
-    ln -s "$base/data" "$base/telegram/.data.new"
+    link_beside "$base/telegram/.data.new" "$base/data"
   act "point telegram/data at the shared data directory (its container keeps its mount)" \
     "ln -sfn $base/current/data $base/telegram/data" \
     mv -T "$base/telegram/.data.new" "$base/telegram/data"

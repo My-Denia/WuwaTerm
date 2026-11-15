@@ -96,7 +96,8 @@ Start the shared translation service, and add the surfaces you choose.
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
-steps name (default v0.2.10, or the tag recorded in contracts/products.json).
+steps name (default: the tag contracts/products.json of this checkout records,
+v0.2.10 here; the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
 v0.2.0, the current published release, or latest (default v0.2.0, or the tag
 recorded in contracts/products.json).

@@ -358,6 +358,93 @@ def interrupted(host: Host, stage: str) -> None:
         (base / "telegram/data").symlink_to(base / "current/data")
 
 
+def _migrate_apart_from_its_temp_link(host: Host, stage: str) -> None:
+    """Leave a temporary link behind with its rename not done.
+
+    Both links are built beside their destination and renamed into place, so an
+    interruption inside that window leaves exactly the symlink, already
+    resolving to the directory it names. `both-temps` is the union of the two
+    windows: one attempt got as far as building the telegram link, and the host
+    was restored from before the `current` rename.
+    """
+
+    assert host.migrate().returncode == 0
+    base = host.base
+    # Both windows open before their switch, so the telegram link still points
+    # through `current` and the link beside its destination is what is left.
+    (base / "telegram/data").unlink()
+    (base / "telegram/data").symlink_to(base / "current" / "data")
+    if stage in ("current-temp", "both-temps"):
+        (base / "current").rename(base / ".current.new")
+    if stage in ("telegram-temp", "both-temps"):
+        (base / "telegram/.data.new").symlink_to(base / "data")
+
+
+@pytest.mark.parametrize("stage", ["current-temp", "telegram-temp", "both-temps"])
+def test_a_temporary_link_left_by_an_interrupted_run_is_reused(host, stage):
+    """The link is renamed into place, never built next to itself.
+
+    A leftover temporary symlink resolves to a directory, so following it would
+    create a second link inside that directory: an untracked file in the
+    release checkout, or a link inside the shared data directory. The rerun
+    keeps the link it already made, renames it, and leaves both trees as they
+    were - with the same state bytes and inodes, since nothing is copied.
+    """
+
+    base, release = host.base, host.base / "releases/r1"
+    _migrate_apart_from_its_temp_link(host, stage)
+    database = base / "data" / "terms.db"
+    before = (database.read_bytes(), database.stat().st_ino)
+
+    resumed = host.migrate()
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert os.readlink(base / "current") == "releases/r1"
+    assert os.readlink(base / "telegram/data") == str(base / "data")
+    assert not os.path.lexists(base / ".current.new")
+    assert not os.path.lexists(base / "telegram/.data.new")
+    # No link was created inside the release checkout or the data directory.
+    assert host.git(release, "status", "--porcelain", "--untracked-files=all") == ""
+    assert not os.path.lexists(release / "r1")
+    assert [entry.name for entry in (base / "data").iterdir() if entry.is_symlink()] == []
+    assert (database.read_bytes(), database.stat().st_ino) == before
+    assert "keeping it" in resumed.stdout
+
+    after = host.tree()
+    again = host.migrate()
+    assert again.returncode == 0, again.stderr
+    assert "already migrated" in again.stdout
+    assert host.tree() == after
+
+
+@pytest.mark.parametrize("temp", [".current.new", "telegram/.data.new"])
+@pytest.mark.parametrize("shape", ["file", "directory", "foreign-link"])
+def test_a_foreign_object_where_a_temporary_link_belongs_is_refused(
+    host, temp, shape
+):
+    """Only the link this script's own step builds may already be there.
+
+    A regular file, a directory or a link to anywhere else is not provably this
+    migration's, so it is refused before the first step and never overwritten,
+    removed, or followed - in the real run and in the dry run alike.
+    """
+
+    path = host.base / temp
+    if shape == "file":
+        path.write_text("not mine\n", encoding="utf-8")
+    elif shape == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(host.base / "somewhere-else")
+    before = host.tree()
+
+    for args in ((), ("--dry-run",)):
+        result = host.migrate(*args)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert f"{temp} exists and is not a link" in result.stderr
+        assert host.tree() == before
+
+
 @pytest.mark.parametrize("stage", ["checkout", "state", "current"])
 def test_an_interrupted_migration_resumes_to_the_same_layout(host, stage):
     interrupted(host, stage)

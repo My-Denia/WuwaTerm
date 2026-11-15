@@ -27,7 +27,12 @@ This module owns that window:
 * ``recover`` classifies the host by OBSERVED state - not by the journal's
   phase marker - and either confirms the new binding or restores the
   recorded previous one. Any ambiguity keeps the journal and changes
-  nothing further.
+  nothing further;
+* ``published`` proves which commit the host is actually serving, from the
+  pointer, its immutable manifest, the live database and every present
+  surface. The release link (`current`) is settled from that answer, never
+  from a recovery exit status, and ``pointer`` names the commit the pointer
+  records when a link that already carries it needs no move at all.
 
 Everything here is driven from ``deploy/vps-update.sh`` under the shared
 deployment lock. The tests exercise it against isolated fake-docker
@@ -128,6 +133,17 @@ JOURNAL_KEYS = {
     "updated_utc",
 }
 
+# Machine-readable recovery outcome. `deploy/vps-update.sh` settles the
+# `current` link from this, so it is printed on stdout and only after the
+# binding was verified AND the record was closed; every human line moves to
+# stderr while the option is on. The grammar is one line,
+# `settle-result v1 kind=<kind> pointer=<absent|present:SHA>`, with the kinds
+# `old-verified`, `new-verified`, `no-journal` and `failed`; a `failed` line
+# carries no pointer and always accompanies a non-zero exit, so a zero exit
+# with any other shape is a contradiction the caller must refuse.
+SETTLE_RESULT_PREFIX = "settle-result v1"
+
+_settle_result = False
 _termination_requested = False
 
 
@@ -800,6 +816,68 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
             raise FullUpdateError("full_recovery_unresolved")
 
 
+def _certify_published_binding() -> str:
+    """The commit the observed host serves, proven from what is on disk.
+
+    Used to settle `current` after a transaction completed, so it must be a
+    complete binding and not an inference: the pointer names a commit, that
+    commit's immutable manifest re-verifies against the live database and the
+    image it records, and every present surface carries that image. A surface
+    restored from a per-surface rollback tag carries the same image id under a
+    different reference, so the reference is resolved instead of compared by
+    name. At least one surface must be running: a certified deployment serves.
+
+    No pointer is its own answer (``published_nothing_deployed``): a first
+    deployment that recovery rolled back to no-pointer state has nothing to
+    name. Anything else that does not verify is unresolved, and the caller
+    must leave `current` where it is.
+    """
+
+    present, value = _pointer_state()
+    if not present:
+        raise FullUpdateError("published_nothing_deployed")
+    if value is None:
+        raise FullUpdateError("full_recovery_unresolved")
+    manifest_path = _confined(f".deployments/{value}.json")
+    if not manifest_path.is_file():
+        raise FullUpdateError("full_recovery_unresolved")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if type(payload) is not dict:
+            raise ValueError
+        image = payload["image"]
+        if type(image) is not dict:
+            raise ValueError
+        image_id = _image_id(image["id"])
+        reference = image["ref"]
+        if type(reference) is not str or not reference:
+            raise ValueError
+        verify_manifest(
+            manifest_path,
+            source_commit=value,
+            image_id=image_id,
+            image_digest=None,
+            db_path=ROOT / "data" / "terms.db",
+            immutable=True,
+        )
+    except (OSError, ValueError, KeyError, TypeError, ManifestError):
+        raise FullUpdateError("full_recovery_unresolved") from None
+    serving = 0
+    for service in SERVICES:
+        state = _container_state(CONTAINERS[service])
+        if state is None:
+            continue
+        if state[1] != image_id:
+            raise FullUpdateError("full_recovery_unresolved")
+        if state[2] != reference and _image_ref_id(state[2]) != image_id:
+            raise FullUpdateError("full_recovery_unresolved")
+        if state[0]:
+            serving += 1
+    if not serving:
+        raise FullUpdateError("full_recovery_unresolved")
+    return value
+
+
 def _preflight_journal_paths(journal: dict[str, Any]) -> None:
     """Confinement, existence and recorded-preimage checks for every path
     the recovery may act on. Runs BEFORE any mutation: a journal that
@@ -1306,6 +1384,65 @@ def cmd_confirm(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_published(_args: argparse.Namespace) -> int:
+    """Print the commit the observed host serves; non-zero means "do not ask
+    `current` to follow this answer".
+
+    Exit codes are a contract with ``deploy/vps-update.sh``:
+
+    * 0 and the commit on stdout: the complete published binding was proven;
+    * 10: no deployment pointer exists, so nothing is deployed to name;
+    * 1: a pointer exists but its binding cannot be proven (unresolved,
+      unobservable, or a transaction record still open).
+
+    An open full-transaction journal is refused rather than interpreted: the
+    record is the authority on what the host is doing until ``recover``
+    clears it, and a settled link must never be derived from half a
+    transaction.
+    """
+
+    _require_held_lock()
+    if full_journal_exists():
+        raise FullUpdateError("full_recovery_required")
+    try:
+        commit = _certify_published_binding()
+    except FullUpdateError as exc:
+        if exc.code != "published_nothing_deployed":
+            raise
+        print("no deployment pointer: nothing is deployed", file=sys.stderr)
+        return 10
+    print(commit)
+    return 0
+
+
+def cmd_pointer(_args: argparse.Namespace) -> int:
+    """Print the commit the deployment pointer records, certifying nothing.
+
+    ``published`` has to prove a complete binding before the release link may
+    move, and one manifest image per commit cannot re-express a rollback whose
+    surfaces legitimately carried different old images. The settlement also
+    asks the narrower question this answers: which commit does the pointer
+    name? A recovery that exited 0 has already verified the binding it
+    restored, so a link already naming that commit needs no move - and text
+    alone is never evidence FOR a move, which is why this never switches
+    anything.
+
+    Exit codes: 0 with the commit on stdout, 10 when no pointer exists, and 1
+    when a pointer exists but cannot be read or parsed.
+    """
+
+    _require_held_lock()
+    present, value = _pointer_state()
+    if not present:
+        print("no deployment pointer: nothing is deployed", file=sys.stderr)
+        return 10
+    if value is None:
+        print("deployment pointer is unreadable", file=sys.stderr)
+        return 1
+    print(value)
+    return 0
+
+
 def cmd_rollback_clear(_args: argparse.Namespace) -> int:
     """Clear the journal only through the observed-binding verifier.
 
@@ -1329,11 +1466,48 @@ def cmd_rollback_clear(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _human(text: str) -> None:
+    """Human log line: stdout normally, stderr while the result owns stdout."""
+
+    print(text, file=sys.stderr if _settle_result else sys.stdout)
+
+
+def _settle_pointer_token() -> str:
+    """The pointer as the outcome line names it: missing, present or unreadable.
+
+    Both verified sides read the pointer, so `invalid` only ever accompanies
+    `no-journal`. It is an answer rather than an exception because "unreadable"
+    is not "nothing deployed", and the settlement must be able to say so.
+    """
+
+    present, value = _pointer_state()
+    if not present:
+        return "absent"
+    if value is None:
+        return "invalid"
+    return f"present:{value}"
+
+
+def _settle(kind: str) -> int:
+    """Report the outcome of a completed run; the caller keeps the exit status."""
+
+    if _settle_result:
+        print(f"{SETTLE_RESULT_PREFIX} kind={kind} pointer={_settle_pointer_token()}")
+    return 0
+
+
+def _report_settle_failure() -> None:
+    """A failed recovery keeps its exit status and claims no outcome."""
+
+    if _settle_result:
+        print(f"{SETTLE_RESULT_PREFIX} kind=failed")
+
+
 def cmd_recover(_args: argparse.Namespace) -> int:
     _require_held_lock()
     if not full_journal_exists():
-        print("no full transaction to recover")
-        return 0
+        _human("no full transaction to recover")
+        return _settle("no-journal")
     journal = _load_journal()
     _require_tool_match(journal)
     side = _classify(journal)
@@ -1348,13 +1522,13 @@ def cmd_recover(_args: argparse.Namespace) -> int:
             # unknown data/services and unobservable state never bypass it.
         else:
             _clear_journal(journal)
-            print("full transaction confirmed on the new binding; journal cleared")
-            return 0
+            _human("full transaction confirmed on the new binding; journal cleared")
+            return _settle("new-verified")
     if side in ("old", "shared"):
         _restore_old_binding(journal)
         _clear_journal(journal)
-        print("full transaction rolled back to the previous binding")
-        return 0
+        _human("full transaction rolled back to the previous binding")
+        return _settle("old-verified")
     raise FullUpdateError("full_recovery_unresolved")
 
 
@@ -1416,11 +1590,16 @@ def main(argv: list[str] | None = None) -> int:
 
     commands.add_parser("confirm")
     commands.add_parser("rollback-clear")
-    commands.add_parser("recover")
+    recover = commands.add_parser("recover")
+    recover.add_argument("--settle-result", action="store_true")
     commands.add_parser("restore-db")
     commands.add_parser("check")
+    commands.add_parser("published")
+    commands.add_parser("pointer")
 
     args = parser.parse_args(argv)
+    global _settle_result
+    _settle_result = bool(getattr(args, "settle_result", False))
     try:
         deployment_admission.admit_legacy(ROOT)
     except deployment_admission.AdmissionError as exc:
@@ -1438,11 +1617,14 @@ def main(argv: list[str] | None = None) -> int:
         "recover": cmd_recover,
         "restore-db": cmd_restore_db,
         "check": cmd_check,
+        "published": cmd_published,
+        "pointer": cmd_pointer,
     }
     try:
         return handlers[args.command](args)
     except FullUpdateError as exc:
         print(f"full-data transaction failed: {exc.code}", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             import traceback
 
@@ -1450,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except Exception:
         print("full-data transaction failed: internal_error", file=sys.stderr)
+        _report_settle_failure()
         if os.environ.get("WUWATERM_RUNTIME_TRACEBACK"):
             import traceback
 

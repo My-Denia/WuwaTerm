@@ -72,7 +72,10 @@ of the updater's files and can only be recovered by byte-identical copies, which
 that release always has:
 `sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full` (a rollback
 that fails prints the exact command; otherwise the `release: created rN` line
-of the run names the release). The next update that passes removes it.
+of the run names the release). The command is self-contained: it runs the tools
+of the release it names, so it works unchanged in a fresh shell, and
+`WUWATERM_DEPLOY_ROOT` stays available for naming a checkout explicitly. The
+next update that passes removes the release.
 
 A host that still runs the old in-place checkout (`/opt/wuwaterm/current` as a
 directory holding its own `data/`, `.env` and `.deployments/`) moves with
@@ -93,11 +96,15 @@ container is touched. Until the containers are recreated, links inside
 `releases/r1` keep their old mount paths resolving (the first update that
 passes removes them), and `telegram/data` is repointed at
 `/opt/wuwaterm/data` (a link through `current` in any other form makes it
-refuse). Running it again changes nothing, and an interrupted run resumes. The first
-update afterwards must be a full one (it recreates bot and API, a pause of a
-few seconds): `--runtime-only` refuses while a container still mounts the old
-paths. Source-capsule recovery with `scripts/legacy_recovery.py` expects a
-checkout that holds its own state, so it does not apply to a release.
+refuse). Running it again changes nothing, and an interrupted run resumes: the
+two temporary links it builds beside `current` and `telegram/data` are renamed
+into place rather than followed, so a run that stopped between building one and
+renaming it reuses it instead of creating a link inside the release or data
+directory it already points at. The first update afterwards must be a full one
+(it recreates bot and API, a pause of a few seconds): `--runtime-only` refuses
+while a container still mounts the old paths. Source-capsule recovery with
+`scripts/legacy_recovery.py` expects a checkout that holds its own state, so it
+does not apply to a release.
 
 Both serving services read that one file through Compose `env_file`; the
 builder has no `env_file` at all, and `.env` is ignored and excluded from the
@@ -764,17 +771,24 @@ lock between source preparation and activation, or use a flag to skip locking.
 After an interrupted runtime-only transaction, use the explicit recovery entry:
 
 ```bash
-sh deploy/vps-update.sh --recover-runtime
+sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-runtime
 ```
 
 Recovery validates the saved transaction, trusted local tool/Compose binding,
 old manifest and images, and unchanged database. It can handle stopped or
 partially switched containers; it does not require network access or the latest
 remote `main`. Keep the trusted release checkout that wrote the journal, and
-the recovery images, intact; run recovery from that release.
-Normal deployment refuses an unresolved transaction until recovery succeeds.
+the recovery images, intact; run recovery from that release, by that absolute
+path. The path is what selects the release: the two recovery modes run from the
+checkout their script was invoked from, not from `current`, which deliberately
+stays on the release that is serving (see [Release layout](#release-layout)).
+Normal deployment refuses an unresolved transaction until recovery succeeds;
+that refusal is the Full/Runtime admission gate, not a statement about the
+read-only `deploy/setup.sh --status` query, which reports what it can observe.
 Uncatchable termination or host power loss is not an atomic Docker operation:
 the durable record makes the unfinished transition explicit and recoverable.
+A transaction that had already committed only needs its release link settled,
+and recovery completes that from the recorded binding.
 
 Recovery never restores or rewrites `terms.db`. If another process changed it,
 or the journal/image binding cannot be trusted, stop and resolve that condition
@@ -871,7 +885,9 @@ sh /opt/wuwaterm/current/deploy/vps-update.sh
 ```
 
 `WUWATERM_DEPLOY_ROOT` names the release to run from and defaults to
-`/opt/wuwaterm/current`. Before any stop the updater:
+`/opt/wuwaterm/current`; `--recover-full` and `--recover-runtime` default to
+the checkout the invoked script belongs to instead, because the release that
+wrote the journal is not necessarily `current`. Before any stop the updater:
 
 1. fetches `origin/main`, builds the next release when `current` is behind it
    (see [Release layout](#release-layout)), requires that release to be clean
@@ -953,13 +969,15 @@ sh deploy/vps-update.sh --runtime-only   # refused likewise
 ```
 
 Recovery runs from the release that wrote the journal, which is not
-necessarily `current`. The explicit
-recovery entry classifies the host by what is actually observed
-— pointer, live database hash, manifest, and both containers' image
-ids/references/running states — never by the journal's phase marker alone:
+necessarily `current`. Invoke that release's own script by its absolute path:
+the path is the binding, so the command needs no environment and works in a
+fresh shell. The explicit recovery entry classifies the host by what is
+actually observed — pointer, live database hash, manifest, and both
+containers' image ids/references/running states — never by the journal's phase
+marker alone:
 
 ```bash
-sh deploy/vps-update.sh --recover-full
+sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
 ```
 
 - Observed NEW binding complete (pointer, database, manifest, and every
@@ -987,6 +1005,43 @@ sh deploy/vps-update.sh --recover-full
   reentrant. A missing live database is restored from the recorded verified
   backup; a first deploy (no recorded old binding) restores the recorded
   absence and starts nothing.
+
+Recovery also settles the release link, because a committed transaction and
+`current` are one binding. The normal path switches `current` after the
+transaction committed, so a kill between those two steps leaves a host whose
+pointer, database and surfaces already run the new deployment while `current`
+still names the release that was serving. The recovery tool therefore reports
+which side this run actually settled — `old-verified`, `new-verified`, or
+`no-journal` when the full entry found no record — on one line of stdout, and
+only after it verified a binding and finished the record; the human log of the
+same run goes to stderr. That line is what the entry settles from, with its own
+reads of the pointer and of every release checkout. An exit status never
+selects a release: a recovery that exits 0 says nothing about which commit the
+link should name.
+
+A link that is already the source of the settled commit — that release's
+marker and its HEAD are the commit, from a clean tree — needs no move and is
+left alone, and saying so needs no published binding: a rollback may
+legitimately restore surfaces that carried different old images, which the
+single-image prover cannot re-express. Moving needs the published binding
+re-proven from observation (pointer, the manifest that must match it, the live
+database hash, every present surface), the proven commit being the settled one,
+and this checkout being its source. Only a `new-verified` or `no-journal`
+settlement moves: an `old-verified` restore puts back the binding the host
+already had, which authorizes nothing about the candidate — a retry of the
+deployed commit records that commit as both sides — so a link that does not
+name the restored commit stays where it was and the refusal names the entry
+that settles it from the published binding. A commit this release does not
+carry while another release does refuses and names that release, never
+`--recover-runtime`, which a second run cannot settle. A pointer naming a
+commit no release's source carries — a host migrated from the in-place
+checkout records its own HEAD as the release's commit — is reported as the
+binding that was restored with nothing to switch to. Every read the settlement
+needs that fails — the record, the pointer, a release's marker, its HEAD or its
+`git status` — refuses instead of counting as "nothing deployed", "no carrier"
+or "clean". Repeating the command after it succeeded changes nothing, and that
+no-op says only what it verified: no transaction is pending and the link needs
+no adjustment.
 
 Before any of that, recovery establishes an admissibility preflight that
 mutates nothing: every journal-referenced path (backup, old manifest) is
