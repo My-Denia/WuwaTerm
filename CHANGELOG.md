@@ -3,17 +3,38 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.8.6
 
 ### Delivery And Deployment
 
+- `scripts/component_build.py`, `scripts/component_build_isolation.py`, and
+  `scripts/component_wheel_build.py` bound per-run build images: after a build
+  is registered and verified, older `wuwaterm-component-build` and
+  `wuwaterm-wheel-build` tags beyond the newest five per family are untagged
+  (skipping any image still used by a container), and the real-Docker
+  acceptance tests clean up their fixture containers (#252).
+- `deploy/vps-update.sh`, `deploy/setup.sh`, and `scripts/runtime_update.py`
+  detect the standalone Telegram container by its Compose service label
+  (`com.docker.compose.service=wuwaterm-telegram`) in addition to the fixed
+  container name, failing closed on `docker ps`/`docker inspect` errors.
+  `runtime_update.py` also records `old_bot_present` in the journal so
+  `_restore_old` and `--recover-runtime` re-create a stopped `wuwaterm-bot`
+  container on rollback when it existed before the update (#253).
+- `deploy/release-layout.sh`, `deploy/migrate-layout.sh`, `deploy/vps-update.sh`,
+  and the deployment scripts introduce the `/opt/wuwaterm` release layout
+  (`releases/rN`, `current` symlink, and shared state) (#255).
 - `deploy/vps-update.sh` keeps the newest five snapshots in
-  `data/deployment-backups`. Every full deployment wrote a database copy, a
-  pointer copy and a diff there and nothing ever removed them, so the directory
-  only grew. After a deployment commits, the files of the older snapshots are
-  removed (`deploy/backup-retention.sh`), the snapshot that
-  deployment just wrote always stays, and any other file in the directory is
-  left alone. See `docs/deployment.md`.
+  `data/deployment-backups` via `deploy/backup-retention.sh`. After a
+  deployment commits, older snapshot files are removed while the snapshot
+  just written and any unrelated files stay (#256).
+
+### Terms And Dictionary
+
+- Rebuilt 3.7 dictionary grows to 12,054 rows (+67 against 0.8.4, 0 removed)
+  with 3.7 official announcement, system, and WavesLine (飞讯) terms,
+  `english_plural.number_variants()` singular/plural alignment for
+  zh-exclusion measurement (keeping `海蚀` lockable) and `zh -> en` review,
+  and `wuwaterm-cjk-matcher-v6` (#257).
 
 ## 0.8.5
 
