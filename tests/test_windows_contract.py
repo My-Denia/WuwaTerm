@@ -19,7 +19,7 @@ from wuwaterm_api import API_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 CONSUMER_FILES = ("src/wuwaterm_client/api.py", "src/wuwaterm_client/manuscript.py",
-                  "src/wuwaterm_client/semantic.py")
+                  "src/wuwaterm_client/semantic.py", "src/wuwaterm_client/__init__.py")
 
 
 def supported_versions(source: str) -> tuple[str, ...]:
