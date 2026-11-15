@@ -10,14 +10,17 @@ import pytest
 from wuwaterm.constants import SOURCE_PROFILES, get_source_profile
 from wuwaterm.data_source import DataSourceError, SourceProvenance
 from wuwaterm.builder import (
+    ARIKATSU_BIN_SPECS,
     BuildError,
     build_database,
     build_database_atomic,
+    iter_records,
     measure_free_text_exclusions,
     measure_free_text_zh_exclusions,
     source_profile_for_data_dir,
 )
 from wuwaterm.db import category_counts, connect, create_database
+from wuwaterm.english_plural import number_variants, plural_forms, plural_suffix_candidates
 from wuwaterm.models import TermRecord
 
 
@@ -409,3 +412,166 @@ def test_measure_free_text_exclusions_stays_on_raw_surfaces(tmp_path: Path):
     zh = {f"line_{index}": "这里没有对应内容。" for index in range(12)}
 
     assert json.loads(measure_free_text_exclusions(db_path, en, zh))["surfaces"] == []
+
+
+def test_english_plural_number_variants_bidirectional_and_guards():
+    assert number_variants("Waveworn Phenomena") == ("Waveworn Phenomenon",)
+    assert number_variants("Waveworn Phenomenon") == ("Waveworn Phenomena",)
+    assert number_variants("WAVEWORN PHENOMENA") == ("WAVEWORN PHENOMENON",)
+    assert number_variants("Main Quests") == ("Main Quest",)
+    assert number_variants("Main Quest") == ("Main Quests",)
+    assert number_variants("Companion Stories") == ("Companion Story",)
+    assert number_variants("Companion Story") == ("Companion Stories",)
+    assert number_variants("Bosses") == ("Boss",)
+    # Singular -ss/-us/-is surfaces must never drop trailing s; non-phenomenon
+    # -on nouns must never mutate to -a.
+    for invariant_singular in ("Solaris", "Genesis", "Status"):
+        assert number_variants(invariant_singular) == ()
+    assert number_variants("Boss") == ("Bosses",)
+    for regular_on in ("Weapon", "Beacon", "Dragon", "Subphenomenon"):
+        assert number_variants(regular_on) == (f"{regular_on}s",)
+    # Existing sentence-locking helpers keep their exact singular->plural rules.
+    assert plural_forms("Waveworn Phenomena") == ("Waveworn Phenomenas",)
+    assert plural_suffix_candidates("Solaris", ("索拉里斯", "Solaris")) == ()
+
+
+def test_number_variants_never_invents_a_short_ordinary_word():
+    # Silent final e takes a bare s, so the plural must not lose its es.
+    assert number_variants("Prizes") == ("Prize",)
+    assert number_variants("Shoes") == ("Shoe",)
+    assert number_variants("Toes") == ("Toe",)
+    # A -ies plural only becomes -y when the stem and the result are long
+    # enough, so the short forms stay out of the variant set.
+    assert number_variants("Lies") == ("Lie",)
+    assert number_variants("Ties") == ("Tie",)
+    assert number_variants("Stories") == ("Story",)
+    # -os/-as endings and the invariant words keep their s: "Mar" must never
+    # answer for the speaker "Mars" and "Na" never for "Nas".
+    for kept in ("Chaos", "Kronos", "Atlas", "Elias", "Nas"):
+        assert number_variants(kept) == ()
+    for invariant in ("Lens", "News", "Mars", "Series", "Species"):
+        assert number_variants(invariant) == ()
+    # Two letters is too short to be a dictionary surface.
+    assert number_variants("TDs") == ()
+
+
+def test_measure_free_text_zh_exclusions_aligns_singular_and_plural_variants(
+    tmp_path: Path,
+):
+    profile = get_source_profile("dimbreath_legacy")
+    db_path = tmp_path / "plural-zh-exclusions.db"
+    create_database(
+        db_path,
+        [
+            TermRecord("core_term", "fixture", "1", "1", "海蚀", "Waveworn Phenomena"),
+            TermRecord("core_term", "fixture", "2", "2", "潮汐任务", "Main Quests"),
+            TermRecord("core_term", "fixture", "3", "3", "伴星任务", "Companion Stories"),
+            TermRecord("core_term", "fixture", "4", "4", "索拉里斯", "Solaris"),
+        ],
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    zh = {}
+    en = {}
+    for index in range(12):
+        zh[f"p_{index}"] = f"海蚀异象出现，第{index}行。"
+        en[f"p_{index}"] = f"A Waveworn Phenomenon appeared, line {index}."
+        zh[f"q_{index}"] = f"完成潮汐任务与伴星任务，第{index}行。"
+        en[f"q_{index}"] = f"Complete the Main Quest and Companion Story, line {index}."
+        # "Solari" is not a singular variant of "Solaris", so these stay unaligned.
+        zh[f"s_{index}"] = f"索拉里斯记录，第{index}行。"
+        en[f"s_{index}"] = f"Solari log entry, line {index}."
+
+    excluded = json.loads(measure_free_text_zh_exclusions(db_path, zh, en))["surfaces"]
+    assert excluded == [["索拉里斯", 12, 0]]
+
+
+def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
+    root = tmp_path / "arikatsu"
+    texts = {
+        "t_def_theme": ("默认主题", "Default Theme"),
+        "t_moon_theme": ("朝月清辉", "Light of Waking Moon"),
+        "t_def_charm": ("默认摆件", "Default Decor"),
+        "t_mica_charm": ("云母小铃", "Mica Chime"),
+        "t_def_bg": ("默认背景", "Default Background"),
+        "t_def_bubble": ("默认气泡", "Default Bubble"),
+        "t_pangu_bubble": ("盘古终端", "Pangu Terminal"),
+        "t_quest_all": ("任务", "Quests"),
+        "t_quest_test": ("存在异常", "Test Task. Main"),
+        "t_quest_main": ("潮汐任务", "Main Quests"),
+        "t_skill_norm": ("常态攻击", "Normal Attack"),
+        "t_gacha_res": ("角色活动唤取", "Featured Resonator Convene"),
+        # Ordinary English words a removed cosmetic table would have imported.
+        "t_sonic": ("索尼克", "Sonic"),
+        "t_shadow": ("夏特", "Shadow"),
+    }
+    for lang, idx in (("zh-Hans", 0), ("en", 1)):
+        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps([{"Id": k, "Content": v[idx]} for k, v in texts.items()]),
+            encoding="utf-8",
+        )
+    table_rows = {
+        "PhoneMsg/chattheme.json": [
+            {"Id": 80891001, "SortId": 0, "ItemAccess": [], "BgDescription": "", "Name": "t_def_theme"},
+            {"Id": 80891002, "SortId": 1, "ItemAccess": [914601], "BgDescription": "d", "Name": "t_moon_theme"},
+        ],
+        "PhoneMsg/chatcharm.json": [
+            {"Id": 80890001, "SortId": 0, "ItemAccess": [], "BgDescription": "", "Name": "t_def_charm"},
+            {"Id": 80890002, "SortId": 1, "ItemAccess": [914602], "BgDescription": "d", "Name": "t_mica_charm"},
+        ],
+        "PhoneMsg/chatbg.json": [
+            {"Id": 80820001, "SortId": 1, "ItemAccess": [], "BgDescription": "", "Name": "t_def_bg"},
+        ],
+        "PhoneMsg/chatdialog.json": [
+            {"Id": 80810001, "SortId": 1, "ItemAccess": [], "BgDescription": "", "Name": "t_def_bubble"},
+            {"Id": 80810002, "SortId": 2, "ItemAccess": [], "BgDescription": "", "Name": "t_pangu_bubble"},
+        ],
+        "questtype/questmaintype.json": [
+            {"Id": 0, "MainTypeName": "t_quest_all"},
+            {"Id": 100, "MainTypeName": "t_quest_test"},
+            {"Id": 1, "MainTypeName": "t_quest_main"},
+        ],
+        "skill/skilltype.json": [{"Id": 1, "TypeName": "t_skill_norm"}],
+        "gacha/gachaviewtypeinfo.json": [{"Type": 2, "TypeText": "t_gacha_res"}],
+    }
+    for spec in ARIKATSU_BIN_SPECS:
+        cfg = root / "BinData" / spec.config_file
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            json.dumps(table_rows.get(spec.config_file, [])), encoding="utf-8"
+        )
+    # A cosmetic table may still exist in the checkout; no spec reads it, which
+    # is how one table import cannot drag an unrelated everyday word in.
+    for config_file, row in (
+        ("MotorDIY/motorsticker.json", {"Id": 89103070, "Title": "t_sonic"}),
+        ("Ornament/ornament.json", {"Id": 80871006, "Name": "t_shadow"}),
+    ):
+        cfg = root / "BinData" / config_file
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps([row]), encoding="utf-8")
+
+    records = iter_records(root, "arikatsu")
+    bin_pairs = {
+        (r.zh, r.en, r.category)
+        for r in records
+        if r.source_file.startswith("BinData/")
+    }
+    assert bin_pairs == {
+        ("朝月清辉", "Light of Waking Moon", "item"),
+        ("云母小铃", "Mica Chime", "item"),
+        ("盘古终端", "Pangu Terminal", "item"),
+        ("潮汐任务", "Main Quests", "core_term"),
+        ("常态攻击", "Normal Attack", "core_term"),
+        ("角色活动唤取", "Featured Resonator Convene", "core_term"),
+    }
+    # The ordinary words those cosmetic tables also carry never enter.
+    assert {r.en for r in records} & {"Sonic", "Shadow"} == set()

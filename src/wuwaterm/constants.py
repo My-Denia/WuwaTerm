@@ -93,7 +93,16 @@ CORE_TERM_KEYS = {
     "LoadingTipsText_1005_Title": "core_term",  # 共鸣者 -> Resonator
     "Term850082_Title": "core_term",  # 声骸 -> Echo
     "OccupationConfig_漂泊者_Name": "core_term",  # 漂泊者 -> Rover
+    "Personalize_Card": "core_term",  # 羁旅印章 -> Sigil
+    "WeRougeBuffTriggerNameDivineDamage": "core_term",  # 徽记 -> Sigil
+    "FunctionMenu_10130_FunctionName": "core_term",  # 飞讯 -> WavesLine
+    "ItemType_ChatTheme": "core_term",  # 飞讯主题 -> WavesLine Theme
     "ItemType_ChatCharm": "core_term",  # 飞讯摆件 -> WavesLine Decor
+    "ItemType_ChatBg": "core_term",  # 聊天背景 -> Chat Background
+    "ItemType_ChatBubble": "core_term",  # 聊天气泡 -> Chat Bubble
+    "HelpText_694_Title": "core_term",  # 历程回顾模式 -> Replay Mode
+    "VisionFetterTitle": "core_term",  # 合鸣效果 -> Sonata Effect
+    "VisionSkinTitleText": "core_term",  # 声骸异相 -> Phantom Appearance
     "Advertising_VersionTitle_37": "core_term",  # 镜锁妄世，心照红尘 -> Prism's Illusion, Heart's Illumination
     # A pinned map mark rather than a core system name. The value is still the
     # term category, so it enters lookup and locking as a location.
@@ -104,7 +113,44 @@ CORE_TERM_KEYS = {
     "Term850079_Title": "core_term",  # 索拉里斯 -> Solaris
     "Term850093_Title": "location",  # 瑝珑 -> Huanglong
     "Influence_998_Title": "core_term",  # 残星会 -> Fractsidus
+    # Announcement cosmetics whose BinData table also carries unrelated
+    # ordinary English words, so the individual verified row is pinned here
+    # instead of importing the table.
+    "BackgroundCard_80065030_Title": "item",  # 舞台时刻！ -> Showtime!
+    "BackgroundCard_80065016_Title": "item",  # 匿于宙海的星光 -> Concealed Starlight
+    "AchievementGroup_1013_Title": "item",  # 万相归心境 -> All Forms in One Heart
+    "PlayerHead_82000019_Name": "item",  # 羊咩祝福 -> Wooly's Blessing
+    "PlayerHead_82000018_Name": "item",  # 推布布 -> Abby Tossing
+    "MotorSticker_89103070_Name": "item",  # 落日狐影 -> Fox Shadow at Sunset
+    "MotorDecorations_89300004_Name": "item",  # 心团子 -> Hsin Cube
+    "OrnamentName_80871006": "item",  # 布是偶 -> Not Even Close
+    "OrnamentName_80870016": "item",  # 何处梦清辉 -> Where Dreams Shine Clear
+    "FlySkinConfig_84100004_Name": "item",  # 缀星纺宙之缍 -> Cosmic Spindle
 }
+
+OFFICIAL_ANNOUNCEMENT_SOURCE_FILE = "official_announcement"
+
+# Fixed official bilingual announcement terms with no standalone MultiText key:
+# the CMS announcement label that the 3.7 maintenance notice renders as
+# 飞讯外观 / WavesLine Looks (absent from client MultiText, 0 zh / 0 en), the
+# 3.7 companion-task pair carried inside HelpText_487_Content and
+# AdvertisingIntelligence_3010503_ContentText (伴行任务 / Starpath Tasks), and
+# the 3.7 reward currency HelpText_516_Title renders as 月影溯环获取方式 /
+# How to Obtain Moonlit Rings. Only pairs with no ordinary homograph are listed:
+# (zh, en, category, source_id).
+#
+# 连携技能 / Concerto Skill and 冰痕 / Frostbite are deliberately absent:
+# 连携技能 is absent from 3.7 and every bilingual 3.7 skill description carrying
+# "Concerto Skill" renders it as 协奏技能, so the pairing would hard-lock a word
+# the game no longer uses, and Frostbite also occurs in 39 official English
+# strings as an ordinary noun and as a monster prefix ("Frostbite ointment" ->
+# 冻伤膏, "Frostbite Coleoid" -> 霜鳞蜃甲), so the pair would override those
+# readings in the en->zh direction.
+OFFICIAL_ANNOUNCEMENT_TERMS: tuple[tuple[str, str, str, str], ...] = (
+    ("飞讯外观", "WavesLine Looks", "core_term", "wavesline_looks"),
+    ("伴行任务", "Starpath Task", "core_term", "starpath_task"),
+    ("月影溯环", "Moonlit Ring", "item", "moonlit_ring"),
+)
 
 # Free-text lock exclusions. The builder counts how often each English
 # dictionary surface is locked in official English text and how often the

@@ -181,9 +181,13 @@ The installer and Web checks from 0.7.x still apply to this release:
 - `review-v2` reports a one-character Chinese resonator name in a context the
   translation step referenced (`欢迎椿`, `快找椿`) and still ignores an ordinary
   word covering it (`香椿`, `臭椿`, `椿树`, `椿芽`). A `心` mention still needs a
-  name-like context, so `心很重要` is neither referenced nor reported. The
-  canonical matcher label is `wuwaterm-cjk-matcher-v5`, so resolution contexts
-  carrying the older hash are stale by design, not by accident.
+  name-like context, so `心很重要` is neither referenced nor reported. An
+  `en -> zh` source mention is spelled exactly as sentence locking spells it (one
+  trailing `s`/`es`), while a `zh -> en` target may also answer with the singular
+  of a plural dictionary entry (`海蚀` -> `Waveworn Phenomenon`) except for
+  resonator and speaker names, which take the plural only. The canonical matcher
+  label is `wuwaterm-cjk-matcher-v6`, so resolution contexts carrying the older
+  hash are stale by design, not by accident.
 - `docs/self-hosting.md`'s backup and restore steps still match what
   `./deploy/setup.sh --with-web` writes under `state-web/`.
 - `docs/api/openapi.json` matches the generated document after the version and

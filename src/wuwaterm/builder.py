@@ -8,6 +8,7 @@ import re
 import tempfile
 import unicodedata
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,11 +24,14 @@ from .constants import (
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
     FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
     FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+    OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,
+    OFFICIAL_ANNOUNCEMENT_TERMS,
     SourceProfile,
     get_source_profile,
 )
 from .data_source import inspect_data_source
 from .db import connect, create_database
+from .english_plural import number_variants
 from .models import TermRecord
 from .normalize import clean_source_text
 
@@ -38,6 +42,30 @@ class CategorySpec:
     config_file: str
     id_field: str
     text_fields: tuple[str, ...]
+    row_filter: Callable[[dict[str, Any]], bool] | None = None
+
+
+def _keep_phone_cosmetic(row: dict[str, Any]) -> bool:
+    # Skip the built-in placeholder rows the client ships before any cosmetic is
+    # owned: SortId == 0 marks the fixed default row, and Id % 10000 == 1 with
+    # an empty ItemAccess and BgDescription is the unsold default (default
+    # theme/decor/background/bubble). Named items stay, such as 80810002
+    # (盘古终端 / Pangu Terminal).
+    if row.get("SortId") == 0:
+        return False
+    row_id = row.get("Id")
+    if (
+        isinstance(row_id, int)
+        and row_id % 10000 == 1
+        and not row.get("ItemAccess")
+        and not row.get("BgDescription")
+    ):
+        return False
+    return True
+
+
+def _keep_quest_main_type(row: dict[str, Any]) -> bool:
+    return row.get("Id") not in (0, 100)
 
 
 CATEGORY_SPECS = (
@@ -52,6 +80,18 @@ CATEGORY_SPECS = (
 
 ARIKATSU_CORE_TEXT_IDS = frozenset(CORE_TERM_KEYS)
 
+# Which BinData tables are dictionary terms at all, and which are only sources of
+# ordinary English words. The four PhoneMsg cosmetic tables, the skill type
+# names, the gacha view types and the quest main types name a system the game
+# reuses verbatim, so they are imported whole apart from their built-in default
+# rows. The remaining cosmetic tables (motor stickers and decorations, frames,
+# skins, ornaments, glider skins, player heads, background cards, achievement
+# groups) also carry ordinary English words as row titles: importing
+# motorsticker.json added Sonic -> 索尼克 and Shadow -> 夏特, hard-locking the
+# official "Imitative Sonic Device" and changing "/tr Shadow"; ornament.json
+# added 无念 -> Stillmind over the speaker Wunian. Their verified individual rows
+# are pinned by CORE_TERM_KEYS instead, so one table import cannot drag an
+# unrelated everyday word into locking or review.
 ARIKATSU_BIN_SPECS = (
     CategorySpec("resonator", "role/roleinfo.json", "Id", ("Name",)),
     CategorySpec("weapon", "weapon/weaponconf.json", "ItemId", ("WeaponName",)),
@@ -60,6 +100,19 @@ ARIKATSU_BIN_SPECS = (
     CategorySpec("skill", "skill/skill.json", "Id", ("SkillName",)),
     CategorySpec("sonata_effect", "phantom/phantomfettergroup.json", "Id", ("FetterGroupName",)),
     CategorySpec("location", "area/area.json", "AreaId", ("Title",)),
+    CategorySpec("item", "PhoneMsg/chattheme.json", "Id", ("Name",), _keep_phone_cosmetic),
+    CategorySpec("item", "PhoneMsg/chatcharm.json", "Id", ("Name",), _keep_phone_cosmetic),
+    CategorySpec("item", "PhoneMsg/chatbg.json", "Id", ("Name",), _keep_phone_cosmetic),
+    CategorySpec("item", "PhoneMsg/chatdialog.json", "Id", ("Name",), _keep_phone_cosmetic),
+    CategorySpec("core_term", "gacha/gachaviewtypeinfo.json", "Type", ("TypeText",)),
+    CategorySpec("core_term", "skill/skilltype.json", "Id", ("TypeName",)),
+    CategorySpec(
+        "core_term",
+        "questtype/questmaintype.json",
+        "Id",
+        ("MainTypeName",),
+        _keep_quest_main_type,
+    ),
 )
 
 
@@ -209,6 +262,8 @@ def iter_arikatsu_records(
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            if spec.row_filter is not None and not spec.row_filter(row):
+                continue
             source_id = str(row.get(spec.id_field, ""))
             if not source_id:
                 continue
@@ -226,6 +281,18 @@ def iter_arikatsu_records(
                 )
                 if record:
                     records.append(record)
+
+    for zh, en, category, source_id in OFFICIAL_ANNOUNCEMENT_TERMS:
+        records.append(
+            TermRecord(
+                category=category,
+                source_file=OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,
+                source_id=source_id,
+                text_key=source_id,
+                zh=clean_source_text(zh),
+                en=clean_source_text(en),
+            )
+        )
 
     speaker_path = bin_root / "speaker" / "speaker.json"
     if speaker_path.exists():
@@ -470,10 +537,14 @@ def measure_free_text_zh_exclusions(
             for value in aligned_en.get(surface, ()) | {official_en}:
                 if not value:
                     continue
-                values.add(value.casefold())
+                candidates = [value]
                 stripped = value.strip(_ZH_ALIGNMENT_QUOTE_CHARS)
-                if stripped:
-                    values.add(stripped.casefold())
+                if stripped and stripped != value:
+                    candidates.append(stripped)
+                for candidate in candidates:
+                    values.add(candidate.casefold())
+                    for variant in number_variants(candidate):
+                        values.add(variant.casefold())
             cached = tuple(values)
             variant_cache[surface] = cached
         return cached

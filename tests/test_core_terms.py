@@ -21,7 +21,13 @@ from pathlib import Path
 import pytest
 
 from wuwaterm.builder import ARIKATSU_BIN_SPECS, iter_records
-from wuwaterm.constants import CATEGORY_ORDER, SOURCE_PROFILES
+from wuwaterm.constants import (
+    CATEGORY_ORDER,
+    CORE_TERM_KEYS,
+    OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,
+    OFFICIAL_ANNOUNCEMENT_TERMS,
+    SOURCE_PROFILES,
+)
 from wuwaterm.data_source import SourceProvenance
 from wuwaterm.db import connect, create_database
 from wuwaterm.lookup import TermService
@@ -40,6 +46,10 @@ BARE_VERSION_ZH = "心照红尘"
 BARE_VERSION_EN = "To the Mortal World, a Burning Heart"
 MAPMARK_ZH = "扶风转标"
 MAPMARK_EN = "Gravity Calibrator"
+# The 3.7 pairing for 徽记 is the same English as 羁旅印章's, so /tr Sigil must
+# still answer with both Chinese names instead of collapsing to one.
+SIGIL_MARK_ZH = "徽记"
+SIGIL_MARK_EN = "Sigil"
 
 ORIGINAL_CORE_KEYS = (
     "LoadingTipsText_1005_Title",
@@ -54,7 +64,26 @@ UPSTREAM_TEXT = {
     "LoadingTipsText_1005_Title": ("共鸣者", "Resonator"),
     "Term850082_Title": ("声骸", "Echo"),
     "OccupationConfig_漂泊者_Name": ("漂泊者", "Rover"),
+    "Personalize_Card": ("羁旅印章", "Sigil"),
+    "WeRougeBuffTriggerNameDivineDamage": (SIGIL_MARK_ZH, SIGIL_MARK_EN),
+    "FunctionMenu_10130_FunctionName": ("飞讯", "WavesLine"),
+    "ItemType_ChatTheme": ("飞讯主题", "WavesLine Theme"),
     "ItemType_ChatCharm": (BRAND_ZH, BRAND_EN),
+    "ItemType_ChatBg": ("聊天背景", "Chat Background"),
+    "ItemType_ChatBubble": ("聊天气泡", "Chat Bubble"),
+    "HelpText_694_Title": ("历程回顾模式", "Replay Mode"),
+    "VisionFetterTitle": ("合鸣效果", "Sonata Effect"),
+    "VisionSkinTitleText": ("声骸异相", "Phantom Appearance"),
+    "BackgroundCard_80065030_Title": ("舞台时刻！", "Showtime!"),
+    "BackgroundCard_80065016_Title": ("匿于宙海的星光", "Concealed Starlight"),
+    "AchievementGroup_1013_Title": ("万相归心境", "All Forms in One Heart"),
+    "PlayerHead_82000019_Name": ("羊咩祝福", "Wooly's Blessing"),
+    "PlayerHead_82000018_Name": ("推布布", "Abby Tossing"),
+    "MotorSticker_89103070_Name": ("落日狐影", "Fox Shadow at Sunset"),
+    "MotorDecorations_89300004_Name": ("心团子", "Hsin Cube"),
+    "OrnamentName_80871006": ("布是偶", "Not Even Close"),
+    "OrnamentName_80870016": ("何处梦清辉", "Where Dreams Shine Clear"),
+    "FlySkinConfig_84100004_Name": ("缀星纺宙之缍", "Cosmic Spindle"),
     "PrefabTextItem_2083276822_Text": (BRAND_ZH, BRAND_EN),
     "Advertising_VersionTitle_37": (VERSION_ZH, VERSION_EN),
     "MapMark_170100_MarkTitle": (MAPMARK_ZH, MAPMARK_EN),
@@ -138,16 +167,7 @@ def test_chat_charm_key_registers_one_core_term_row(core_term_db: Path):
     rows = _direct_rows(core_term_db)
 
     # The mirror key holds the same pair upstream and is still not a second row.
-    assert set(rows) == {
-        *ORIGINAL_CORE_KEYS,
-        "ItemType_ChatCharm",
-        "Advertising_VersionTitle_37",
-        "MapMark_170100_MarkTitle",
-        "Term850078_Title",
-        "Term850079_Title",
-        "Term850093_Title",
-        "Influence_998_Title",
-    }
+    assert set(rows) == set(CORE_TERM_KEYS)
 
     row = rows["ItemType_ChatCharm"]
     # Same category, priority and normalisation path as the three keys that
@@ -216,17 +236,71 @@ def test_chat_charm_references_into_english_and_locks_into_chinese(
     assert BRAND_EN not in restored
 
 
-def test_bare_brand_word_is_not_a_dictionary_term(core_term_db: Path):
-    translator = SentenceTranslator(core_term_db)
+def test_wavesline_and_announcement_ui_core_terms_register_and_reference(
+    core_term_db: Path,
+):
+    rows = _direct_rows(core_term_db)
+    expected = {
+        "Personalize_Card": ("羁旅印章", "Sigil", "core_term"),
+        "WeRougeBuffTriggerNameDivineDamage": (SIGIL_MARK_ZH, SIGIL_MARK_EN, "core_term"),
+        "FunctionMenu_10130_FunctionName": ("飞讯", "WavesLine", "core_term"),
+        "ItemType_ChatTheme": ("飞讯主题", "WavesLine Theme", "core_term"),
+        "ItemType_ChatBg": ("聊天背景", "Chat Background", "core_term"),
+        "ItemType_ChatBubble": ("聊天气泡", "Chat Bubble", "core_term"),
+        "HelpText_694_Title": ("历程回顾模式", "Replay Mode", "core_term"),
+        "VisionFetterTitle": ("合鸣效果", "Sonata Effect", "core_term"),
+        "VisionSkinTitleText": ("声骸异相", "Phantom Appearance", "core_term"),
+        "BackgroundCard_80065030_Title": ("舞台时刻！", "Showtime!", "item"),
+        "BackgroundCard_80065016_Title": ("匿于宙海的星光", "Concealed Starlight", "item"),
+        "AchievementGroup_1013_Title": ("万相归心境", "All Forms in One Heart", "item"),
+        "PlayerHead_82000019_Name": ("羊咩祝福", "Wooly's Blessing", "item"),
+        "PlayerHead_82000018_Name": ("推布布", "Abby Tossing", "item"),
+        "MotorSticker_89103070_Name": ("落日狐影", "Fox Shadow at Sunset", "item"),
+        "MotorDecorations_89300004_Name": ("心团子", "Hsin Cube", "item"),
+        "OrnamentName_80871006": ("布是偶", "Not Even Close", "item"),
+        "OrnamentName_80870016": ("何处梦清辉", "Where Dreams Shine Clear", "item"),
+        "FlySkinConfig_84100004_Name": ("缀星纺宙之缍", "Cosmic Spindle", "item"),
+    }
+    service = TermService(core_term_db)
+    for key, (zh, en, category) in expected.items():
+        row = rows[key]
+        assert (row["zh"], row["en"], row["category"]) == (zh, en, category)
+        hit = service.lookup_exact(zh)
+        assert hit.exact and hit.best.entry.en == en
 
-    # The registered pair is the ornament name; the product family word alone
-    # is context, not a term, so it neither locks nor becomes a reference.
-    assert translator.lock_terms("飞讯").locks == ()
+    # Both Chinese names that share the English Sigil stay reachable.
+    sigil = service.lookup_exact(SIGIL_MARK_EN)
+    assert sigil.exact
+    assert {candidate.entry.zh for candidate in sigil.candidates} >= {
+        "羁旅印章",
+        SIGIL_MARK_ZH,
+    }
+
+    with connect(core_term_db) as conn:
+        supplement_rows = conn.execute(
+            "SELECT zh, en, category, source_id FROM terms WHERE source_file = ?",
+            (OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,),
+        ).fetchall()
+    assert {
+        (row["zh"], row["en"], row["category"], row["source_id"])
+        for row in supplement_rows
+    } == set(OFFICIAL_ANNOUNCEMENT_TERMS)
+
+    # The combat-teaching pairs the 3.7 build retired stay out: 协奏技能 is the
+    # current Concerto Skill and Frostbite is an ordinary noun as well.
+    for retired in ("连携技能", "冰痕"):
+        assert retired not in {row["zh"] for row in supplement_rows}
+        assert not service.lookup_exact(retired).exact
+
+    translator = SentenceTranslator(core_term_db)
     bare = translator._lock_terms_with_references(
-        translator.prepare_text("打开飞讯看看新消息。"), to_chinese=False
+        translator.prepare_text("打开飞讯查看飞讯外观、月影溯环与布是偶。"),
+        to_chinese=False,
     )
-    assert bare.references == ()
-    assert bare.locks == ()
+    assert ("飞讯", "飞讯", "WavesLine", "core_term") in bare.references
+    assert ("飞讯外观", "飞讯外观", "WavesLine Looks", "core_term") in bare.references
+    assert ("月影溯环", "月影溯环", "Moonlit Ring", "item") in bare.references
+    assert ("布是偶", "布是偶", "Not Even Close", "item") in bare.references
 
 
 def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
@@ -236,16 +310,7 @@ def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
 
     # The mirror key carries the identical pair and the bare 心照红尘 has its
     # own different official English; neither is a dictionary entry.
-    assert set(rows) == {
-        *ORIGINAL_CORE_KEYS,
-        "ItemType_ChatCharm",
-        "Advertising_VersionTitle_37",
-        "MapMark_170100_MarkTitle",
-        "Term850078_Title",
-        "Term850079_Title",
-        "Term850093_Title",
-        "Influence_998_Title",
-    }
+    assert set(rows) == set(CORE_TERM_KEYS)
 
     row = rows["Advertising_VersionTitle_37"]
     assert row["category"] == "core_term"
@@ -337,15 +402,7 @@ def test_term_glossary_titles_are_imported(tmp_path: Path):
 def test_missing_upstream_key_still_skips_and_keeps_the_original_three(
     tmp_path: Path,
 ):
-    added_keys = {
-        "ItemType_ChatCharm",
-        "Advertising_VersionTitle_37",
-        "MapMark_170100_MarkTitle",
-        "Term850078_Title",
-        "Term850079_Title",
-        "Term850093_Title",
-        "Influence_998_Title",
-    }
+    added_keys = set(CORE_TERM_KEYS) - set(ORIGINAL_CORE_KEYS)
     texts = {key: pair for key, pair in UPSTREAM_TEXT.items() if key not in added_keys}
 
     rows = _direct_rows(_build(tmp_path, texts))
