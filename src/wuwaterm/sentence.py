@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import re
 import asyncio
@@ -65,6 +66,9 @@ _PARAGRAPH_BREAK_RE = re.compile(r"\n[^\S\n]*\n\s*")
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
+TRANSLATION_THINKING_ENV = "WUWATERM_TRANSLATION_THINKING"
+TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
+TRANSLATION_THINKING_DEFAULT = "disabled"
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
     "event loop; use translate_async() or translate_html_async() instead."
@@ -1611,6 +1615,27 @@ async def _call_llm_async(
         )
 
 
+def _translation_thinking_body() -> dict:
+    """Provider reasoning fields for one translation request.
+
+    ``WUWATERM_TRANSLATION_THINKING`` is read per call: ``disabled`` (the
+    default) switches thinking off, ``low``/``high`` turn it on at that
+    ``reasoning_effort``, and ``omit`` sends neither field so the provider
+    default decides (high-effort thinking on DeepSeek, which can run past the
+    translation timeout on a long segment). An unknown value falls back to the
+    default rather than failing every translation.
+    """
+    mode = os.getenv(TRANSLATION_THINKING_ENV, "").strip() or TRANSLATION_THINKING_DEFAULT
+    if mode not in TRANSLATION_THINKING_MODES:
+        LOGGER.warning("unknown %s; using %s", TRANSLATION_THINKING_ENV, TRANSLATION_THINKING_DEFAULT)
+        mode = TRANSLATION_THINKING_DEFAULT
+    if mode == "disabled":
+        return {"thinking": {"type": "disabled"}}
+    if mode == "omit":
+        return {}
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
+
+
 async def _call_llm_async_with_client(
     client: httpx.AsyncClient,
     locked_text: str,
@@ -1668,6 +1693,10 @@ async def _call_llm_async_with_client(
         {"role": "system", "content": system_content},
         {"role": "user", "content": locked_text},
     ]
+    # Only add the keyword when there is a field to send, so ``omit`` is the
+    # exact call (and request) this function made before the setting existed.
+    extra_body = _translation_thinking_body()
+    options = {"extra_body": extra_body} if extra_body else {}
     return await llm_transport.post_chat_completion(
-        client, messages, purpose="translation"
+        client, messages, purpose="translation", **options
     )

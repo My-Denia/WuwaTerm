@@ -732,6 +732,8 @@ def test_a_translation_without_context_keeps_the_original_request_body(
     tmp_path, sample_db, monkeypatch
 ):
     configure_llm(monkeypatch)
+    # The original body predates WUWATERM_TRANSLATION_THINKING; "omit" is it.
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING", "omit")
     model = FakeModel("Please translate this sentence")
     app, _, token = semantic_app(tmp_path, sample_db, model)
 
@@ -964,13 +966,19 @@ def test_thinking_mode_setting_shapes_the_request(tmp_path, sample_db, monkeypat
     assert {key: body[key] for key in ("thinking", "reasoning_effort") if key in body} == extra
 
 
-def test_translation_requests_carry_no_thinking_field(tmp_path, sample_db, monkeypatch):
+def test_translation_requests_do_not_take_the_semantic_review_thinking_setting(
+    tmp_path, sample_db, monkeypatch
+):
     configure_llm(monkeypatch)
+    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING", raising=False)
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "high")
     model = FakeModel("译文")
     app, _, token = semantic_app(tmp_path, sample_db, model)
 
     assert translate(app, token).status_code == 200
-    assert "thinking" not in model.body() and "max_tokens" not in model.body()
+    body = model.body()
+    assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body and "max_tokens" not in body
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(None, 75.0), ("120", 120.0), ("abc", 75.0), ("0", 75.0)])

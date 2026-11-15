@@ -364,7 +364,9 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 
 **For sentence translation (optional, shared by both surfaces):**
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
-plus the timeout and concurrency bounds beside them.
+plus the timeout and concurrency bounds beside them and
+`WUWATERM_TRANSLATION_THINKING` (default `disabled`, see
+[privacy-and-llm](privacy-and-llm.md#llm-configuration)).
 
 **For semantic review (experimental, off by default):**
 `WUWATERM_SEMANTIC_REVIEW_ENABLED=1` turns on `POST /v1/semantic-reviews` and
