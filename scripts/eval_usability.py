@@ -44,6 +44,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import subprocess
 import sys
 import unicodedata
@@ -55,6 +56,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 Z95 = 1.959963984540054
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 SAMPLE_SCHEMA = "usability-sample-v1"
 NAMES_SCHEMA = "usability-names-v1"
 ITEMS_SCHEMA = "usability-items-v1"
@@ -817,8 +819,34 @@ def added_lines(diff: str) -> tuple[str, Callable[[int, int], str]]:
     starts: list[int] = []
     numbers: list[int] = []
     offset = 0
+    old_left = new_left = 0  # lines still owed to the current hunk, per its @@ header
+    after_minus_header = False
     for number, line in enumerate(diff.split("\n"), start=1):
-        if line.startswith("+") and not line.startswith("+++"):
+        added = False
+        if old_left > 0 or new_left > 0:
+            # Inside a hunk every '+' line is content, even one that reads "+++".
+            if line.startswith("+"):
+                added, new_left = True, new_left - 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif line.startswith(" ") or line == "":
+                old_left, new_left = old_left - 1, new_left - 1
+            elif not line.startswith("\\"):
+                old_left = new_left = 0  # not hunk syntax: the hunk is over
+        if not added and old_left <= 0 and new_left <= 0:
+            hunk = HUNK_HEADER.match(line)
+            if hunk:
+                old_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
+                new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
+                after_minus_header = False
+                continue
+            if after_minus_header and line.startswith("+++ "):
+                after_minus_header = False  # the "+++ b/path" file header
+                continue
+            after_minus_header = line.startswith("--- ")
+            # Outside a hunk a '+' line is not hunk syntax; scan it rather than drop it.
+            added = line.startswith("+")
+        if added:
             pieces.append(line[1:])
             starts.append(offset)
             numbers.append(number)

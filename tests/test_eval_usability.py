@@ -993,6 +993,24 @@ def test_diff_scans_added_lines_only(scan):
     assert res.code == 1 and res.rows[0]["windows_hit"] == len(SEALED_SRC) - WINDOW + 1
 
 
+def test_diff_added_line_whose_content_starts_with_plus_is_scanned(scan):
+    # Content "++ <text>" makes the diff line start with "+++"; inside a hunk it is
+    # still an added line, not a file header.
+    for content in (f"++ {SEALED_SRC}", f"++{SEALED_SRC}"):
+        patch = f"diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+{content}\n"
+        res = scan.run(*scan.sealed(), "--diff", scan.file("p.patch", patch))
+        assert res.code == 1 and res.rows[0]["windows_hit"] == len(SEALED_SRC) - WINDOW + 1
+
+
+def test_diff_file_header_after_a_hunk_is_still_a_header(scan):
+    patch = (
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+plain added line\n"
+        f"diff --git a/g b/g\n--- a/g\n+++ b/{SEALED_SRC}\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    res = scan.run(*scan.sealed(), "--diff", scan.file("p.patch", patch))
+    assert res.code == 0 and res.rows[0]["windows_hit"] == 0
+
+
 def test_diff_added_lines_are_joined_by_newline_without_the_plus(scan):
     text = "alpha beta gamma\ndelta epsilon zeta"
     sealed = scan.sealed(paragraphs=[para("a#p0", "zh-en", "story", text)])
