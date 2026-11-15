@@ -465,6 +465,124 @@ def test_a_per_surface_old_binding_is_settled_without_moving_current(
     assert "recovery restored" not in again.stderr
 
 
+def surface_starts(log: Path) -> int:
+    """How many times the fake daemon was asked to start a surface."""
+
+    if not log.exists():
+        return 0
+    return sum(
+        1
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if " up -d " in line
+    )
+
+
+def retry_the_same_commit_and_kill_after_promotion(host: Host, commit: str) -> None:
+    """Deploy r2's own commit again, SIGKILLed right after the promotion.
+
+    The interrupted deployment that ran before this one completed: the pointer
+    and the database moved and the record was closed, only `current` was left
+    behind. A retry from r2 therefore records the commit r2 itself carries as
+    the previous binding, and the kill lands after the candidate database was
+    durably promoted but before the promotion was recorded. Recovering that
+    record restores the binding the retry started from - the OLD side - while
+    `current` still names the release that served before it.
+    """
+
+    base = host.base
+    barrier = base / "retry-promote-barrier"
+    process = subprocess.Popen(
+        ["sh", str(base / "releases" / "r2" / "deploy" / "vps-update.sh")],
+        cwd=base,
+        env={
+            **host.env,
+            "FULL_KILL_BARRIER_FILE": str(barrier),
+            "FULL_KILL_PID_FILE": str(base / "retry-promote-pid"),
+            "FULL_KILL_RELEASE_FILE": str(base / "retry-promote-never"),
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        wait_for(barrier, process, "the retry's promotion")
+        assert current_target(base) == "releases/r1"
+        assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{commit}\n"
+        assert (base / JOURNAL_RELPATH).exists()
+        kill_group(process)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=30)
+
+
+def test_an_old_side_restore_does_not_authorize_the_candidate(full_host):
+    """A retry of the deployed commit rolls back to itself; the link stays put.
+
+    The first deployment was killed after its confirm, so the pointer named the
+    new commit while `current` still named the release that served. The retry of
+    that same commit was killed after its stop and promotion, and the recovery
+    of that retry is an OLD-side restore: it puts back the binding the host
+    already had, which happens to be the candidate's own commit.
+
+    Settling the old side must not be read as authority for the candidate. It
+    is not a certification of the new binding, and letting it switch `current`
+    would make a rollback the reason a release became the serving one. The host
+    is left restored and unmoved, and the refusal names the one entry that can
+    settle the link instead.
+    """
+
+    host = full_host
+    base = host.base
+    commit = interrupted_full_deploy(host, "after")
+    release = base / "releases" / "r2"
+    old_db = (base / "data" / "terms.db").read_bytes()
+    # What the host was serving when the retry began: the binding it records as
+    # its previous one, and therefore the one a restore has to put back.
+    served_bot = (base / "bot-image").read_text(encoding="ascii").strip()
+    served_api = (base / "api-image").read_text(encoding="ascii").strip()
+    retry_the_same_commit_and_kill_after_promotion(host, commit)
+    # The retry stopped both surfaces and promoted the database before it died.
+    assert (base / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (base / "api-running").read_text(encoding="ascii").strip() == "false"
+    starts = surface_starts(base / "docker.log")
+
+    result = recover(host, release, "--recover-full")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    # The old binding really came back: the surfaces the retry stopped run
+    # again, on the images the retry recorded, with the database it backed up.
+    assert (base / "data" / "terms.db").read_bytes() == old_db
+    assert (base / "bot-image").read_text(encoding="ascii").strip() == served_bot
+    assert (base / "api-image").read_text(encoding="ascii").strip() == served_api
+    assert (base / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (base / "api-running").read_text(encoding="ascii").strip() == "true"
+    assert surface_starts(base / "docker.log") > starts
+    assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{commit}\n"
+    assert not (base / JOURNAL_RELPATH).exists()
+    # ... and the old-side restore did not move the link to the candidate,
+    # even though the pointer names the commit that release carries.
+    assert current_target(base) == "releases/r1"
+    assert "OLD binding" in result.stderr
+    assert "old-side restore never" in result.stderr
+    assert "Nothing is moved" in result.stderr
+    assert "--recover-full" in result.stderr
+    assert "r2 (current)" not in result.stdout
+
+    # With the record closed, the next run proves the published binding on its
+    # own and only then switches; it claims a settlement, not a recovery, and
+    # nothing about an old side that authorized it.
+    settled = recover(host, release, "--recover-full")
+
+    assert settled.returncode == 0, settled.stderr
+    assert current_target(base) == "releases/r2"
+    assert f"r2 (current) for {commit}" in settled.stdout
+    assert "recovery restored" not in settled.stdout + settled.stderr
+    assert "OLD binding" not in settled.stdout + settled.stderr
+    assert "rolled back" not in settled.stderr
+
+
 def test_a_migrated_full_rollback_reports_success_without_switching_current(
     migrated_host,
 ):

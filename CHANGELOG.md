@@ -15,28 +15,26 @@ does not distribute generated game data or generated SQLite databases.
   the checkout their script belongs to, `WUWATERM_DEPLOY_ROOT` still names one
   explicitly, and the printed commands and `docs/deployment.md` use the
   absolute release path so they work unchanged in a fresh shell.
-- A committed transaction and `current` are settled as one binding. A full
-  recovery that found a transaction, one that found no record
-  (`no-journal`), and a runtime recovery of a journal that had already
-  committed now converge the release link from the side that run actually
-  verified, instead of exiting 0 with the host serving a deployment `current`
-  did not name. Moving the link still requires the served commit proven from
-  the pointer, that commit's immutable manifest, the live database and every
-  present surface, plus a release whose marker and clean HEAD carry it.
-- A verified rollback stays a success. A host whose surfaces carried different
-  old images, and a host migrated from the in-place checkout, restore a
-  binding that the single-image prover cannot re-express; the settlement no
-  longer reports either as a failure, and a committed candidate whose marker
-  was removed is no longer read as "no release carries it". The internal
-  outcome line is one structured line of stdout (`old-verified`,
-  `new-verified`, `no-journal`) with the human log on stderr, so the default
-  output and exit codes of both recovery tools are unchanged and no schema,
-  temporary file or log parsing was added. An unprovable binding, a commit
-  another release carries and a pointer no release carries each get their own
-  answer and leave `current` where it was; every read the settlement needs
-  refuses instead of counting as absent or clean; and repeating a completed
-  recovery is a no-op that says only what it verified.
-- `deploy/migrate-layout.sh` decides both temporary links (`current.new` and
+- A completed transaction and `current` are settled as one binding, from the
+  side that run actually settled. The entry reads the one structured outcome
+  line its own tool prints (`old-verified`, `new-verified`, `no-journal`)
+  instead of an exit status, which cannot tell "needs no move" from "cannot be
+  authenticated". Only a certified new binding, or a run that found no record,
+  may move the link, and moving it still requires the served commit proven
+  from the pointer, that commit's immutable manifest, the live database and
+  every present surface, plus a release whose marker and clean HEAD carry it.
+  An old-side restore moves nothing: it certifies nothing about the candidate,
+  so a link that does not name the restored commit stays where it was and the
+  refusal names the entry that settles it. A verified rollback is still a
+  success, including the per-surface old images and the migrated host that the
+  single-image prover cannot re-express, and a runtime recovery of a journal
+  that had already committed now finishes its entry instead of failing. The
+  structured line is an internal option (`--settle-result`); ordinary
+  invocations keep their text output. A committed candidate whose marker was
+  removed is no longer read as "no release carries it", every read the
+  settlement needs refuses instead of counting as absent or clean, and
+  repeating a completed recovery is a no-op that says only what it verified.
+- `deploy/migrate-layout.sh` decides both temporary links (`.current.new` and
   `telegram/.data.new`) before the first step. A run that stopped between
   creating one and renaming it left a link already resolving to a directory,
   and the re-run's plain `ln -s` created `releases/r1/r1` inside the release
@@ -45,15 +43,16 @@ does not distribute generated game data or generated SQLite databases.
   without being overwritten, removed or followed (the dry run included), and
   the link is created with GNU `ln -T` so even the create-then-rename window
   cannot follow one.
-- The formal tag names Telegram `v0.2.10`. `deploy/setup.sh` takes the
-  installed product tags from `contracts/products.json` when it can read it,
-  and this release records Telegram `v0.2.10` there, so a fresh checkout
+- This release's formal tag names Telegram `v0.2.10`. `deploy/setup.sh` takes
+  the installed product tags from `contracts/products.json` when it can read
+  it, and this release records Telegram `v0.2.10` there, so a fresh checkout
   prints its install steps and the `DEFAULT_TELEGRAM_VERSION` constant agrees.
   `docs/self-hosting.md` and `README.md` keep the explicit
   `WUWATERM_TELEGRAM_VERSION=v0.2.10` override for the published `v0.8.6` tag,
   which records `v0.2.9` and therefore prints that older release's steps.
-  Telegram `v0.2.10` still pins Core `v0.8.6`, so this release reaches
-  Telegram users only when that product moves its own lock.
+  `contracts/products.json` keeps Core's own `release` on the published
+  `v0.8.6` snapshot, and Telegram `v0.2.10` still pins Core `v0.8.6`: these
+  deploy-script fixes ship with the Core tag and need no new Telegram release.
 
 ## 0.8.6
 

@@ -420,6 +420,21 @@ release_settle() {
   [ "$settle_self_rc" -ne 2 ] || settle_unreadable "$release_name" || return 1
   if [ "$settle_self_rc" -eq 0 ] && { [ "$pr_marker" = "$settle_pointer" ] \
     || [ "$pr_head" = "$settle_pointer" ]; }; then
+    # A restore of the OLD side puts back the binding the host already had, so
+    # it certifies nothing about the candidate - not even when the pointer
+    # names the candidate's own commit, as a retry of the deployed commit
+    # records that commit on both sides. Switching the link here would make a
+    # rollback the reason a release serves, so it is refused before the
+    # published proof and never reaches release_publish.
+    if [ "$settle_kind" = old-verified ]; then
+      settle_refuse \
+        "release: recovery restored the OLD binding $settle_pointer, so an" \
+        "  old-side restore never authorizes switching $settle_current to" \
+        "  $release_name, even though that release carries $settle_pointer." \
+        "  Nothing is moved. The transaction record is closed, so the link is" \
+        "  settled from the published binding by a repeated run:" \
+        "  sh $code_root/deploy/vps-update.sh --recover-full" || return 1
+    fi
     # (h) Move to this release, and only on the complete published proof plus
     # this checkout being the source of that commit. A failure here is never
     # re-read as "no release carries it".

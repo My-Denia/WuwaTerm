@@ -1026,16 +1026,22 @@ legitimately restore surfaces that carried different old images, which the
 single-image prover cannot re-express. Moving needs the published binding
 re-proven from observation (pointer, the manifest that must match it, the live
 database hash, every present surface), the proven commit being the settled one,
-and this checkout being its source. A commit this release does not carry while
-another release does refuses and names that release, never `--recover-runtime`,
-which a second run cannot settle. A pointer naming a commit no release's source
-carries — a host migrated from the in-place checkout records its own HEAD as
-the release's commit — is reported as the binding that was restored with
-nothing to switch to. Every read the settlement needs that fails — the record,
-the pointer, a release's marker, its HEAD or its `git status` — refuses instead
-of counting as "nothing deployed", "no carrier" or "clean". Repeating the
-command after it succeeded changes nothing, and that no-op says only what it
-verified: no transaction is pending and the link needs no adjustment.
+and this checkout being its source. Only a `new-verified` or `no-journal`
+settlement moves: an `old-verified` restore puts back the binding the host
+already had, which authorizes nothing about the candidate — a retry of the
+deployed commit records that commit as both sides — so a link that does not
+name the restored commit stays where it was and the refusal names the entry
+that settles it from the published binding. A commit this release does not
+carry while another release does refuses and names that release, never
+`--recover-runtime`, which a second run cannot settle. A pointer naming a
+commit no release's source carries — a host migrated from the in-place
+checkout records its own HEAD as the release's commit — is reported as the
+binding that was restored with nothing to switch to. Every read the settlement
+needs that fails — the record, the pointer, a release's marker, its HEAD or its
+`git status` — refuses instead of counting as "nothing deployed", "no carrier"
+or "clean". Repeating the command after it succeeded changes nothing, and that
+no-op says only what it verified: no transaction is pending and the link needs
+no adjustment.
 
 Before any of that, recovery establishes an admissibility preflight that
 mutates nothing: every journal-referenced path (backup, old manifest) is
