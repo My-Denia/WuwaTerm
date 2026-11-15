@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import re
-from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -986,32 +985,87 @@ def _target_occurrences(
     return occurrences
 
 
-def _available_occurrences(
+def _region_spans(
     target: str,
     region: tuple[int, int],
     forms: Sequence[str],
     occurrences: Callable[[str, str], list[tuple[int, int]]],
-) -> int:
-    """Count distinct non-overlapping occurrences of any form wholly in region.
+) -> frozenset[tuple[int, int]]:
+    """Qualified occurrences of any form lying wholly in region.
 
     Qualification runs on the full target, as the judge does, and the already
-    used spans are deliberately not subtracted: the count describes the region,
+    used spans are deliberately not subtracted: the set describes the region,
     not how far the review has got.
     """
     lo, hi = region
-    spans = {
+    return frozenset(
         span
         for form in forms
         for span in occurrences(target, form)
         if lo <= span[0] and span[1] <= hi
-    }
+    )
+
+
+def _guard_spans(
+    target: str,
+    region: tuple[int, int],
+    candidates: Sequence[ReviewCandidate],
+    direction: str,
+) -> frozenset[tuple[int, int]]:
+    """Every span in region that any candidate form of a mention can take."""
+    forms = _candidate_forms(candidates, direction)
+    return _region_spans(
+        target, region, forms, _target_occurrences(candidates, direction, forms)
+    )
+
+
+def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
+    """How many of these spans can be taken at once without overlapping."""
     count = 0
-    last_end = lo
+    last_end = -1
     for start, end in sorted(spans, key=lambda span: (span[1], span[0])):
         if start >= last_end:
             count += 1
             last_end = end
     return count
+
+
+def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool]:
+    """Mark every claim whose paragraph cannot say which occurrence it owns.
+
+    Claims that overlap, directly or through another claim, form one group:
+    an exact "Echoes" and the plural of "Echo" reach for the same span. A
+    group is ambiguous when one of its members can take fewer distinct spans
+    than the group has members, and then every member is, so no mention is
+    credited with an occurrence another one may own.
+    """
+    parent = list(range(len(claims)))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for left in range(len(claims)):
+        for right in range(left + 1, len(claims)):
+            if any(
+                _spans_overlap(mine, theirs)
+                for mine in claims[left]
+                for theirs in claims[right]
+            ):
+                parent[root(left)] = root(right)
+    groups: dict[int, list[int]] = {}
+    for index in range(len(claims)):
+        groups.setdefault(root(index), []).append(index)
+    ambiguous = [False] * len(claims)
+    for members in groups.values():
+        if any(
+            0 < _non_overlapping_count(claims[i]) < len(members) for i in members
+        ):
+            for i in members:
+                ambiguous[i] = True
+    return ambiguous
 
 
 def _span_at(text: str, start: int, end: int) -> ReviewSpan:
@@ -1226,14 +1280,13 @@ def _judge_mention_v2(
     used_target: set[tuple[int, int]],
     resolution: ReviewResolution | None,
     automatic_term_excluded: bool = False,
-    competing_mentions: int | None = None,
+    ambiguous_repeat: bool = False,
 ) -> ReviewFinding:
     """Judge one mention against its mapped target range.
 
-    ``competing_mentions`` is set only for a guarded paragraph region: the
-    number of mentions in that source paragraph that could take the same
-    official form. When the paragraph holds fewer qualified occurrences than
-    that, the paragraph cannot say which mention an occurrence answers, so the
+    ``ambiguous_repeat`` is set only in a guarded paragraph region, when the
+    paragraph holds fewer qualified occurrences than the mentions that could
+    take them: it cannot say which mention an occurrence answers, so the
     mention is left unassessed instead of being credited or blamed.
     """
     finding_id = _span_mention_id(source, mention.start, mention.end)
@@ -1283,19 +1336,11 @@ def _judge_mention_v2(
     if corresponding is None:
         return not_evaluated(REASON_NO_TARGET_REGION)
 
-    if competing_mentions is not None:
-        # Every candidate's form, whatever the resolution picked: a confirmed
-        # conflict on a translation that is in fact correct is the outcome to
-        # avoid, so a selected pair does not lift the guard.
-        all_forms = _candidate_forms(candidates, direction)
-        available = _available_occurrences(
-            target,
-            corresponding,
-            all_forms,
-            _target_occurrences(candidates, direction, all_forms),
-        )
-        if 0 < available < competing_mentions:
-            return not_evaluated(REASON_AMBIGUOUS_REPEAT)
+    if ambiguous_repeat:
+        # Decided on every candidate's form, whatever the resolution picked: a
+        # confirmed conflict on a translation that is in fact correct is the
+        # outcome to avoid, so a selected pair does not lift the guard.
+        return not_evaluated(REASON_AMBIGUOUS_REPEAT)
 
     lo, hi = corresponding
     in_region: dict[str, list[tuple[int, int]]] = {}
@@ -1600,12 +1645,14 @@ def _review_pair_v2(
             _TermSpan,
             tuple[ReviewCandidate, ...],
             ReviewResolution | None,
-            tuple[int, int] | None,
         ]
     ] = []
-    # Per guarded source paragraph: how many mentions that still assert a
-    # constraint carry each set of official forms.
-    competing: dict[tuple[int, int], Counter[frozenset[str]]] = {}
+    # Per guarded source paragraph: the target spans each mention that still
+    # asserts a constraint could take there. Two mentions compete when any of
+    # their spans overlap, whatever form produced them: an exact "Echoes" and
+    # the plural of "Echo" claim the same occurrence.
+    claims: dict[tuple[int, int], list[frozenset[tuple[int, int]]]] = {}
+    claim_owner: dict[tuple[int, int], list[int]] = {}
     for mention in mentions:
         candidates = _candidates_for(surfaces[mention.source], include_id=True)
         finding_id = _span_mention_id(source, mention.start, mention.end)
@@ -1622,14 +1669,28 @@ def _review_pair_v2(
             (resolution is not None and resolution.choice == CHOICE_NOT_A_TERM)
             or (resolution is None and mention.source in automatic_exclusions)
         )
-        if guard is not None and asserts_constraint:
-            competing.setdefault(guard, Counter())[
-                frozenset(_candidate_forms(candidates, direction))
-            ] += 1
-        planned.append((mention, candidates, resolution, guard))
+        if (
+            guard is not None
+            and asserts_constraint
+            and region is not None
+            and region.target is not None
+        ):
+            spans = _guard_spans(
+                target, (region.target.start, region.target.end), candidates, direction
+            )
+            claims.setdefault(guard, []).append(spans)
+            claim_owner.setdefault(guard, []).append(len(planned))
+        planned.append((mention, candidates, resolution))
 
-    for mention, candidates, resolution, guard in planned:
-        own_forms = frozenset(_candidate_forms(candidates, direction))
+    ambiguous: set[int] = set()
+    for guard, region_claims in claims.items():
+        for owner, flagged in zip(
+            claim_owner[guard], _ambiguous_claims(region_claims), strict=True
+        ):
+            if flagged:
+                ambiguous.add(owner)
+
+    for index, (mention, candidates, resolution) in enumerate(planned):
         findings.append(
             _judge_mention_v2(
                 source=source,
@@ -1641,15 +1702,7 @@ def _review_pair_v2(
                 used_target=used_target,
                 resolution=resolution,
                 automatic_term_excluded=mention.source in automatic_exclusions,
-                competing_mentions=(
-                    None
-                    if guard is None
-                    else sum(
-                        count
-                        for forms, count in competing.get(guard, {}).items()
-                        if not forms.isdisjoint(own_forms)
-                    )
-                ),
+                ambiguous_repeat=index in ambiguous,
             )
         )
 

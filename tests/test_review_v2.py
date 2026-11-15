@@ -397,6 +397,42 @@ def test_guarded_paragraph_with_fewer_occurrences_than_mentions_is_ambiguous(v2_
     ]
 
 
+def test_guarded_mentions_compete_for_an_inflected_occurrence(tmp_path):
+    """Different forms that can answer with the same target span compete for it."""
+    service = _plural_service(
+        tmp_path, TermRecord("item", "fixture", "echoes", "echoes", "今汐", "Echoes")
+    )
+    # "Echoes" is 今汐's exact form and 声骸's ("Echo") plural: one span, two claims.
+    source, target = "今汐与声骸。", "Echoes. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+
+    resolved = _pair(service, source, target, **_official_pair_for(report, 1))
+    assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
+
+    # 今汐 can take only "Echoes", which 声骸 may also take: the whole group
+    # stays unassessed rather than crediting 声骸 with 今汐's occurrence.
+    report = _pair(service, source, "Echoes and an Echo. Indeed.")
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+
+    # Each mention can take two spans: both are credited, on distinct spans.
+    report = _pair(service, source, "Echoes and Echoes. Indeed.")
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert len({item.target_span.start for item in report.findings}) == 2
+
+
+def test_guarded_mentions_with_unrelated_forms_do_not_compete(v2_service):
+    source, target = "今汐与声骸。", "Jinhsi and an Echo. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
+
+
 def test_guarded_paragraph_with_no_form_anywhere_keeps_the_ordinary_verdicts(v2_service):
     source = "今汐登场。\n\n声骸出现。"
     target = "Someone appears. Truly.\n\nSomething appears."

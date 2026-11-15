@@ -41,7 +41,8 @@ does not distribute generated game data or generated SQLite databases.
   a term is left `not_evaluated` when the paragraph holds fewer qualified
   occurrences of its official forms than there are mentions competing for
   them, so an ambiguous repeat is never credited or blamed, a confirmed pair
-  included. Verdicts on pairs with equal sentence counts and on explicitly
+  included. Mentions compete when their accepted forms, singular and plural
+  variants included, can take the same target span. Verdicts on pairs with equal sentence counts and on explicitly
   aligned pairs are unchanged. Every `not_evaluated` finding now carries an
   internal reason (`not_a_term`, `ordinary_word`, `no_target_region`,
   `found_outside_region`, `ambiguous_repeat`) that is not on the wire, so the
