@@ -8,11 +8,12 @@ half-open), never on ``prepare_text`` output.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from .cjk_span import (
@@ -985,38 +986,98 @@ def _target_occurrences(
     return occurrences
 
 
-def _region_spans(
-    target: str,
-    region: tuple[int, int],
-    forms: Sequence[str],
-    occurrences: Callable[[str, str], list[tuple[int, int]]],
-) -> frozenset[tuple[int, int]]:
-    """Qualified occurrences of any form lying wholly in region.
+class _OccurrenceModel:
+    """The one set of target occurrences review-v2 credits to a mention.
 
-    Qualification runs on the full target, as the judge does, and the already
-    used spans are deliberately not subtracted: the set describes the region,
-    not how far the review has got.
+    An occurrence first qualifies on the full target: word boundaries, the
+    one-character name rule and bounded English inflection. Then the longest
+    match wins: an occurrence lying strictly inside an occurrence of a longer
+    form of any term mentioned in the pair is not an occurrence of the
+    shorter form ("Echo" inside "Echo Set" when the source mentions both).
+    Equal spans stay available to every form that reaches them, so an exact
+    "Echoes" and the plural of "Echo" both see it.
+
+    The judge, its elsewhere veto and the paragraph guard all read
+    occurrences here, on every mapping path, so no two of them can disagree
+    about which spans a mention could take.
     """
-    lo, hi = region
-    return frozenset(
-        span
-        for form in forms
-        for span in occurrences(target, form)
-        if lo <= span[0] and span[1] <= hi
-    )
 
+    def __init__(
+        self,
+        target: str,
+        direction: str,
+        candidates_by_surface: Mapping[str, Sequence[ReviewCandidate]],
+    ) -> None:
+        self._target = target
+        self._direction = direction
+        universe: set[tuple[int, int]] = set()
+        for candidates in candidates_by_surface.values():
+            forms = _candidate_forms(candidates, direction)
+            finder = _target_occurrences(candidates, direction, forms)
+            for form in forms:
+                universe.update(finder(target, form))
+        # Sorted by start, longer first; reach[i] is the furthest end among
+        # the first i spans. Every span before a key either starts earlier or
+        # starts there and ends later, so it strictly contains that span
+        # exactly when it reaches at least as far.
+        ordered = sorted(universe, key=lambda span: (span[0], -span[1]))
+        self._keys = [(start, -end) for start, end in ordered]
+        self._reach = [-1]
+        for _start, end in ordered:
+            self._reach.append(max(self._reach[-1], end))
+        self._cache: dict[
+            tuple[str, tuple[str, ...], str], list[tuple[int, int]]
+        ] = {}
 
-def _guard_spans(
-    target: str,
-    region: tuple[int, int],
-    candidates: Sequence[ReviewCandidate],
-    direction: str,
-) -> frozenset[tuple[int, int]]:
-    """Every span in region that any candidate form of a mention can take."""
-    forms = _candidate_forms(candidates, direction)
-    return _region_spans(
-        target, region, forms, _target_occurrences(candidates, direction, forms)
-    )
+    def _inside_longer(self, span: tuple[int, int]) -> bool:
+        position = bisect.bisect_left(self._keys, (span[0], -span[1]))
+        return self._reach[position] >= span[1]
+
+    def occurrences(
+        self,
+        surface: str,
+        candidates: Sequence[ReviewCandidate],
+        forms: tuple[str, ...],
+    ) -> Callable[[str, str], list[tuple[int, int]]]:
+        """Available occurrences of one of ``forms`` for a mention of surface."""
+        qualified = _target_occurrences(candidates, self._direction, forms)
+
+        def available(text: str, form: str) -> list[tuple[int, int]]:
+            if text is not self._target:
+                raise ValueError("the occurrence model reads only its own target")
+            key = (surface, forms, form)
+            found = self._cache.get(key)
+            if found is None:
+                found = [
+                    span
+                    for span in qualified(text, form)
+                    if not self._inside_longer(span)
+                ]
+                self._cache[key] = found
+            return list(found)
+
+        return available
+
+    def claim(
+        self,
+        surface: str,
+        candidates: Sequence[ReviewCandidate],
+        region: tuple[int, int],
+    ) -> frozenset[tuple[int, int]]:
+        """Every span in region that any candidate form of a mention can take.
+
+        Used spans are deliberately not subtracted: the claim describes the
+        region, not how far the review has got.
+        """
+        forms = _candidate_forms(candidates, self._direction)
+        available = self.occurrences(surface, candidates, forms)
+        lo, hi = region
+        return frozenset(
+            span
+            for form in forms
+            for span in available(self._target, form)
+            if lo <= span[0] and span[1] <= hi
+        )
 
 
 def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
@@ -1033,18 +1094,16 @@ def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
 def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool]:
     """Mark every claim whose paragraph cannot say which occurrence it owns.
 
-    A claim is the set of target spans one mention could take. First the
-    longest match wins: a span lying strictly inside another claimed span is
-    not an occurrence of the shorter form ("Echo" inside "Echo Set" when the
-    source also mentions that term). Claims whose remaining spans overlap,
-    directly or through another claim, then form one group: an exact "Echoes"
-    and the plural of "Echo" reach for the same span. A group is ambiguous
+    A claim is the set of available target spans one mention could take
+    (see ``_OccurrenceModel``). Claims whose spans overlap, directly or
+    through another claim, form one group: an exact "Echoes" and the plural
+    of "Echo" reach for the same span. A group is ambiguous
     when one of its members can take fewer distinct spans than the group has
     members, and then every member is, so no mention is credited with an
     occurrence another one may own.
 
     Mentions of one term carry the same claim, so the work runs per distinct
-    claim, and both passes are sweeps over spans sorted by start: a paragraph
+    claim, and grouping is a sweep over spans sorted by start: a paragraph
     with hundreds of mentions stays linear-logarithmic.
     """
     kinds: dict[frozenset[tuple[int, int]], int] = {}
@@ -1053,18 +1112,7 @@ def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool
     for kind in kind_of:
         members[kind] += 1
 
-    # Sorted by start, longer first: a span is strictly inside an earlier one
-    # exactly when an earlier span reaches at least as far.
-    contained: set[tuple[int, int]] = set()
-    reach = -1
-    for start, end in sorted(
-        {span for claim in kinds for span in claim},
-        key=lambda span: (span[0], -span[1]),
-    ):
-        if end <= reach:
-            contained.add((start, end))
-        reach = max(reach, end)
-    kept = [frozenset(span for span in claim if span not in contained) for claim in kinds]
+    kept = list(kinds)
 
     parent = list(range(len(kinds)))
 
@@ -1315,6 +1363,7 @@ def _judge_mention_v2(
     corresponding: tuple[int, int] | None,
     used_target: set[tuple[int, int]],
     resolution: ReviewResolution | None,
+    occurrence_model: _OccurrenceModel,
     automatic_term_excluded: bool = False,
     ambiguous_repeat: bool = False,
 ) -> ReviewFinding:
@@ -1367,7 +1416,7 @@ def _judge_mention_v2(
         if selected is not None
         else _candidate_forms(candidates, direction)
     )
-    occurrences = _target_occurrences(candidates, direction, forms)
+    occurrences = occurrence_model.occurrences(mention.source, candidates, forms)
 
     if corresponding is None:
         return not_evaluated(REASON_NO_TARGET_REGION)
@@ -1692,8 +1741,13 @@ def _review_pair_v2(
     claim_cache: dict[
         tuple[tuple[int, int], str], frozenset[tuple[int, int]]
     ] = {}
+    candidates_by_surface = {
+        mention.source: _candidates_for(surfaces[mention.source], include_id=True)
+        for mention in mentions
+    }
+    occurrence_model = _OccurrenceModel(target, direction, candidates_by_surface)
     for mention in mentions:
-        candidates = _candidates_for(surfaces[mention.source], include_id=True)
+        candidates = candidates_by_surface[mention.source]
         finding_id = _span_mention_id(source, mention.start, mention.end)
         resolution = by_id.get(finding_id)
         if resolution is not None:
@@ -1718,11 +1772,10 @@ def _review_pair_v2(
             cache_key = (guard, mention.source)
             spans = claim_cache.get(cache_key)
             if spans is None:
-                spans = _guard_spans(
-                    target,
-                    (region.target.start, region.target.end),
+                spans = occurrence_model.claim(
+                    mention.source,
                     candidates,
-                    direction,
+                    (region.target.start, region.target.end),
                 )
                 claim_cache[cache_key] = spans
             claims.setdefault(guard, []).append(spans)
@@ -1748,6 +1801,7 @@ def _review_pair_v2(
                 corresponding=_mapped_target_range(mention, mappings),
                 used_target=used_target,
                 resolution=resolution,
+                occurrence_model=occurrence_model,
                 automatic_term_excluded=mention.source in automatic_exclusions,
                 ambiguous_repeat=index in ambiguous,
             )

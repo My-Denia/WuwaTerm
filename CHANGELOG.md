@@ -42,8 +42,13 @@ does not distribute generated game data or generated SQLite databases.
   occurrences of its official forms than there are mentions competing for
   them, so an ambiguous repeat is never credited or blamed, a confirmed pair
   included. Mentions compete when their accepted forms, singular and plural
-  variants included, can take the same target span. Verdicts on pairs with equal sentence counts and on explicitly
-  aligned pairs are unchanged. Every `not_evaluated` finding now carries an
+  variants included, can take the same target span. On every path the
+  longest match now wins: an occurrence inside an occurrence of a longer form
+  of a term the source also mentions ("Echo" inside "Echo Set") no longer
+  counts for the shorter term, so a missing 声骸 next to 声骸套装 is
+  `needs_review` instead of verified on part of "Echo Set". Apart from that,
+  verdicts on pairs with equal sentence counts and on explicitly aligned pairs
+  are unchanged. Every `not_evaluated` finding now carries an
   internal reason (`not_a_term`, `ordinary_word`, `no_target_region`,
   `found_outside_region`, `ambiguous_repeat`) that is not on the wire, so the
   response shape is unchanged. The matcher label moves to

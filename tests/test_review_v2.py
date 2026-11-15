@@ -434,16 +434,102 @@ def test_guarded_mentions_with_unrelated_forms_do_not_compete(v2_service):
     assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
 
 
-def test_guarded_shorter_form_inside_a_mentioned_longer_term_does_not_compete(tmp_path):
+_V, _NR = VERDICT_VERIFIED, VERDICT_NEEDS_REVIEW
+_OUTSIDE = (VERDICT_NOT_EVALUATED, REASON_FOUND_OUTSIDE_REGION)
+_AMBIGUOUS = (VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_REPEAT)
+# (case, source, target, expected per mention). A verified entry names the
+# target text it is credited with. Each case runs on the equal sentence count
+# path as written, and on the guarded paragraph path with a list marker the
+# source writes as "一、" and the target as "I.".
+_OCCURRENCE_MATRIX = (
+    ("exact", "今汐登场。", "Jinhsi appears.", [(_V, "Jinhsi")], None),
+    ("inflected", "声骸出现。", "Echoes appear.", [(_V, "Echoes")], None),
+    (
+        "inflection competes",
+        "回响与声骸。",
+        "Echoes.",
+        # Equal counts keep the positional greedy of repeat-shortage.
+        [(_V, "Echoes"), (_NR, None)],
+        [_AMBIGUOUS, _AMBIGUOUS],
+    ),
+    (
+        "nested, both present",
+        "声骸与声骸套装。",
+        "Echo and Echo Set.",
+        [(_V, "Echo"), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "nested, order swapped",
+        "声骸与声骸套装。",
+        "Echo Set and Echo.",
+        [(_V, "Echo"), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "nested, shorter missing",
+        "声骸与声骸套装。",
+        "Echo Set.",
+        [(_NR, None), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "repeated, one occurrence",
+        "今汐与今汐。",
+        "Jinhsi.",
+        [(_V, "Jinhsi"), (_NR, None)],
+        [_AMBIGUOUS, _AMBIGUOUS],
+    ),
+    (
+        "shifted to the other paragraph",
+        "今汐登场。\n\n声骸出现。",
+        "An Echo appears.\n\nJinhsi appears.",
+        [_OUTSIDE, _OUTSIDE],
+        None,
+    ),
+    ("missing entirely", "今汐登场。", "Someone appears.", [(_NR, None)], None),
+    (
+        "unrelated terms",
+        "今汐与声骸。",
+        "Jinhsi and an Echo.",
+        [(_V, "Jinhsi"), (_V, "Echo")],
+        None,
+    ),
+)
+
+
+@pytest.mark.parametrize("path", ("equal", "guarded"))
+@pytest.mark.parametrize(
+    ("case", "source", "target", "equal", "guarded"),
+    _OCCURRENCE_MATRIX,
+    ids=[row[0] for row in _OCCURRENCE_MATRIX],
+)
+def test_occurrence_matrix(tmp_path, path, case, source, target, equal, guarded):
+    """The judge and the guard read one occurrence model on both mapping paths."""
     service = _plural_service(
-        tmp_path, TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set")
+        tmp_path,
+        TermRecord("character", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
+        TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set"),
+        TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
     )
-    source, target = "一、声骸与声骸套装。", "I. Echo and Echo Set."
-    _differing_counts(source, target)
+    expected = equal
+    if path == "guarded":
+        source, target = "一、" + source, "I. " + target
+        _differing_counts(source, target)
+        assert len(_paragraph_ranges(source)) == len(_paragraph_ranges(target))
+        expected = guarded or equal
+    else:
+        assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target))
 
     report = _pair(service, source, target)
-    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
-    assert [item.target_span.text for item in report.findings] == ["Echo", "Echo Set"]
+
+    actual = [
+        (item.verdict, item.reason)
+        if item.verdict == VERDICT_NOT_EVALUATED
+        else (item.verdict, item.target_span.text if item.target_span else None)
+        for item in report.findings
+    ]
+    assert actual == expected, case
 
 
 def test_guarded_paragraph_with_many_mentions_stays_fast(v2_service):

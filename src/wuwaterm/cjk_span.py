@@ -85,8 +85,10 @@ rule.
 wuwaterm-cjk-matcher-v7 changes no matcher input. review-v2 now judges terms
 through paragraph pairing when the source and target sentence counts differ
 (a translation that writes the list marker "I." where the source has "一、"
-no longer leaves every term unassessed), so the same input gave a different
-report under v6 and the basis must change. Stored resolution contexts and
+no longer leaves every term unassessed), and a target occurrence inside an
+occurrence of a longer form of another mentioned term no longer counts for the
+shorter one. The same input gave a different report under v6, so the basis
+must change. Stored resolution contexts and
 saved manuscript-v3 segment results carrying v6 go stale by the existing
 freshness rule and are re-reviewed.
 """
