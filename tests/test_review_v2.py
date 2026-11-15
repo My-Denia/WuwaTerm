@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -431,6 +432,34 @@ def test_guarded_mentions_with_unrelated_forms_do_not_compete(v2_service):
     report = _pair(v2_service, source, target)
     assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
     assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
+
+
+def test_guarded_shorter_form_inside_a_mentioned_longer_term_does_not_compete(tmp_path):
+    service = _plural_service(
+        tmp_path, TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set")
+    )
+    source, target = "一、声骸与声骸套装。", "I. Echo and Echo Set."
+    _differing_counts(source, target)
+
+    report = _pair(service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert [item.target_span.text for item in report.findings] == ["Echo", "Echo Set"]
+
+
+def test_guarded_paragraph_with_many_mentions_stays_fast(v2_service):
+    # Hundreds of mentions competing for hundreds of spans in one paragraph,
+    # within the 2,000-scalar limit on each side.
+    source = "、".join(["今汐", "声骸"] * 200) + "。"
+    target = ", ".join(["Jinhsi", "Echo"] * 140) + ". Indeed."
+    assert len(source) <= 2000 and len(target) <= 2000
+    _differing_counts(source, target)
+
+    started = time.perf_counter()
+    report = _pair(v2_service, source, target)
+    elapsed = time.perf_counter() - started
+
+    assert {item.reason for item in report.findings} == {REASON_AMBIGUOUS_REPEAT}
+    assert elapsed < 1.0
 
 
 def test_guarded_paragraph_with_no_form_anywhere_keeps_the_ordinary_verdicts(v2_service):

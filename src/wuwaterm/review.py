@@ -1033,13 +1033,40 @@ def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
 def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool]:
     """Mark every claim whose paragraph cannot say which occurrence it owns.
 
-    Claims that overlap, directly or through another claim, form one group:
-    an exact "Echoes" and the plural of "Echo" reach for the same span. A
-    group is ambiguous when one of its members can take fewer distinct spans
-    than the group has members, and then every member is, so no mention is
-    credited with an occurrence another one may own.
+    A claim is the set of target spans one mention could take. First the
+    longest match wins: a span lying strictly inside another claimed span is
+    not an occurrence of the shorter form ("Echo" inside "Echo Set" when the
+    source also mentions that term). Claims whose remaining spans overlap,
+    directly or through another claim, then form one group: an exact "Echoes"
+    and the plural of "Echo" reach for the same span. A group is ambiguous
+    when one of its members can take fewer distinct spans than the group has
+    members, and then every member is, so no mention is credited with an
+    occurrence another one may own.
+
+    Mentions of one term carry the same claim, so the work runs per distinct
+    claim, and both passes are sweeps over spans sorted by start: a paragraph
+    with hundreds of mentions stays linear-logarithmic.
     """
-    parent = list(range(len(claims)))
+    kinds: dict[frozenset[tuple[int, int]], int] = {}
+    kind_of = [kinds.setdefault(claim, len(kinds)) for claim in claims]
+    members = [0] * len(kinds)
+    for kind in kind_of:
+        members[kind] += 1
+
+    # Sorted by start, longer first: a span is strictly inside an earlier one
+    # exactly when an earlier span reaches at least as far.
+    contained: set[tuple[int, int]] = set()
+    reach = -1
+    for start, end in sorted(
+        {span for claim in kinds for span in claim},
+        key=lambda span: (span[0], -span[1]),
+    ):
+        if end <= reach:
+            contained.add((start, end))
+        reach = max(reach, end)
+    kept = [frozenset(span for span in claim if span not in contained) for claim in kinds]
+
+    parent = list(range(len(kinds)))
 
     def root(index: int) -> int:
         while parent[index] != index:
@@ -1047,25 +1074,34 @@ def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool
             index = parent[index]
         return index
 
-    for left in range(len(claims)):
-        for right in range(left + 1, len(claims)):
-            if any(
-                _spans_overlap(mine, theirs)
-                for mine in claims[left]
-                for theirs in claims[right]
-            ):
-                parent[root(left)] = root(right)
-    groups: dict[int, list[int]] = {}
-    for index in range(len(claims)):
-        groups.setdefault(root(index), []).append(index)
-    ambiguous = [False] * len(claims)
-    for members in groups.values():
-        if any(
-            0 < _non_overlapping_count(claims[i]) < len(members) for i in members
-        ):
-            for i in members:
-                ambiguous[i] = True
-    return ambiguous
+    def join(left: int, right: int) -> None:
+        parent[root(left)] = root(right)
+
+    owners: dict[tuple[int, int], list[int]] = {}
+    for kind, claim in enumerate(kept):
+        for span in claim:
+            owners.setdefault(span, []).append(kind)
+    reach, reach_kind = -1, -1
+    for span in sorted(owners):
+        first, *others = owners[span]
+        for other in others:
+            join(first, other)
+        if span[0] < reach:
+            # The span reaching furthest so far starts no later and ends
+            # after this start, so the two overlap.
+            join(first, reach_kind)
+        if span[1] > reach:
+            reach, reach_kind = span[1], first
+
+    group_size: dict[int, int] = {}
+    for kind in range(len(kinds)):
+        group_size[root(kind)] = group_size.get(root(kind), 0) + members[kind]
+    ambiguous_groups = {
+        root(kind)
+        for kind, claim in enumerate(kept)
+        if 0 < _non_overlapping_count(claim) < group_size[root(kind)]
+    }
+    return [root(kind) in ambiguous_groups for kind in kind_of]
 
 
 def _span_at(text: str, start: int, end: int) -> ReviewSpan:
@@ -1653,6 +1689,9 @@ def _review_pair_v2(
     # the plural of "Echo" claim the same occurrence.
     claims: dict[tuple[int, int], list[frozenset[tuple[int, int]]]] = {}
     claim_owner: dict[tuple[int, int], list[int]] = {}
+    claim_cache: dict[
+        tuple[tuple[int, int], str], frozenset[tuple[int, int]]
+    ] = {}
     for mention in mentions:
         candidates = _candidates_for(surfaces[mention.source], include_id=True)
         finding_id = _span_mention_id(source, mention.start, mention.end)
@@ -1675,9 +1714,17 @@ def _review_pair_v2(
             and region is not None
             and region.target is not None
         ):
-            spans = _guard_spans(
-                target, (region.target.start, region.target.end), candidates, direction
-            )
+            # One term's mentions share candidates, hence the same claim.
+            cache_key = (guard, mention.source)
+            spans = claim_cache.get(cache_key)
+            if spans is None:
+                spans = _guard_spans(
+                    target,
+                    (region.target.start, region.target.end),
+                    candidates,
+                    direction,
+                )
+                claim_cache[cache_key] = spans
             claims.setdefault(guard, []).append(spans)
             claim_owner.setdefault(guard, []).append(len(planned))
         planned.append((mention, candidates, resolution))
