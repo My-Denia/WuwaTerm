@@ -604,12 +604,15 @@ def _tier_texts(key: str, zh: str, en: str, *, en_premium: str | None = None):
 
 @pytest.fixture()
 def names_checkout(tmp_path: Path) -> Path:
-    # Upstream names on synthetic keys and ids.
+    # Upstream names on synthetic keys and ids; "Revival Mist" is synthetic.
     texts = {
         "Area_2103_Title": ("泊金港", "Gold's Landing"),
         "Area_41037_Title": ("拉贝尔学部", "Rabelle College"),
+        "Area_41043_Title": ("教学楼", "Academia Hall"),
         "Term900001_Title": ("核心", "Core"),
-        "Term900002_Title": ("调谐器", "Tuner"),
+        "Term900002_Title": ("营养块", "Nutrient Block"),
+        "Term900003_Title": ("复苏吸雾", "Revival Mist"),
+        "Speaker_1513_Name": ("调音师", "Tuner"),
         **_tier_texts("core", "能源核心", "Energy Core"),
         # Only three tiers ship: no base row.
         **{
@@ -620,7 +623,11 @@ def names_checkout(tmp_path: Path) -> Path:
         # Same Chinese base, a different English suffix on one tier: no base row.
         **_tier_texts("tube", "密音筒", "Sealed Tube", en_premium="Sealed Canister"),
         # The base pair is already an official record: kept once.
+        **_tier_texts("block", "营养块", "Nutrient Block"),
+        # A base surface another record pairs with a different counterpart
+        # (the speaker 调音师 / Tuner, 复苏吸雾 / Revival Mist): no base row.
         **_tier_texts("tuner", "调谐器", "Tuner"),
+        **_tier_texts("inhaler", "复苏吸雾", "Revival Inhaler"),
     }
     table_rows = {
         "area/area.json": [{"AreaId": 2103, "Title": "Area_2103_Title"}],
@@ -630,55 +637,22 @@ def names_checkout(tmp_path: Path) -> Path:
             *_tier_rows(43020001, "core"),
             *_tier_rows(43010001, "potion")[:3],
             *_tier_rows(36000001, "tube"),
+            *_tier_rows(42100017, "block"),
             *_tier_rows(36000011, "tuner"),
+            *_tier_rows(42100013, "inhaler"),
         ],
     }
-    return _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
-
-
-def test_arikatsu_imports_area_titles_no_area_row_references(names_checkout: Path):
-    records = iter_records(names_checkout, "arikatsu")
-    area_records = sorted(
-        (r.category, r.source_file, r.source_id, r.zh, r.en)
-        for r in records
-        if r.text_key.startswith("Area_")
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps([{"Id": 1513}]), encoding="utf-8"
     )
-    assert area_records == [
-        ("location", "BinData/area/area.json", "2103", "泊金港", "Gold's Landing"),
-        (
-            "location",
-            "Textmaps/multi_text/MultiText.json",
-            "Area_41037_Title",
-            "拉贝尔学部",
-            "Rabelle College",
-        ),
-    ]
+    return root
 
 
-def test_arikatsu_derives_base_row_only_for_complete_tier_families(
-    names_checkout: Path,
-):
-    records = iter_records(names_checkout, "arikatsu")
-    assert [r for r in records if r.source_id.startswith("tier-base:")] == [
-        TermRecord(
-            "item",
-            "BinData/item/iteminfo.json",
-            "tier-base:43020001",
-            "tier-base:43020001",
-            "能源核心",
-            "Energy Core",
-        )
-    ]
-    assert [(r.category, r.source_id) for r in records if r.zh == "调谐器"] == [
-        ("core_term", "Term900002_Title")
-    ]
-
-
-def test_tier_base_row_owns_its_span_in_both_directions(
-    names_checkout: Path, tmp_path: Path
-):
-    # MY-18: "Energy Cores" is one material, not "Energy" plus 核心 / Core,
-    # and the lowercase ordinary phrase stays prose.
+@pytest.fixture()
+def names_lock(names_checkout: Path, tmp_path: Path):
+    """Lock or reference a sentence against a DB built from names_checkout."""
     from wuwaterm.sentence import SentenceTranslator
 
     profile = get_source_profile("arikatsu")
@@ -706,14 +680,86 @@ def test_tier_base_row_owns_its_span_in_both_directions(
             allow_nfkc_spelling=True,
         )
 
-    plural = lock("Farm Energy Cores.", to_chinese=True)
+    return lock
+
+
+def test_arikatsu_imports_area_titles_no_area_row_references(names_checkout: Path):
+    records = iter_records(names_checkout, "arikatsu")
+    area_records = sorted(
+        (r.category, r.source_file, r.source_id, r.zh, r.en)
+        for r in records
+        if r.text_key.startswith("Area_")
+    )
+    multitext = "Textmaps/multi_text/MultiText.json"
+    assert area_records == [
+        ("location", "BinData/area/area.json", "2103", "泊金港", "Gold's Landing"),
+        ("location", multitext, "Area_41037_Title", "拉贝尔学部", "Rabelle College"),
+        ("location", multitext, "Area_41043_Title", "教学楼", "Academia Hall"),
+    ]
+
+
+def test_arikatsu_derives_base_row_only_for_complete_tier_families(
+    names_checkout: Path,
+):
+    records = iter_records(names_checkout, "arikatsu")
+    assert [r for r in records if r.source_id.startswith("tier-base:")] == [
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:43020001",
+            "tier-base:43020001",
+            "能源核心",
+            "Energy Core",
+        )
+    ]
+    assert [(r.category, r.source_id) for r in records if r.zh == "营养块"] == [
+        ("core_term", "Term900002_Title")
+    ]
+
+
+def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
+    # MY-18: "Energy Cores" is one material, not "Energy" plus 核心 / Core,
+    # and the lowercase ordinary phrase stays prose.
+    plural = names_lock("Farm Energy Cores.", to_chinese=True)
     assert [(zh, en) for _, zh, en in plural.locks] == [("能源核心", "Energy Core")]
     assert plural.restore(plural.locked_text, to_en=False) == "Farm 能源核心."
 
-    ordinary = lock("The energy core of a star.", to_chinese=True)
+    ordinary = names_lock("The energy core of a star.", to_chinese=True)
     assert (ordinary.locks, ordinary.references) == ((), ())
     assert ordinary.locked_text == "The energy core of a star."
 
-    zh_source = lock("今天去刷能源核心。", to_chinese=False)
+    zh_source = names_lock("今天去刷能源核心。", to_chinese=False)
     assert zh_source.locks == ()
     assert zh_source.references == (("能源核心", "能源核心", "Energy Core", "item"),)
+
+
+def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
+    # MY-18: bare "Tuner" is already the speaker 调音师, so 调谐器 / Tuner is
+    # not derived. Bare "Tuner" stays a contextual speaker reference carrying
+    # 调音师, as before tier bases, also where the sentence means the item:
+    # the model weighs it, nothing hard-locks it to 调谐器. A tier name locks.
+    tuner = ("Tuner", "调音师", "Tuner", "speaker")
+    speaker = names_lock("Tuner: Hold that note.", to_chinese=True)
+    assert (speaker.locks, speaker.references) == ((), (tuner,))
+
+    item = names_lock("Use a Basic Tuner first, then the Tuner.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in item.locks] == [("初级调谐器", "Basic Tuner")]
+    assert item.references == (tuner,)
+
+    ordinary = names_lock("Bring a guitar tuner.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())
+
+
+def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):
+    # MY-18: 教学楼 is the Area title of Academia Hall and the everyday word
+    # for a school building. zh->en hands every category to the model as a
+    # reference, never a lock; en->zh locks only the capitalized name.
+    school = names_lock("我们学校的教学楼很旧。", to_chinese=False)
+    assert school.locks == ()
+    assert school.references == (("教学楼", "教学楼", "Academia Hall", "location"),)
+
+    name = names_lock("Meet me at Academia Hall.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in name.locks] == [("教学楼", "Academia Hall")]
+
+    ordinary = names_lock("Our old academia hall has no lift.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())

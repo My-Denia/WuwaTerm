@@ -11,16 +11,23 @@ does not distribute generated game data or generated SQLite databases.
   `area/area.json` row references as locations, so place names such as
   拉贝尔学部 / Rabelle College and the rest of the Startorch campus reach
   `terms.db` (21 rows on the pinned data; 15 carry names the dictionary
-  lacked, 14 distinct pairs).
+  lacked, 14 distinct pairs). Like every term, an area title reaches
+  Chinese-to-English translation as a contextual reference, never a lock,
+  so the everyday 教学楼 ("teaching building") is a hint the model weighs
+  against the sentence; English-to-Chinese locks only the exact
+  "Academia Hall", not lowercase "academia hall".
 - A complete four-tier item family in `item/iteminfo.json` (初级X / 中级X /
   高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y")
   adds its base pair as a derived item row (`tier-base:<basic id>`), unless
-  that exact pair already exists: 15 rows on the pinned data, such as
-  密音筒 / Sealed Tube and 能源核心 / Energy Core. "Energy Cores" now locks
-  the whole material instead of leaving "Energy" and locking 核心 / Core.
-  The derived 调谐器 / Tuner row outranks the speaker 调音师 / Tuner, so
-  English "Tuner" now locks to 调谐器. The free-text exclusion metadata of
-  the pinned build is unchanged.
+  X or Y is already a surface of another record: 14 rows on the pinned
+  data, such as 密音筒 / Sealed Tube and 能源核心 / Energy Core. "Energy
+  Cores" now locks the whole material instead of leaving "Energy" and
+  locking 核心 / Core. A surface another record pairs differently already
+  names something else, so its base is not derived: on the pinned data
+  that drops only 调谐器 / Tuner, and bare "Tuner" stays the speaker
+  调音师 / Tuner contextual reference it was before, also where it means
+  the item; "Basic Tuner" and the other tier names still lock. The
+  free-text exclusion metadata of the pinned build is unchanged.
 
 ### Compatibility and distribution
 

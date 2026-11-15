@@ -208,18 +208,24 @@ def _item_tier_base_records(
     rows: list[Any],
     zh_map: dict[str, str],
     en_map: dict[str, str],
-    existing_pairs: set[tuple[str, str]],
+    existing: list[TermRecord],
 ) -> list[TermRecord]:
     """Return one derived item row per complete four-tier item family.
 
     A family is the set of iteminfo rows whose cleaned names are a tier
     prefix plus the same Chinese base X and, with the matching English tier
     prefix, the same English base Y. Only a family with all four tiers names
-    its base, and a base pair that is already a record is not repeated. The
-    row's source_id and text_key are ``tier-base:<id>`` with the smallest
-    Basic-tier row id, so the row says it is derived and stays deterministic
-    when one tier has several rows.
+    its base, and only while neither X nor Y is already a surface of an
+    existing record: a base pair that is already a record is not repeated,
+    and a bare X or Y another record pairs with a different counterpart
+    already names something else (Tuner is the speaker 调音师), so it does
+    not name the material unambiguously. The row's source_id and text_key
+    are ``tier-base:<id>`` with the smallest Basic-tier row id, so the row
+    says it is derived and stays deterministic when one tier has several
+    rows.
     """
+    zh_surfaces = {record.zh for record in existing}
+    en_surfaces = {record.en for record in existing}
     families: dict[tuple[str, str], dict[int, list[str]]] = defaultdict(dict)
     for row in rows:
         if not isinstance(row, dict):
@@ -239,7 +245,11 @@ def _item_tier_base_records(
 
     records: list[TermRecord] = []
     for (zh, en), tiers in sorted(families.items()):
-        if len(tiers) != len(ITEM_TIER_PREFIXES) or (zh, en) in existing_pairs:
+        if (
+            len(tiers) != len(ITEM_TIER_PREFIXES)
+            or zh in zh_surfaces
+            or en in en_surfaces
+        ):
             continue
         basic_id = min(tiers[0], key=_numeric_id_key)
         source_id = f"{ITEM_TIER_BASE_SOURCE_PREFIX}{basic_id}"
@@ -415,15 +425,11 @@ def iter_arikatsu_records(
             if record:
                 records.append(record)
 
-    # Derived last, so an exact pair any other source already carries is kept
-    # once.
+    # Derived last, so every other source's surfaces are known: an exact pair
+    # is kept once and a surface that already names something else is left
+    # to it.
     records.extend(
-        _item_tier_base_records(
-            bin_rows["item/iteminfo.json"],
-            zh_map,
-            en_map,
-            {(record.zh, record.en) for record in records},
-        )
+        _item_tier_base_records(bin_rows["item/iteminfo.json"], zh_map, en_map, records)
     )
 
     if not records:
