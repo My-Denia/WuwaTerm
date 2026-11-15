@@ -210,3 +210,16 @@ default. Comparing the request bodies against an echo gateway, old and new
 dictionary, it changes only D-004 segment 1 and D-009 segment 1 and no R
 request. So N2 is measured on D-004 and D-009 only: their usable count is at
 least the baseline's minus 2, and R is unaffected by construction.
+
+### Correction before the first call of the per-direction arm
+
+A dry run against the echo gateway showed that three en→zh D segments
+(D-009, D-012, D-014) cannot be answered from the baseline under the full
+reuse key, although their code path is unchanged: every request with a hard
+lock gets a fresh random placeholder prefix (`_new_placeholder_prefix`), so
+its body never repeats. P-Q3 is therefore shown in two parts. The six en→zh
+segments without a lock are answered from the baseline output (0 calls). For
+all nine en→zh segments, the request bodies of the baseline code (`e97b997`)
+and of the candidate, with the placeholder prefix fixed, are byte-identical
+(9 of 9 SHA-256 equal). The en→zh documents are not sent again, and en→zh
+results stay the baseline's. Only the zh→en D documents run.
