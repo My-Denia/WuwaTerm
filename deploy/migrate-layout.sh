@@ -169,9 +169,21 @@ else
 fi
 [ -f "$code/deploy/release-layout.sh" ] \
   || refuse "$code has no deploy/release-layout.sh; advance it to a commit that has this layout first"
-[ -z "$(GIT_OPTIONAL_LOCKS=0 command git -C "$code" status --porcelain --untracked-files=all)" ] \
-  || refuse "$code has modifications or untracked files"
-say "checkout is clean at $(command git -C "$code" rev-parse HEAD)"
+code_head=$(command git -C "$code" rev-parse HEAD)
+dirty=$(GIT_OPTIONAL_LOCKS=0 command git -C "$code" status --porcelain --untracked-files=all)
+# A run cut off after it recorded the commit and before it hid that file from git
+# leaves it untracked. Once the checkout is a release, that file is this script's
+# own when it is a regular file holding HEAD, and it is then the only entry the
+# gate overlooks: the step below installs the exclude. Anything else stays
+# refused and untouched.
+if [ "$dirty" = '?? .release-commit' ] && [ "$code" = "$rel" ] \
+    && [ -f "$rel/.release-commit" ] && [ ! -L "$rel/.release-commit" ] \
+    && [ "$(cat "$rel/.release-commit")" = "$code_head" ]; then
+  say "$rel/.release-commit is the commit recorded by an interrupted run; keeping it"
+  dirty=""
+fi
+[ -z "$dirty" ] || refuse "$code has modifications or untracked files"
+say "checkout is clean at $code_head"
 # Whatever else git ignores stays in the release and is deleted with it when it
 # is pruned. Only caches may go that way.
 stray=""

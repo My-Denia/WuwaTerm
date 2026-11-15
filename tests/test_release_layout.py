@@ -356,6 +356,13 @@ def interrupted(host: Host, stage: str) -> None:
             (base / name).rename(release / name)
         (base / "telegram/data").unlink()
         (base / "telegram/data").symlink_to(base / "current/data")
+    elif stage == "marker":  # cut off after the commit was recorded, before the git exclude
+        (base / "current").unlink()
+        for name in ("data", "state"):
+            (release / name).unlink()
+        (release / ".git/info/exclude").write_text("")
+        (base / "telegram/data").unlink()
+        (base / "telegram/data").symlink_to(base / "current/data")
 
 
 def _migrate_apart_from_its_temp_link(host: Host, stage: str) -> None:
@@ -445,7 +452,7 @@ def test_a_foreign_object_where_a_temporary_link_belongs_is_refused(
         assert host.tree() == before
 
 
-@pytest.mark.parametrize("stage", ["checkout", "state", "current"])
+@pytest.mark.parametrize("stage", ["checkout", "state", "marker", "current"])
 def test_an_interrupted_migration_resumes_to_the_same_layout(host, stage):
     interrupted(host, stage)
     resumed = host.migrate()
@@ -461,6 +468,31 @@ def test_an_interrupted_migration_resumes_to_the_same_layout(host, stage):
     assert (release / ".release-commit").read_text().strip() == host.head
     assert host.git(release, "status", "--porcelain", "--untracked-files=all") == ""
     assert "nothing to do" in host.migrate().stdout
+
+
+def test_a_dry_run_in_the_cut_off_marker_window_changes_nothing(host):
+    interrupted(host, "marker")
+    before = host.tree()
+    result = host.migrate("--dry-run")
+    assert result.returncode == 0, result.stderr
+    assert "DRY RUN" in result.stdout
+    assert host.tree() == before
+
+
+@pytest.mark.parametrize("foreign", ["other-content", "extra-file"])
+def test_a_cut_off_migration_still_refuses_what_it_did_not_create(host, foreign):
+    """Only the marker holding HEAD is overlooked; any other untracked path refuses."""
+
+    interrupted(host, "marker")
+    path = host.base / "releases/r1" / (".release-commit" if foreign == "other-content" else "notes.txt")
+    path.write_text("not mine\n", encoding="utf-8")
+    before = host.tree()
+    for args in ((), ("--dry-run",)):
+        result = host.migrate(*args)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "has modifications or untracked files" in result.stderr
+        assert host.tree() == before
+        assert path.read_text(encoding="utf-8") == "not mine\n"
 
 
 def test_migrating_again_after_later_updates_is_still_a_no_op(host):
