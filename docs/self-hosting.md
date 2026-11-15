@@ -365,7 +365,8 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 **For sentence translation (optional, shared by both surfaces):**
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
 plus the timeout and concurrency bounds beside them and
-`WUWATERM_TRANSLATION_THINKING` (default `disabled`, see
+`WUWATERM_TRANSLATION_THINKING` (default `omit`, which sends no reasoning
+field and leaves the provider default in place; see
 [privacy-and-llm](privacy-and-llm.md#llm-configuration)).
 
 **For semantic review (experimental, off by default):**

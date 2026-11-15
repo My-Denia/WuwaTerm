@@ -977,8 +977,8 @@ def test_translation_requests_do_not_take_the_semantic_review_thinking_setting(
 
     assert translate(app, token).status_code == 200
     body = model.body()
-    assert body["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in body and "max_tokens" not in body
+    assert "thinking" not in body and "reasoning_effort" not in body
+    assert "max_tokens" not in body
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(None, 75.0), ("120", 120.0), ("abc", 75.0), ("0", 75.0)])

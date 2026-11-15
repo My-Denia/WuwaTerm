@@ -52,15 +52,17 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Translation
 
-- Translation requests now say whether the model should think. They carried
-  no reasoning field, so a provider such as DeepSeek ran its default,
-  high-effort thinking, and a long segment could outlast the 45 s model
-  timeout. `WUWATERM_TRANSLATION_THINKING` is `disabled` by default
-  (`thinking: {"type": "disabled"}`); `low` and `high` turn thinking on at
-  that effort, and `omit` sends the previous request unchanged. It applies to
-  plain and HTML translation on both surfaces and is not applied to semantic
-  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. An unknown value
-  logs a warning and uses `disabled`.
+- New `WUWATERM_TRANSLATION_THINKING` setting for the reasoning field a
+  translation request carries. The default is `omit`: no field is sent, the
+  request is unchanged, and the provider default applies. On DeepSeek that is
+  high-effort thinking, and a long segment can outlast the 45 s model timeout.
+  `disabled` sends `thinking: {"type": "disabled"}`; it was measured
+  much faster but lowered translation quality (ordinary words rendered as
+  official names), so it is not the default. `low` and `high` turn thinking on
+  at that effort. It applies to plain and HTML translation on both surfaces
+  and is not applied to semantic review, which keeps
+  `WUWATERM_SEMANTIC_REVIEW_THINKING`. An unknown value logs a warning and
+  uses `omit`.
 
 ### Delivery And Deployment
 

@@ -56,11 +56,21 @@ def _body(monkeypatch, mode: str | None, *, html_mode: bool = False) -> dict:
     return seen[0]
 
 
+PREVIOUS_KEYS = ["model", "messages", "temperature"]  # the request before the setting existed
+
+
+@pytest.mark.parametrize("mode", [None, "", "omit"])
+def test_default_sends_exactly_the_previous_request(monkeypatch, mode):
+    body = _body(monkeypatch, mode)
+
+    assert list(body) == PREVIOUS_KEYS
+    assert "thinking" not in body and "reasoning_effort" not in body
+    assert "max_tokens" not in body
+
+
 @pytest.mark.parametrize(
     ("mode", "extra"),
     [
-        (None, DISABLED),
-        ("", DISABLED),
         ("disabled", DISABLED),
         ("low", {**ENABLED, "reasoning_effort": "low"}),
         ("high", {**ENABLED, "reasoning_effort": "high"}),
@@ -68,7 +78,7 @@ def _body(monkeypatch, mode: str | None, *, html_mode: bool = False) -> dict:
 )
 def test_mode_adds_only_the_reasoning_fields(monkeypatch, mode, extra):
     baseline = _body(monkeypatch, "omit")
-    assert list(baseline) == ["model", "messages", "temperature"]  # the previous request
+    assert list(baseline) == PREVIOUS_KEYS
 
     body = _body(monkeypatch, mode)
 
@@ -76,18 +86,23 @@ def test_mode_adds_only_the_reasoning_fields(monkeypatch, mode, extra):
     assert "max_tokens" not in body
 
 
-def test_unknown_mode_warns_and_uses_the_default(monkeypatch, caplog):
+def test_unknown_mode_warns_and_uses_omit(monkeypatch, caplog):
     baseline = _body(monkeypatch, "omit")
 
     with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
         body = _body(monkeypatch, "medium-ish")
 
-    assert body == {**baseline, **DISABLED}
-    assert [r.getMessage() for r in caplog.records] == [f"unknown {ENV}; using disabled"]
+    assert body == baseline
+    assert list(body) == PREVIOUS_KEYS
+    assert [r.getMessage() for r in caplog.records] == [f"unknown {ENV}; using omit"]
 
 
 @pytest.mark.parametrize(
-    ("mode", "extra"), [(None, DISABLED), ("high", {**ENABLED, "reasoning_effort": "high"})]
+    ("mode", "extra"),
+    [
+        ("disabled", DISABLED),
+        ("high", {**ENABLED, "reasoning_effort": "high"}),
+    ],
 )
 def test_html_mode_request_carries_the_field(monkeypatch, mode, extra):
     body = _body(monkeypatch, mode, html_mode=True)
@@ -96,7 +111,14 @@ def test_html_mode_request_carries_the_field(monkeypatch, mode, extra):
     assert "translate only the visible" in body["messages"][0]["content"]
 
 
-def test_omit_passes_no_extra_body_to_the_transport_call(monkeypatch):
+def test_html_mode_default_sends_no_reasoning_field(monkeypatch):
+    body = _body(monkeypatch, None, html_mode=True)
+
+    assert list(body) == PREVIOUS_KEYS
+    assert "translate only the visible" in body["messages"][0]["content"]
+
+
+def test_default_passes_no_extra_body_to_the_transport_call(monkeypatch):
     """An evaluation runner patches ``llm_transport.post_chat_completion`` and reads ``extra_body``."""
     calls: list[dict] = []
 
@@ -105,16 +127,22 @@ def test_omit_passes_no_extra_body_to_the_transport_call(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(llm_transport, "post_chat_completion", fake)
+    monkeypatch.delenv(ENV, raising=False)
+    asyncio.run(_call_llm_async("x", ()))
     for mode in ("omit", "disabled"):
         monkeypatch.setenv(ENV, mode)
         asyncio.run(_call_llm_async("x", ()))
 
-    assert calls == [{"purpose": "translation"}, {"purpose": "translation", "extra_body": DISABLED}]
+    assert calls == [
+        {"purpose": "translation"},
+        {"purpose": "translation"},
+        {"purpose": "translation", "extra_body": DISABLED},
+    ]
 
 
 def test_a_model_read_timeout_answers_llm_unavailable(monkeypatch, tmp_path, sample_db):
     """The failure thinking mode caused: the model outlasts the timeout, the API answers 503."""
-    _configure(monkeypatch, None)
+    _configure(monkeypatch, "disabled")
 
     posted: list[dict] = []
 

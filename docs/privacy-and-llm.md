@@ -101,13 +101,15 @@ Optional LLM environment variables:
 - `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`, finite range `0.1..300`.
 - `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`, range `1..64`; max
   in-flight LLM calls.
-- `WUWATERM_TRANSLATION_THINKING`, default `disabled`; one of `disabled`,
-  `low`, `high`, `omit`. `disabled` sends `thinking: {"type": "disabled"}`;
-  `low` and `high` turn thinking on at that `reasoning_effort`; `omit` sends
-  neither field, so the provider default applies, which on DeepSeek is
-  high-effort thinking and can outlast `WUWATERM_LLM_TIMEOUT_SECONDS` on a
-  long segment. Translation requests only; an unknown value logs a warning
-  and uses `disabled`. Read on every request.
+- `WUWATERM_TRANSLATION_THINKING`, default `omit`; one of `omit`, `disabled`,
+  `low`, `high`. `omit` sends neither field, so the provider default applies,
+  which on DeepSeek is high-effort thinking and can outlast
+  `WUWATERM_LLM_TIMEOUT_SECONDS` on a long segment. `disabled` sends
+  `thinking: {"type": "disabled"}`; it was measured much faster, but lowered
+  translation quality (ordinary words rendered as official names). `low` and
+  `high` turn thinking on at that `reasoning_effort`. Translation requests
+  only; an unknown value logs a warning and uses `omit`. Read on every
+  request.
 
 ## Configuration Validation
 

@@ -68,7 +68,7 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 TRANSLATION_THINKING_ENV = "WUWATERM_TRANSLATION_THINKING"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
-TRANSLATION_THINKING_DEFAULT = "disabled"
+TRANSLATION_THINKING_DEFAULT = "omit"
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
     "event loop; use translate_async() or translate_html_async() instead."
@@ -1618,12 +1618,12 @@ async def _call_llm_async(
 def _translation_thinking_body() -> dict:
     """Provider reasoning fields for one translation request.
 
-    ``WUWATERM_TRANSLATION_THINKING`` is read per call: ``disabled`` (the
-    default) switches thinking off, ``low``/``high`` turn it on at that
-    ``reasoning_effort``, and ``omit`` sends neither field so the provider
-    default decides (high-effort thinking on DeepSeek, which can run past the
-    translation timeout on a long segment). An unknown value falls back to the
-    default rather than failing every translation.
+    ``WUWATERM_TRANSLATION_THINKING`` is read per call: ``omit`` (the default)
+    sends neither field, so the provider default decides (high-effort thinking
+    on DeepSeek, which can run past the translation timeout on a long
+    segment); ``disabled`` switches thinking off, and ``low``/``high`` turn it
+    on at that ``reasoning_effort``. An unknown value falls back to ``omit``
+    rather than failing every translation.
     """
     mode = os.getenv(TRANSLATION_THINKING_ENV, "").strip() or TRANSLATION_THINKING_DEFAULT
     if mode not in TRANSLATION_THINKING_MODES:
