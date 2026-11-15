@@ -72,7 +72,10 @@ of the updater's files and can only be recovered by byte-identical copies, which
 that release always has:
 `sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full` (a rollback
 that fails prints the exact command; otherwise the `release: created rN` line
-of the run names the release). The next update that passes removes it.
+of the run names the release). The command is self-contained: it runs the tools
+of the release it names, so it works unchanged in a fresh shell, and
+`WUWATERM_DEPLOY_ROOT` stays available for naming a checkout explicitly. The
+next update that passes removes the release.
 
 A host that still runs the old in-place checkout (`/opt/wuwaterm/current` as a
 directory holding its own `data/`, `.env` and `.deployments/`) moves with
@@ -764,17 +767,24 @@ lock between source preparation and activation, or use a flag to skip locking.
 After an interrupted runtime-only transaction, use the explicit recovery entry:
 
 ```bash
-sh deploy/vps-update.sh --recover-runtime
+sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-runtime
 ```
 
 Recovery validates the saved transaction, trusted local tool/Compose binding,
 old manifest and images, and unchanged database. It can handle stopped or
 partially switched containers; it does not require network access or the latest
 remote `main`. Keep the trusted release checkout that wrote the journal, and
-the recovery images, intact; run recovery from that release.
-Normal deployment refuses an unresolved transaction until recovery succeeds.
+the recovery images, intact; run recovery from that release, by that absolute
+path. The path is what selects the release: the two recovery modes run from the
+checkout their script was invoked from, not from `current`, which deliberately
+stays on the release that is serving (see [Release layout](#release-layout)).
+Normal deployment refuses an unresolved transaction until recovery succeeds;
+that refusal is the Full/Runtime admission gate, not a statement about the
+read-only `deploy/setup.sh --status` query, which reports what it can observe.
 Uncatchable termination or host power loss is not an atomic Docker operation:
 the durable record makes the unfinished transition explicit and recoverable.
+A transaction that had already committed only needs its release link settled,
+and recovery completes that from the recorded binding.
 
 Recovery never restores or rewrites `terms.db`. If another process changed it,
 or the journal/image binding cannot be trusted, stop and resolve that condition
@@ -871,7 +881,9 @@ sh /opt/wuwaterm/current/deploy/vps-update.sh
 ```
 
 `WUWATERM_DEPLOY_ROOT` names the release to run from and defaults to
-`/opt/wuwaterm/current`. Before any stop the updater:
+`/opt/wuwaterm/current`; `--recover-full` and `--recover-runtime` default to
+the checkout the invoked script belongs to instead, because the release that
+wrote the journal is not necessarily `current`. Before any stop the updater:
 
 1. fetches `origin/main`, builds the next release when `current` is behind it
    (see [Release layout](#release-layout)), requires that release to be clean
@@ -953,13 +965,15 @@ sh deploy/vps-update.sh --runtime-only   # refused likewise
 ```
 
 Recovery runs from the release that wrote the journal, which is not
-necessarily `current`. The explicit
-recovery entry classifies the host by what is actually observed
-— pointer, live database hash, manifest, and both containers' image
-ids/references/running states — never by the journal's phase marker alone:
+necessarily `current`. Invoke that release's own script by its absolute path:
+the path is the binding, so the command needs no environment and works in a
+fresh shell. The explicit recovery entry classifies the host by what is
+actually observed — pointer, live database hash, manifest, and both
+containers' image ids/references/running states — never by the journal's phase
+marker alone:
 
 ```bash
-sh deploy/vps-update.sh --recover-full
+sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
 ```
 
 - Observed NEW binding complete (pointer, database, manifest, and every
@@ -987,6 +1001,20 @@ sh deploy/vps-update.sh --recover-full
   reentrant. A missing live database is restored from the recorded verified
   backup; a first deploy (no recorded old binding) restores the recorded
   absence and starts nothing.
+
+Recovery also settles the release link, because a committed transaction and
+`current` are one binding. The normal path switches `current` after the
+transaction committed, so a kill between those two steps leaves a host whose
+pointer, database and surfaces already run the new deployment while `current`
+still names the release that was serving. `--recover-full` therefore ends by
+proving the published binding again from observation — pointer, the manifest
+that must match it, the live database hash and every present surface — and
+switches `current` when that commit is the commit of the release the command
+was run from. The record's own exit status never selects a release: a
+binding that was rolled back, a commit this checkout does not carry, a second
+release with a different commit, or an unprovable state leaves `current`
+exactly where it was, and the last two refuse instead of reporting a
+completion. Repeating the command after it succeeded changes nothing.
 
 Before any of that, recovery establishes an admissibility preflight that
 mutates nothing: every journal-referenced path (backup, old manifest) is

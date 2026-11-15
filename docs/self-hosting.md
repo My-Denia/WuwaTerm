@@ -81,6 +81,18 @@ from a moving branch is possible and is a worse idea than it looks: the data pin
 and the schema version travel with the source, so a tag is what makes a working
 install describable later.
 
+A clone of the v0.8.6 tag installs Telegram v0.2.9 by default, because that
+Core release records v0.2.9 in `contracts/products.json` and `deploy/setup.sh`
+takes the recorded tag. `main` and later maintenance releases record v0.2.10.
+To pair the tagged Core with the newer Telegram release, name it on the install
+command:
+
+```bash
+WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram
+```
+
+The variable names a published tag; there is no `latest`.
+
 For the source path, create the environment with the Bot, API, and builder
 extras. This supports every source-path command in this guide:
 
@@ -148,9 +160,13 @@ What it does, in this order:
 5. `--with-telegram` installs no bot here. It resolves the Telegram product,
    prepares its checkout when `--telegram-dir` is given (below), and prints
    that product's own install steps with this installation's paths filled in.
-   `WUWATERM_TELEGRAM_VERSION` names another release tag; the default is the
-   tag `contracts/products.json` records (`v0.2.10` today, and the constant in
-   the script when that file is absent).
+   `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
+   tag this checkout's `contracts/products.json` records (`v0.2.10` on `main`,
+   `v0.2.9` on the `v0.8.6` tag), falling back to the constant in the script
+   when that file is absent. A tagged Core therefore installs the Telegram
+   release it recorded rather than the newest one; naming the tag on the
+   command is how a tagged install moves it (see [Get The Source At A Release
+   Tag](#get-the-source-at-a-release-tag)).
 6. `--with-web` writes `state-web/web.env` (mode `0600`) with the runtime
    mode, the external HTTPS origin (`--web-origin`), a dedicated
    `translate,meta` device token, a generated `WUWATERM_WEB_EDGE_SECRET`, the

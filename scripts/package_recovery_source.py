@@ -34,10 +34,14 @@ ENTRYPOINTS = {
     "runtime": (b"--recover-runtime)", (
         b"exec python3 scripts/runtime_update.py --recover-runtime",
         b'exec "$deploy_python" scripts/runtime_update.py --recover-runtime',
+        # A release layout settles `current` after the transaction, so the
+        # recovery command runs and returns instead of exec'ing away.
+        b'"$deploy_python" scripts/runtime_update.py --recover-runtime',
     )),
     "full": (b"--recover-full)", (
         b"exec python3 scripts/full_update.py recover",
         b'exec "$deploy_python" scripts/full_update.py recover',
+        b'"$deploy_python" scripts/full_update.py recover',
     )),
 }
 FINGERPRINT_MARKER_PREFIX = b"# WUWATERM-LEGACY-ADMISSION-FINGERPRINT:"

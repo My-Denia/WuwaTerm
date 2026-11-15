@@ -30,10 +30,51 @@ if [ "$#" -ne 0 ]; then
   exit 64
 fi
 
-DEPLOY_ROOT="${WUWATERM_DEPLOY_ROOT:-/opt/wuwaterm/current}"
+# A recovery entry runs the tools of the release that WROTE the record: a
+# failed deployment deliberately leaves /opt/wuwaterm/current on the release
+# that is serving, so the `current` default would hand recovery to the wrong
+# release - a different tool fingerprint and a different HEAD - even when the
+# operator invoked the failed release's own script by absolute path. `$0`
+# therefore binds those two modes to the checkout they were invoked from,
+# which is what makes the command the updater prints work in a fresh shell.
+# An explicit WUWATERM_DEPLOY_ROOT still wins, and every other mode keeps the
+# documented `current` entry.
+case "$mode" in
+  recover-full|recover-runtime)
+    if [ -n "${WUWATERM_DEPLOY_ROOT:-}" ]; then
+      DEPLOY_ROOT=$WUWATERM_DEPLOY_ROOT
+    else
+      script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || {
+        echo "refusing recovery: the invoked script's directory cannot be resolved" >&2
+        exit 1
+      }
+      DEPLOY_ROOT=$(CDPATH= cd -- "$script_dir/.." && pwd -P) || {
+        echo "refusing recovery: the invoked script's checkout cannot be resolved" >&2
+        exit 1
+      }
+    fi
+    ;;
+  *)
+    DEPLOY_ROOT="${WUWATERM_DEPLOY_ROOT:-/opt/wuwaterm/current}"
+    ;;
+esac
 FAIL_STEP="${WUWATERM_FAIL_STEP:-}"
 
 cd "$DEPLOY_ROOT"
+
+if [ "$mode" = recover-full ] || [ "$mode" = recover-runtime ]; then
+  # Recovery changes bindings. A checkout without the tools to do that is not
+  # the release that wrote the record, so it is refused before anything runs.
+  for required in deploy/vps-update.sh deploy/docker-compose.yml \
+    scripts/full_update.py scripts/runtime_update.py; do
+    if [ ! -f "$required" ]; then
+      echo "refusing recovery: $DEPLOY_ROOT is not a deployment checkout" >&2
+      echo "($required is missing); run the release that wrote the record:" >&2
+      echo "  sh <release>/deploy/vps-update.sh --recover-full" >&2
+      exit 1
+    fi
+  done
+fi
 
 # Release layout: <base>/releases/rN is the checkout and <base> holds the
 # state every release shares (data/, state/, state-api/, .env, .deployments/,
@@ -203,6 +244,84 @@ if [ -n "$release_name" ]; then
   esac
 fi
 
+# A completed transaction and the `current` link are ONE binding: the pointer
+# names a commit, and `current` names the release whose code carries it. The
+# normal path switches the link after the transaction committed, so an
+# interruption in between leaves a host that already serves the new deployment
+# while `current` still names the release that was serving. Recovery therefore
+# settles the link too, and settles it from EVIDENCE rather than from its own
+# exit status: `published` re-proves the observed binding (pointer, matching
+# manifest, live database, every present surface) and prints the commit it
+# proves. The link moves only to a release authenticated for that commit, so a
+# rolled-back binding, an unresolved one, or a candidate that never deployed
+# it never moves `current`.
+release_settle() {
+  [ -n "$release_name" ] || return 0
+  settle_current=$(readlink "$state_root/current" 2>/dev/null || true)
+  settle_current_commit=""
+  if [ -n "$settle_current" ] && \
+    [ -f "$state_root/$settle_current/.release-commit" ]; then
+    settle_current_commit=$(tr -d '\n' < "$state_root/$settle_current/.release-commit")
+  fi
+  # An open runtime-only transaction can have moved the pointer without
+  # committing it, so a settlement must not read it: the record is recovered
+  # first, and only a closed transaction may contribute evidence here.
+  if ! "$deploy_python" scripts/runtime_update.py --check-runtime-journal \
+    >/dev/null 2>&1; then
+    echo "release: an open runtime-only transaction must be recovered first;" >&2
+    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
+    return 1
+  fi
+  if settle_published=$("$deploy_python" scripts/full_update.py published); then
+    :
+  else
+    settle_status=$?
+    if [ "$settle_status" -eq 10 ]; then
+      echo "release: no deployment is published; $state_root/current stays at" \
+        "${settle_current:-nothing}"
+      return 0
+    fi
+    echo "release: the published binding could not be proven from observation" >&2
+    echo "  $state_root/current stays at ${settle_current:-nothing}" >&2
+    echo "release: run recovery from the release that wrote the record, with" >&2
+    echo "  its records intact: sh $code_root/deploy/vps-update.sh --recover-full" >&2
+    return 1
+  fi
+  if [ "$settle_current_commit" = "$settle_published" ]; then
+    echo "release: $settle_current is current for $settle_published"
+    return 0
+  fi
+  settle_release_commit=$(tr -d '\n' \
+    < "$state_root/releases/$release_name/.release-commit" 2>/dev/null || true)
+  settle_head=$(git rev-parse HEAD 2>/dev/null || true)
+  settle_dirty=$(git status --porcelain --untracked-files=all 2>/dev/null || true)
+  if [ "$settle_release_commit" = "$settle_published" ] && \
+    [ "$settle_head" = "$settle_published" ] && [ -z "$settle_dirty" ]; then
+    if release_publish "$state_root" "$release_name"; then
+      echo "release: $release_name (current) for $settle_published"
+      return 0
+    fi
+    echo "release: the deployment is complete, but $state_root/current could not" >&2
+    echo "be switched to $release_name; it stays at ${settle_current:-nothing}" >&2
+    return 1
+  fi
+  # The pointer names a commit this checkout does not carry: refuse, and name
+  # the release that does, instead of moving `current` to a checkout nobody can
+  # authenticate for that commit.
+  echo "release: the deployment pointer names $settle_published, which $release_name" >&2
+  echo "does not carry; $state_root/current stays at ${settle_current:-nothing}" >&2
+  for settle_dir in "$state_root"/releases/r[1-9]*; do
+    [ -d "$settle_dir" ] && [ ! -L "$settle_dir" ] || continue
+    case "$(tr -d '\n' < "$settle_dir/.release-commit" 2>/dev/null || true)" in
+      "$settle_published")
+        echo "release: run recovery from ${settle_dir##*/}:" >&2
+        echo "  sh $settle_dir/deploy/vps-update.sh --recover-full" >&2
+        ;;
+    esac
+  done
+  return 1
+}
+
 case "$mode" in
   runtime-only)
     if [ -n "$release_name" ]; then
@@ -216,11 +335,15 @@ case "$mode" in
     ;;
   recover-runtime)
     cd "$code_root"
-    exec "$deploy_python" scripts/runtime_update.py --recover-runtime
+    "$deploy_python" scripts/runtime_update.py --recover-runtime
+    release_settle
+    exit 0
     ;;
   recover-full)
     cd "$code_root"
-    exec "$deploy_python" scripts/full_update.py recover
+    "$deploy_python" scripts/full_update.py recover
+    release_settle
+    exit 0
     ;;
 esac
 
@@ -618,7 +741,7 @@ rollback_on_failure() {
     echo "restarted. Stop both containers by hand, then roll back." >&2
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-    echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
+    echo "  sh $code_root/deploy/vps-update.sh --recover-full" >&2
     exit "$status"
   fi
 
@@ -732,7 +855,7 @@ rollback_on_failure() {
   if [ "$rollback_failed" -ne 0 ]; then
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-    echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
+    echo "  sh $code_root/deploy/vps-update.sh --recover-full" >&2
   else
     # The rollback restored the previous binding completely, so the armed
     # journal no longer describes an open transaction. It may be dropped
@@ -745,7 +868,7 @@ rollback_on_failure() {
     if ! python3 scripts/full_update.py rollback-clear; then
       echo "warning: the restored binding failed observed verification; manual recovery is required" >&2
       echo "warning: the full-transaction journal is KEPT for recovery:" >&2
-      echo "  sh ${code_prefix}deploy/vps-update.sh --recover-full" >&2
+      echo "  sh $code_root/deploy/vps-update.sh --recover-full" >&2
     fi
   fi
   exit "$status"

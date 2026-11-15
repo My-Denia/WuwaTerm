@@ -95,6 +95,16 @@ when you point it at that checkout (`--telegram-dir`), then prints the
 product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
+A clone of the Core v0.8.6 tag installs Telegram v0.2.9 by default, the release
+that tag records; `main` and later maintenance releases record v0.2.10. To pair
+the tagged Core with the newer Telegram release, name the tag explicitly:
+
+```bash
+WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram
+```
+
+The variable always names a published tag, never `latest`.
+
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
 lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot

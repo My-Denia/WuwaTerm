@@ -1531,7 +1531,7 @@ def _new_deployment() -> int:
 
 def _recovery() -> int:
     journal = _load_journal()
-    if journal["status"] in {"committed", "rolled_back"}:
+    if journal["status"] == "rolled_back":
         raise RuntimeUpdateError("no_recovery_needed")
     if "old_bot_present" not in journal:
         raise RuntimeUpdateError("recovery_tool_mismatch")
@@ -1545,6 +1545,21 @@ def _recovery() -> int:
     if _tool_hash() != journal["tool_hash"]:
         raise RuntimeUpdateError("recovery_tool_mismatch")
     _assert_directories()
+    if journal["status"] == "committed":
+        # The transaction committed its health check, manifest and pointer
+        # before the process died; only the release link can still be
+        # unsettled. Re-prove the committed binding from observation and
+        # report a finished transaction: nothing is stopped or restarted, and
+        # a binding that no longer matches the record is not certified.
+        db_snapshot = _database_snapshot()
+        if not _idempotent_target(
+            journal["source_commit"],
+            db_snapshot,
+            _pointer(ROOT / ".deploy_commit"),
+        ):
+            raise RuntimeUpdateError("invalid_pointer")
+        print("runtime-only transaction already committed; nothing to restore")
+        return 0
     global _in_rollback, _termination_requested
     _in_rollback = True
     _termination_requested = False
