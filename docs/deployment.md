@@ -96,11 +96,15 @@ container is touched. Until the containers are recreated, links inside
 `releases/r1` keep their old mount paths resolving (the first update that
 passes removes them), and `telegram/data` is repointed at
 `/opt/wuwaterm/data` (a link through `current` in any other form makes it
-refuse). Running it again changes nothing, and an interrupted run resumes. The first
-update afterwards must be a full one (it recreates bot and API, a pause of a
-few seconds): `--runtime-only` refuses while a container still mounts the old
-paths. Source-capsule recovery with `scripts/legacy_recovery.py` expects a
-checkout that holds its own state, so it does not apply to a release.
+refuse). Running it again changes nothing, and an interrupted run resumes: the
+two temporary links it builds beside `current` and `telegram/data` are renamed
+into place rather than followed, so a run that stopped between building one and
+renaming it reuses it instead of creating a link inside the release or data
+directory it already points at. The first update afterwards must be a full one
+(it recreates bot and API, a pause of a few seconds): `--runtime-only` refuses
+while a container still mounts the old paths. Source-capsule recovery with
+`scripts/legacy_recovery.py` expects a checkout that holds its own state, so it
+does not apply to a release.
 
 Both serving services read that one file through Compose `env_file`; the
 builder has no `env_file` at all, and `.env` is ignored and excluded from the
