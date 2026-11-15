@@ -1602,6 +1602,80 @@ def test_ordinary_plant_words_are_not_offered_as_name_references(
     assert locked.references == ()
 
 
+# Chinese-to-English wording for a one-character reference (spelled out, not
+# rebuilt from the code's own format string).
+SCOPED_CAMELLYA_LINE = (
+    "椿 = Camellya (resonator; one-character name: use Camellya only where 椿 on its "
+    "own names this resonator; where 椿 is part of another word, such as a plant, "
+    "flower, food, skill or effect name, translate that word by its meaning)"
+)
+
+
+def _reference_block(monkeypatch, db, text, *, to_chinese=False):
+    """The reference lines of the system prompt a real translation request carries."""
+    _, payload = _reference_payload(monkeypatch, db, text, "Camellya joins.", to_chinese=to_chinese)
+    system = payload["messages"][0]["content"]
+    if "Dictionary term references:\n" not in system:
+        return []
+    return system.split("Dictionary term references:\n", 1)[1].splitlines()
+
+
+def test_one_character_name_reference_says_where_the_name_applies(
+    monkeypatch, single_name_db
+):
+    with connect(single_name_db) as conn:
+        insert_records(conn, [TermRecord("resonator", "fixture", "5", "5", "今汐", "Jinhsi")])
+        conn.commit()
+
+    # The one-character line is scoped; the multi-character line is the plain form.
+    lines = _reference_block(monkeypatch, single_name_db, "今汐和椿加入队伍。")
+    assert lines == ["今汐 = Jinhsi (resonator)", SCOPED_CAMELLYA_LINE]
+
+
+def test_one_character_reference_scope_applies_to_chinese_to_english_only(
+    monkeypatch,
+):
+    enable_llm_env(monkeypatch)
+    plain = {}
+    for to_chinese in (False, True):
+        seen = []
+
+        def handler(request, seen=seen):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        asyncio.run(
+            _call_llm_async(
+                "x",
+                (),
+                to_chinese=to_chinese,
+                references=(("椿", "椿", "Camellya", "resonator"),),
+                transport=httpx.MockTransport(handler),
+            )
+        )
+        plain[to_chinese] = seen[0]["messages"][0]["content"].split("references:\n", 1)[1]
+
+    assert plain[False] == SCOPED_CAMELLYA_LINE
+    assert plain[True] == "椿 = 椿 (resonator)"  # English-to-Chinese keeps the plain line
+
+
+@pytest.mark.parametrize("text", ["香椿炒蛋和椿芽都是春天的菜。", "今天的香椿很嫩。"])
+def test_one_character_name_inside_an_ordinary_plant_word_gets_no_reference(
+    monkeypatch, single_name_db, text
+):
+    # MY-18: the matcher decides first. An ordinary compound is never offered as
+    # the name, so the scoped line only ever describes a real name mention.
+    assert _reference_block(monkeypatch, single_name_db, text) == []
+
+
+def test_a_name_and_an_ordinary_compound_in_one_text_give_one_scoped_reference(
+    monkeypatch, single_name_db
+):
+    text = "椿加入队伍，大家都爱吃香椿。"
+
+    assert _reference_block(monkeypatch, single_name_db, text) == [SCOPED_CAMELLYA_LINE]
+
+
 def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
     # 心 is a 3.7 resonator (Hsin) and the ordinary word for heart, mind or
     # core. Telling the model 心 = Hsin in ordinary prose would invite the very

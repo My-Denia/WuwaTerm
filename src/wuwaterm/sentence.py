@@ -66,7 +66,10 @@ _PARAGRAPH_BREAK_RE = re.compile(r"\n[^\S\n]*\n\s*")
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
-TRANSLATION_THINKING_ENV = "WUWATERM_TRANSLATION_THINKING"
+# One reasoning setting per direction: Chinese-to-English and English-to-Chinese
+# have different latency and quality trade-offs.
+TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
+TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
 TRANSLATION_THINKING_DEFAULT = "omit"
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
@@ -1615,25 +1618,48 @@ async def _call_llm_async(
         )
 
 
-def _translation_thinking_body() -> dict:
+def _translation_thinking_body(to_chinese: bool) -> dict:
     """Provider reasoning fields for one translation request.
 
-    ``WUWATERM_TRANSLATION_THINKING`` is read per call: ``omit`` (the default)
-    sends neither field, so the provider default decides (high-effort thinking
-    on DeepSeek, which can run past the translation timeout on a long
-    segment); ``disabled`` switches thinking off, and ``low``/``high`` turn it
-    on at that ``reasoning_effort``. An unknown value falls back to ``omit``
-    rather than failing every translation.
+    The mode comes from ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` for a request
+    into Chinese and ``WUWATERM_TRANSLATION_THINKING_ZH_EN`` for one into
+    English, read per call. ``omit`` (the default) sends neither field, so the
+    provider default decides (high-effort thinking on DeepSeek, which can run
+    past the translation timeout on a long segment); ``disabled`` switches
+    thinking off, and ``low``/``high`` turn it on at that ``reasoning_effort``.
+    An unknown value falls back to ``omit`` rather than failing every
+    translation.
     """
-    mode = os.getenv(TRANSLATION_THINKING_ENV, "").strip() or TRANSLATION_THINKING_DEFAULT
+    env = TRANSLATION_THINKING_EN_ZH_ENV if to_chinese else TRANSLATION_THINKING_ZH_EN_ENV
+    mode = os.getenv(env, "").strip() or TRANSLATION_THINKING_DEFAULT
     if mode not in TRANSLATION_THINKING_MODES:
-        LOGGER.warning("unknown %s; using %s", TRANSLATION_THINKING_ENV, TRANSLATION_THINKING_DEFAULT)
+        LOGGER.warning("unknown %s; using %s", env, TRANSLATION_THINKING_DEFAULT)
         mode = TRANSLATION_THINKING_DEFAULT
     if mode == "disabled":
         return {"thinking": {"type": "disabled"}}
     if mode == "omit":
         return {}
     return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
+
+
+def _reference_line(source: str, target: str, category: str, to_chinese: bool) -> str:
+    """One dictionary reference line as the model sees it.
+
+    A single Chinese character is also part of many ordinary words (a plant,
+    a dish, a skill or an effect), and the model has no way to tell from the
+    bare line ``X = Name (resonator)`` which use a given occurrence is. When
+    translating into English, a one-character source therefore says up front
+    where the official name applies. The rule is general, not a word list.
+    English-to-Chinese lines and multi-character sources keep the plain form.
+    """
+    if not to_chinese and len(source) == 1 and _is_cjk_character(source):
+        return (
+            f"{source} = {target} ({category}; one-character name: use {target} "
+            f"only where {source} on its own names this {category}; where "
+            f"{source} is part of another word, such as a plant, flower, food, "
+            f"skill or effect name, translate that word by its meaning)"
+        )
+    return f"{source} = {target} ({category})"
 
 
 async def _call_llm_async_with_client(
@@ -1652,7 +1678,7 @@ async def _call_llm_async_with_client(
     official_index = 1 if to_chinese else 2
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     reference_lines = "\n".join(
-        f"{source} = {(zh, en)[official_index - 1]} ({category})"
+        _reference_line(source, (zh, en)[official_index - 1], category, to_chinese)
         for source, zh, en, category in references
     )
     if to_chinese:
@@ -1695,7 +1721,7 @@ async def _call_llm_async_with_client(
     ]
     # Only add the keyword when there is a field to send, so ``omit`` is the
     # exact call (and request) this function made before the setting existed.
-    extra_body = _translation_thinking_body()
+    extra_body = _translation_thinking_body(to_chinese)
     options = {"extra_body": extra_body} if extra_body else {}
     return await llm_transport.post_chat_completion(
         client, messages, purpose="translation", **options

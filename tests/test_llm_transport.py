@@ -347,7 +347,8 @@ GOLDEN_CASES = [
 @pytest.mark.parametrize("index", range(len(GOLDEN_CASES)))
 def test_translation_request_body_is_byte_identical_to_pre_extraction(index, monkeypatch):
     # "omit" sends no reasoning field, which is the request recorded below.
-    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING", "omit")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "omit")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "omit")
     seen = {}
 
     def handler(request):

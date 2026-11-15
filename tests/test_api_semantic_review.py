@@ -732,8 +732,9 @@ def test_a_translation_without_context_keeps_the_original_request_body(
     tmp_path, sample_db, monkeypatch
 ):
     configure_llm(monkeypatch)
-    # The original body predates WUWATERM_TRANSLATION_THINKING; "omit" is it.
-    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING", "omit")
+    # The original body predates the translation thinking settings; "omit" is it.
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "omit")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "omit")
     model = FakeModel("Please translate this sentence")
     app, _, token = semantic_app(tmp_path, sample_db, model)
 
@@ -970,7 +971,8 @@ def test_translation_requests_do_not_take_the_semantic_review_thinking_setting(
     tmp_path, sample_db, monkeypatch
 ):
     configure_llm(monkeypatch)
-    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING", raising=False)
+    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", raising=False)
+    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", raising=False)
     monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "high")
     model = FakeModel("译文")
     app, _, token = semantic_app(tmp_path, sample_db, model)
