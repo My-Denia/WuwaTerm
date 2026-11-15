@@ -1602,8 +1602,13 @@ def test_ordinary_plant_words_are_not_offered_as_name_references(
     assert locked.references == ()
 
 
-# Chinese-to-English wording for a one-character reference (spelled out, not
-# rebuilt from the code's own format string).
+ZH_EN = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
+EN_ZH = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
+PLAIN_CAMELLYA_LINE = "椿 = Camellya (resonator)"  # the line main sends
+
+# Chinese-to-English wording for a one-character reference, sent only with
+# WUWATERM_TRANSLATION_THINKING_ZH_EN=disabled (spelled out, not rebuilt from
+# the code's own format string).
 SCOPED_CAMELLYA_LINE = (
     "椿 = Camellya (resonator; one-character name: use Camellya only where 椿 on its "
     "own names this resonator; where 椿 is part of another word, such as a plant, "
@@ -1611,8 +1616,16 @@ SCOPED_CAMELLYA_LINE = (
 )
 
 
-def _reference_block(monkeypatch, db, text, *, to_chinese=False):
-    """The reference lines of the system prompt a real translation request carries."""
+def _reference_block(monkeypatch, db, text, *, to_chinese=False, zh_en=None):
+    """The reference lines of the system prompt a real translation request carries.
+
+    ``zh_en`` is the value of WUWATERM_TRANSLATION_THINKING_ZH_EN (unset when None).
+    """
+    monkeypatch.delenv(EN_ZH, raising=False)
+    if zh_en is None:
+        monkeypatch.delenv(ZH_EN, raising=False)
+    else:
+        monkeypatch.setenv(ZH_EN, zh_en)
     _, payload = _reference_payload(monkeypatch, db, text, "Camellya joins.", to_chinese=to_chinese)
     system = payload["messages"][0]["content"]
     if "Dictionary term references:\n" not in system:
@@ -1628,14 +1641,44 @@ def test_one_character_name_reference_says_where_the_name_applies(
         conn.commit()
 
     # The one-character line is scoped; the multi-character line is the plain form.
-    lines = _reference_block(monkeypatch, single_name_db, "今汐和椿加入队伍。")
+    lines = _reference_block(
+        monkeypatch, single_name_db, "今汐和椿加入队伍。", zh_en="disabled"
+    )
     assert lines == ["今汐 = Jinhsi (resonator)", SCOPED_CAMELLYA_LINE]
+
+
+@pytest.mark.parametrize("zh_en", [None, "", "omit", "low", "high"])
+def test_one_character_name_reference_is_the_plain_line_unless_thinking_is_disabled(
+    monkeypatch, single_name_db, zh_en
+):
+    # The scoped wording compensates for thinking being off and was measured only
+    # with ZH_EN=disabled. In every other mode, the shipped default (omit)
+    # included, the request carries the plain line main sends.
+    lines = _reference_block(monkeypatch, single_name_db, "椿加入队伍。", zh_en=zh_en)
+    assert lines == [PLAIN_CAMELLYA_LINE]
+
+
+def test_the_scoped_line_follows_the_zh_en_mode_not_the_en_zh_mode(
+    monkeypatch, single_name_db
+):
+    # EN_ZH=disabled does not scope a Chinese-to-English line; only ZH_EN does.
+    monkeypatch.delenv(ZH_EN, raising=False)
+    monkeypatch.setenv(EN_ZH, "disabled")
+    _, payload = _reference_payload(
+        monkeypatch, single_name_db, "椿加入队伍。", "Camellya joins.", to_chinese=False
+    )
+    system = payload["messages"][0]["content"]
+    assert system.endswith("Dictionary term references:\n" + PLAIN_CAMELLYA_LINE)
+    assert "thinking" not in payload
 
 
 def test_one_character_reference_scope_applies_to_chinese_to_english_only(
     monkeypatch,
 ):
     enable_llm_env(monkeypatch)
+    # Thinking off in both directions: only the Chinese-to-English line is scoped.
+    monkeypatch.setenv(ZH_EN, "disabled")
+    monkeypatch.setenv(EN_ZH, "disabled")
     plain = {}
     for to_chinese in (False, True):
         seen = []
@@ -1673,7 +1716,9 @@ def test_a_name_and_an_ordinary_compound_in_one_text_give_one_scoped_reference(
 ):
     text = "椿加入队伍，大家都爱吃香椿。"
 
-    assert _reference_block(monkeypatch, single_name_db, text) == [SCOPED_CAMELLYA_LINE]
+    assert _reference_block(
+        monkeypatch, single_name_db, text, zh_en="disabled"
+    ) == [SCOPED_CAMELLYA_LINE]
 
 
 def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
