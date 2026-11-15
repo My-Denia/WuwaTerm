@@ -260,3 +260,16 @@ D-004 are now official; lowercase "sealed tubes" is not matched. N2 is not
 met for D-004: at the shipped default it timed out, and under `disabled` its
 three C grades are of the kinds the `disabled` run had without the dictionary
 change. N3 and N4 are met (36 added rows, no exclusion change).
+
+### Correction, 2026-11-16
+
+The results above say the scoped one-character reference brought back two of
+the three ordinary-word items. It did not. The per-direction outputs still
+render the flower inside the mechanic name as the resonator name in all three
+places; the frozen scorer passed two of them only because the translation now
+keeps the source's middle dot inside the name, which its literal check does
+not match. The guard result does not change: P-Q4 compares the frozen score
+and the blind count of the scorer's misses, and both stay as reported. The
+scope line had no measured benefit and was removed from the setting before
+it shipped. Upstream data holds these mechanic names only inside skill and
+term descriptions, not under a name key, so no dictionary import covers them.
