@@ -3,6 +3,19 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Translation
+
+- Long translations keep the source's paragraph breaks when the model kept
+  the lines but dropped or added blank lines: on a request with a context
+  (API requests that send `context`, and every segment of long text,
+  including Telegram trusted messages over 2,000 characters), an answer with
+  the source's non-empty line count but a different paragraph count is
+  regrouped into the source's paragraphs. The lines and their order are
+  unchanged; an answer whose line count differs is returned as before, with
+  no extra model call. Calls without a context are unchanged (MY-231).
+
 ## 0.9.0
 
 ### Terms And Dictionary
