@@ -284,14 +284,16 @@ later commit removed; with that line gone, zh→en `disabled` sends the same
 request bodies as the `disabled` arm (`8710a16`), 42 of 42 compared with the
 placeholder prefix fixed.
 
-## Default change proposed, 2026-11-16
+## Default changed (PR #268), 2026-11-16
 
-A separate change proposes `disabled` as the default for Chinese→English
-requests (English→Chinese stays `omit`), because it removes the long-segment
+PR #268 makes `disabled` the default for Chinese→English requests
+(English→Chinese stays `omit`), because it removes the long-segment
 timeouts: in the `disabled` arm, 0 timeouts, p95 8.6 s, and D zh→en usable
-122/128 against 38/128. The shipped zh→en requests are the same as that
-arm's. The quality guard was not met (M-Gold 664/675 against the frozen
-670; en→zh is unaffected because it stays `omit`). Owner decision
+122/128 against 38/128. The zh→en requests this change sends are the same as
+that arm's on the dictionary that arm used; under the 0.9.0 dictionary D-004
+segment 1 differs (measured separately: 7/10 under `disabled`). M-Gold (R1)
+is unaffected. The quality guard was not met (M-Gold 664/675 against the
+frozen 670; en→zh is unaffected because it stays `omit`). Owner decision
 (2026-11-16): asked whether 0.9.1 should turn off thinking for
 Chinese→English, the owner answered 「关」. With the default changed, ADR
 0020's "no extra thinking field today" (Translation runs, Settings)
