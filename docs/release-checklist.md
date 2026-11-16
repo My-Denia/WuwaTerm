@@ -207,9 +207,11 @@ The installer and Web checks from 0.7.x still apply to this release:
   `en -> zh` source mention is spelled exactly as sentence locking spells it (one
   trailing `s`/`es`), while a `zh -> en` target may also answer with the singular
   of a plural dictionary entry (`海蚀` -> `Waveworn Phenomenon`) except for
-  resonator and speaker names, which take the plural only. The canonical matcher
-  label is `wuwaterm-cjk-matcher-v6`, so resolution contexts carrying the older
-  hash are stale by design, not by accident.
+  resonator and speaker names, which take the plural only. Without alignments,
+  a pair whose sentence counts differ but whose paragraph counts match is still
+  judged paragraph by paragraph instead of being left unassessed. The canonical
+  matcher label is `wuwaterm-cjk-matcher-v7`, so resolution contexts carrying
+  the older hash are stale by design, not by accident.
 - `docs/self-hosting.md`'s backup and restore steps still match what
   `./deploy/setup.sh --with-web` writes under `state-web/`.
 - `docs/api/openapi.json` matches the generated document after the version and

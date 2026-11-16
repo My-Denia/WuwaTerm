@@ -5,16 +5,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
 
 from wuwaterm.application import project_review_report, review_pair
 from wuwaterm.cjk_span import JIEBA_COMMIT, LEXICON_FILTER, _WORDS
+from wuwaterm.constants import (
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+)
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.review import (
+    REASON_AMBIGUOUS_REPEAT,
+    REASON_FOUND_OUTSIDE_REGION,
+    REASON_NO_TARGET_REGION,
+    REASON_NOT_A_TERM,
+    REASON_ORDINARY_WORD,
     RULE_VERSION_V2,
     VERDICT_CONFLICT,
     VERDICT_NEEDS_REVIEW,
@@ -22,6 +34,7 @@ from wuwaterm.review import (
     VERDICT_VERIFIED,
     ReviewRequestError,
     _collect_mentions,
+    _paragraph_ranges,
     _sentence_ranges,
     _sentence_ranges_v2,
     _surface_index,
@@ -185,18 +198,27 @@ def test_frozen_explicit_merge_and_split_cover_both_terms(v2_service, case_id):
     assert len({item.target_span.start for item in findings if item.target_span}) == 2
 
 
-@pytest.mark.parametrize("case_id", ("merge", "split", "unmatched"))
-def test_frozen_mismatched_counts_without_mapping_are_unassessed(v2_service, case_id):
+@pytest.mark.parametrize(
+    ("case_id", "verdict", "spans"),
+    (
+        ("merge", VERDICT_VERIFIED, ["Jinhsi", "Echo"]),
+        ("split", VERDICT_VERIFIED, ["Jinhsi", "Echo"]),
+        ("unmatched", VERDICT_NEEDS_REVIEW, [None, None]),
+    ),
+)
+def test_frozen_mismatched_counts_pair_the_single_paragraph(
+    v2_service, case_id, verdict, spans
+):
+    """Unequal sentence counts in one paragraph pair that paragraph as one region."""
     report = _v2(v2_service, case_id)
     findings = _term_findings(report)
 
-    assert [item.verdict for item in findings] == [
-        VERDICT_NOT_EVALUATED,
-        VERDICT_NOT_EVALUATED,
-    ]
-    assert report.coverage.evaluated == 0
-    assert report.coverage.not_evaluated == 3
-    assert all(item.target_span is None for item in findings)
+    assert [item.verdict for item in findings] == [verdict, verdict]
+    assert [item.target_span.text if item.target_span else None for item in findings] == spans
+    assert report.coverage.evaluated == 2
+    assert report.coverage.not_evaluated == 1
+    starts = {item.target_span.start for item in findings if item.target_span}
+    assert len(starts) == len([span for span in spans if span])
 
 
 def test_frozen_repeat_shortage_does_not_reuse_target_span(v2_service):
@@ -265,6 +287,568 @@ def test_explicit_null_target_is_unassessed(v2_service):
     )
     assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
     assert report.findings[0].target_span is None
+
+
+def _pair(service: TermService, source: str, target: str, **overrides):
+    return review_pair(
+        service,
+        source,
+        target,
+        "en",
+        review_version=RULE_VERSION_V2,
+        **overrides,
+    )
+
+
+def _official_pair_for(report, index: int) -> dict[str, object]:
+    finding = report.findings[index]
+    return {
+        "resolutions": (
+            {
+                "mention_id": finding.id,
+                "choice": "official_pair",
+                "candidate_id": finding.candidates[0].candidate_id,
+            },
+        ),
+        "resolution_context": {
+            "source_revision": report.source_revision,
+            "rule_version": report.rule_version,
+            "dictionary_revision": report.dictionary.revision,
+            "matcher_revision": report.matcher_revision,
+        },
+    }
+
+
+def _differing_counts(source: str, target: str) -> None:
+    """The pair reaches paragraph pairing: sentence counts differ."""
+    assert len(_sentence_ranges_v2(source)) != len(_sentence_ranges_v2(target))
+
+
+def test_paragraph_pairing_survives_a_list_marker_the_source_lacks(v2_service):
+    source = "一、机制\n\n1. 今汐登场。\n\n声骸出现。"
+    target = "I. Mechanics\n\n1. Jinhsi appears.\n\nAn Echo appears."
+    _differing_counts(source, target)
+    source_paragraphs = _paragraph_ranges(source)
+    target_paragraphs = _paragraph_ranges(target)
+    assert len(source_paragraphs) == len(target_paragraphs) == 3
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_VERIFIED,
+    ]
+    for finding, paragraph in zip(report.findings, target_paragraphs[1:], strict=True):
+        assert finding.target_span is not None
+        assert paragraph[0] <= finding.target_span.start
+        assert finding.target_span.end <= paragraph[1]
+    assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
+    assert report.coverage.evaluated == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (
+        # Strict region pairs: the sentence counts agree inside each paragraph.
+        ("一、机制\n\n今汐登场。\n\n声骸出现。", "I. Mechanics\n\nAn Echo appears.\n\nJinhsi appears."),
+        # The first paragraph pair is guarded, its form is in the other paragraph.
+        ("今汐登场。\n\n声骸出现。", "An Echo appears. Truly.\n\nJinhsi appears."),
+    ),
+)
+def test_form_found_only_in_another_paragraph_is_not_credited(v2_service, source, target):
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_FOUND_OUTSIDE_REGION] * 2
+    assert all(item.target_span is None for item in report.findings)
+
+
+def test_unequal_paragraph_counts_map_nothing(v2_service):
+    source = "今汐登场。\n\n声骸出现。"
+    target = "Jinhsi appears. An Echo appears. Truly."
+    _differing_counts(source, target)
+    assert len(_paragraph_ranges(source)) != len(_paragraph_ranges(target))
+
+    report = _pair(v2_service, source, target)
+
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_NO_TARGET_REGION] * 2
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 3
+
+
+def test_guarded_paragraph_with_fewer_occurrences_than_mentions_is_ambiguous(v2_service):
+    source, target = "今汐与今汐。", "Jinhsi. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+    assert all(item.target_span is None for item in report.findings)
+    assert all(item.candidates for item in report.findings)
+
+    # A confirmed pair on the second mention would otherwise be a conflict that
+    # the correct translation does not deserve: the first mention took the only
+    # occurrence.
+    resolved = _pair(v2_service, source, target, **_official_pair_for(report, 1))
+    assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in resolved.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+
+    # The same shortage inside agreeing sentence counts keeps its old verdicts.
+    equal = _v2(v2_service, "repeat-shortage")
+    assert [item.verdict for item in equal.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_NEEDS_REVIEW,
+    ]
+
+
+def test_guarded_mentions_compete_for_an_inflected_occurrence(tmp_path):
+    """Different forms that can answer with the same target span compete for it."""
+    service = _plural_service(
+        tmp_path, TermRecord("item", "fixture", "echoes", "echoes", "今汐", "Echoes")
+    )
+    # "Echoes" is 今汐's exact form and 声骸's ("Echo") plural: one span, two claims.
+    source, target = "今汐与声骸。", "Echoes. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in report.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+
+    resolved = _pair(service, source, target, **_official_pair_for(report, 1))
+    assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
+
+    # 今汐 can take only "Echoes", which 声骸 may also take: the whole group
+    # stays unassessed rather than crediting 声骸 with 今汐's occurrence.
+    report = _pair(service, source, "Echoes and an Echo. Indeed.")
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+
+    # Each mention can take two spans: both are credited, on distinct spans.
+    report = _pair(service, source, "Echoes and Echoes. Indeed.")
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert len({item.target_span.start for item in report.findings}) == 2
+
+
+def test_guarded_mentions_with_unrelated_forms_do_not_compete(v2_service):
+    source, target = "今汐与声骸。", "Jinhsi and an Echo. Indeed."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert [item.target_span.text for item in report.findings] == ["Jinhsi", "Echo"]
+
+
+_V, _NR = VERDICT_VERIFIED, VERDICT_NEEDS_REVIEW
+_OUTSIDE = (VERDICT_NOT_EVALUATED, REASON_FOUND_OUTSIDE_REGION)
+_AMBIGUOUS = (VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_REPEAT)
+# (case, source, target, expected per mention). A verified entry names the
+# target text it is credited with. Each case runs on the equal sentence count
+# path as written, and on the guarded paragraph path with a list marker the
+# source writes as "一、" and the target as "I.".
+_OCCURRENCE_CASES = (
+    ("exact", "今汐登场。", "Jinhsi appears.", [(_V, "Jinhsi")], None),
+    ("inflected", "声骸出现。", "Echoes appear.", [(_V, "Echoes")], None),
+    (
+        "inflection competes",
+        "回响与声骸。",
+        "Echoes.",
+        # Equal counts keep the positional greedy of repeat-shortage.
+        [(_V, "Echoes"), (_NR, None)],
+        [_AMBIGUOUS, _AMBIGUOUS],
+    ),
+    (
+        "nested, both present",
+        "声骸与声骸套装。",
+        "Echo and Echo Set.",
+        [(_V, "Echo"), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "nested, order swapped",
+        "声骸与声骸套装。",
+        "Echo Set and Echo.",
+        [(_V, "Echo"), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "nested, shorter missing",
+        "声骸与声骸套装。",
+        "Echo Set.",
+        [(_NR, None), (_V, "Echo Set")],
+        None,
+    ),
+    (
+        "repeated, one occurrence",
+        "今汐与今汐。",
+        "Jinhsi.",
+        [(_V, "Jinhsi"), (_NR, None)],
+        [_AMBIGUOUS, _AMBIGUOUS],
+    ),
+    (
+        "shifted to the other paragraph",
+        "今汐登场。\n\n声骸出现。",
+        "An Echo appears.\n\nJinhsi appears.",
+        [_OUTSIDE, _OUTSIDE],
+        None,
+    ),
+    ("missing entirely", "今汐登场。", "Someone appears.", [(_NR, None)], None),
+    (
+        "unrelated terms",
+        "今汐与声骸。",
+        "Jinhsi and an Echo.",
+        [(_V, "Jinhsi"), (_V, "Echo")],
+        None,
+    ),
+)
+
+
+_NA = (VERDICT_NOT_EVALUATED, REASON_NOT_A_TERM)
+_ORDINARY = (VERDICT_NOT_EVALUATED, REASON_ORDINARY_WORD)
+_LONGER_ONLY = ("声骸与声骸套装。", "Echo Set.")
+# User actions and ordinary-word exclusions on the nested pair. Only a mention
+# that still asserts a constraint reserves its span for the longest match, so
+# a dismissed or excluded "Echo Set" leaves its "Echo" to 声骸, and a confirmed
+# 声骸 is then credited instead of blamed. (case, source, target, equal,
+# guarded, actions by mention index, zh surfaces excluded as ordinary words)
+_OCCURRENCE_ACTIONS = (
+    ("longer dismissed", *_LONGER_ONLY, [(_V, "Echo"), _NA], None, {1: "not_a_term"}, ()),
+    (
+        "longer dismissed, shorter confirmed",
+        *_LONGER_ONLY,
+        [(_V, "Echo"), _NA],
+        None,
+        {0: "official_pair", 1: "not_a_term"},
+        (),
+    ),
+    ("longer excluded", *_LONGER_ONLY, [(_V, "Echo"), _ORDINARY], None, {}, ("声骸套装",)),
+    (
+        "longer excluded, shorter confirmed",
+        *_LONGER_ONLY,
+        [(_V, "Echo"), _ORDINARY],
+        None,
+        {0: "official_pair"},
+        ("声骸套装",),
+    ),
+    (
+        "longer excluded but confirmed",
+        *_LONGER_ONLY,
+        [(_NR, None), (_V, "Echo Set")],
+        None,
+        {1: "official_pair"},
+        ("声骸套装",),
+    ),
+    (
+        "shorter confirmed, longer a term",
+        *_LONGER_ONLY,
+        [(VERDICT_CONFLICT, None), (_V, "Echo Set")],
+        None,
+        {0: "official_pair"},
+        (),
+    ),
+)
+_C = (VERDICT_CONFLICT, None)
+# The resolution dimension: 星辉 has two candidates, "Echo Set" and
+# "Starlight", and 声骸 ("Echo") is confirmed in every row, so a wrong
+# reservation shows as a confirmed conflict. 星辉 is unresolved, resolved to
+# either candidate, dismissed, or an unresolved ordinary word; only the forms
+# it still asserts may reserve "Echo Set" and hide the "Echo" inside it.
+_SHORT_CONFIRMED = {0: ("official_pair", "Echo")}
+_RESOLUTION_STATES = (
+    ("unresolved", {}, ()),
+    ("selected Echo Set", {1: ("official_pair", "Echo Set")}, ()),
+    ("selected Starlight", {1: ("official_pair", "Starlight")}, ()),
+    ("dismissed", {1: ("not_a_term", None)}, ()),
+    ("excluded", {}, ("星辉",)),
+)
+_RESOLUTION_STRUCTURES = (
+    (
+        "nested present",
+        "Echo and Echo Set.",
+        {
+            "unresolved": [(_V, "Echo"), (_V, "Echo Set")],
+            "selected Echo Set": [(_V, "Echo"), (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echo"), _C],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+    (
+        "nested shorter missing",
+        "Echo Set.",
+        {
+            "unresolved": [_C, (_V, "Echo Set")],
+            "selected Echo Set": [_C, (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echo"), _C],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+    (
+        "inflected",
+        "Echoes and Echo Set.",
+        {
+            "unresolved": [(_V, "Echoes"), (_V, "Echo Set")],
+            "selected Echo Set": [(_V, "Echoes"), (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echoes"), _C],
+            "dismissed": [(_V, "Echoes"), _NA],
+            "excluded": [(_V, "Echoes"), _ORDINARY],
+        },
+    ),
+    (
+        "unrelated",
+        "Echo and Starlight.",
+        {
+            "unresolved": [(_V, "Echo"), (_V, "Starlight")],
+            "selected Echo Set": [(_V, "Echo"), _C],
+            "selected Starlight": [(_V, "Echo"), (_V, "Starlight")],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+)
+_OCCURRENCE_RESOLUTIONS = tuple(
+    (
+        f"{structure}, 星辉 {state}",
+        "声骸与星辉。",
+        target,
+        expected[state],
+        None,
+        {**_SHORT_CONFIRMED, **actions},
+        excluded,
+    )
+    for structure, target, expected in _RESOLUTION_STRUCTURES
+    for state, actions, excluded in _RESOLUTION_STATES
+)
+# 回音 has two candidates of its own, "Echo" and "Echo Set". The longest
+# match holds among one mention's own candidates whatever is selected: the
+# "Echo" inside "Echo Set" is never an Echo of 回音. A verified entry may name
+# the target start when the text alone would not tell two spans apart.
+_OWN_CANDIDATES = (
+    ("own longer candidate, unresolved", "回音出现。", "Echo Set appears.", [(_V, "Echo Set")], None, {}, ()),
+    (
+        "own longer candidate, Echo confirmed, only Echo Set",
+        "回音出现。",
+        "Echo Set appears.",
+        [_C],
+        None,
+        {0: ("official_pair", "Echo")},
+        (),
+    ),
+    (
+        "own longer candidate, Echo confirmed, both",
+        "回音出现。",
+        "Echo Set and Echo appear.",
+        [(_V, "Echo", 13)],
+        None,
+        {0: ("official_pair", "Echo")},
+        (),
+    ),
+)
+_OCCURRENCE_MATRIX = (
+    tuple((*row, {}, ()) for row in _OCCURRENCE_CASES)
+    + _OCCURRENCE_ACTIONS
+    + _OCCURRENCE_RESOLUTIONS
+    + _OWN_CANDIDATES
+)
+
+
+def _matrix_service(tmp_path: Path, excluded: tuple[str, ...]) -> TermService:
+    path = tmp_path / "occurrence-matrix.db"
+    metadata = [("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")]
+    if excluded:
+        metadata.append(
+            (
+                FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+                json.dumps(
+                    {
+                        "version": FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+                        "min_occurrences": FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+                        "max_aligned_ratio": list(FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO),
+                        "surfaces": [[surface, 12, 2] for surface in sorted(excluded)],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany("INSERT INTO metadata(key, value) VALUES (?, ?)", metadata)
+        insert_records(
+            conn,
+            (
+                *_PLURAL_RECORDS,
+                TermRecord("character", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
+                TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set"),
+                TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
+                TermRecord("item", "fixture", "xinghui-set", "xinghui-set", "星辉", "Echo Set"),
+                TermRecord("character", "fixture", "xinghui", "xinghui", "星辉", "Starlight"),
+                TermRecord("item", "fixture", "huiyin", "huiyin", "回音", "Echo"),
+                TermRecord("item", "fixture", "huiyin-set", "huiyin-set", "回音", "Echo Set"),
+            ),
+        )
+        conn.commit()
+    return TermService(path)
+
+
+@pytest.mark.parametrize("path", ("equal", "guarded"))
+@pytest.mark.parametrize(
+    ("case", "source", "target", "equal", "guarded", "actions", "excluded"),
+    _OCCURRENCE_MATRIX,
+    ids=[row[0] for row in _OCCURRENCE_MATRIX],
+)
+def test_occurrence_matrix(
+    tmp_path, path, case, source, target, equal, guarded, actions, excluded
+):
+    """The judge and the guard read one occurrence model on both mapping paths."""
+    service = _matrix_service(tmp_path, excluded)
+    expected = equal
+    if path == "guarded":
+        source, target = "一、" + source, "I. " + target
+        _differing_counts(source, target)
+        assert len(_paragraph_ranges(source)) == len(_paragraph_ranges(target))
+        expected = guarded or equal
+    else:
+        assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target))
+
+    report = _pair(service, source, target)
+    if actions:
+        resolutions = []
+        for index, action in sorted(actions.items()):
+            choice, form = action if isinstance(action, tuple) else (action, None)
+            finding = report.findings[index]
+            resolution = {"mention_id": finding.id, "choice": choice}
+            if choice == "official_pair":
+                resolution["candidate_id"] = next(
+                    candidate.candidate_id
+                    for candidate in finding.candidates
+                    if form is None or candidate.en == form
+                )
+            resolutions.append(resolution)
+        report = _pair(
+            service,
+            source,
+            target,
+            resolutions=tuple(resolutions),
+            resolution_context={
+                "source_revision": report.source_revision,
+                "rule_version": report.rule_version,
+                "dictionary_revision": report.dictionary.revision,
+                "matcher_revision": report.matcher_revision,
+            },
+        )
+
+    offset = 3 if path == "guarded" else 0
+    actual = [
+        (item.verdict, item.reason)
+        if item.verdict == VERDICT_NOT_EVALUATED
+        else (item.verdict, item.target_span.text if item.target_span else None)
+        if len(want) == 2
+        else (item.verdict, item.target_span.text, item.target_span.start - offset)
+        for item, want in zip(report.findings, expected, strict=True)
+    ]
+    assert actual == expected, case
+
+
+def test_guarded_paragraph_with_many_mentions_stays_fast(v2_service):
+    # Hundreds of mentions competing for hundreds of spans in one paragraph,
+    # within the 2,000-scalar limit on each side.
+    source = "、".join(["今汐", "声骸"] * 200) + "。"
+    target = ", ".join(["Jinhsi", "Echo"] * 140) + ". Indeed."
+    assert len(source) <= 2000 and len(target) <= 2000
+    _differing_counts(source, target)
+
+    started = time.perf_counter()
+    report = _pair(v2_service, source, target)
+    elapsed = time.perf_counter() - started
+
+    assert {item.reason for item in report.findings} == {REASON_AMBIGUOUS_REPEAT}
+    assert elapsed < 1.0
+
+
+def test_guarded_paragraph_with_no_form_anywhere_keeps_the_ordinary_verdicts(v2_service):
+    source = "今汐登场。\n\n声骸出现。"
+    target = "Someone appears. Truly.\n\nSomething appears."
+    _differing_counts(source, target)
+
+    report = _pair(v2_service, source, target)
+    assert [item.verdict for item in report.findings] == [VERDICT_NEEDS_REVIEW] * 2
+    assert all(item.target_span is None for item in report.findings)
+
+    resolved = _pair(v2_service, source, target, **_official_pair_for(report, 0))
+    assert [item.verdict for item in resolved.findings] == [
+        VERDICT_CONFLICT,
+        VERDICT_NEEDS_REVIEW,
+    ]
+
+
+def test_v2_reason_is_internal_and_only_on_not_evaluated_findings(v2_service):
+    reasons = {
+        REASON_NOT_A_TERM,
+        REASON_ORDINARY_WORD,
+        REASON_NO_TARGET_REGION,
+        REASON_FOUND_OUTSIDE_REGION,
+        REASON_AMBIGUOUS_REPEAT,
+    }
+    baseline = _v2(v2_service, "basic-zh-en")
+    case = FROZEN["basic-zh-en"]
+    by_reason = {
+        REASON_NOT_A_TERM: _v2(
+            v2_service,
+            "basic-zh-en",
+            resolutions=(
+                {"mention_id": baseline.findings[0].id, "choice": "not_a_term"},
+            ),
+            resolution_context=_official_pair_for(baseline, 0)["resolution_context"],
+        ),
+        REASON_NO_TARGET_REGION: _v2(
+            v2_service,
+            "basic-zh-en",
+            alignments=[
+                {"source": _span(case["source"], 0, len(case["source"])), "target": None}
+            ],
+        ),
+        REASON_FOUND_OUTSIDE_REGION: _v2(v2_service, "swapped"),
+        REASON_AMBIGUOUS_REPEAT: _pair(v2_service, "今汐与今汐。", "Jinhsi. Indeed."),
+    }  # ordinary_word is pinned with the exclusion fixtures
+    for reason, report in by_reason.items():
+        assert {item.reason for item in report.findings} == {reason}
+
+    unmatched = _v2(v2_service, "unmatched")
+    conflict = _v2(v2_service, "unmatched", **_official_pair_for(unmatched, 0))
+    assert VERDICT_CONFLICT in {item.verdict for item in conflict.findings}
+    for report in (
+        *by_reason.values(),
+        baseline,
+        unmatched,
+        conflict,
+        _v2(v2_service, "repeat-shortage"),
+    ):
+        for item in report.findings:
+            if item.verdict == VERDICT_NOT_EVALUATED:
+                assert item.reason in reasons
+            else:
+                assert item.reason is None
+
+    v1 = review_pair(v2_service, **DECIMAL_WORD_CASE)
+    assert [item.verdict for item in v1.findings] == [VERDICT_NOT_EVALUATED]
+    assert v1.findings[0].reason is None
+
+    body = project_review_report(by_reason[REASON_FOUND_OUTSIDE_REGION], "request-reason")
+    assert body["findings"]
+    for finding in body["findings"]:
+        assert set(finding) == {
+            "candidates",
+            "candidates_truncated",
+            "id",
+            "rule_id",
+            "source_span",
+            "target_span",
+            "verdict",
+        }
 
 
 def test_v2_wire_additions_are_raw_hex_and_top_level_is_unchanged(v2_service):

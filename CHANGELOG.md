@@ -60,6 +60,39 @@ does not distribute generated game data or generated SQLite databases.
   content, a link, or any other untracked file is still refused and left
   untouched. The rerun then installs the git exclude and finishes.
 
+### Review
+
+- `review-v2` no longer leaves every term unassessed when the source and the
+  translation split into different numbers of sentences. A translation that
+  writes a list marker like "I." where the source has "一、" made the counts
+  differ, and without a sentence mapping every finding was `not_evaluated`: in
+  a long manuscript most terms had no verdict. When the counts differ and the
+  request carries no alignments, review now pairs paragraphs (the
+  segmentation-v1 paragraph regions) if both sides have the same number of
+  them. Sentences pair one to one inside a paragraph whose counts agree, and a
+  paragraph whose counts still differ is judged as one region. In that region
+  a term is left `not_evaluated` when the paragraph holds fewer qualified
+  occurrences of its official forms than there are mentions competing for
+  them, so an ambiguous repeat is never credited or blamed, a confirmed pair
+  included. Mentions compete when their accepted forms, singular and plural
+  variants included, can take the same target span. On every path the
+  longest match now wins: an occurrence inside an occurrence of a longer form
+  some mention still asserts, or of a longer form among the mention's own
+  candidates ("Echo" inside "Echo Set"), no longer counts for the shorter
+  form, so a missing 声骸 next to 声骸套装 is `needs_review` instead of
+  verified on part of "Echo Set". A term dismissed as `not_a_term`, an
+  unresolved ordinary word and another mention's unselected candidates
+  reserve nothing. Apart from that,
+  verdicts on pairs with equal sentence counts and on explicitly aligned pairs
+  are unchanged. Every `not_evaluated` finding now carries an
+  internal reason (`not_a_term`, `ordinary_word`, `no_target_region`,
+  `found_outside_region`, `ambiguous_repeat`) that is not on the wire, so the
+  response shape is unchanged. The matcher label moves to
+  `wuwaterm-cjk-matcher-v7`, because the same input now gives a different
+  report: saved manuscript-v3 segment results and stored resolution contexts
+  that carry v6 go stale and are re-reviewed, and matching choices reconfirm
+  automatically.
+
 ## 0.8.7
 
 ### Delivery And Deployment

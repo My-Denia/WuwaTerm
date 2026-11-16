@@ -30,6 +30,8 @@ from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.review import (
+    REASON_NO_TARGET_REGION,
+    REASON_ORDINARY_WORD,
     RULE_SENTENCE_MEANING,
     RULE_TERM_PAIR,
     RULE_VERSION,
@@ -218,6 +220,12 @@ def test_excluded_english_word_is_not_pluralized(excluded_service):
     ]
 
 
+def test_excluded_automatic_mention_reports_the_ordinary_word_reason(excluded_service):
+    report = _v2(excluded_service, "Fish is food.", "鱼肉是食物。", "en")
+    assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
+    assert report.findings[0].reason == REASON_ORDINARY_WORD
+
+
 def test_excluded_automatic_with_present_form_is_not_evaluated(excluded_service, plain_service):
     # The official zh form 祂 sits in the mapped region, but target-form
     # presence alone must not verify an ambiguous ordinary word (D3).
@@ -264,8 +272,8 @@ def test_excluded_automatic_with_elsewhere_only_form_is_not_evaluated(excluded_s
 
 
 def test_excluded_automatic_without_mapping_is_not_evaluated(excluded_service):
-    # Mismatched sentence counts produce no mapping at all.
-    report = _v2(excluded_service, "Fish.", "No fish here. None.", "en")
+    # Mismatched sentence and paragraph counts produce no mapping at all.
+    report = _v2(excluded_service, "Fish.", "No fish here.\n\nNone.", "en")
     assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
     assert report.findings[0].target_span is None
 
@@ -386,7 +394,9 @@ def test_excluded_official_pair_with_elsewhere_only_form_is_not_evaluated(exclud
 
 
 def test_excluded_official_pair_without_mapping_is_not_evaluated(excluded_service):
-    source, target = "Tea.", "Tea or coffee. Hmm."
+    # Sentence counts (1/2) and paragraph counts (1/2) both differ, so
+    # nothing maps; a confirmed pair does not create a region.
+    source, target = "Tea.", "Tea or coffee.\n\nHmm."
     baseline = _v2(excluded_service, source, target, "en")
     finding = baseline.findings[0]
     assert baseline.dictionary.term_count == len(TERMS)
@@ -401,6 +411,25 @@ def test_excluded_official_pair_without_mapping_is_not_evaluated(excluded_servic
     resolved = report.findings[0]
     assert resolved.verdict == VERDICT_NOT_EVALUATED
     assert resolved.target_span is None
+    assert resolved.reason == REASON_NO_TARGET_REGION
+
+    # One paragraph on each side pairs as one region even though the
+    # sentence counts differ, and the confirmed pair is then checked there.
+    target = "Tea or coffee. Hmm."
+    baseline = _v2(excluded_service, source, target, "en")
+    finding = baseline.findings[0]
+    report = _v2(
+        excluded_service,
+        source,
+        target,
+        "en",
+        resolutions=(_official_pair(finding, finding.candidates[0]),),
+        resolution_context=_context(baseline, source),
+    )
+    resolved = report.findings[0]
+    assert resolved.verdict == VERDICT_VERIFIED
+    assert resolved.target_span is not None
+    assert resolved.target_span.text == "Tea"
 
 
 def test_excluded_official_pair_with_stale_candidate_id_is_rejected(excluded_service):

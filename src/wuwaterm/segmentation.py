@@ -13,18 +13,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .review import _sentence_ranges_v2
+from .review import WHITESPACE, _core, _paragraph_ranges, _sentence_ranges_v2
 
 SEGMENT_LIMIT = 1800
 HARD_CUT_WINDOW = 200
 BOUNDARY_PUNCTUATION = "，、；：,;:"
 
-# Exactly the scalars of the spec; str.isspace() has a different set.
-WHITESPACE: frozenset[str] = frozenset(
-    "\t\n\x0b\x0c\r \u00a0\u1680"
-    + "".join(chr(code) for code in range(0x2000, 0x200B))
-    + "\u2028\u2029\u202f\u205f\u3000"
-)
+# WHITESPACE (exactly the scalars of the spec; str.isspace() has a different
+# set), _core and _paragraph_ranges are defined in review and imported above.
 _NATURAL = WHITESPACE | frozenset(BOUNDARY_PUNCTUATION)
 
 STATUS_READY = "ready"
@@ -90,48 +86,9 @@ class SegmentPair:
 # ---------------------------------------------------------------------------
 
 
-def _core(text: str, start: int, end: int) -> tuple[int, int]:
-    """Core of [start, end): WS trimmed; an all-WS region has core (start, start)."""
-    a = start
-    while a < end and text[a] in WHITESPACE:
-        a += 1
-    if a == end:
-        return start, start
-    b = end
-    while text[b - 1] in WHITESPACE:
-        b -= 1
-    return a, b
-
-
 def _core_len(text: str, start: int, end: int) -> int:
     a, b = _core(text, start, end)
     return b - a
-
-
-def _paragraph_ranges(text: str) -> list[tuple[int, int]]:
-    """Paragraph regions; empty when the text has no non-WS scalar."""
-    length = len(text)
-    cuts: list[int] = []
-    i = 0
-    while i < length:
-        if text[i] not in WHITESPACE:
-            i += 1
-            continue
-        j = i
-        newlines = 0
-        while j < length and text[j] in WHITESPACE:
-            if text[j] == "\n":
-                newlines += 1
-            j += 1
-        # A leading run belongs to the first region and a trailing run to the
-        # last one, so neither produces a cut.
-        if newlines >= 2 and i > 0 and j < length:
-            cuts.append(j)
-        i = j
-    if _core(text, 0, length)[0] == _core(text, 0, length)[1]:
-        return []
-    bounds = [0, *cuts, length]
-    return list(zip(bounds, bounds[1:], strict=False))
 
 
 def _sentence_pieces(text: str, start: int, end: int) -> list[tuple[int, int]]:
