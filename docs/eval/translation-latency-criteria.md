@@ -273,3 +273,13 @@ and the blind count of the scorer's misses, and both stay as reported. The
 scope line had no measured benefit and was removed from the setting before
 it shipped. Upstream data holds these mechanic names only inside skill and
 term descriptions, not under a name key, so no dictionary import covers them.
+
+### Correction, 2026-11-16 (official-name runs)
+
+The sections above that say the dictionary change is "on `main`" are wrong
+about its base: `611d405` is the head of the official-name pull request,
+branched at `fa13e0a`; it was not on `main` when it was measured. The
+per-direction run at `853eaec` included the one-character scope line that a
+later commit removed; with that line gone, zh→en `disabled` sends the same
+request bodies as the `disabled` arm (`8710a16`), 42 of 42 compared with the
+placeholder prefix fixed.

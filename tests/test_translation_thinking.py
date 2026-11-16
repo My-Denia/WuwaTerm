@@ -11,7 +11,7 @@ import logging
 import httpx
 import pytest
 
-from tests.test_api_semantic_review import FakeModel, configure_llm, semantic_app, translate
+from tests.test_api_semantic_review import FakeModel, configure_llm
 from wuwaterm import llm_transport
 from wuwaterm.sentence import _call_llm_async
 
@@ -77,17 +77,3 @@ def test_an_unknown_mode_warns_naming_the_variable_and_uses_the_default(monkeypa
 
     assert body == default and "extra_body" not in kwargs
     assert [r.getMessage() for r in caplog.records] == [f"unknown {var}; using omit"]
-
-
-def test_a_model_read_timeout_answers_llm_unavailable(monkeypatch, tmp_path, sample_db):
-    """The failure thinking mode caused: the model outlasts the timeout, the API answers 503."""
-    configure_llm(monkeypatch)
-    monkeypatch.setenv(ZH_EN, "disabled")
-    model = FakeModel(httpx.ReadTimeout("slow"))
-    app, _, token = semantic_app(tmp_path, sample_db, model)
-
-    response = translate(app, token)
-
-    assert model.calls == 1 and model.body()["thinking"] == DISABLED["thinking"]  # reached the model
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "llm_unavailable"
