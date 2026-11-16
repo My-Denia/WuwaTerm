@@ -67,3 +67,22 @@ to the model does not change.
 No model call is needed: the requests are unchanged (L1), so the stored
 answers are what the gateway returned for them, and the post-check is a
 deterministic function of each answer and its source.
+
+## Results and one premise that holds only on this data, 2026-11-16
+
+All of L1–L6 hold. No model call was made.
+
+- L1: 51 of 51 request bodies (D 17, R 34) are identical to `d54957c`.
+- L2: paragraph-count matches go from 31 to 33 of 34 segments in each of the
+  three R runs, and stay at 14/14, 17/17 and 8/8 on D. Both end-to-end D-003
+  answers (31 and 8 paragraphs, 45 lines each) come out with 45 paragraphs.
+- L3 and L4 hold for all 8 regrouped answers and every other segment.
+- L5: M-Gold, Set 1 and Set 2 are equal before and after on all three R runs
+  (664/120/38, 671/119/38, 667/120/38).
+
+"The request sent to the model does not change" holds for each segment's own
+text but not in general for the next segment: `_translate_long_plain_text`
+gives the next segment the end of this segment's translation as read-only
+context, so a regrouped answer whose changed blank lines fall within that
+tail changes the next request. On the D and R inputs none did (0 of 5
+following contexts changed). The change is blank lines only.
