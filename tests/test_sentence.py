@@ -2986,6 +2986,84 @@ def test_prepare_outputs_keep_their_existing_whitespace_and_paragraphs(nfkc_surf
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "answer", "expected"),
+    [
+        # Same lines, blank lines dropped: the source layout comes back and
+        # every line keeps its own text, indentation included.
+        ("a1\na2\n\nb1\n\nc1\nc2", "A1\nA2\nB1\n　C1\nC2", "A1\nA2\n\nB1\n\n　C1\nC2"),
+        # One multi-line paragraph answered in paragraphs: back to one, and the
+        # whitespace around the whole answer is left alone.
+        ("a\nb\nc", " A\n\nB\n \n\nC\n", " A\nB\nC\n"),
+        # A different number of lines: nothing to map, returned unchanged.
+        ("a\n\nb", "A\nB\nC", "A\nB\nC"),
+        # Already the source's paragraph count: byte-identical, even when the
+        # lines sit differently inside the paragraphs.
+        ("a1\na2\n\nb1", "A1\n\nA2\nB1  \n", "A1\n\nA2\nB1  \n"),
+    ],
+)
+def test_regrouping_restores_only_the_blank_lines_of_the_source_layout(source, answer, expected):
+    from wuwaterm.review import _paragraph_ranges
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    out = _regroup_lines_into_source_paragraphs(source, answer)
+
+    assert out == expected
+    if out != answer:
+        assert len(_paragraph_ranges(out)) == len(_paragraph_ranges(source))
+        stripped = [[line.strip() for line in text.split("\n") if line.strip()] for text in (out, answer)]
+        assert stripped[0] == stripped[1]
+
+
+def _paragraph_model(monkeypatch, sample_db, answer_for):
+    """A translator whose mock model answers ``answer_for(sent text)``."""
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    sent: list[str] = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["messages"][-1]["content"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": answer_for(sent[-1])}}]})
+
+    return SentenceTranslator(sample_db, llm_transport=httpx.MockTransport(handler)), sent
+
+
+def _translate(translator, text, context):
+    async def run():
+        try:
+            return await translator.translate_async(text, propagate_errors=True, context=context)
+        finally:
+            await translator.aclose()
+
+    return asyncio.run(run())
+
+
+def test_context_translation_keeps_the_source_paragraphs_when_the_model_drops_blank_lines(
+    monkeypatch, sample_db
+):
+    from wuwaterm.application import TranslationContext
+
+    translator, sent = _paragraph_model(
+        monkeypatch, sample_db, lambda text: text.replace("\n\n", "\n").upper()
+    )
+    source = "first line\nsecond line\n\nthird line"
+
+    out = _translate(translator, source, TranslationContext())
+
+    assert sent == [source]  # the request still carries the blank line
+    assert out == "FIRST LINE\nSECOND LINE\n\nTHIRD LINE"
+
+
+def test_plain_translation_returns_the_model_layout_unchanged(monkeypatch, sample_db):
+    translator, sent = _paragraph_model(monkeypatch, sample_db, lambda _text: "One\n\nTwo\n\nThree")
+
+    out = _translate(translator, "first line\nsecond line\nthird line", None)
+
+    assert sent == ["first line\nsecond line\nthird line"]
+    assert out == "One\n\nTwo\n\nThree"
+
+
 def test_canonical_candidate_keeps_bounds_identity_and_longest_selection(
     nfkc_surface_db,
 ):

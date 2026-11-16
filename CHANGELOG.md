@@ -5,6 +5,33 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Translation
+
+- Long translations keep the source's paragraph breaks when the model kept
+  the lines but dropped or added blank lines: on a request with a context
+  (API requests that send `context`, and every segment of long text,
+  including Telegram trusted messages over 2,000 characters), an answer with
+  the source's non-empty line count but a different paragraph count is
+  regrouped into the source's paragraphs. The lines and their order are
+  unchanged; an answer whose line count differs is returned as before, with
+  no extra model call. Calls without a context are unchanged (MY-231).
+- Chinese-to-English translation requests now send thinking disabled by
+  default, which removes the long-segment timeouts into English. Measured on
+  the evaluation development set with the same requests (the `disabled`
+  arm): 0 timeouts, p95 8.6 s, and Chinese-to-English usable paragraphs went
+  from 38 to 122 of 128. Known regression: a character-mechanic name that
+  contains a one-character resonator name (for example a 红椿蕊-type term)
+  may be rendered with the resonator name, and the frozen M-Gold score is
+  664/675, below its 670 guard. To restore the previous behaviour, set
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`; an existing `.env` that already
+  sets it to `omit` keeps `omit`. English-to-Chinese keeps `omit`. A blank
+  or unknown value (the latter logs a warning) now falls back to that
+  direction's default, which into English is `disabled`; in 0.9.0 both fell
+  back to `omit`. The standalone Telegram bot gets this default only after
+  its Core pin moves to a release that contains it.
+
+## 0.9.0
+
 ### Terms And Dictionary
 
 - The builder imports the pinned `Area_<n>_Title` keys that no
@@ -12,7 +39,7 @@ does not distribute generated game data or generated SQLite databases.
   拉贝尔学部 / Rabelle College and the rest of the Startorch campus reach
   `terms.db` (21 rows on the pinned data; 15 carry names the dictionary
   lacked, 14 distinct pairs). English-to-Chinese locks only the exact
-  "Academia Hall", not lowercase "academia hall".
+  "Academia Hall", not lowercase "academia hall" (#267).
 - A complete four-tier item family in `item/iteminfo.json` (初级X / 中级X /
   高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y")
   adds its base pair as a derived item row (`tier-base:<basic id>`), unless
@@ -24,7 +51,7 @@ does not distribute generated game data or generated SQLite databases.
   that drops only 调谐器 / Tuner, and bare "Tuner" stays the speaker
   调音师 / Tuner contextual reference it was before, also where it means
   the item; "Basic Tuner" and the other tier names still lock. The
-  free-text exclusion metadata of the pinned build is unchanged.
+  free-text exclusion metadata of the pinned build is unchanged (#267).
 - A Chinese surface that only these area titles and derived item bases
   carry is reference-only in Chinese free text, with or without a model (28
   surfaces on the pinned data; one an existing record also carries, such as
@@ -36,7 +63,7 @@ does not distribute generated game data or generated SQLite databases.
   speaker name. It still owns its span, so 核心 / Core inside 能源核心 is
   no longer locked or referenced on its own. A query that is only the name,
   such as 教学楼 alone, is still a dictionary lookup and returns Academia
-  Hall.
+  Hall (#267).
 
 ### Compatibility and distribution
 
@@ -48,36 +75,33 @@ does not distribute generated game data or generated SQLite databases.
   the clients use, and ADR 0015 records that the v3 segment-result rule
   supersedes part of its imported-history rule. No Core API, review or
   manuscript behavior changes; the shipped Windows 0.4.2 and Web 0.2.0
-  records are unchanged.
+  records are unchanged (#264).
 
 ### Translation
 
 - New `WUWATERM_TRANSLATION_THINKING_ZH_EN` and
   `WUWATERM_TRANSLATION_THINKING_EN_ZH` settings for the reasoning field a
   translation request carries, one per direction (Chinese into English,
-  English into Chinese). `omit` sends no field, so the request is unchanged
-  and the provider default applies; on DeepSeek that is high-effort thinking,
-  and a long segment can outlast the 45 s model timeout, which happens only
-  into English. `disabled` sends `thinking: {"type": "disabled"}`; it was
-  measured to remove those timeouts, but lowered translation quality into
-  Chinese. `low` and `high` turn thinking on at that effort. The settings
+  English into Chinese). Both default to `omit`: no field is sent, the
+  request is unchanged, and the provider default applies. On DeepSeek that is
+  high-effort thinking, and a long segment can outlast the 45 s model
+  timeout, which happens only into English. `disabled` sends
+  `thinking: {"type": "disabled"}`; it was measured to remove those timeouts,
+  but lowered translation quality into Chinese and into English let a
+  one-character name be applied to an ordinary word, so it is not the
+  default. `low` and `high` turn thinking on at that effort. The settings
   apply to plain and HTML translation on both surfaces and not to semantic
-  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is
-  that direction's default; an unknown value logs a warning naming the
-  variable and uses that default. The defaults are `disabled` into English
-  (next entry) and `omit` into Chinese.
-- Chinese-to-English translation requests now send thinking disabled by
-  default, which removes the long-segment timeouts into English. Measured on
-  the evaluation development set with the same requests (the `disabled`
-  arm): 0 timeouts, p95 8.6 s, and Chinese-to-English usable paragraphs went
-  from 38 to 122 of 128. Known regression: a character-mechanic name that
-  contains a one-character resonator name (for example a 红椿蕊-type term)
-  may be rendered with the resonator name, and the frozen M-Gold score is
-  664/675, below its 670 guard. To restore the previous behaviour, set
-  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`; an existing `.env` that already
-  sets it to `omit` keeps `omit`. English-to-Chinese keeps `omit`. The
-  standalone Telegram bot gets this default only after its Core pin moves to
-  a release that contains it.
+  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is the
+  default; an unknown value logs a warning naming the variable and uses
+  `omit` (#266).
+
+### Evaluation
+
+- `docs/adr/0020-held-out-usability-evaluation.md`,
+  `docs/eval/usability-judging.md` and `scripts/eval_usability.py` freeze how
+  paragraph usability is measured on held-out manuscripts and score the
+  judgments afterwards. The script imports nothing from Core and nothing at
+  runtime calls it, so no service behavior changes (#263).
 
 ### Delivery And Deployment
 
@@ -87,7 +111,7 @@ does not distribute generated game data or generated SQLite databases.
   run included. The gate now overlooks exactly that one entry, and only when
   it is a regular file holding the checkout's HEAD; a marker with other
   content, a link, or any other untracked file is still refused and left
-  untouched. The rerun then installs the git exclude and finishes.
+  untouched. The rerun then installs the git exclude and finishes (#262).
 
 ### Review
 
@@ -120,7 +144,7 @@ does not distribute generated game data or generated SQLite databases.
   `wuwaterm-cjk-matcher-v7`, because the same input now gives a different
   report: saved manuscript-v3 segment results and stored resolution contexts
   that carry v6 go stale and are re-reviewed, and matching choices reconfirm
-  automatically.
+  automatically (#265).
 
 ## 0.8.7
 
