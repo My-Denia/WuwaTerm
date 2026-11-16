@@ -40,12 +40,23 @@ def _post(monkeypatch, to_chinese: bool, env: dict[str, str] | None = None) -> t
     return model.body(), kwargs[0]
 
 
-@pytest.mark.parametrize("to_chinese", [False, True])
-def test_defaults_send_no_reasoning_field(monkeypatch, to_chinese):
-    body, kwargs = _post(monkeypatch, to_chinese)
+def test_defaults_disable_thinking_into_english_and_send_nothing_into_chinese(monkeypatch):
+    zh_en, zh_en_kwargs = _post(monkeypatch, False)
+    en_zh, en_zh_kwargs = _post(monkeypatch, True)
+
+    assert list(zh_en) == [*BODY_KEYS, "thinking"] and zh_en["thinking"] == DISABLED["thinking"]
+    assert "reasoning_effort" not in zh_en and "max_tokens" not in zh_en
+    assert zh_en_kwargs == {"purpose": "translation", "extra_body": DISABLED}
+    assert list(en_zh) == BODY_KEYS
+    assert en_zh_kwargs == {"purpose": "translation"}  # no extra_body keyword at all
+
+
+@pytest.mark.parametrize("var", [ZH_EN, EN_ZH])
+def test_omit_sends_no_reasoning_field_in_either_direction(monkeypatch, var):
+    body, kwargs = _post(monkeypatch, var == EN_ZH, {var: "omit"})
 
     assert list(body) == BODY_KEYS
-    assert kwargs == {"purpose": "translation"}  # no extra_body keyword at all
+    assert kwargs == {"purpose": "translation"}
 
 
 @pytest.mark.parametrize("var", [ZH_EN, EN_ZH])
@@ -60,20 +71,29 @@ def test_defaults_send_no_reasoning_field(monkeypatch, to_chinese):
 def test_a_mode_reaches_only_its_own_direction(monkeypatch, var, mode, extra):
     own = var == EN_ZH  # the setting's direction, as to_chinese
     default, _ = _post(monkeypatch, own)
+    other_default = _post(monkeypatch, not own)
 
     body, _ = _post(monkeypatch, own, {var: mode})
-    other, other_kwargs = _post(monkeypatch, not own, {var: mode})
+    other = _post(monkeypatch, not own, {var: mode})
 
     assert body == {**default, **extra}  # model, messages and temperature unchanged
-    assert list(other) == BODY_KEYS and "extra_body" not in other_kwargs
+    assert other == other_default  # the other direction's body and kwargs did not move
 
 
 @pytest.mark.parametrize("var", [ZH_EN, EN_ZH])
-def test_an_unknown_mode_warns_naming_the_variable_and_uses_the_default(monkeypatch, caplog, var):
-    default, _ = _post(monkeypatch, var == EN_ZH)
+def test_an_unknown_mode_warns_naming_the_variable_and_uses_that_directions_default(
+    monkeypatch, caplog, var
+):
+    default = _post(monkeypatch, var == EN_ZH)
+    fallback = "omit" if var == EN_ZH else "disabled"
 
     with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
-        body, kwargs = _post(monkeypatch, var == EN_ZH, {var: "medium-ish"})
+        unknown = _post(monkeypatch, var == EN_ZH, {var: "medium-ish"})
 
-    assert body == default and "extra_body" not in kwargs
-    assert [r.getMessage() for r in caplog.records] == [f"unknown {var}; using omit"]
+    assert unknown == default  # body and transport kwargs both
+    assert [r.getMessage() for r in caplog.records] == [f"unknown {var}; using {fallback}"]
+
+
+@pytest.mark.parametrize("var", [ZH_EN, EN_ZH])
+def test_a_blank_mode_is_that_directions_default(monkeypatch, var):
+    assert _post(monkeypatch, var == EN_ZH, {var: "  "}) == _post(monkeypatch, var == EN_ZH)

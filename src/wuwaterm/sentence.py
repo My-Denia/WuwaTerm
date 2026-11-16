@@ -67,11 +67,14 @@ SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<bo
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 # One reasoning setting per direction: Chinese-to-English and English-to-Chinese
-# have different latency and quality trade-offs.
+# have different latency and quality trade-offs. Into English, thinking is off
+# by default (long segments otherwise outlast the model timeout); into Chinese
+# the provider default stays.
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
-TRANSLATION_THINKING_DEFAULT = "omit"
+TRANSLATION_THINKING_ZH_EN_DEFAULT = "disabled"
+TRANSLATION_THINKING_EN_ZH_DEFAULT = "omit"
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
     "event loop; use translate_async() or translate_html_async() instead."
@@ -1623,24 +1626,29 @@ def _translation_thinking_mode(to_chinese: bool) -> str:
 
     The mode comes from ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` for a request
     into Chinese and ``WUWATERM_TRANSLATION_THINKING_ZH_EN`` for one into
-    English, read per call. An unknown value falls back to ``omit`` rather
-    than failing every translation.
+    English, read per call. A blank value is that direction's default
+    (``disabled`` into English, ``omit`` into Chinese); an unknown value falls
+    back to the same default rather than failing every translation.
     """
-    env = TRANSLATION_THINKING_EN_ZH_ENV if to_chinese else TRANSLATION_THINKING_ZH_EN_ENV
-    mode = os.getenv(env, "").strip() or TRANSLATION_THINKING_DEFAULT
+    if to_chinese:
+        env, default = TRANSLATION_THINKING_EN_ZH_ENV, TRANSLATION_THINKING_EN_ZH_DEFAULT
+    else:
+        env, default = TRANSLATION_THINKING_ZH_EN_ENV, TRANSLATION_THINKING_ZH_EN_DEFAULT
+    mode = os.getenv(env, "").strip() or default
     if mode not in TRANSLATION_THINKING_MODES:
-        LOGGER.warning("unknown %s; using %s", env, TRANSLATION_THINKING_DEFAULT)
-        mode = TRANSLATION_THINKING_DEFAULT
+        LOGGER.warning("unknown %s; using %s", env, default)
+        mode = default
     return mode
 
 
 def _translation_thinking_body(mode: str) -> dict:
     """Provider reasoning fields for a translation request under ``mode``.
 
-    ``omit`` (the default) sends neither field, so the provider default decides
-    (high-effort thinking on DeepSeek, which can run past the translation
-    timeout on a long segment); ``disabled`` switches thinking off, and
-    ``low``/``high`` turn it on at that ``reasoning_effort``.
+    ``omit`` (the default into Chinese) sends neither field, so the provider
+    default decides (high-effort thinking on DeepSeek, which can run past the
+    translation timeout on a long segment); ``disabled`` (the default into
+    English) switches thinking off, and ``low``/``high`` turn it on at that
+    ``reasoning_effort``.
     """
     if mode == "disabled":
         return {"thinking": {"type": "disabled"}}

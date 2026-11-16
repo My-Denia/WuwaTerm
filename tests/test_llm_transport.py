@@ -354,10 +354,11 @@ GOLDEN_CASES = [
 
 @pytest.mark.parametrize("index", range(len(GOLDEN_CASES)))
 def test_translation_request_body_is_byte_identical_to_pre_extraction(index, monkeypatch):
-    # Neither thinking variable set: the shipped defaults, which is the request
-    # recorded below (no reasoning field, plain reference lines).
-    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", raising=False)
-    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", raising=False)
+    # The recorded bodies guard the `omit` request (no reasoning field, plain
+    # reference lines); Chinese-to-English now defaults to `disabled`, so say
+    # `omit` for both directions.
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "omit")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "omit")
     seen = {}
 
     def handler(request):

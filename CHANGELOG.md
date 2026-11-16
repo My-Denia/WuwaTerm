@@ -55,18 +55,26 @@ does not distribute generated game data or generated SQLite databases.
 - New `WUWATERM_TRANSLATION_THINKING_ZH_EN` and
   `WUWATERM_TRANSLATION_THINKING_EN_ZH` settings for the reasoning field a
   translation request carries, one per direction (Chinese into English,
-  English into Chinese). Both default to `omit`: no field is sent, the
-  request is unchanged, and the provider default applies. On DeepSeek that is
-  high-effort thinking, and a long segment can outlast the 45 s model
-  timeout, which happens only into English. `disabled` sends
-  `thinking: {"type": "disabled"}`; it was measured to remove those timeouts,
-  but lowered translation quality into Chinese and into English let a
-  one-character name be applied to an ordinary word, so it is not the
-  default. `low` and `high` turn thinking on at that effort. The settings
+  English into Chinese). `omit` sends no field, so the request is unchanged
+  and the provider default applies; on DeepSeek that is high-effort thinking,
+  and a long segment can outlast the 45 s model timeout, which happens only
+  into English. `disabled` sends `thinking: {"type": "disabled"}`; it was
+  measured to remove those timeouts, but lowered translation quality into
+  Chinese. `low` and `high` turn thinking on at that effort. The settings
   apply to plain and HTML translation on both surfaces and not to semantic
-  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is the
-  default; an unknown value logs a warning naming the variable and uses
-  `omit`.
+  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is
+  that direction's default; an unknown value logs a warning naming the
+  variable and uses that default. The defaults are `disabled` into English
+  (next entry) and `omit` into Chinese.
+- Chinese-to-English translation requests now send thinking disabled by
+  default, which removes the long-segment timeouts into English. Measured on
+  the evaluation development set: 0 timeouts, p95 about 9 s, and Chinese to
+  English usable paragraphs went from 38 to 124 of 128. Known regression: a
+  character-mechanic name that contains a one-character resonator name (for
+  example a 红椿蕊-type term) may be rendered with the resonator name, and
+  the frozen M-Gold score is 667/675 against 670 before. To restore the
+  previous behaviour, set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`.
+  English-to-Chinese keeps `omit`.
 
 ### Delivery And Deployment
 
