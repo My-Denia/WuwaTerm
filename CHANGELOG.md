@@ -3,6 +3,34 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.9.2
+
+### Terms and translation
+
+- A dictionary rebuild imports the complete sourced version-title key family
+  and retains derived four-tier item base pairs whose surfaces have another
+  meaning. Version titles are contextual references, and competing pairs are
+  supplied as alternatives while the established exact owner remains primary.
+  The existing game-data pin is unchanged.
+- Single-character name references use the same source-boundary admission in
+  translation and review, and translation limits each hint to its admitted
+  occurrences. Rare legitimate continuations can also be withheld. Derived
+  names can gain case-varied contextual hints when a segment contains other
+  dictionary terms; an ordinary-word sense can still be ambiguous. The matcher
+  advances from v7 to v8, making saved manuscript-v3 term results using the old
+  matcher stale under the existing freshness rule.
+- The optional document-context prompt clarifies omitted actors, rhetorical
+  addressees, idioms and irony, and complete translation of modifiers and
+  clauses.
+
+### Provider compatibility
+
+- A structured HTTP 400 rejection of `thinking` or `reasoning_effort` now
+  produces a specific server diagnostic and a safe configuration warning.
+  The request is not retried or changed automatically. For translation, the
+  affected direction can be set to `omit`, which uses the provider default
+  rather than disabling thinking.
+
 ## 0.9.1
 
 ### Translation
