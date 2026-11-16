@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    AREA_TITLE_KEY_RE,
+    ARIKATSU_MULTITEXT_SOURCE_FILE,
     CORE_TERM_KEYS,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
@@ -24,6 +26,7 @@ from .constants import (
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
     FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
     FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+    ITEM_TIER_BASE_SOURCE_PREFIX,
     OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,
     OFFICIAL_ANNOUNCEMENT_TERMS,
     SourceProfile,
@@ -116,6 +119,18 @@ ARIKATSU_BIN_SPECS = (
 )
 
 
+# item/iteminfo.json ships some materials only as four tiers: 初级X / 中级X /
+# 高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y".
+# Official text also names the material itself (密音筒 / Sealed Tube), so a
+# complete family adds its base pair (X, Y) as a derived item row.
+ITEM_TIER_PREFIXES = (
+    ("初级", "Basic "),
+    ("中级", "Medium "),
+    ("高级", "Advanced "),
+    ("特级", "Premium "),
+)
+
+
 class BuildError(RuntimeError):
     pass
 
@@ -179,6 +194,72 @@ def _record_for_key(
         zh=zh,
         en=en,
     )
+
+
+def _numeric_id_key(value: str) -> tuple[int, int, str]:
+    return (0, int(value), "") if value.isdigit() else (1, 0, value)
+
+
+def _item_tier_base_records(
+    rows: list[Any],
+    zh_map: dict[str, str],
+    en_map: dict[str, str],
+    existing: list[TermRecord],
+) -> list[TermRecord]:
+    """Return one derived item row per complete four-tier item family.
+
+    A family is the set of iteminfo rows whose cleaned names are a tier
+    prefix plus the same Chinese base X and, with the matching English tier
+    prefix, the same English base Y. Only a family with all four tiers names
+    its base, and only while neither X nor Y is already a surface of an
+    existing record: a base pair that is already a record is not repeated,
+    and a bare X or Y another record pairs with a different counterpart
+    already names something else (Tuner is the speaker 调音师), so it does
+    not name the material unambiguously. The row's source_id and text_key
+    are ``tier-base:<id>`` with the smallest Basic-tier row id, so the row
+    says it is derived and stays deterministic when one tier has several
+    rows.
+    """
+    zh_surfaces = {record.zh for record in existing}
+    en_surfaces = {record.en for record in existing}
+    families: dict[tuple[str, str], dict[int, list[str]]] = defaultdict(dict)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("Id", ""))
+        text_key = row.get("Name")
+        if not row_id or not isinstance(text_key, str) or not text_key:
+            continue
+        zh = clean_source_text(zh_map.get(text_key, ""))
+        en = clean_source_text(en_map.get(text_key, ""))
+        for tier, (zh_prefix, en_prefix) in enumerate(ITEM_TIER_PREFIXES):
+            if zh.startswith(zh_prefix) and en.startswith(en_prefix):
+                base = (zh[len(zh_prefix) :].strip(), en[len(en_prefix) :].strip())
+                if base[0] and base[1]:
+                    families[base].setdefault(tier, []).append(row_id)
+                break
+
+    records: list[TermRecord] = []
+    for (zh, en), tiers in sorted(families.items()):
+        if (
+            len(tiers) != len(ITEM_TIER_PREFIXES)
+            or zh in zh_surfaces
+            or en in en_surfaces
+        ):
+            continue
+        basic_id = min(tiers[0], key=_numeric_id_key)
+        source_id = f"{ITEM_TIER_BASE_SOURCE_PREFIX}{basic_id}"
+        records.append(
+            TermRecord(
+                category="item",
+                source_file="BinData/item/iteminfo.json",
+                source_id=source_id,
+                text_key=source_id,
+                zh=zh,
+                en=en,
+            )
+        )
+    return records
 
 
 def source_profile_for_data_dir(data_dir: str | Path, profile_name: str | None = None) -> SourceProfile:
@@ -252,6 +333,7 @@ def iter_arikatsu_records(
         if record:
             records.append(record)
 
+    bin_rows: dict[str, list[Any]] = {}
     for spec in ARIKATSU_BIN_SPECS:
         path = bin_root / spec.config_file
         if not path.exists():
@@ -259,6 +341,7 @@ def iter_arikatsu_records(
         rows = load_json(path)
         if not isinstance(rows, list):
             raise BuildError(f"expected list in {path}")
+        bin_rows[spec.config_file] = rows
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -281,6 +364,33 @@ def iter_arikatsu_records(
                 )
                 if record:
                     records.append(record)
+
+    # A location reaches the dictionary through an area/area.json row's Title.
+    # The pinned TextMap also carries Area_<n>_Title keys that no area.json
+    # row references (Area_41037_Title 拉贝尔学部 / Rabelle College and the rest
+    # of the Startorch campus): those are imported directly. Like the Term
+    # glossary import, no row filter applies; an empty or missing side is
+    # skipped as elsewhere.
+    referenced_area_titles = {
+        row.get("Title") for row in bin_rows["area/area.json"] if isinstance(row, dict)
+    }
+    for text_key in sorted(zh_map):
+        if (
+            text_key in referenced_area_titles
+            or text_key in CORE_TERM_KEYS
+            or not AREA_TITLE_KEY_RE.fullmatch(text_key)
+        ):
+            continue
+        record = _record_for_key(
+            category="location",
+            source_file=ARIKATSU_MULTITEXT_SOURCE_FILE,
+            source_id=text_key,
+            text_key=text_key,
+            zh_map=zh_map,
+            en_map=en_map,
+        )
+        if record:
+            records.append(record)
 
     for zh, en, category, source_id in OFFICIAL_ANNOUNCEMENT_TERMS:
         records.append(
@@ -314,6 +424,13 @@ def iter_arikatsu_records(
             )
             if record:
                 records.append(record)
+
+    # Derived last, so every other source's surfaces are known: an exact pair
+    # is kept once and a surface that already names something else is left
+    # to it.
+    records.extend(
+        _item_tier_base_records(bin_rows["item/iteminfo.json"], zh_map, en_map, records)
+    )
 
     if not records:
         raise BuildError("no term records were extracted")

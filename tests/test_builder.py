@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 
 from wuwaterm.constants import SOURCE_PROFILES, get_source_profile
@@ -493,6 +495,28 @@ def test_measure_free_text_zh_exclusions_aligns_singular_and_plural_variants(
     assert excluded == [["索拉里斯", 12, 0]]
 
 
+def _write_arikatsu(
+    root: Path,
+    texts: dict[str, tuple[str, str]],
+    table_rows: dict[str, list[dict[str, object]]],
+) -> Path:
+    """Write a synthetic Arikatsu checkout; every spec table not given is empty."""
+    for lang, idx in (("zh-Hans", 0), ("en", 1)):
+        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps([{"Id": k, "Content": v[idx]} for k, v in texts.items()]),
+            encoding="utf-8",
+        )
+    for spec in ARIKATSU_BIN_SPECS:
+        cfg = root / "BinData" / spec.config_file
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            json.dumps(table_rows.get(spec.config_file, [])), encoding="utf-8"
+        )
+    return root
+
+
 def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     root = tmp_path / "arikatsu"
     texts = {
@@ -512,13 +536,6 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
         "t_sonic": ("索尼克", "Sonic"),
         "t_shadow": ("夏特", "Shadow"),
     }
-    for lang, idx in (("zh-Hans", 0), ("en", 1)):
-        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps([{"Id": k, "Content": v[idx]} for k, v in texts.items()]),
-            encoding="utf-8",
-        )
     table_rows = {
         "PhoneMsg/chattheme.json": [
             {"Id": 80891001, "SortId": 0, "ItemAccess": [], "BgDescription": "", "Name": "t_def_theme"},
@@ -543,12 +560,7 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
         "skill/skilltype.json": [{"Id": 1, "TypeName": "t_skill_norm"}],
         "gacha/gachaviewtypeinfo.json": [{"Type": 2, "TypeText": "t_gacha_res"}],
     }
-    for spec in ARIKATSU_BIN_SPECS:
-        cfg = root / "BinData" / spec.config_file
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(
-            json.dumps(table_rows.get(spec.config_file, [])), encoding="utf-8"
-        )
+    _write_arikatsu(root, texts, table_rows)
     # A cosmetic table may still exist in the checkout; no spec reads it, which
     # is how one table import cannot drag an unrelated everyday word in.
     for config_file, row in (
@@ -575,3 +587,301 @@ def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     }
     # The ordinary words those cosmetic tables also carry never enter.
     assert {r.en for r in records} & {"Sonic", "Shadow"} == set()
+
+
+def _tier_rows(first_id: int, key: str) -> list[dict[str, object]]:
+    return [{"Id": first_id + tier, "Name": f"{key}_{tier}"} for tier in range(4)]
+
+
+def _tier_texts(key: str, zh: str, en: str, *, en_premium: str | None = None):
+    names = [("初级", "Basic"), ("中级", "Medium"), ("高级", "Advanced"), ("特级", "Premium")]
+    texts = {
+        f"{key}_{tier}": (f"{zh_prefix}{zh}", f"{en_prefix} {en}")
+        for tier, (zh_prefix, en_prefix) in enumerate(names)
+    }
+    if en_premium is not None:
+        texts[f"{key}_3"] = (f"特级{zh}", f"Premium {en_premium}")
+    return texts
+
+
+@pytest.fixture()
+def names_checkout(tmp_path: Path) -> Path:
+    # Upstream names on synthetic keys and ids; "Revival Mist" is synthetic.
+    texts = {
+        "Area_2103_Title": ("泊金港", "Gold's Landing"),
+        "Area_41037_Title": ("拉贝尔学部", "Rabelle College"),
+        "Area_41039_Title": ("学院公寓", "Academy Dormitory"),
+        "Area_41040_Title": ("生活中枢", "Living Commons"),
+        "Area_41043_Title": ("教学楼", "Academia Hall"),
+        "Term900001_Title": ("核心", "Core"),
+        "Term900002_Title": ("营养块", "Nutrient Block"),
+        "Term900003_Title": ("复苏吸雾", "Revival Mist"),
+        "Speaker_1513_Name": ("调音师", "Tuner"),
+        **_tier_texts("core", "能源核心", "Energy Core"),
+        **_tier_texts("bag", "能量袋", "Energy Bag"),
+        # Only three tiers ship: no base row.
+        **{
+            key: value
+            for key, value in _tier_texts("potion", "共鸣促剂", "Resonance Potion").items()
+            if not key.endswith("_3")
+        },
+        # Same Chinese base, a different English suffix on one tier: no base row.
+        **_tier_texts("tube", "密音筒", "Sealed Tube", en_premium="Sealed Canister"),
+        # The base pair is already an official record: kept once.
+        **_tier_texts("block", "营养块", "Nutrient Block"),
+        # A base surface another record pairs with a different counterpart
+        # (the speaker 调音师 / Tuner, 复苏吸雾 / Revival Mist): no base row.
+        **_tier_texts("tuner", "调谐器", "Tuner"),
+        **_tier_texts("inhaler", "复苏吸雾", "Revival Inhaler"),
+    }
+    table_rows = {
+        "area/area.json": [{"AreaId": 2103, "Title": "Area_2103_Title"}],
+        "item/iteminfo.json": [
+            # Two Basic rows: the derived id is the smallest one.
+            {"Id": 43020009, "Name": "core_0"},
+            *_tier_rows(43020001, "core"),
+            *_tier_rows(42100022, "bag"),
+            *_tier_rows(43010001, "potion")[:3],
+            *_tier_rows(36000001, "tube"),
+            *_tier_rows(42100017, "block"),
+            *_tier_rows(36000011, "tuner"),
+            *_tier_rows(42100013, "inhaler"),
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps([{"Id": 1513}]), encoding="utf-8"
+    )
+    return root
+
+
+@pytest.fixture()
+def names_db(names_checkout: Path, tmp_path: Path) -> Path:
+    """A terms DB built from names_checkout."""
+    profile = get_source_profile("arikatsu")
+    db_path = tmp_path / "names.db"
+    create_database(
+        db_path,
+        iter_records(names_checkout, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    return db_path
+
+
+@pytest.fixture()
+def names_lock(names_db: Path):
+    """Lock or reference a sentence against a DB built from names_checkout."""
+    from wuwaterm.sentence import SentenceTranslator
+
+    translator = SentenceTranslator(names_db)
+
+    def lock(text: str, *, to_chinese: bool):
+        return translator._lock_terms_with_references(
+            translator.prepare_text(text),
+            to_chinese=to_chinese,
+            allow_plural_inflection=to_chinese,
+            allow_nfkc_spelling=True,
+        )
+
+    return lock
+
+
+def test_arikatsu_imports_area_titles_no_area_row_references(names_checkout: Path):
+    records = iter_records(names_checkout, "arikatsu")
+    area_records = sorted(
+        (r.category, r.source_file, r.source_id, r.zh, r.en)
+        for r in records
+        if r.text_key.startswith("Area_")
+    )
+    multitext = "Textmaps/multi_text/MultiText.json"
+    assert area_records == [
+        ("location", "BinData/area/area.json", "2103", "泊金港", "Gold's Landing"),
+        ("location", multitext, "Area_41037_Title", "拉贝尔学部", "Rabelle College"),
+        ("location", multitext, "Area_41039_Title", "学院公寓", "Academy Dormitory"),
+        ("location", multitext, "Area_41040_Title", "生活中枢", "Living Commons"),
+        ("location", multitext, "Area_41043_Title", "教学楼", "Academia Hall"),
+    ]
+
+
+def test_arikatsu_derives_base_row_only_for_complete_tier_families(
+    names_checkout: Path,
+):
+    records = iter_records(names_checkout, "arikatsu")
+    assert [r for r in records if r.source_id.startswith("tier-base:")] == [
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:43020001",
+            "tier-base:43020001",
+            "能源核心",
+            "Energy Core",
+        ),
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:42100022",
+            "tier-base:42100022",
+            "能量袋",
+            "Energy Bag",
+        ),
+    ]
+    assert [(r.category, r.source_id) for r in records if r.zh == "营养块"] == [
+        ("core_term", "Term900002_Title")
+    ]
+
+
+def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
+    # MY-18: "Energy Cores" is one material, not "Energy" plus 核心 / Core,
+    # and the lowercase ordinary phrase stays prose.
+    plural = names_lock("Farm Energy Cores.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in plural.locks] == [("能源核心", "Energy Core")]
+    assert plural.restore(plural.locked_text, to_en=False) == "Farm 能源核心."
+
+    ordinary = names_lock("The energy core of a star.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())
+    assert ordinary.locked_text == "The energy core of a star."
+
+    zh_source = names_lock("今天去刷能源核心。", to_chinese=False)
+    assert zh_source.locks == ()
+    assert zh_source.references == (("能源核心", "能源核心", "Energy Core", "item"),)
+
+
+def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
+    # MY-18: bare "Tuner" is already the speaker 调音师, so 调谐器 / Tuner is
+    # not derived. Bare "Tuner" stays a contextual speaker reference carrying
+    # 调音师, as before tier bases, also where the sentence means the item:
+    # the model weighs it, nothing hard-locks it to 调谐器. A tier name locks.
+    tuner = ("Tuner", "调音师", "Tuner", "speaker")
+    speaker = names_lock("Tuner: Hold that note.", to_chinese=True)
+    assert (speaker.locks, speaker.references) == ((), (tuner,))
+
+    item = names_lock("Use a Basic Tuner first, then the Tuner.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in item.locks] == [("初级调谐器", "Basic Tuner")]
+    assert item.references == (tuner,)
+
+    ordinary = names_lock("Bring a guitar tuner.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())
+
+
+def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):
+    # MY-18: 教学楼 is the Area title of Academia Hall and the everyday word
+    # for a school building. zh->en hands every category to the model as a
+    # reference, never a lock; en->zh locks only the capitalized name.
+    school = names_lock("我们学校的教学楼很旧。", to_chinese=False)
+    assert school.locks == ()
+    assert school.references == (("教学楼", "教学楼", "Academia Hall", "location"),)
+
+    name = names_lock("Meet me at Academia Hall.", to_chinese=True)
+    assert [(zh, en) for _, zh, en in name.locks] == [("教学楼", "Academia Hall")]
+
+    ordinary = names_lock("Our old academia hall has no lift.", to_chinese=True)
+    assert (ordinary.locks, ordinary.references) == ((), ())
+
+
+# Ordinary sentences whose everyday word is also a surface only the derived
+# name rows (orphan area titles, four-tier item bases) carry.
+DERIVED_NAME_PROSE = (
+    "我们学校的教学楼很旧。",
+    "她住在学院公寓三楼。",
+    "背包里有一个能量袋。",
+    "这里是社区的生活中枢。",
+)
+
+
+def _without_model(monkeypatch) -> None:
+    for name in (
+        "WUWATERM_OPENAI_BASE_URL",
+        "OPENAI_BASE_URL",
+        "WUWATERM_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "WUWATERM_OPENAI_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_derived_name_rows_never_rewrite_chinese_text_without_a_model(
+    monkeypatch, names_db
+):
+    # MY-18: with no model there is nobody to weigh a reference, so a surface
+    # only a derived name row carries is left as written instead of being
+    # substituted with the name it may not mean.
+    from wuwaterm.sentence import SentenceTranslator
+
+    _without_model(monkeypatch)
+    translator = SentenceTranslator(names_db)
+    for sentence in DERIVED_NAME_PROSE:
+        assert translator.translate(sentence) == sentence
+        assert asyncio.run(translator.translate_async(sentence)) == sentence
+    # The material still owns its span, so 核心 inside it is not locked alone.
+    assert translator.translate("今天去刷能源核心。") == "今天去刷能源核心。"
+    # Nor is a line that starts like a speaker prefix rewritten.
+    assert translator.translate("教学楼：门口集合。") == "教学楼:门口集合。"
+
+
+def test_rows_main_already_had_still_lock_without_a_model(monkeypatch, names_db):
+    # An area.json location, an iteminfo tier item and a glossary term lock
+    # as before; the capitalized English names of derived rows lock en->zh.
+    from wuwaterm.sentence import SentenceTranslator
+
+    _without_model(monkeypatch)
+    translator = SentenceTranslator(names_db)
+    assert translator.translate("明天去泊金港。") == "明天去Gold's Landing。"
+    assert translator.translate("泊金港：晴。") == "Gold's Landing: 晴。"
+    assert translator.translate("先刷初级能源核心。") == "先刷Basic Energy Core。"
+    assert translator.translate("核心很重要。") == "Core很重要。"
+    assert (
+        translator.translate("Meet me at Academia Hall.", to_chinese=True)
+        == "Meet me at 教学楼."
+    )
+    assert translator.translate("Farm Energy Cores.", to_chinese=True) == "Farm 能源核心."
+
+
+def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, names_db):
+    from wuwaterm.sentence import SentenceTranslator
+
+    for name, value in (
+        ("WUWATERM_OPENAI_BASE_URL", "http://model.test/v1"),
+        ("WUWATERM_OPENAI_API_KEY", "test-key"),
+        ("WUWATERM_OPENAI_MODEL", "test-model"),
+    ):
+        monkeypatch.setenv(name, value)
+    bodies = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "translated"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    translator = SentenceTranslator(names_db, llm_transport=httpx.MockTransport(model))
+    text = "".join(DERIVED_NAME_PROSE)
+    assert asyncio.run(translator.translate_async(text)) == "translated"
+
+    [body] = bodies
+    system, user = (message["content"] for message in body["messages"])
+    assert user == text
+    for reference in (
+        "教学楼 = Academia Hall (location)",
+        "学院公寓 = Academy Dormitory (location)",
+        "能量袋 = Energy Bag (item)",
+        "生活中枢 = Living Commons (location)",
+    ):
+        assert reference in system

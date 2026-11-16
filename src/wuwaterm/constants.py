@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -129,6 +130,16 @@ CORE_TERM_KEYS = {
 }
 
 OFFICIAL_ANNOUNCEMENT_SOURCE_FILE = "official_announcement"
+
+# Derived name rows. Two builder mechanisms add names no BinData row pairs:
+# the Arikatsu Area_<n>_Title keys no area/area.json row references, imported
+# from the TextMap as locations, and the base pair of a complete four-tier
+# item family, whose source_id is ITEM_TIER_BASE_SOURCE_PREFIX plus the
+# Basic-tier row id. Runtime reads a row's provenance from these markers
+# (sentence._is_derived_name_entry).
+ARIKATSU_MULTITEXT_SOURCE_FILE = "Textmaps/multi_text/MultiText.json"
+AREA_TITLE_KEY_RE = re.compile(r"Area_\d+_Title")
+ITEM_TIER_BASE_SOURCE_PREFIX = "tier-base:"
 
 # Fixed official bilingual announcement terms with no standalone MultiText key:
 # the CMS announcement label that the 3.7 maintenance notice renders as

@@ -27,8 +27,12 @@ from .cjk_span import (
     single_character_name_mention_at,
 )
 from .constants import (
+    AREA_TITLE_KEY_RE,
+    ARIKATSU_MULTITEXT_SOURCE_FILE,
+    CORE_TERM_KEYS,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    ITEM_TIER_BASE_SOURCE_PREFIX,
 )
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
 from .exclusion_metadata import (
@@ -50,7 +54,7 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
 )
 from .lookup import TermService
 from .models import TermEntry
-from .normalize import normalize_user_text
+from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
 from .semantic_review_contract import PRECEDENT_WORDING
 
@@ -322,6 +326,53 @@ def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
             continue
         surfaces.update(surface for surface, _occurrences, _aligned in rows)
     return frozenset(surfaces)
+
+
+def _is_derived_name_entry(entry: TermEntry) -> bool:
+    """Return whether the builder derived ``entry`` instead of reading a pair.
+
+    Two mechanisms do: an Area_<n>_Title key no area/area.json row
+    references, imported from the TextMap as a location, and the base pair of
+    a complete four-tier item family (``tier-base:<id>``). A curated
+    CORE_TERM_KEYS row shares the TextMap source file and stays an ordinary
+    row.
+    """
+    if entry.source_id.startswith(ITEM_TIER_BASE_SOURCE_PREFIX):
+        return True
+    return (
+        entry.category == "location"
+        and entry.source_file == ARIKATSU_MULTITEXT_SOURCE_FILE
+        and entry.text_key not in CORE_TERM_KEYS
+        and AREA_TITLE_KEY_RE.fullmatch(entry.text_key) is not None
+    )
+
+
+def _derived_reference_only_sources(entries: Iterable[TermEntry]) -> frozenset[str]:
+    """Return the Chinese surfaces free text references but never locks.
+
+    A derived name row's Chinese surface is often also an everyday word
+    (教学楼 is any school's teaching building, 能量袋 any energy bag), and no
+    official row pairs it in a context that tells the two apart. It stays in
+    span selection, so it still owns its span and the model receives it as a
+    contextual reference, but it never becomes a placeholder: without a model
+    the text is left as written. A surface any other row also carries, also
+    under lookup normalization, keeps that row's behavior, and English
+    surfaces are not affected (en->zh still locks the exact "Academia Hall").
+    """
+    derived: set[str] = set()
+    established: set[str] = set()
+    for entry in entries:
+        surfaces = derived if _is_derived_name_entry(entry) else established
+        for surface in (entry.zh, entry.en):
+            if surface:
+                surfaces.add(surface)
+    established_norms = {normalize_text(surface) for surface in established}
+    return frozenset(
+        surface
+        for surface in derived
+        if any(map(_is_cjk_character, surface))
+        and normalize_text(surface) not in established_norms
+    )
 
 
 def _is_latin_word_char(char: str) -> bool:
@@ -628,8 +679,8 @@ class SentenceTranslator:
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
         self._lockable_sources_cache: tuple[
-            tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
-        ] = ((), frozenset())
+            tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
+        ] = ((), frozenset(), frozenset())
         self._source_categories_cache_key: tuple[object, ...] | None = None
         self._source_categories_cache: dict[str, str] = {}
 
@@ -758,6 +809,7 @@ class SentenceTranslator:
         # decide whether a term is safe to force, so read it from the same
         # cached snapshot the spans were selected from.
         categories = self._source_categories() if to_chinese is not None else {}
+        reference_only = self._reference_only_sources()
         locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
         references: list[tuple[str, str, str, str]] = []
@@ -774,12 +826,15 @@ class SentenceTranslator:
                 or categories.get(zh)
                 or ""
             )
-            if category and _is_contextual_reference(
-                category, to_chinese=to_chinese
+            # A derived name's Chinese surface is never forced, whatever the
+            # path; without a model (to_chinese is None) nothing receives a
+            # reference and the text stays as written.
+            if span.source in reference_only or (
+                category and _is_contextual_reference(category, to_chinese=to_chinese)
             ):
                 locked_parts.append(text[span.start : span.end])
                 reference = (span.source, zh, en, category)
-                if reference not in seen_references:
+                if to_chinese is not None and reference not in seen_references:
                     seen_references.add(reference)
                     references.append(reference)
             else:
@@ -1272,6 +1327,11 @@ class SentenceTranslator:
         official = self._exact_official(speaker)
         if not official:
             return line
+        # A line that starts with a derived name's Chinese surface ("教学楼：")
+        # is not rewritten to the name either.
+        norm = normalize_text(speaker)
+        if any(normalize_text(source) == norm for source in self._reference_only_sources()):
+            return line
         return f"{official}: {body}" if body else f"{official}:"
 
     def _exact_official(self, query: str) -> str | None:
@@ -1301,7 +1361,7 @@ class SentenceTranslator:
     ) -> tuple[
         tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
     ]:
-        rows, nfkc_sources = self._lockable_snapshot()
+        rows, nfkc_sources, _reference_only = self._lockable_snapshot()
         return self._eligible_rows(rows), nfkc_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
@@ -1321,10 +1381,11 @@ class SentenceTranslator:
     def _read_lockable_sources(
         self,
     ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
+        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
     ]:
         excluded = _free_text_exclusions(self.service.metadata())
-        sources = _exact_lockable_sources(self.service.entries())
+        entries = self.service.entries()
+        sources = _exact_lockable_sources(entries)
         # Case variants come after every exact source, so an exact surface
         # always keeps its own record and wins equal-length overlaps. They are
         # computed before exclusions are removed, so an excluded surface still
@@ -1337,7 +1398,11 @@ class SentenceTranslator:
             sources.pop(surface, None)
         for variant, official in variants:
             sources.setdefault(variant, official)
-        return tuple(sources.items()), nfkc_sources
+        return (
+            tuple(sources.items()),
+            nfkc_sources,
+            _derived_reference_only_sources(entries),
+        )
 
     def _source_categories(self) -> dict[str, str]:
         """Surface -> category, cached with the already-loaded lockable rows.
@@ -1363,10 +1428,14 @@ class SentenceTranslator:
         """Raw surfaces the prepared plain-text paths may also match by NFKC."""
         return self._lockable_snapshot()[1]
 
+    def _reference_only_sources(self) -> frozenset[str]:
+        """Chinese surfaces that are references, never locks (derived names)."""
+        return self._lockable_snapshot()[2]
+
     def _lockable_snapshot(
         self,
     ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str]
+        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
     ]:
         # Each source text (Chinese OR English form) maps to the official
         # (zh, en, category) record, retaining single-character name provenance.
@@ -1374,8 +1443,8 @@ class SentenceTranslator:
         # direction. Cache by filesystem identity plus build provenance so an
         # atomic DB replacement invalidates the cache without repeated full
         # terms-table reads during normal operation. The admissible NFKC
-        # spelling set is built from the same snapshot, so it cannot drift
-        # from the rows it augments.
+        # spelling set and the reference-only set are built from the same
+        # snapshot, so they cannot drift from the rows they qualify.
         for _attempt in range(2):
             identity_before = self._lockable_sources_identity()
             if identity_before == self._lockable_sources_cache_key:

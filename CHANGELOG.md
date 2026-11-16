@@ -5,6 +5,39 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Terms And Dictionary
+
+- The builder imports the pinned `Area_<n>_Title` keys that no
+  `area/area.json` row references as locations, so place names such as
+  拉贝尔学部 / Rabelle College and the rest of the Startorch campus reach
+  `terms.db` (21 rows on the pinned data; 15 carry names the dictionary
+  lacked, 14 distinct pairs). English-to-Chinese locks only the exact
+  "Academia Hall", not lowercase "academia hall".
+- A complete four-tier item family in `item/iteminfo.json` (初级X / 中级X /
+  高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y")
+  adds its base pair as a derived item row (`tier-base:<basic id>`), unless
+  X or Y is already a surface of another record: 14 rows on the pinned
+  data, such as 密音筒 / Sealed Tube and 能源核心 / Energy Core. "Energy
+  Cores" now locks the whole material instead of leaving "Energy" and
+  locking 核心 / Core. A surface another record pairs differently already
+  names something else, so its base is not derived: on the pinned data
+  that drops only 调谐器 / Tuner, and bare "Tuner" stays the speaker
+  调音师 / Tuner contextual reference it was before, also where it means
+  the item; "Basic Tuner" and the other tier names still lock. The
+  free-text exclusion metadata of the pinned build is unchanged.
+- A Chinese surface that only these area titles and derived item bases
+  carry is reference-only in Chinese free text, with or without a model (28
+  surfaces on the pinned data; one an existing record also carries, such as
+  泊金港, locks as before). With a model, Chinese-to-English translation
+  hands it over as a contextual reference, so the everyday 教学楼
+  ("teaching building") is a hint the model weighs against the sentence.
+  Without a model the text keeps it as written instead of turning it into
+  "Academia Hall", and a line starting "教学楼：" is not rewritten as a
+  speaker name. It still owns its span, so 核心 / Core inside 能源核心 is
+  no longer locked or referenced on its own. A query that is only the name,
+  such as 教学楼 alone, is still a dictionary lookup and returns Academia
+  Hall.
+
 ### Compatibility and distribution
 
 - The Web and Windows contract pins (`contracts/web-ref.txt`,
