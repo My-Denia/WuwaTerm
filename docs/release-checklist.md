@@ -12,7 +12,12 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.9.0`, a review,
+  published tag. The current source version is `0.9.1`, a patch release on top
+  of `v0.9.0`: long translations keep the source's paragraph layout when the
+  model kept the lines, Chinese-to-English translation requests send thinking
+  disabled by default (`WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` restores the
+  previous request), and the self-host installer's default Web release moves to
+  `v0.3.1`. The latest published Core release is `v0.9.0`, a review,
   dictionary and translation-settings release on top of `v0.8.7`: `review-v2`
   judges terms paragraph by paragraph when the sentence counts differ and the
   matcher label moves to `wuwaterm-cjk-matcher-v7`, the dictionary adds the
@@ -37,10 +42,12 @@ release. That boundary has not moved.
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
   target-version file. Core `0.9.0` and its published asset hashes are recorded
-  there. For a future release, update `products.core.release` only after it is
-  published, using its actual asset names and SHA-256 values; do not invent an
-  asset name or SHA-256 for a release that does not exist yet. Leave the
-  `products.telegram` and `products.web` entries on their published releases.
+  there. Do not edit `products.core.release` to the prospective `0.9.1` before
+  that release is published, and do not invent an asset name or SHA-256 for it;
+  update it only after publication, using its actual asset names and SHA-256
+  values. Leave the `products.telegram` entry on its published release.
+  `products.web` records the published Web `v0.3.1`, because the installer
+  takes its default Web release from that entry.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
@@ -50,6 +57,14 @@ release. That boundary has not moved.
   of `v0.9.0` records `v0.2.10` and needs `WUWATERM_TELEGRAM_VERSION=v0.3.0`
   to pair the tagged Core with it. A clone of `v0.8.6` records `v0.2.9`. The
   tag always names a published release; there is no `latest`.
+- The Web release works the same way: `products.web.release.tag`,
+  `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
+  the top section of `docs/products.md` name one published release, and
+  `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
+  they differ. This tag records and installs Web `v0.3.1`; a clone of `v0.9.0`
+  records Web `v0.2.0`, which rejects manuscript v3 files, and needs
+  `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
+  Web. `docs/self-hosting.md` and `README.md` say the same.
 - Windows product: [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:

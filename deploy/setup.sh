@@ -99,7 +99,7 @@ WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
 steps name (default: the tag contracts/products.json of this checkout records,
 v0.3.0 here; the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
-v0.3.0, the current published release, or latest (default v0.3.0, or the tag
+v0.3.1, the current published release, or latest (default v0.3.1, or the tag
 recorded in contracts/products.json).
 EOF
 }
@@ -389,7 +389,7 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
 DEFAULT_TELEGRAM_VERSION=v0.3.0
-DEFAULT_WEB_VERSION=v0.3.0
+DEFAULT_WEB_VERSION=v0.3.1
 
 recorded_product_tag() {
     [ -f "$code_root/contracts/products.json" ] || return 1

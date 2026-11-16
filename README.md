@@ -96,9 +96,9 @@ product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
 A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10,
-the release that tag records; `main` records v0.3.0, which pins Core v0.9.0
-and which the next formal release will carry. To pair the tagged Core with
-Telegram v0.3.0, name the tag explicitly:
+the release that tag records; the v0.9.1 tag and `main` record v0.3.0, which
+pins Core v0.9.0. To pair the v0.9.0 tag with Telegram v0.3.0, name the tag
+explicitly:
 
 ```bash
 WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
@@ -108,11 +108,11 @@ The variable always names a published tag, never `latest`.
 
 The Web option also defaults to the release the checkout records: a clone of
 the Core v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files,
-while `main` records Web v0.3.0. To get the manuscript-v3 Web with the tagged
-Core, name the tag explicitly:
+while the v0.9.1 tag and `main` record Web v0.3.1. To get the manuscript-v3 Web
+with the v0.9.0 tag, name the tag explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.3.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.3.1 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
@@ -121,7 +121,8 @@ source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/releases) package this
-checkout records (v0.3.0 on `main`, v0.2.0 on the v0.9.0 tag), verifies it
+checkout records (v0.3.1 on `main` and the v0.9.1 tag, v0.2.0 on the v0.9.0
+tag), verifies it
 against the release checksums, and needs the HTTPS origin your proxy serves
 (`--web-origin`).
 

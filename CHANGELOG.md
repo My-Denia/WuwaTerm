@@ -3,7 +3,7 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.9.1
 
 ### Translation
 
@@ -33,6 +33,19 @@ does not distribute generated game data or generated SQLite databases.
   that contains it, and an install whose `.env` was copied from
   WuwaTerm-Telegram's `deploy/env.example` (which sets `omit` explicitly)
   keeps `omit` until that file changes.
+
+### Delivery And Deployment
+
+- The self-host installer of a v0.9.1 checkout defaults to Web `v0.3.1` and
+  Telegram `v0.3.0`; a v0.9.0 checkout defaulted to Web `v0.2.0`, which
+  rejects manuscript v3 files, and Telegram `v0.2.10`. `deploy/setup.sh` takes
+  the installed product tags from `contracts/products.json` when it can read
+  it, and this release records those two tags there, so `--with-web` installs
+  Web `v0.3.1`, `--with-telegram` prints the Telegram `v0.3.0` steps, and the
+  `DEFAULT_WEB_VERSION` and `DEFAULT_TELEGRAM_VERSION` constants agree.
+  `WUWATERM_WEB_VERSION` and `WUWATERM_TELEGRAM_VERSION` still choose another
+  published tag, which is how a v0.9.0 checkout is paired with Web `v0.3.1`
+  or Telegram `v0.3.0`. Telegram `v0.3.0` pins Core `v0.9.0`.
 
 ## 0.9.0
 
