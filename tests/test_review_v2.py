@@ -621,10 +621,36 @@ _OCCURRENCE_RESOLUTIONS = tuple(
     for structure, target, expected in _RESOLUTION_STRUCTURES
     for state, actions, excluded in _RESOLUTION_STATES
 )
+# 回音 has two candidates of its own, "Echo" and "Echo Set". The longest
+# match holds among one mention's own candidates whatever is selected: the
+# "Echo" inside "Echo Set" is never an Echo of 回音. A verified entry may name
+# the target start when the text alone would not tell two spans apart.
+_OWN_CANDIDATES = (
+    ("own longer candidate, unresolved", "回音出现。", "Echo Set appears.", [(_V, "Echo Set")], None, {}, ()),
+    (
+        "own longer candidate, Echo confirmed, only Echo Set",
+        "回音出现。",
+        "Echo Set appears.",
+        [_C],
+        None,
+        {0: ("official_pair", "Echo")},
+        (),
+    ),
+    (
+        "own longer candidate, Echo confirmed, both",
+        "回音出现。",
+        "Echo Set and Echo appear.",
+        [(_V, "Echo", 13)],
+        None,
+        {0: ("official_pair", "Echo")},
+        (),
+    ),
+)
 _OCCURRENCE_MATRIX = (
     tuple((*row, {}, ()) for row in _OCCURRENCE_CASES)
     + _OCCURRENCE_ACTIONS
     + _OCCURRENCE_RESOLUTIONS
+    + _OWN_CANDIDATES
 )
 
 
@@ -660,6 +686,8 @@ def _matrix_service(tmp_path: Path, excluded: tuple[str, ...]) -> TermService:
                 TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
                 TermRecord("item", "fixture", "xinghui-set", "xinghui-set", "星辉", "Echo Set"),
                 TermRecord("character", "fixture", "xinghui", "xinghui", "星辉", "Starlight"),
+                TermRecord("item", "fixture", "huiyin", "huiyin", "回音", "Echo"),
+                TermRecord("item", "fixture", "huiyin-set", "huiyin-set", "回音", "Echo Set"),
             ),
         )
         conn.commit()
@@ -713,11 +741,14 @@ def test_occurrence_matrix(
             },
         )
 
+    offset = 3 if path == "guarded" else 0
     actual = [
         (item.verdict, item.reason)
         if item.verdict == VERDICT_NOT_EVALUATED
         else (item.verdict, item.target_span.text if item.target_span else None)
-        for item in report.findings
+        if len(want) == 2
+        else (item.verdict, item.target_span.text, item.target_span.start - offset)
+        for item, want in zip(report.findings, expected, strict=True)
     ]
     assert actual == expected, case
 

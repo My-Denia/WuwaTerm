@@ -44,9 +44,12 @@ does not distribute generated game data or generated SQLite databases.
   included. Mentions compete when their accepted forms, singular and plural
   variants included, can take the same target span. On every path the
   longest match now wins: an occurrence inside an occurrence of a longer form
-  of a term the source also mentions ("Echo" inside "Echo Set") no longer
-  counts for the shorter term, so a missing 声骸 next to 声骸套装 is
-  `needs_review` instead of verified on part of "Echo Set". Apart from that,
+  some mention still asserts, or of a longer form among the mention's own
+  candidates ("Echo" inside "Echo Set"), no longer counts for the shorter
+  form, so a missing 声骸 next to 声骸套装 is `needs_review` instead of
+  verified on part of "Echo Set". A term dismissed as `not_a_term`, an
+  unresolved ordinary word and another mention's unselected candidates
+  reserve nothing. Apart from that,
   verdicts on pairs with equal sentence counts and on explicitly aligned pairs
   are unchanged. Every `not_evaluated` finding now carries an
   internal reason (`not_a_term`, `ordinary_word`, `no_target_region`,

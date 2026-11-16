@@ -1010,6 +1010,25 @@ def _asserted_forms(
     return _candidate_forms(candidates, direction)
 
 
+class _ContainmentIndex:
+    """Answers whether a span lies strictly inside one of a fixed span set."""
+
+    def __init__(self, spans: Iterable[tuple[int, int]]) -> None:
+        # Sorted by start, longer first; reach[i] is the furthest end among
+        # the first i spans. Every span before a key either starts earlier or
+        # starts there and ends later, so it strictly contains that span
+        # exactly when it reaches at least as far.
+        ordered = sorted(set(spans), key=lambda span: (span[0], -span[1]))
+        self._keys = [(start, -end) for start, end in ordered]
+        self._reach = [-1]
+        for _start, end in ordered:
+            self._reach.append(max(self._reach[-1], end))
+
+    def strictly_contains(self, span: tuple[int, int]) -> bool:
+        position = bisect.bisect_left(self._keys, (span[0], -span[1]))
+        return self._reach[position] >= span[1]
+
+
 class _OccurrenceModel:
     """The one set of target occurrences review-v2 credits to a mention.
 
@@ -1023,8 +1042,11 @@ class _OccurrenceModel:
       claims in a guarded paragraph, and what it reserves.
     - An occurrence qualifies on the full target (word boundaries, the
       one-character name rule, inflection) and is available unless it lies
-      strictly inside an occurrence of a form some mention reserves: the
-      longest match wins ("Echo" inside a reserved "Echo Set" is not an Echo).
+      strictly inside an occurrence of a form some mention reserves, or of a
+      longer form among the mention's own candidates whatever is selected:
+      the longest match wins ("Echo" inside a reserved "Echo Set" is not an
+      Echo, nor inside its own candidate "Echo Set" after "Echo" is chosen).
+      Another mention's unselected candidates reserve nothing.
       Equal spans stay available to every form that reaches them, so an
       exact "Echoes" and the plural of "Echo" compete for it.
     - A resolution on the shorter mention changes only what that mention
@@ -1050,22 +1072,25 @@ class _OccurrenceModel:
             finder = _target_occurrences(candidates, direction, forms)
             for form in forms:
                 universe.update(finder(target, form))
-        # Sorted by start, longer first; reach[i] is the furthest end among
-        # the first i spans. Every span before a key either starts earlier or
-        # starts there and ends later, so it strictly contains that span
-        # exactly when it reaches at least as far.
-        ordered = sorted(universe, key=lambda span: (span[0], -span[1]))
-        self._keys = [(start, -end) for start, end in ordered]
-        self._reach = [-1]
-        for _start, end in ordered:
-            self._reach.append(max(self._reach[-1], end))
+        self._reserved = _ContainmentIndex(universe)
+        self._own: dict[str, _ContainmentIndex] = {}
         self._cache: dict[
             tuple[str, tuple[str, ...], str], list[tuple[int, int]]
         ] = {}
 
-    def _inside_longer(self, span: tuple[int, int]) -> bool:
-        position = bisect.bisect_left(self._keys, (span[0], -span[1]))
-        return self._reach[position] >= span[1]
+    def _own_candidates(
+        self, surface: str, candidates: Sequence[ReviewCandidate]
+    ) -> _ContainmentIndex:
+        """Occurrences of every form among the mention's own candidates."""
+        index = self._own.get(surface)
+        if index is None:
+            forms = _candidate_forms(candidates, self._direction)
+            finder = _target_occurrences(candidates, self._direction, forms)
+            index = _ContainmentIndex(
+                span for form in forms for span in finder(self._target, form)
+            )
+            self._own[surface] = index
+        return index
 
     def occurrences(
         self,
@@ -1082,10 +1107,12 @@ class _OccurrenceModel:
             key = (surface, forms, form)
             found = self._cache.get(key)
             if found is None:
+                own = self._own_candidates(surface, candidates)
                 found = [
                     span
                     for span in qualified(text, form)
-                    if not self._inside_longer(span)
+                    if not self._reserved.strictly_contains(span)
+                    and not own.strictly_contains(span)
                 ]
                 self._cache[key] = found
             return list(found)
