@@ -12,12 +12,21 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.8.7`, a deployment-recovery
-  maintenance release on top of `v0.8.6`: recovery runs the release that was
-  invoked rather than `current`, a transaction that had committed and the
-  release link are settled from the side that run verified, the layout
-  migration's temporary links are reentrant, and the tag names Telegram
-  `v0.2.10`. The previous release, `v0.8.6`, is a delivery and
+  published tag. The current source version is `0.9.0`, a review, dictionary and
+  translation-settings release on top of `v0.8.7`: `review-v2` judges terms
+  paragraph by paragraph when the sentence counts differ and the matcher label
+  moves to `wuwaterm-cjk-matcher-v7`, the dictionary adds the orphan area titles
+  and four-tier item base names (reference-only in Chinese text), translation
+  takes a per-direction thinking setting that defaults to the old request, the
+  layout migration can be rerun after a cut-off, the Web and Windows contract
+  pins move to manuscript v3, and the held-out usability evaluation protocol
+  (ADR 0020, scripts only) lands. The latest published Core release is
+  `v0.8.7`, a deployment-recovery maintenance release on top of `v0.8.6`:
+  recovery runs the release that was invoked rather than `current`, a
+  transaction that had committed and the release link are settled from the
+  side that run verified, the layout migration's temporary links are
+  reentrant, and the tag names Telegram `v0.2.10`. The previous release,
+  `v0.8.6`, is a delivery and
   dictionary release on top of `v0.8.5`: it bounds per-run build images,
   detects the standalone Telegram container by Compose label, records
   `old_bot_present` for stopped-bot rollback, adopts the `/opt/wuwaterm`
@@ -29,9 +38,11 @@ release. That boundary has not moved.
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
   target-version file. Core `0.8.7` and its published asset hashes are recorded
-  there. For a future release, update `products.core.release` only after it is
-  published, using its actual asset names and SHA-256 values. Leave the
-  `products.telegram` and `products.web` entries on their published releases.
+  there. Do not edit `products.core.release` to the prospective `0.9.0` before
+  that release is published, and do not invent an asset name or SHA-256 for it;
+  update it only after publication, using its actual asset names and SHA-256
+  values. Leave the `products.telegram` and `products.web` entries on their
+  published releases.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
@@ -169,14 +180,15 @@ The 0.8.0 capability checks still apply to this release:
 - Long texts are cut by `segmentation-v1` and keep their separators; the old
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
-  against the existing pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`);
-  this release does not move them.
+  against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
+  release carries, which #264 moved to the manuscript v3 commits; this
+  checklist does not move them again.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.2.10 pins the published Core
   `v0.8.6` wheel and is deployed, so the 0.8.6 library reaches Telegram users
-  through that product's own release. `0.8.7` is not in that pin; it reaches
-  Telegram users only after WuwaTerm-Telegram moves its lock to `v0.8.7` and
-  releases, which this checklist does not assume.
+  through that product's own release. Neither `0.8.7` nor `0.9.0` is in that
+  pin; they reach Telegram users only after WuwaTerm-Telegram moves its lock to
+  the new tag and releases, which this checklist does not assume.
 
 The installer and Web checks from 0.7.x still apply to this release:
 

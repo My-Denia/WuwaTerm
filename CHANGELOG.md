@@ -3,7 +3,7 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.9.0
 
 ### Terms And Dictionary
 
@@ -12,7 +12,7 @@ does not distribute generated game data or generated SQLite databases.
   拉贝尔学部 / Rabelle College and the rest of the Startorch campus reach
   `terms.db` (21 rows on the pinned data; 15 carry names the dictionary
   lacked, 14 distinct pairs). English-to-Chinese locks only the exact
-  "Academia Hall", not lowercase "academia hall".
+  "Academia Hall", not lowercase "academia hall" (#267).
 - A complete four-tier item family in `item/iteminfo.json` (初级X / 中级X /
   高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y")
   adds its base pair as a derived item row (`tier-base:<basic id>`), unless
@@ -24,7 +24,7 @@ does not distribute generated game data or generated SQLite databases.
   that drops only 调谐器 / Tuner, and bare "Tuner" stays the speaker
   调音师 / Tuner contextual reference it was before, also where it means
   the item; "Basic Tuner" and the other tier names still lock. The
-  free-text exclusion metadata of the pinned build is unchanged.
+  free-text exclusion metadata of the pinned build is unchanged (#267).
 - A Chinese surface that only these area titles and derived item bases
   carry is reference-only in Chinese free text, with or without a model (28
   surfaces on the pinned data; one an existing record also carries, such as
@@ -36,7 +36,7 @@ does not distribute generated game data or generated SQLite databases.
   speaker name. It still owns its span, so 核心 / Core inside 能源核心 is
   no longer locked or referenced on its own. A query that is only the name,
   such as 教学楼 alone, is still a dictionary lookup and returns Academia
-  Hall.
+  Hall (#267).
 
 ### Compatibility and distribution
 
@@ -48,7 +48,7 @@ does not distribute generated game data or generated SQLite databases.
   the clients use, and ADR 0015 records that the v3 segment-result rule
   supersedes part of its imported-history rule. No Core API, review or
   manuscript behavior changes; the shipped Windows 0.4.2 and Web 0.2.0
-  records are unchanged.
+  records are unchanged (#264).
 
 ### Translation
 
@@ -66,7 +66,15 @@ does not distribute generated game data or generated SQLite databases.
   apply to plain and HTML translation on both surfaces and not to semantic
   review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is the
   default; an unknown value logs a warning naming the variable and uses
-  `omit`.
+  `omit` (#266).
+
+### Evaluation
+
+- `docs/adr/0020-held-out-usability-evaluation.md`,
+  `docs/eval/usability-judging.md` and `scripts/eval_usability.py` freeze how
+  paragraph usability is measured on held-out manuscripts and score the
+  judgments afterwards. The script imports nothing from Core and nothing at
+  runtime calls it, so no service behavior changes (#263).
 
 ### Delivery And Deployment
 
@@ -76,7 +84,7 @@ does not distribute generated game data or generated SQLite databases.
   run included. The gate now overlooks exactly that one entry, and only when
   it is a regular file holding the checkout's HEAD; a marker with other
   content, a link, or any other untracked file is still refused and left
-  untouched. The rerun then installs the git exclude and finishes.
+  untouched. The rerun then installs the git exclude and finishes (#262).
 
 ### Review
 
@@ -109,7 +117,7 @@ does not distribute generated game data or generated SQLite databases.
   `wuwaterm-cjk-matcher-v7`, because the same input now gives a different
   report: saved manuscript-v3 segment results and stored resolution contexts
   that carry v6 go stale and are re-reviewed, and matching choices reconfirm
-  automatically.
+  automatically (#265).
 
 ## 0.8.7
 

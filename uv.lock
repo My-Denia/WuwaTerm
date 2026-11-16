@@ -864,7 +864,7 @@ wheels = [
 
 [[package]]
 name = "wuwaterm"
-version = "0.8.7"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
