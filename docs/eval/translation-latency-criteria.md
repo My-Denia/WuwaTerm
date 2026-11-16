@@ -283,3 +283,16 @@ per-direction run at `853eaec` included the one-character scope line that a
 later commit removed; with that line gone, zh→en `disabled` sends the same
 request bodies as the `disabled` arm (`8710a16`), 42 of 42 compared with the
 placeholder prefix fixed.
+
+## Default change proposed, 2026-11-16
+
+A separate change proposes `disabled` as the default for Chinese→English
+requests (English→Chinese stays `omit`), because it removes the long-segment
+timeouts: in the `disabled` arm, 0 timeouts, p95 8.6 s, and D zh→en usable
+122/128 against 38/128. The shipped zh→en requests are the same as that
+arm's. The quality guard was not met (M-Gold 664/675 against the frozen
+670; en→zh is unaffected because it stays `omit`). The owner decides
+whether to accept that trade-off; the decision is pending, and the change is
+held until then. With the default changed, ADR 0020's "no extra thinking
+field today" (Translation runs, Settings) describes the request at its
+freeze; later runs record the setting in their reuse key.

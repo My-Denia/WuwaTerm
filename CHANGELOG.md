@@ -68,13 +68,16 @@ does not distribute generated game data or generated SQLite databases.
   (next entry) and `omit` into Chinese.
 - Chinese-to-English translation requests now send thinking disabled by
   default, which removes the long-segment timeouts into English. Measured on
-  the evaluation development set: 0 timeouts, p95 about 9 s, and Chinese to
-  English usable paragraphs went from 38 to 124 of 128. Known regression: a
-  character-mechanic name that contains a one-character resonator name (for
-  example a 红椿蕊-type term) may be rendered with the resonator name, and
-  the frozen M-Gold score is 667/675 against 670 before. To restore the
-  previous behaviour, set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`.
-  English-to-Chinese keeps `omit`.
+  the evaluation development set with the same requests (the `disabled`
+  arm): 0 timeouts, p95 8.6 s, and Chinese-to-English usable paragraphs went
+  from 38 to 122 of 128. Known regression: a character-mechanic name that
+  contains a one-character resonator name (for example a 红椿蕊-type term)
+  may be rendered with the resonator name, and the frozen M-Gold score is
+  664/675, below its 670 guard. To restore the previous behaviour, set
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`; an existing `.env` that already
+  sets it to `omit` keeps `omit`. English-to-Chinese keeps `omit`. The
+  standalone Telegram bot gets this default only after its Core pin moves to
+  a release that contains it.
 
 ### Delivery And Deployment
 
