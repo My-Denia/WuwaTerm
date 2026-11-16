@@ -146,6 +146,15 @@ class _TermSpan:
     order: int
 
 
+def _reference_span_admitted(span: _TermSpan, text: str, offset: int) -> bool:
+    """Apply review's one-character admission to an already selected span."""
+    return (
+        len(span.source) != 1
+        or not _is_cjk_character(span.source)
+        or single_character_name_mention_at(text, offset + span.start, offset + span.end)
+    )
+
+
 def _is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
 
@@ -832,6 +841,8 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool = False,
         placeholder_prefix: str | None = None,
         placeholder_offset: int = 0,
+        context_has_terms: bool | None = None,
+        soft_sources: frozenset[str] | None = None,
     ) -> LockedSentence:
         """Lock the same spans, but hand contextual ones to the model as text.
 
@@ -853,6 +864,8 @@ class SentenceTranslator:
             allow_nfkc_spelling=allow_nfkc_spelling,
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=placeholder_offset,
+            context_has_terms=context_has_terms,
+            soft_sources=soft_sources,
         )
 
     def _lock_terms_selected(
@@ -866,6 +879,8 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool,
         placeholder_prefix: str | None,
         placeholder_offset: int,
+        context_has_terms: bool | None = None,
+        soft_sources: frozenset[str] | None = None,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
@@ -877,23 +892,35 @@ class SentenceTranslator:
         if not allow_nfkc_spelling:
             nfkc_sources = frozenset()
         candidates = self._reference_candidates() if to_chinese is not None else {}
-        primary_sources = {source for source, _official in lockable}
-        soft_sources = candidates.keys() - primary_sources
+        if soft_sources is None:
+            primary_sources = {source for source, _official in lockable}
+            soft_sources = frozenset(candidates.keys() - primary_sources)
         selected = select_term_spans(
             text, lockable, context_text, context_offset,
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=nfkc_sources,
         )
+        if to_chinese is not None:
+            selected = [span for span in selected if _reference_span_admitted(span, context_text, context_offset)]
         # A new casing hint needs actual dictionary context in the submitted
         # segment. Ordinary prose such as "the energy core of a star" must
         # not acquire game hints merely because a derived base has that form.
         has_term_context = bool(selected)
         if soft_sources and not has_term_context and context_text != text:
-            has_term_context = bool(select_term_spans(
-                context_text, lockable, context_text, 0,
-                allow_plural_inflection=allow_plural_inflection,
-            ))
-        if soft_sources and has_term_context:
+            if context_has_terms is not None:
+                has_term_context = context_has_terms
+            else:
+                has_term_context = any(
+                    _reference_span_admitted(span, context_text, 0)
+                    for span in select_term_spans(
+                        context_text, lockable, context_text, 0,
+                        allow_plural_inflection=allow_plural_inflection,
+                    )
+                )
+        # Without even a literal soft spelling in this fragment there is
+        # nothing new to select. Keep the existing spans instead of scanning
+        # the whole primary dictionary a second time for every inline tag.
+        if soft_sources and has_term_context and any(source in text for source in soft_sources):
             lockable += tuple(
                 (source, (choices[0][0], choices[0][1]))
                 for source, choices in candidates.items()
@@ -904,6 +931,7 @@ class SentenceTranslator:
                 allow_plural_inflection=allow_plural_inflection,
                 nfkc_spelling_sources=nfkc_sources,
             )
+            selected = [span for span in selected if _reference_span_admitted(span, context_text, context_offset)]
         prefix = placeholder_prefix or _new_placeholder_prefix(text)
         # The span carries the official pair only; the category is needed to
         # decide whether a term is safe to force, so read it from the same
@@ -1036,6 +1064,22 @@ class SentenceTranslator:
                 context_parts.append(context)
                 offset += len(context)
         context_text = "".join(context_parts)
+        # This is a boolean source-match check for this request, not a
+        # meaning chosen in another segment. Reuse it across unmatched HTML
+        # fragments instead of rescanning the identical visible text per tag.
+        context_has_terms = None
+        soft_sources = None
+        if to_chinese is not None:
+            primary_sources = {source for source, _official in lockable}
+            soft_sources = frozenset(self._reference_candidates().keys() - primary_sources)
+            if soft_sources and len(segments) > 1:
+                context_has_terms = any(
+                    _reference_span_admitted(span, context_text, 0)
+                    for span in select_term_spans(
+                        context_text, lockable, context_text, 0,
+                        allow_plural_inflection=allow_plural_inflection,
+                    )
+                )
         locked_segments: list[str] = []
         locks: list[tuple[str, str, str]] = []
         references: list[tuple[str, str, str, str]] = []
@@ -1067,6 +1111,8 @@ class SentenceTranslator:
                     allow_nfkc_spelling=False,
                     placeholder_prefix=prefix,
                     placeholder_offset=len(locks),
+                    context_has_terms=context_has_terms,
+                    soft_sources=soft_sources,
                 )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)

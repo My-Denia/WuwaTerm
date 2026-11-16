@@ -86,5 +86,5 @@ rhetorical addressees, asks for idiomatic and ironic meaning in full-clause
 context, and requires modifiers and clauses to be translated completely.
 This is a general instruction change, not a canned translation of an
 evaluation paragraph. Previous-segment context remains read-only and human
-precedents retain occurrence scope. Its semantic benefit is unconfirmed
-until the independent evaluator runs the frozen comparison.
+precedents retain occurrence scope.
+Real-model evaluation of this candidate has not been run.

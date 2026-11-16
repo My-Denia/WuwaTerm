@@ -1649,6 +1649,81 @@ def test_single_character_reference_scope_survives_protected_boundaries(single_n
     assert start == locked.locked_text.index("椿")
 
 
+@pytest.mark.parametrize("source,mentions", [
+    ("椿·蕾很强。", 0),
+    ("给椿·蕾。", 0),
+    ("欢迎椿。", 1),
+    ("欢迎椿，给椿·蕾。", 1),
+])
+def test_selected_single_character_reference_uses_review_admission(single_name_db, source, mentions):
+    from wuwaterm.application import review_pair
+
+    translator = SentenceTranslator(single_name_db)
+    locked = translator._lock_terms_with_references(source, to_chinese=False)
+    assert locked.locked_text == source
+    assert locked.locks == ()
+    assert len(locked.reference_spans) == mentions
+    assert bool(locked.references) == bool(mentions)
+    report = review_pair(translator.service, source, "placeholder", "en", review_version="review-v2")
+    assert len(report.findings) == mentions
+
+
+@pytest.mark.parametrize("html,mentions", [
+    ("椿·蕾很强。", 0),
+    ("给<b>椿</b>·蕾。", 0),
+    ("<b>给椿</b>·蕾。", 0),
+    ("香<b>椿</b>。", 0),
+    ("欢迎<b>椿</b>。", 1),
+    ("欢迎<b>椿</b>，给<i>椿</i>·蕾。", 1),
+])
+def test_selected_html_reference_uses_complete_visible_context(single_name_db, html, mentions):
+    from wuwaterm.application import review_pair
+    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
+
+    translator = SentenceTranslator(single_name_db)
+    protected = protect_telegram_html(html)
+    locked = translator._lock_protected_terms_with_references(protected.neutral, to_chinese=False)
+    assert locked.locks == ()
+    assert len(locked.reference_spans) == mentions
+    assert bool(locked.references) == bool(mentions)
+    assert protected.restore(locked.locked_text) == html
+    assert all(locked.locked_text.count(token) == 1 for token, _ in protected.structures)
+    report = review_pair(translator.service, strip_telegram_html(html), "placeholder", "en", review_version="review-v2")
+    assert len(report.findings) == mentions
+
+
+def test_protected_reference_context_is_scanned_once_per_call(monkeypatch, ambiguous_material_db):
+    import wuwaterm.sentence as sentence_module
+    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
+
+    html = "<b>Echo</b> " * 8
+    visible = strip_telegram_html(html)
+    full_scans = []
+    scans = []
+    original = sentence_module.select_term_spans
+
+    def observe(text, *args, **kwargs):
+        scans.append(text)
+        if text == visible:
+            full_scans.append(text)
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(sentence_module, "select_term_spans", observe)
+    translator = SentenceTranslator(ambiguous_material_db)
+    locked = translator._lock_protected_terms_with_references(
+        protect_telegram_html(html).neutral, to_chinese=True, allow_plural_inflection=True,
+    )
+    assert len(locked.locks) == 8
+    assert len(full_scans) == 1
+    assert len(scans) == len(protect_telegram_html(html).neutral.visible_segments) + 1
+    # Context evidence is local to this call, never retained as sense memory.
+    ordinary = translator._lock_protected_terms_with_references(
+        protect_telegram_html("<b>ordinary</b> sealed tubes.").neutral,
+        to_chinese=True, allow_plural_inflection=True,
+    )
+    assert (ordinary.locks, ordinary.references) == ((), ())
+
+
 @pytest.fixture()
 def ambiguous_material_db(sample_db):
     with connect(sample_db) as conn:
