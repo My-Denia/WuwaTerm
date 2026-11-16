@@ -383,6 +383,19 @@ one-character resonator name may be rendered with the resonator name; set
 `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.
 See [privacy-and-llm](privacy-and-llm.md#llm-configuration).
 
+An OpenAI-compatible endpoint may reject provider-specific reasoning fields.
+An HTTP 400 with `error.code=unsupported_parameter` and `error.param` equal to
+`thinking` or `reasoning_effort` produces a safe compatibility warning. For
+translation, explicitly set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` for
+Chinese into English, or `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` for English
+into Chinese, for the affected direction. Alternatively choose a provider
+supporting the requested fields. `omit` sends neither field and hands control
+to the provider default; it does not disable thinking. WuwaTerm fails that
+request after one POST, without retrying or silently removing fields. Providers
+supporting the existing `disabled` default keep receiving it. See
+[provider compatibility](privacy-and-llm.md#provider-compatibility) for the
+diagnostic and API behavior.
+
 **For semantic review (experimental, off by default):**
 `WUWATERM_SEMANTIC_REVIEW_ENABLED=1` turns on `POST /v1/semantic-reviews` and
 lists `semantic-review-v1` in `GET /v1/capabilities`; it also needs a model.

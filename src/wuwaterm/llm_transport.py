@@ -65,6 +65,8 @@ _LLM_FAILURE_DETAILS = frozenset(
         "truncated_output",
         "missing_placeholder",
         "duplicate_placeholder",
+        "unsupported_thinking",
+        "unsupported_reasoning_effort",
         "unspecified",
     }
 )
@@ -237,9 +239,45 @@ def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
     if response.status_code == 429:
         reason = "budget" if _has_structured_budget_signal(response) else "rate_limit"
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason=reason)
+    parameter = _unsupported_reasoning_parameter(response)
+    if parameter is not None:
+        LOGGER.warning(
+            "llm provider rejected parameter=%s; for translation set "
+            "WUWATERM_TRANSLATION_THINKING_ZH_EN=omit (Chinese to English) or "
+            "WUWATERM_TRANSLATION_THINKING_EN_ZH=omit (English to Chinese) "
+            "for the affected direction, or choose a provider supporting this parameter; "
+            "omit uses the provider default and does not disable thinking",
+            parameter,
+        )
+        # Keep the notice and reason: the sync application classifies the
+        # returned notice, while async callers receive the safe diagnostic.
+        return LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE,
+            reason="http",
+            detail=f"unsupported_{parameter}",
+        )
     if _has_structured_budget_signal(response):
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason="budget")
     return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="http")
+
+
+def _unsupported_reasoning_parameter(response: httpx.Response) -> str | None:
+    """Recognize a structured parameter rejection without reading its message."""
+    if response.status_code != 400:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if not isinstance(error, dict) or error.get("code") != "unsupported_parameter":
+        return None
+    parameter = error.get("param")
+    if type(parameter) is str and parameter in {"thinking", "reasoning_effort"}:
+        return parameter
+    return None
 
 
 def _has_structured_budget_signal(response: httpx.Response) -> bool:
