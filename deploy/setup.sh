@@ -97,9 +97,9 @@ Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
 steps name (default: the tag contracts/products.json of this checkout records,
-v0.2.10 here; the script's own constant when that file is absent).
+v0.3.0 here; the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
-v0.2.0, the current published release, or latest (default v0.2.0, or the tag
+v0.3.0, the current published release, or latest (default v0.3.0, or the tag
 recorded in contracts/products.json).
 EOF
 }
@@ -388,8 +388,8 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # snapshot and docs/products.md points readers at it, so when that file can be
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
-DEFAULT_TELEGRAM_VERSION=v0.2.10
-DEFAULT_WEB_VERSION=v0.2.0
+DEFAULT_TELEGRAM_VERSION=v0.3.0
+DEFAULT_WEB_VERSION=v0.3.0
 
 recorded_product_tag() {
     [ -f "$code_root/contracts/products.json" ] || return 1
@@ -578,7 +578,7 @@ install_telegram() {
     [ "$with_telegram" = 1 ] || return 0
     case "$telegram_product_release" in
         v[0-9]*) ;;
-        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.2.10, not: $telegram_product_release" ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.3.0, not: $telegram_product_release" ;;
     esac
     wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
     if [ -n "$telegram_dir" ]; then
@@ -723,7 +723,7 @@ resolve_web_package() {
         case "$web_product_release" in
             latest) base="$web_product_repo/releases/latest/download" ;;
             v[0-9]*) base="$web_product_repo/releases/download/$web_product_release" ;;
-            *) fail "WUWATERM_WEB_VERSION must be latest or a tag like v0.2.0, not: $web_product_release" ;;
+            *) fail "WUWATERM_WEB_VERSION must be latest or a tag like v0.3.0, not: $web_product_release" ;;
         esac
         manifest_url="$base/manifest-$variant.json"
         sums_url="$base/SHA256SUMS-$variant"

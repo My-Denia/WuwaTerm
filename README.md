@@ -95,13 +95,13 @@ when you point it at that checkout (`--telegram-dir`), then prints the
 product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
-A clone of the Core v0.8.6 tag prints the install steps of Telegram v0.2.9,
-the release that tag records; Core v0.8.7 records Telegram v0.2.10 as its
-default. To pair Core v0.8.6 with the newer Telegram release,
-name the tag explicitly:
+A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10,
+the release that tag records; `main` records v0.3.0, which pins Core v0.9.0
+and which the next formal release will carry. To pair the tagged Core with
+Telegram v0.3.0, name the tag explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
 ```
 
 The variable always names a published tag, never `latest`.
@@ -111,7 +111,7 @@ lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
-[WuwaTerm-Web v0.2.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0)
+[WuwaTerm-Web v0.3.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.3.0)
 package, verifies it against the release checksums, and needs the HTTPS origin
 your proxy serves (`--web-origin`).
 

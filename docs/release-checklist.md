@@ -46,10 +46,10 @@ release. That boundary has not moved.
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
   `docs/self-hosting.md` name the same published release: this tag records and
-  prints `v0.2.10`, while a clone of `v0.8.6` records `v0.2.9` and needs
-  `WUWATERM_TELEGRAM_VERSION=v0.2.10` to pair the tagged Core with the newer
-  Telegram release. The tag always names a published release; there is no
-  `latest`.
+  prints `v0.3.0`, the Telegram release that pins Core `v0.9.0`, while a clone
+  of `v0.9.0` records `v0.2.10` and needs `WUWATERM_TELEGRAM_VERSION=v0.3.0`
+  to pair the tagged Core with it. A clone of `v0.8.6` records `v0.2.9`. The
+  tag always names a published release; there is no `latest`.
 - Windows product: [v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
@@ -182,11 +182,11 @@ The 0.8.0 capability checks still apply to this release:
   release carries, which #264 moved to the manuscript v3 commits; this
   checklist does not move them again.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
-  own lock is moved and released. Telegram 0.2.10 pins the published Core
-  `v0.8.6` wheel and is deployed, so the 0.8.6 library reaches Telegram users
-  through that product's own release. Neither `0.8.7` nor `0.9.0` is in that
-  pin; they reach Telegram users only after WuwaTerm-Telegram moves its lock to
-  the new tag and releases, which this checklist does not assume.
+  own lock is moved and released. Telegram 0.3.0 pins the published Core
+  `v0.9.0` wheel and is deployed, so the 0.9.0 library reaches Telegram users
+  through that product's own release. A later Core release reaches Telegram
+  users only after WuwaTerm-Telegram moves its lock to the new tag and
+  releases, which this checklist does not assume.
 
 The installer and Web checks from 0.7.x still apply to this release:
 

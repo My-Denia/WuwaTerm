@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-15",
+  "observed_on": "2026-11-16",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The four releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -36,7 +36,7 @@
         "web"
       ],
       "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/3b9faa1c6024b19c7a71e5382f56c4f607216a21/contracts/manuscript-v3/SPEC.md",
-      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. The v3 contract is in Web and Windows main, not in Windows 0.4.2 or Web 0.2.0; the shipped-release records below keep the format each release was recorded with."
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. The v3 contract ships in Web 0.3.0 and is in Windows main, not in Windows 0.4.2 or Web 0.2.0; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -138,7 +138,7 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.8.7 and v0.9.0 deployment has not been done. The latest production adoption record is Core v0.8.6 (e852e827), current release r3, with a 12,054-term dictionary and wuwaterm-cjk-matcher-v6. The legacy in-Core wuwaterm-bot stays stopped (status=created); standalone Telegram 0.2.10 pins the Core 0.8.6 wheel.",
+      "adoption_note": "Core v0.9.0 (d54957c) is deployed on the owner VPS since 2026-11-16 by a full update, not a runtime-only one: release r4 is current, r3 is retained and r2 was removed, and .deploy_commit reads back d54957c. wuwaterm-api answers /healthz and /readyz with 200, publishes OpenAPI 0.9.0 and has not restarted. It serves terms.db sha256 3308e5fe… with 12,089 terms (database diff +35 / 0 / 0 against the 12,054-term Core 0.8.6 database), and the data pin 9218d612 is unchanged. WUWATERM_TRANSLATION_THINKING_ZH_EN and WUWATERM_TRANSLATION_THINKING_EN_ZH are not set, so translation keeps the default omit. The legacy in-Core wuwaterm-bot stays stopped (status=created); Telegram runs as the standalone 0.3.0 container (wuwaterm-telegram) on Core 0.9.0.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/d54957cadf470bec2e91b5269c9f908c1409bc0b/docs/self-hosting.md",
@@ -150,28 +150,59 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
       "responsibility": "Standalone Telegram bot and its installation, operation and state.",
       "main": {
-        "commit": "9a11dcaee17611ed714624bd2784c978dad66600",
-        "tree": "4ec0a22bf899954f0b330fbe7407380ac55eb806",
+        "commit": "da61ab136a7dde7424f5011e7ac17f011a5840b7",
+        "tree": "5139a603f8f8b6d0025b935483158d55c579241f",
         "status": "success"
       },
-      "source_version": "0.2.10",
+      "source_version": "0.3.0",
       "release": {
-        "version": "0.2.10",
-        "tag": "v0.2.10",
+        "version": "0.3.0",
+        "tag": "v0.3.0",
         "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.10",
-        "published_at": "2026-11-15T04:32:59Z",
-        "source_commit": "9a11dcaee17611ed714624bd2784c978dad66600",
-        "source_tree": "4ec0a22bf899954f0b330fbe7407380ac55eb806",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.3.0",
+        "published_at": "2026-11-16T02:49:36Z",
+        "source_commit": "da61ab136a7dde7424f5011e7ac17f011a5840b7",
+        "source_tree": "5139a603f8f8b6d0025b935483158d55c579241f",
         "assets": [
-          "wuwaterm_telegram-0.2.10-py3-none-any.whl",
-          "wuwaterm_telegram-0.2.10.tar.gz",
+          "wuwaterm_telegram-0.3.0-py3-none-any.whl",
+          "wuwaterm_telegram-0.3.0.tar.gz",
           "bundle.json",
           "image.oci.tar",
           "install-probe.json",
           "source.tar",
           "SHA256SUMS"
         ],
+        "asset_sha256": {
+          "wuwaterm_telegram-0.3.0-py3-none-any.whl": "c2924d03ba8395b9a3871b57a8b57521d3f5b7c3419ce7475d3a6b9b26b38499",
+          "wuwaterm_telegram-0.3.0.tar.gz": "c0fc4ee8d9e2332d6d0c440e72434fd998134a524d1adfa77ce69ebb1e795ace",
+          "bundle.json": "976bd9784b44c59b9e6368bc13b1320e11e00f38c57b8492442fd17126471efd",
+          "image.oci.tar": "794a26c6b6619b0f46a120f5ef82cf2f286a794cf858d2e0e11e53f93340d841",
+          "install-probe.json": "51ea452dd31d3328fb78903b5104a5417fb6b00191ae567744221ab95b3c9d54",
+          "source.tar": "5e666377a2f06f098baabf123342c175564aa50a26e6aafba91e1ccc03a40f1b",
+          "SHA256SUMS": "1e34f0ac5d4c03fffb1175a0d8ae8b7deec652b79eae4b5c8a41b1e9ac5c75a3"
+        },
+        "note": "v0.3.0 pins the published Core 0.9.0 wheel (OCI index sha256:28ab3af0ff4d8fdf6f7b3cad76812a245a80348b77e9200d248ec96e27e13ca5, manifest sha256:7dee0ea1ee65eeba32673f352a0a533dbb780ec4a49d2224bc3d3f3e2f6eb26c, config sha256:001e9b20203e8db5c6cb8f6739ceca374eb904455e2c6f85d7404ef6cc310430), settles the review dedup boundaries for TTL, repeats, delivery and /review last (#38), and documents the per-direction translation thinking settings in deploy/env.example (#39). Production was updated."
+      },
+      "adoption": "deployed",
+      "compatibility": {
+        "core_package_version": "0.9.0",
+        "core_wheel_sha256": "8435cb3b0ba1a941ac98d3838f1a6194e95cbda869ff0b17a9fd6597b55c14e5",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/da61ab136a7dde7424f5011e7ac17f011a5840b7/core-lock.json",
+        "terms_database_schema_version": "2",
+        "http_api_required": false,
+        "note": "core-lock.json pins the published Core v0.9.0 wheel; release-to-release dependency, not a CI artifact."
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/da61ab136a7dde7424f5011e7ac17f011a5840b7/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/da61ab136a7dde7424f5011e7ac17f011a5840b7/docs/artifact-verification.md"
+      ],
+      "previous_release": {
+        "version": "0.2.10",
+        "tag": "v0.2.10",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.10",
+        "published_at": "2026-11-15T04:32:59Z",
+        "source_commit": "9a11dcaee17611ed714624bd2784c978dad66600",
+        "source_tree": "4ec0a22bf899954f0b330fbe7407380ac55eb806",
         "asset_sha256": {
           "wuwaterm_telegram-0.2.10-py3-none-any.whl": "eeab7e568746074bf7e5118ab5d6042b5e33100da9bdd0c76f24bab322ca627b",
           "wuwaterm_telegram-0.2.10.tar.gz": "31af6da7c443c3a0315eb367c643091f930429e36389be47ee65209246ca13d7",
@@ -181,40 +212,9 @@
           "source.tar": "baaa139362c187b8a5febceba54df250eeb48c345474d8ddecb05a061a113eb1",
           "SHA256SUMS": "d27211b01372a691cbaf6554b69c62b7cfca1d1647a1d007e8e236c6b90b7000"
         },
-        "note": "v0.2.10 pins the published Core 0.8.6 wheel and sets explicit Compose name and container_name wuwaterm-telegram (OCI index sha256:5216861bacfa9d099186ab0bfc368a9cc089c0063623cb603b2f14e0fb1c8be8, manifest sha256:99b604543274cf4580495ab407de7bb1172774789fe097d5653efea43b9d6433, config sha256:caf0bd3e3bd1bf3a4a6fc421eb50b698a9b5b7ea8bd2698805fdcc20bd7bcc0a). Production was updated."
+        "note": "Kept as history after v0.3.0; the release and its assets are still published. v0.2.9 and earlier remain on the release page."
       },
-      "adoption": "deployed",
-      "compatibility": {
-        "core_package_version": "0.8.6",
-        "core_wheel_sha256": "d91b63b8d45a02242a5fdac80005477ce1eb5af567c6d33cbaa9c2321db76255",
-        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/9a11dcaee17611ed714624bd2784c978dad66600/core-lock.json",
-        "terms_database_schema_version": "2",
-        "http_api_required": false,
-        "note": "core-lock.json pins the published Core v0.8.6 wheel; release-to-release dependency, not a CI artifact."
-      },
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/9a11dcaee17611ed714624bd2784c978dad66600/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/9a11dcaee17611ed714624bd2784c978dad66600/docs/artifact-verification.md"
-      ],
-      "previous_release": {
-        "version": "0.2.9",
-        "tag": "v0.2.9",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.2.9",
-        "published_at": "2026-11-13T07:33:51Z",
-        "source_commit": "646e1e3dec0a2df9627dd2be4df3982de7ba19e2",
-        "source_tree": "c7ef2ae9a9a73a64a4585cea3f37a0e92fa22082",
-        "asset_sha256": {
-          "wuwaterm_telegram-0.2.9-py3-none-any.whl": "a392aa4c935c6a319ceddf58e7f9f5259315318097c26b418f1d8666364d20fd",
-          "wuwaterm_telegram-0.2.9.tar.gz": "a5f1b703a02c3cf1677aa970643bf3ceabde458bd1ccf34fbbd939c01e32a9b8",
-          "bundle.json": "17198c89ec209d6569fb395bcd38fe58ac3a4b823c161fea4d0eab38d67e8e0f",
-          "image.oci.tar": "a0c2712c471a5b279ef624bf465a4455b5daa57a0819567b4b1d717b809861f0",
-          "install-probe.json": "f692f1db46bdd5ede6e54ee41ab9663e2861882d6ddb9ddc3b50ca62acfab82c",
-          "source.tar": "b54083a19a28ca66cd050c9874d37d8d7e3bce13ca07cb0902c585d2afe75588",
-          "SHA256SUMS": "8e31d497b9c936b965b595b3851ca2c06f623c6a6d0ee4070386957e84115b0b"
-        },
-        "note": "Kept as history after v0.2.10; the release and its assets are still published."
-      },
-      "adoption_note": "Standalone Telegram 0.2.10 on Core 0.8.6 includes the explicit Compose name: wuwaterm-telegram and container_name: wuwaterm-telegram naming fix, passed Core 0.8.6 component_artifact.py acquire verification, and runs on the owner VPS as standalone wuwaterm-telegram. The legacy in-Core wuwaterm-bot stays stopped and the API serves Core 0.8.6."
+      "adoption_note": "Standalone Telegram 0.3.0 on Core 0.9.0 runs on the owner VPS as wuwaterm-telegram since 2026-11-16: the image revision is da61ab1, the bot reports Core 0.9.0, getMe succeeds, the container has not restarted and its log has no Conflict lines. The legacy in-Core wuwaterm-bot stays stopped and the API serves Core 0.9.0."
     },
     {
       "id": "windows",
@@ -282,12 +282,53 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "5aabe80bee3adda164e151de2da297a01860c301",
-        "tree": "94a27365810c4868159ebbd95398f9639e370990",
-        "status": "merged"
+        "commit": "9ab24c4a45ced85eb867e8081767c40a80dd9b41",
+        "tree": "65f48a57bba8003218647f2e13199ee308a3a38e",
+        "status": "success"
       },
-      "source_version": "0.2.0",
+      "source_version": "0.3.0",
       "release": {
+        "version": "0.3.0",
+        "tag": "v0.3.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.3.0",
+        "published_at": "2026-11-16T02:57:28Z",
+        "source_commit": "9ab24c4a45ced85eb867e8081767c40a80dd9b41",
+        "source_tree": "65f48a57bba8003218647f2e13199ee308a3a38e",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.3.0-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.3.0-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.3.0-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.3.0-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.3.0-linux-x64-root.tar.gz": "c1d48bc95c3496036749f9f6964a06c4378c459178a4cf28ec4240aa6804d53e",
+          "manifest-root.json": "76353a4160903f37e23858a8878ced7eefbc6917570ea8503a76bc1aedf9f6d1",
+          "SHA256SUMS-root": "f28b2b2817099d172e522e6cf1233d90350d95c19704ea5500417a21bab65803",
+          "wuwaterm-web-v0.3.0-linux-x64-prefix-71708eb255bc.tar.gz": "e6efeb2c61d2817c0da60d8328d95434aa5204160bd83d5d9ae33bbd8ea9f94a",
+          "manifest-prefix.json": "1e7d20fb29a52ab7b20a175a69486dfd7b1b546fadf0f1f6ea596832806fb065",
+          "SHA256SUMS-prefix": "5237784b2e4129162510cd7d3b46a2944d3892f80e165413da0b694cfe093615"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of Web CI run 43791077911, promoted without rebuilding.",
+        "note": "v0.3.0 is the first Web release that reads and writes wuwaterm-manuscript-v3, a file format Web 0.2.0 and Windows 0.4.2 reject: resumable long-manuscript review, clearer failures, choices on truncated segments, current exports, report import, and paragraphs kept on whole-text translation. The BFF, the /v1 proxy, the database schema, dependencies and hosting configuration are unchanged since v0.2.0. v0.2.0 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.2.0",
         "tag": "v0.2.0",
         "status": "released",
@@ -326,48 +367,7 @@
           "SHA256SUMS-prefix": "0efb9b838f2841f737634b2cf8312ccbfe530e2d3ac02ce2b8ef350b9478f628"
         },
         "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
-        "note": "v0.2.0 supersedes v0.1.1; the earlier release and its recorded assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.1.1",
-        "tag": "v0.1.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.1.1",
-        "published_at": "2026-11-09T07:05:49Z",
-        "source_commit": "31fdc14b1a14563990d0acaf89dc302f024cebdc",
-        "source_tree": "b0a752656dd0cb2234ba970db4b16ed95a6e8169",
-        "builds": {
-          "root": {
-            "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": ""
-          },
-          "prefix": {
-            "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": "/private"
-          }
-        },
-        "assets": [
-          "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz",
-          "manifest-root.json",
-          "SHA256SUMS-root",
-          "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz",
-          "manifest-prefix.json",
-          "SHA256SUMS-prefix"
-        ],
-        "asset_sha256": {
-          "wuwaterm-web-v0.1.1-linux-x64-root.tar.gz": "9f88dd717e6bd13ff6e9edb2ff4b49a7c8bab27fa44bff4958cc24f558bef043",
-          "manifest-root.json": "17f10574a277bd01cdd84d914c433c9952cf4d083aaf33b4c65f08d064dbb8ba",
-          "SHA256SUMS-root": "3f7d6d4b487f826c5637195eb283792370e2957729a4c8d5c6252764172d861a",
-          "wuwaterm-web-v0.1.1-linux-x64-prefix-71708eb255bc.tar.gz": "32b52a3a751b192a3d4a1536e50f4a4f9dc3ba83153245c6f497b59da3bc8070",
-          "manifest-prefix.json": "5aff6270c25b773c7962f7d802e2d52fdd3afdbb19e286b7ade407d99c5d39ab",
-          "SHA256SUMS-prefix": "5ece536650c46970e2561473eb44687b6d5a3681cdb8cc9ae57d492a4cd5fc35"
-        },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
-        "note": "v0.1.1 superseded v0.1.0; both releases and their recorded assets are still published."
+        "note": "v0.2.0 supersedes v0.1.1. Kept as history after v0.3.0; the release and its assets are still published, and v0.1.1 and earlier remain on the release page."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -398,21 +398,21 @@
       "compatibility": {
         "api": "v1",
         "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v1",
+        "manuscript": "wuwaterm-manuscript-v3",
         "selfhost_requires": "A compatible Core API with GET /v1/auth/status and an issued device credential, plus an authenticated HTTPS reverse proxy that sets X-WuwaTerm-Edge.",
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/5aabe80bee3adda164e151de2da297a01860c301/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/9ab24c4a45ced85eb867e8081767c40a80dd9b41/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/9ab24c4a45ced85eb867e8081767c40a80dd9b41/docs/self-hosting.md"
       ],
-      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web main was that same commit at the time, and v0.2.0 is the published Web product release."
+      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web v0.3.0 (9ab24c4a45ced85eb867e8081767c40a80dd9b41) is published and its root and /private candidates were replayed against Core v0.9.0 before publication; the Sites site has not been updated to it and still serves v0.2.0."
     }
   ],
   "ci_pins": {
     "core_tests_web": "3b9faa1c6024b19c7a71e5382f56c4f607216a21",
     "core_tests_windows": "e8880eb27b6117ff30d3bf134022303fe5f1a441",
     "web_tests_core": "d5c35d299dc8c6d467b8e3a2f8c6b03cf2720a45",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web and Windows pins are main commits after their latest releases (Web 0.2.0, Windows 0.4.2) and carry manuscript v3."
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is a main commit that carries manuscript v3 and is an ancestor of the Web v0.3.0 tag; the Windows pin is a main commit after Windows 0.4.2 and carries manuscript v3."
   }
 }

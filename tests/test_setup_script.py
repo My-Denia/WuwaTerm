@@ -956,7 +956,7 @@ def test_release_defaults_match_the_recorded_snapshot_and_the_guide():
     constants = _constants()
     recorded = _recorded_tags()
     recommended = _recommended_tags()
-    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.2.10"
+    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.3.0"
     assert recommended["telegram"] == recorded["telegram"].lstrip("v")
     assert constants["DEFAULT_WEB_VERSION"] == recorded["web"]
     assert recommended["web"] == recorded["web"]
@@ -971,8 +971,8 @@ def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
     result = run_setup(install_root, "--with-telegram", "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.2.10" in result.stdout
-    assert "wuwaterm_telegram-0.2.10-py3-none-any.whl" in result.stdout
+    assert "release v0.3.0" in result.stdout
+    assert "wuwaterm_telegram-0.3.0-py3-none-any.whl" in result.stdout
 
 
 def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
@@ -981,7 +981,7 @@ def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
     result = run_setup(install_root, "--with-telegram", "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.2.10" in result.stdout
+    assert "release v0.3.0" in result.stdout
 
 
 @pytest.mark.parametrize(("version", "expected"), [
@@ -1041,5 +1041,5 @@ def test_an_unusable_web_version_is_refused(install_root, version):
     )
 
     assert result.returncode == 1
-    assert "WUWATERM_WEB_VERSION must be latest or a tag like v0.2.0" in result.stderr
+    assert "WUWATERM_WEB_VERSION must be latest or a tag like v0.3.0" in result.stderr
     assert not (install_root / "data" / "terms.db").exists()

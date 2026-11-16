@@ -81,14 +81,14 @@ from a moving branch is possible and is a worse idea than it looks: the data pin
 and the schema version travel with the source, so a tag is what makes a working
 install describable later.
 
-A clone of the v0.8.6 tag prints the install steps of Telegram v0.2.9,
-because that Core release records v0.2.9 in `contracts/products.json` and
-`deploy/setup.sh` takes the recorded tag. Core v0.8.7 records Telegram v0.2.10
-as its default. To pair Core v0.8.6 with the newer Telegram release, name it on
-the install command:
+A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10,
+because that Core release records v0.2.10 in `contracts/products.json` and
+`deploy/setup.sh` takes the recorded tag. `main` records Telegram v0.3.0, which
+pins Core v0.9.0 and which the next formal release will carry. To pair the
+tagged Core with Telegram v0.3.0, name it on the install command:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.2.10 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
 ```
 
 The variable names a published tag; there is no `latest`.
@@ -161,8 +161,8 @@ What it does, in this order:
    prepares its checkout when `--telegram-dir` is given (below), and prints
    that product's own install steps with this installation's paths filled in.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
-   tag this checkout's `contracts/products.json` records (`v0.2.10` on `main`,
-   `v0.2.9` on the `v0.8.6` tag), falling back to the constant in the script
+   tag this checkout's `contracts/products.json` records (`v0.3.0` on `main`,
+   `v0.2.10` on the `v0.9.0` tag), falling back to the constant in the script
    when that file is absent. A tagged Core therefore installs the Telegram
    release it recorded rather than the newest one; naming the tag on the
    command is how a tagged install moves it (see [Get The Source At A Release
@@ -256,7 +256,7 @@ bot runs somewhere else, as long as each has the database.
 **What `--with-telegram` does.** It resolves the product, prints its install
 steps with this installation's paths filled in, and starts nothing. Add
 `--telegram-dir <checkout>` — a clone at the release tag,
-`git clone --branch v0.2.10 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
+`git clone --branch v0.3.0 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
 — and the script also copies `data/terms.db` into that checkout, creates its
 `state/` at mode `0700`, and writes its `.env` at mode `0600` from this one.
 Only the bot's settings travel: the token, the owner id, the model settings and
