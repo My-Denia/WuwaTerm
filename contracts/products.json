@@ -138,7 +138,7 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.9.1 (c24cb5d) is deployed on the owner VPS since 2026-11-16 by a runtime-only update: release r5 is current, r4 is retained, and wuwaterm-api reports 0.9.1. terms.db is the 0.9.0 database, unchanged (12,089 terms, data pin 9218d612). WUWATERM_TRANSLATION_THINKING_ZH_EN is not set in .env, so Chinese-to-English translation requests use the new default disabled. Core v0.9.0 (d54957c) was deployed earlier the same day by a full update (release r4); that update left the legacy in-Core wuwaterm-bot stopped (status=created), and Telegram runs as the standalone wuwaterm-telegram container, now 0.3.1 on Core 0.9.1.",
+      "adoption_note": "Core v0.9.1 (c24cb5d) is deployed on the owner VPS since 2026-11-16 by a runtime-only update: release r5 is current, r4 is retained, and wuwaterm-api reports 0.9.1. terms.db is the 0.9.0 database, unchanged (12,089 terms, data pin 9218d612). WUWATERM_TRANSLATION_THINKING_ZH_EN is not set in .env, so Chinese-to-English translation requests use the new default disabled. The legacy in-Core wuwaterm-bot is stopped (status=created): the r5 update recreated it on the new image without starting it. Core v0.9.0 (d54957c) was deployed earlier the same day by a full update (release r4). Telegram runs as the standalone wuwaterm-telegram container, now 0.3.1 on Core 0.9.1.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/c24cb5dc1f33619ba1026831ff4e4357ee8107af/docs/self-hosting.md",
@@ -223,16 +223,17 @@
         },
         "note": "v0.3.0 pins the published Core 0.9.0 wheel (OCI index sha256:28ab3af0ff4d8fdf6f7b3cad76812a245a80348b77e9200d248ec96e27e13ca5, manifest sha256:7dee0ea1ee65eeba32673f352a0a533dbb780ec4a49d2224bc3d3f3e2f6eb26c, config sha256:001e9b20203e8db5c6cb8f6739ceca374eb904455e2c6f85d7404ef6cc310430), settles the review dedup boundaries for TTL, repeats, delivery and /review last (#38), and documents the per-direction translation thinking settings in deploy/env.example (#39). Kept as history after v0.3.1; the release and its assets are still published. v0.2.10 and earlier remain on the release page."
       },
-      "adoption_note": "Standalone Telegram 0.3.1 on Core 0.9.1 runs on the owner VPS as wuwaterm-telegram since 2026-11-16, as a local image built from the release the way 0.3.0 was: the bot runs wuwaterm 0.9.1 and wuwaterm-telegram 0.3.1, the container has not restarted, and Chinese-to-English translation sends thinking disabled."
+      "adoption_note": "Standalone Telegram 0.3.1 on Core 0.9.1 runs on the owner VPS as wuwaterm-telegram since 2026-11-16, as a local image built from the release the way 0.3.0 was: the bot runs wuwaterm 0.9.1 and wuwaterm-telegram 0.3.1 and the container has not restarted. The production .env sets none of WUWATERM_TRANSLATION_THINKING_ZH_EN, WUWATERM_TRANSLATION_THINKING_EN_ZH and WUWATERM_SEMANTIC_REVIEW_THINKING; inside the running container, Core 0.9.1 computes the Chinese-to-English mode from that environment as disabled (request body {\"thinking\":{\"type\":\"disabled\"}}) and English-to-Chinese as omit."
     },
     {
       "id": "windows",
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "277551c8f43f5c95f9183c618779c21445587f09",
-        "tree": "619b896672bb97d43c831cc0875d004427a2567e",
-        "status": "success"
+        "commit": "44ff781938f0265eb4a3683344e868ffb7914f8d",
+        "tree": "d2e13fff5dbf9726efdab499111ca2fe8fbcc118",
+        "status": "success",
+        "status_note": "README-only commit (#26, record of 0.5.0 and its assets) on top of the release commit 277551c. ci.yml is skipped by its paths-ignore for docs-only changes, and the Dependency audit run succeeded (run 43847746394). The CI run that passed is on 277551c."
       },
       "release": {
         "version": "0.5.0",
@@ -263,7 +264,7 @@
         "manuscript": "wuwaterm-manuscript-v3",
         "note": "The client reads and writes wuwaterm-manuscript-v1, v2 and v3; local manuscript editing works offline, and online features require a configured API and device credential."
       },
-      "validation": "0.5.0: the native single-screen 150%-DPI acceptance (Linear MY-201, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612) with production Core 0.9.1; a895042 and the released 277551c have the same code, and only README.md differs. The published ZIP (9a15d4a6...) is built from 277551c (validation run 43842606090). Not done: multi-monitor mixed-DPI window drag and live IME composition.",
+      "validation": "0.5.0: the native single-screen 150%-DPI acceptance (Linear MY-201 https://linear.app/my-denia/issue/MY-201#comment-f4b65948-07bf-4453-9e2e-ddb3354f8b37, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612) with production Core 0.9.1; a895042 and the released 277551c have the same code, and only README.md differs. The published ZIP (9a15d4a6...) is built from 277551c (release build run 43843812553, validation run 43842606090). Not done: multi-monitor mixed-DPI window drag and live IME composition.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm-Windows/blob/277551c8f43f5c95f9183c618779c21445587f09/README.md"
       ],
@@ -290,7 +291,7 @@
         "signed": false,
         "note": "v0.4.2 fixes the empty-state card layout and the term-row tab order. No new service capability is required. Kept as history after v0.5.0; the release and its assets are still published. v0.4.1 and earlier remain on the release page."
       },
-      "adoption_note": "0.5.0 is published. The native single-screen 150%-DPI acceptance (Linear MY-201, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612), whose code is the released code and differs only in README.md. Not done: multi-monitor mixed-DPI window drag and live IME composition."
+      "adoption_note": "0.5.0 is published. The native single-screen 150%-DPI acceptance (Linear MY-201 https://linear.app/my-denia/issue/MY-201#comment-f4b65948-07bf-4453-9e2e-ddb3354f8b37, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612), whose code is the released code and differs only in README.md. Not done: multi-monitor mixed-DPI window drag and live IME composition. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.5.0 ZIP."
     },
     {
       "id": "web",
@@ -421,7 +422,7 @@
         "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/README.md",
         "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/docs/self-hosting.md"
       ],
-      "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web v0.3.1 (6ddccae8aa2f89b56b662f9b756496be7d730ec7) is published, and v0.3.0 (9ab24c4a45ced85eb867e8081767c40a80dd9b41) before it had its root and /private candidates replayed against Core v0.9.0 before publication. Not done: the Sites deploy of Web v0.3.1; the site still serves v0.2.0."
+      "adoption_note": "The public Sites site runs Sites version 31, deployed on 2026-11-16 by the owner-dispatched Sites session from Web 78384b7064637030f57bf325b56c1fee3f0f4d3c (package 0.3.0) on hosting commit 79b8216ddf4203d499ae7f0672d773393c40cef1: native deployment succeeded, the homepage answered HTTP 200, and the public access setting and environment revision 29 are unchanged (Linear MY-200 https://linear.app/my-denia/issue/MY-200#comment-07e97540-e6f2-45d0-84f2-c2d1b48be946). It replaced saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301). From 78384b7 to the v0.3.1 tag commit 6ddccae8aa2f89b56b662f9b756496be7d730ec7 only docs/self-hosting.md, package.json and package-lock.json change, so the site runs the application code of v0.3.1. v0.3.0 (9ab24c4a45ced85eb867e8081767c40a80dd9b41) had its root and /private candidates replayed against Core v0.9.0 before publication."
     }
   ],
   "ci_pins": {
