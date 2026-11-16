@@ -119,6 +119,30 @@ Optional LLM environment variables:
   unknown value logs a warning naming the variable and uses that default. Read
   on every request.
 
+### Provider Compatibility
+
+Provider-specific `thinking` and `reasoning_effort` fields require support from
+the configured endpoint. An HTTP 400 whose `error` object has
+`code: "unsupported_parameter"` and `param: "thinking"` or
+`param: "reasoning_effort"` gets diagnostic detail `unsupported_thinking` or
+`unsupported_reasoning_effort`. The reason remains `http`. A fixed warning
+names only the allowed parameter and the configuration options; it never
+copies the provider's message, source text, secrets, or URL. An error message
+merely mentioning thinking does not trigger this diagnostic.
+
+For translation, explicitly set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`
+(Chinese into English) or `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` (English
+into Chinese) for the affected direction, or select a provider supporting the
+requested fields. `omit` sends neither reasoning field and uses the provider
+default; it does not disable thinking. These direction variables affect
+translation only.
+
+The failed request still makes one POST. WuwaTerm does not retry it, remove
+fields automatically, or infer support from the model name. The existing
+user-facing unavailable notice and HTTP 503 `llm_unavailable` envelope stay the
+same; the specific detail is available in server diagnostics. Ordinary HTTP
+errors retain their existing classification.
+
 ## Configuration Validation
 
 Non-empty invalid numeric or boolean settings fail startup instead of being
