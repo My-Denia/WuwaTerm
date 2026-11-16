@@ -106,9 +106,10 @@ WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
 
 The variable always names a published tag, never `latest`.
 
-The Web option follows the same rule. A clone of the Core v0.9.0 tag installs
-Web v0.2.0, which rejects manuscript v3 files, while `main` records Web v0.3.0.
-To get the manuscript-v3 Web with the tagged Core, name the tag explicitly:
+The Web option also defaults to the release the checkout records: a clone of
+the Core v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files,
+while `main` records Web v0.3.0. To get the manuscript-v3 Web with the tagged
+Core, name the tag explicitly:
 
 ```bash
 WUWATERM_WEB_VERSION=v0.3.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
