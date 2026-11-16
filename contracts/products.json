@@ -221,9 +221,9 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "59b8a5f8eeff2afc947874ab20c7e59f44734348",
-        "tree": "9d4e0f283d42857a1e42222eb4ac910b1bc19826",
-        "status": "merged"
+        "commit": "910b1a80a5528073a794834c4005d7e98af369d8",
+        "tree": "0daf5d4eb4c878f38ded0df7a19f3e24a3b653ed",
+        "status": "success"
       },
       "release": {
         "version": "0.4.2",
