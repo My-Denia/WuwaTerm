@@ -992,8 +992,10 @@ class _OccurrenceModel:
     An occurrence first qualifies on the full target: word boundaries, the
     one-character name rule and bounded English inflection. Then the longest
     match wins: an occurrence lying strictly inside an occurrence of a longer
-    form of any term mentioned in the pair is not an occurrence of the
-    shorter form ("Echo" inside "Echo Set" when the source mentions both).
+    form of a term the pair still asserts is not an occurrence of the shorter
+    form ("Echo" inside "Echo Set" when the source mentions both). A term
+    dismissed as not_a_term, or an unresolved ordinary word, reserves nothing,
+    so its span stays available to the shorter term.
     Equal spans stay available to every form that reaches them, so an exact
     "Echoes" and the plural of "Echo" both see it.
 
@@ -1006,12 +1008,12 @@ class _OccurrenceModel:
         self,
         target: str,
         direction: str,
-        candidates_by_surface: Mapping[str, Sequence[ReviewCandidate]],
+        reserving: Mapping[str, Sequence[ReviewCandidate]],
     ) -> None:
         self._target = target
         self._direction = direction
         universe: set[tuple[int, int]] = set()
-        for candidates in candidates_by_surface.values():
+        for candidates in reserving.values():
             forms = _candidate_forms(candidates, direction)
             finder = _target_occurrences(candidates, direction, forms)
             for form in forms:
@@ -1745,7 +1747,26 @@ def _review_pair_v2(
         mention.source: _candidates_for(surfaces[mention.source], include_id=True)
         for mention in mentions
     }
-    occurrence_model = _OccurrenceModel(target, direction, candidates_by_surface)
+
+    def asserts_constraint(mention: _TermSpan) -> bool:
+        # A mention dismissed as not_a_term, or an unresolved ordinary word,
+        # asserts nothing: the judge sets it aside without a verdict, it does
+        # not compete in a guarded paragraph, and it reserves no span for the
+        # longest match. An explicit official_pair asserts again.
+        resolution = by_id.get(_span_mention_id(source, mention.start, mention.end))
+        if resolution is not None:
+            return resolution.choice != CHOICE_NOT_A_TERM
+        return mention.source not in automatic_exclusions
+
+    occurrence_model = _OccurrenceModel(
+        target,
+        direction,
+        {
+            mention.source: candidates_by_surface[mention.source]
+            for mention in mentions
+            if asserts_constraint(mention)
+        },
+    )
     for mention in mentions:
         candidates = candidates_by_surface[mention.source]
         finding_id = _span_mention_id(source, mention.start, mention.end)
@@ -1757,14 +1778,9 @@ def _review_pair_v2(
         if region is not None:
             key = (region.source.start, region.source.end)
             guard = key if key in guarded_regions else None
-        # A mention the judge sets aside without a verdict does not compete.
-        asserts_constraint = not (
-            (resolution is not None and resolution.choice == CHOICE_NOT_A_TERM)
-            or (resolution is None and mention.source in automatic_exclusions)
-        )
         if (
             guard is not None
-            and asserts_constraint
+            and asserts_constraint(mention)
             and region is not None
             and region.target is not None
         ):

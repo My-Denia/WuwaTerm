@@ -12,6 +12,12 @@ import pytest
 
 from wuwaterm.application import project_review_report, review_pair
 from wuwaterm.cjk_span import JIEBA_COMMIT, LEXICON_FILTER, _WORDS
+from wuwaterm.constants import (
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+    FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
+    FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+)
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
@@ -441,7 +447,7 @@ _AMBIGUOUS = (VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_REPEAT)
 # target text it is credited with. Each case runs on the equal sentence count
 # path as written, and on the guarded paragraph path with a list marker the
 # source writes as "一、" and the target as "I.".
-_OCCURRENCE_MATRIX = (
+_OCCURRENCE_CASES = (
     ("exact", "今汐登场。", "Jinhsi appears.", [(_V, "Jinhsi")], None),
     ("inflected", "声骸出现。", "Echoes appear.", [(_V, "Echoes")], None),
     (
@@ -498,20 +504,102 @@ _OCCURRENCE_MATRIX = (
 )
 
 
+_NA = (VERDICT_NOT_EVALUATED, REASON_NOT_A_TERM)
+_ORDINARY = (VERDICT_NOT_EVALUATED, REASON_ORDINARY_WORD)
+_LONGER_ONLY = ("声骸与声骸套装。", "Echo Set.")
+# User actions and ordinary-word exclusions on the nested pair. Only a mention
+# that still asserts a constraint reserves its span for the longest match, so
+# a dismissed or excluded "Echo Set" leaves its "Echo" to 声骸, and a confirmed
+# 声骸 is then credited instead of blamed. (case, source, target, equal,
+# guarded, actions by mention index, zh surfaces excluded as ordinary words)
+_OCCURRENCE_ACTIONS = (
+    ("longer dismissed", *_LONGER_ONLY, [(_V, "Echo"), _NA], None, {1: "not_a_term"}, ()),
+    (
+        "longer dismissed, shorter confirmed",
+        *_LONGER_ONLY,
+        [(_V, "Echo"), _NA],
+        None,
+        {0: "official_pair", 1: "not_a_term"},
+        (),
+    ),
+    ("longer excluded", *_LONGER_ONLY, [(_V, "Echo"), _ORDINARY], None, {}, ("声骸套装",)),
+    (
+        "longer excluded, shorter confirmed",
+        *_LONGER_ONLY,
+        [(_V, "Echo"), _ORDINARY],
+        None,
+        {0: "official_pair"},
+        ("声骸套装",),
+    ),
+    (
+        "longer excluded but confirmed",
+        *_LONGER_ONLY,
+        [(_NR, None), (_V, "Echo Set")],
+        None,
+        {1: "official_pair"},
+        ("声骸套装",),
+    ),
+    (
+        "shorter confirmed, longer a term",
+        *_LONGER_ONLY,
+        [(VERDICT_CONFLICT, None), (_V, "Echo Set")],
+        None,
+        {0: "official_pair"},
+        (),
+    ),
+)
+_OCCURRENCE_MATRIX = (
+    tuple((*row, {}, ()) for row in _OCCURRENCE_CASES) + _OCCURRENCE_ACTIONS
+)
+
+
+def _matrix_service(tmp_path: Path, excluded: tuple[str, ...]) -> TermService:
+    path = tmp_path / "occurrence-matrix.db"
+    metadata = [("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")]
+    if excluded:
+        metadata.append(
+            (
+                FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+                json.dumps(
+                    {
+                        "version": FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
+                        "min_occurrences": FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+                        "max_aligned_ratio": list(FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO),
+                        "surfaces": [[surface, 12, 2] for surface in sorted(excluded)],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany("INSERT INTO metadata(key, value) VALUES (?, ?)", metadata)
+        insert_records(
+            conn,
+            (
+                *_PLURAL_RECORDS,
+                TermRecord("character", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
+                TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set"),
+                TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
+            ),
+        )
+        conn.commit()
+    return TermService(path)
+
+
 @pytest.mark.parametrize("path", ("equal", "guarded"))
 @pytest.mark.parametrize(
-    ("case", "source", "target", "equal", "guarded"),
+    ("case", "source", "target", "equal", "guarded", "actions", "excluded"),
     _OCCURRENCE_MATRIX,
     ids=[row[0] for row in _OCCURRENCE_MATRIX],
 )
-def test_occurrence_matrix(tmp_path, path, case, source, target, equal, guarded):
+def test_occurrence_matrix(
+    tmp_path, path, case, source, target, equal, guarded, actions, excluded
+):
     """The judge and the guard read one occurrence model on both mapping paths."""
-    service = _plural_service(
-        tmp_path,
-        TermRecord("character", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
-        TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set"),
-        TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
-    )
+    service = _matrix_service(tmp_path, excluded)
     expected = equal
     if path == "guarded":
         source, target = "一、" + source, "I. " + target
@@ -522,6 +610,26 @@ def test_occurrence_matrix(tmp_path, path, case, source, target, equal, guarded)
         assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target))
 
     report = _pair(service, source, target)
+    if actions:
+        resolutions = []
+        for index, choice in sorted(actions.items()):
+            finding = report.findings[index]
+            resolution = {"mention_id": finding.id, "choice": choice}
+            if choice == "official_pair":
+                resolution["candidate_id"] = finding.candidates[0].candidate_id
+            resolutions.append(resolution)
+        report = _pair(
+            service,
+            source,
+            target,
+            resolutions=tuple(resolutions),
+            resolution_context={
+                "source_revision": report.source_revision,
+                "rule_version": report.rule_version,
+                "dictionary_revision": report.dictionary.revision,
+                "matcher_revision": report.matcher_revision,
+            },
+        )
 
     actual = [
         (item.verdict, item.reason)
