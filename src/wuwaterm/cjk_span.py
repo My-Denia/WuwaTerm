@@ -93,6 +93,13 @@ candidates reserve nothing. The same input gave a different report under v6,
 so the basis must change. Stored resolution contexts and saved manuscript-v3
 segment results carrying v6 go stale by the existing freshness rule and are
 re-reviewed.
+
+wuwaterm-cjk-matcher-v8 also requires a plausible right word boundary for a
+single-character source name. An unrecognized CJK continuation (including a
+middle-dot compound) is not evidence of a standalone name. A following known
+word or the existing name grammar still admits 欢迎椿来到 and 快找椿商量.
+This narrows the same source admission used by translation and review; it
+does not invent an official translation for the enclosing compound.
 """
 
 from __future__ import annotations
@@ -184,6 +191,21 @@ def single_character_name_mention_at(text: str, start: int, end: int) -> bool:
         return False
     if text[start:end] in _EVERYDAY_STANDALONE_CHARS:
         return single_character_name_context_ok(text, start, end)
+    # The lexicon cannot list novel mechanic names. Do not interpret a
+    # component of an unknown longer word as a character merely because the
+    # ordinary-word veto has no entry for that compound. Unlike a whitelist
+    # of character spellings, this boundary rule applies to every candidate.
+    if end < len(text) and text[end] == "·":
+        return False
+    if end < len(text) and _is_cjk_character(text[end]):
+        if single_character_name_context_ok(text, start, end):
+            return True
+        if text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能"), end):
+            return True
+        return any(
+            text[end:hi] in _WORDS
+            for hi in range(end + 2, min(len(text), end + MAX_WORD_LEN) + 1)
+        )
     return True
 
 
@@ -66537,7 +66559,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v7", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        ["wuwaterm-cjk-matcher-v8", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

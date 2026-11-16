@@ -211,17 +211,13 @@ def _item_tier_base_records(
     A family is the set of iteminfo rows whose cleaned names are a tier
     prefix plus the same Chinese base X and, with the matching English tier
     prefix, the same English base Y. Only a family with all four tiers names
-    its base, and only while neither X nor Y is already a surface of an
-    existing record: a base pair that is already a record is not repeated,
-    and a bare X or Y another record pairs with a different counterpart
-    already names something else (Tuner is the speaker 调音师), so it does
-    not name the material unambiguously. The row's source_id and text_key
-    are ``tier-base:<id>`` with the smallest Basic-tier row id, so the row
-    says it is derived and stays deterministic when one tier has several
-    rows.
+    its base. An existing identical pair is not repeated, while a shared X or
+    Y with a different counterpart is retained as an ambiguous candidate.
+    The row's source_id and text_key are ``tier-base:<id>`` with the smallest
+    Basic-tier row id, so the row says it is derived and stays deterministic
+    when one tier has several rows.
     """
-    zh_surfaces = {record.zh for record in existing}
-    en_surfaces = {record.en for record in existing}
+    existing_pairs = {(record.zh, record.en) for record in existing}
     families: dict[tuple[str, str], dict[int, list[str]]] = defaultdict(dict)
     for row in rows:
         if not isinstance(row, dict):
@@ -241,11 +237,7 @@ def _item_tier_base_records(
 
     records: list[TermRecord] = []
     for (zh, en), tiers in sorted(families.items()):
-        if (
-            len(tiers) != len(ITEM_TIER_PREFIXES)
-            or zh in zh_surfaces
-            or en in en_surfaces
-        ):
+        if len(tiers) != len(ITEM_TIER_PREFIXES) or (zh, en) in existing_pairs:
             continue
         basic_id = min(tiers[0], key=_numeric_id_key)
         source_id = f"{ITEM_TIER_BASE_SOURCE_PREFIX}{basic_id}"
@@ -302,17 +294,17 @@ def iter_arikatsu_records(
         loaded_text_maps.append((zh_map, en_map))
     records: list[TermRecord] = []
 
-    # The pinned Term table is the game's official glossary: 655
-    # ``Term<n>_Title`` pairs. The curated CORE_TERM_KEYS covers a handful;
-    # import the rest as core terms so exact lookup is not limited to those
-    # hand-picked entries. BinData still supplies its own categories.
-    term_title = re.compile(r"Term\d+_Title$")
+    # The TextMap has structured official glossary and version-title families.
+    # Import the complete families, skipping curated keys to retain their one
+    # existing record. Other advertising and UI text is not a term source.
+    # BinData still supplies its own categories.
+    core_title = re.compile(r"(?:Term\d+_Title|Advertising_VersionTitle_\d+)")
     for text_key in sorted(zh_map):
-        if text_key in CORE_TERM_KEYS or not term_title.fullmatch(text_key):
+        if text_key in CORE_TERM_KEYS or not core_title.fullmatch(text_key):
             continue
         record = _record_for_key(
             category="core_term",
-            source_file="Textmaps/multi_text/MultiText.json",
+            source_file=ARIKATSU_MULTITEXT_SOURCE_FILE,
             source_id=text_key,
             text_key=text_key,
             zh_map=zh_map,
@@ -425,9 +417,9 @@ def iter_arikatsu_records(
             if record:
                 records.append(record)
 
-    # Derived last, so every other source's surfaces are known: an exact pair
-    # is kept once and a surface that already names something else is left
-    # to it.
+    # Derived last, so an exact pair already present in another source is not
+    # repeated. A shared surface with a different counterpart remains available
+    # for contextual disambiguation.
     records.extend(
         _item_tier_base_records(bin_rows["item/iteminfo.json"], zh_map, en_map, records)
     )

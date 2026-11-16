@@ -517,6 +517,62 @@ def _write_arikatsu(
     return root
 
 
+def test_arikatsu_imports_version_title_family_with_source_provenance(tmp_path: Path):
+    titles = {
+        "Advertising_VersionTitle_30": ("我们生而眺望", "We Who See the Stars"),
+        "Advertising_VersionTitle_31": ("赠予雪中的你", "For You Who Walk in Snow"),
+        "Advertising_VersionTitle_32": ("于影中启明的决心", "Resolution to Illuminate the Shadows"),
+        "Advertising_VersionTitle_33": ("自星海尽处回响", "Reverbs From the End of Galaxies"),
+        "Advertising_VersionTitle_34": ("未选择的梦", "The Dream Not Dreamed"),
+        "Advertising_VersionTitle_35": ("遗音扶剑，荡梦而歌", "Blade of Past Resounds, Lingering Dream Hymns"),
+        "Advertising_VersionTitle_36": ("蜃云灯影，凡尘剑心", "Lamplight in Mirage, Sword's Resolve in Heart"),
+        "Advertising_VersionTitle_37": ("镜锁妄世，心照红尘", "Prism's Illusion, Heart's Illumination"),
+        # A synthetic future member checks that import follows the key family.
+        "Advertising_VersionTitle_100": ("未来版本标题", "Future Version Title"),
+    }
+    ordinary = {
+        key: ("普通界面文本", "Ordinary UI text")
+        for key in (
+            "Advertising_VersionTitle_",
+            "Advertising_VersionTitle_next",
+            "Advertising_VersionTitle_34_Subtitle",
+            "Other_Advertising_VersionTitle_34",
+            "Advertising_VersionDesc_34",
+        )
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", {**titles, **ordinary}, {})
+
+    records = iter_records(root, "arikatsu")
+    multitext = "Textmaps/multi_text/MultiText.json"
+    actual = sorted(
+        (r for r in records if r.source_file == multitext), key=lambda r: r.text_key
+    )
+    assert actual == [
+        TermRecord("core_term", multitext, key, key, *titles[key]) for key in sorted(titles)
+    ]
+    # The curated member must keep its one existing row, not gain a second.
+    assert sum(r.text_key == "Advertising_VersionTitle_37" for r in records) == 1
+
+
+@pytest.mark.parametrize(
+    ("zh", "en"),
+    [(None, "Title"), ("标题", None), ("", "Title"), ("标题", ""),
+     (" \t\n", "Title"), ("标题", " \t\n")],
+    ids=["missing-zh", "missing-en", "empty-zh", "empty-en", "blank-zh", "blank-en"],
+)
+def test_arikatsu_skips_version_titles_without_both_nonempty_sides(
+    tmp_path: Path, zh: str | None, en: str | None
+):
+    root = _write_arikatsu(tmp_path / "arikatsu", {}, {})
+    key = "Advertising_VersionTitle_34"
+    for lang, value in (("zh-Hans", zh), ("en", en)):
+        path = root / "Textmaps" / lang / "multi_text" / "MultiText.json"
+        rows = [] if value is None else [{"Id": key, "Content": value}]
+        path.write_text(json.dumps(rows), encoding="utf-8")
+
+    assert not [r for r in iter_records(root, "arikatsu") if r.text_key == key]
+
+
 def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     root = tmp_path / "arikatsu"
     texts = {
@@ -629,8 +685,8 @@ def names_checkout(tmp_path: Path) -> Path:
         **_tier_texts("tube", "密音筒", "Sealed Tube", en_premium="Sealed Canister"),
         # The base pair is already an official record: kept once.
         **_tier_texts("block", "营养块", "Nutrient Block"),
-        # A base surface another record pairs with a different counterpart
-        # (the speaker 调音师 / Tuner, 复苏吸雾 / Revival Mist): no base row.
+        # A shared surface can have different counterparts: both pairs belong
+        # in the dictionary for the sentence layer to resolve in context.
         **_tier_texts("tuner", "调谐器", "Tuner"),
         **_tier_texts("inhaler", "复苏吸雾", "Revival Inhaler"),
     }
@@ -720,6 +776,14 @@ def test_arikatsu_derives_base_row_only_for_complete_tier_families(
         TermRecord(
             "item",
             "BinData/item/iteminfo.json",
+            "tier-base:42100013",
+            "tier-base:42100013",
+            "复苏吸雾",
+            "Revival Inhaler",
+        ),
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
             "tier-base:43020001",
             "tier-base:43020001",
             "能源核心",
@@ -733,10 +797,35 @@ def test_arikatsu_derives_base_row_only_for_complete_tier_families(
             "能量袋",
             "Energy Bag",
         ),
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:36000011",
+            "tier-base:36000011",
+            "调谐器",
+            "Tuner",
+        ),
     ]
     assert [(r.category, r.source_id) for r in records if r.zh == "营养块"] == [
         ("core_term", "Term900002_Title")
     ]
+
+
+def test_tier_base_collisions_and_pair_dedup_survive_database_build(names_db: Path):
+    with connect(names_db) as conn:
+        rows = conn.execute(
+            "SELECT category, source_file, source_id, text_key, zh, en FROM terms "
+            "WHERE en = 'Tuner' OR zh IN ('复苏吸雾', '营养块')"
+        ).fetchall()
+
+    assert {tuple(row) for row in rows} == {
+        ("speaker", "BinData/speaker/speaker.json", "1513", "Speaker_1513_Name", "调音师", "Tuner"),
+        ("item", "BinData/item/iteminfo.json", "tier-base:36000011", "tier-base:36000011", "调谐器", "Tuner"),
+        ("core_term", "Textmaps/multi_text/MultiText.json", "Term900003_Title", "Term900003_Title", "复苏吸雾", "Revival Mist"),
+        ("item", "BinData/item/iteminfo.json", "tier-base:42100013", "tier-base:42100013", "复苏吸雾", "Revival Inhaler"),
+        ("core_term", "Textmaps/multi_text/MultiText.json", "Term900002_Title", "Term900002_Title", "营养块", "Nutrient Block"),
+    }
+    assert len(rows) == 5
 
 
 def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
@@ -755,21 +844,24 @@ def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
     assert zh_source.references == (("能源核心", "能源核心", "Energy Core", "item"),)
 
 
-def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
-    # MY-18: bare "Tuner" is already the speaker 调音师, so 调谐器 / Tuner is
-    # not derived. Bare "Tuner" stays a contextual speaker reference carrying
-    # 调音师, as before tier bases, also where the sentence means the item:
-    # the model weighs it, nothing hard-locks it to 调谐器. A tier name locks.
-    tuner = ("Tuner", "调音师", "Tuner", "speaker")
+def test_tuner_collision_keeps_both_meanings_as_contextual_references(names_lock):
+    # The same English surface names a speaker and a material. Both pairs must
+    # reach the model as references; neither may become a hard replacement.
+    tuners = (
+        ("Tuner", "调音师", "Tuner", "speaker"),
+        ("Tuner", "调谐器", "Tuner", "item"),
+    )
     speaker = names_lock("Tuner: Hold that note.", to_chinese=True)
-    assert (speaker.locks, speaker.references) == ((), (tuner,))
+    assert speaker.locks == ()
+    assert speaker.references == tuners
 
     item = names_lock("Use a Basic Tuner first, then the Tuner.", to_chinese=True)
     assert [(zh, en) for _, zh, en in item.locks] == [("初级调谐器", "Basic Tuner")]
-    assert item.references == (tuner,)
+    assert item.references == tuners
 
     ordinary = names_lock("Bring a guitar tuner.", to_chinese=True)
-    assert (ordinary.locks, ordinary.references) == ((), ())
+    assert ordinary.locks == ()
+    assert ordinary.locked_text == "Bring a guitar tuner."
 
 
 def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):

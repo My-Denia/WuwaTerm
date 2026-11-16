@@ -76,7 +76,7 @@ def test_lexicon_is_the_pinned_jieba_slice():
     for word in REQUIRED_WORDS:
         assert word in _WORDS
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v7", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        ["wuwaterm-cjk-matcher-v8", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -181,6 +181,10 @@ def test_target_single_character_compound_qualification(text, name, compound):
         ("欢迎椿来到黑海岸。", "椿", True),
         ("快找椿商量对策。", "椿", True),
         ("给椿。", "椿", True),
+        # A novel mechanic compound is not an isolated character mention.
+        ("椿的红椿蕊很强。", "椿", True),
+        ("红椿蕊很强。", "椿", False),
+        ("红椿·蕾很强。", "椿", False),
         ("香椿拌豆腐。", "椿", False),
         ("院子里的臭椿长高了。", "椿", False),
         ("老椿树发芽了。", "椿", False),
