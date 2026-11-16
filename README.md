@@ -106,14 +106,23 @@ WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
 
 The variable always names a published tag, never `latest`.
 
+The Web option follows the same rule. A clone of the Core v0.9.0 tag installs
+Web v0.2.0, which rejects manuscript v3 files, while `main` records Web v0.3.0.
+To get the manuscript-v3 Web with the tagged Core, name the tag explicitly:
+
+```bash
+WUWATERM_WEB_VERSION=v0.3.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+```
+
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
 lists the explicit commands: Docker Compose on Linux (or Python 3.11+ from
 source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
-[WuwaTerm-Web v0.3.0](https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.3.0)
-package, verifies it against the release checksums, and needs the HTTPS origin
-your proxy serves (`--web-origin`).
+[WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/releases) package this
+checkout records (v0.3.0 on `main`, v0.2.0 on the v0.9.0 tag), verifies it
+against the release checksums, and needs the HTTPS origin your proxy serves
+(`--web-origin`).
 
 ### Windows client
 

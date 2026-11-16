@@ -93,6 +93,15 @@ WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
 
 The variable names a published tag; there is no `latest`.
 
+The Web release follows the same rule: a clone of the v0.9.0 tag installs Web
+v0.2.0, which rejects manuscript v3 files, while `main` records Web v0.3.0. To
+get the manuscript-v3 Web with the tagged Core, name the tag on the install
+command:
+
+```bash
+WUWATERM_WEB_VERSION=v0.3.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+```
+
 For the source path, create the environment with the Bot, API, and builder
 extras. This supports every source-path command in this guide:
 
