@@ -95,13 +95,14 @@ when you point it at that checkout (`--telegram-dir`), then prints the
 product's own install steps. This checkout no longer starts the inline bot it
 still carries; that became an explicit `--with-legacy-bot`.
 
-A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10,
-the release that tag records; the v0.9.1 tag and `main` record v0.3.0, which
-pins Core v0.9.0. To pair the v0.9.0 tag with Telegram v0.3.0, name the tag
-explicitly:
+A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10
+and a clone of the v0.9.1 tag those of Telegram v0.3.0 (which pins Core
+v0.9.0), the release each tag records; `main` records v0.3.1, which pins Core
+v0.9.1 and which the next formal release will carry. To pair the v0.9.1 tag
+with Telegram v0.3.1, name the tag explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.3.0 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.3.1 ./deploy/setup.sh --with-telegram
 ```
 
 The variable always names a published tag, never `latest`.
@@ -128,7 +129,7 @@ against the release checksums, and needs the HTTPS origin your proxy serves
 
 ### Windows client
 
-Download the portable package from [WuwaTerm-Windows v0.4.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
+Download the portable package from [WuwaTerm-Windows v0.5.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 
