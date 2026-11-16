@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from .cjk_span import (
@@ -986,35 +986,67 @@ def _target_occurrences(
     return occurrences
 
 
+def _asserted_forms(
+    candidates: Sequence[ReviewCandidate],
+    direction: str,
+    resolution: ReviewResolution | None,
+    automatic_term_excluded: bool,
+) -> tuple[str, ...]:
+    """The official forms a mention asserts; see ``_OccurrenceModel``.
+
+    An ``official_pair`` naming no current candidate asserts nothing here;
+    the judge rejects that request.
+    """
+    if resolution is not None:
+        if resolution.choice == CHOICE_NOT_A_TERM:
+            return ()
+        if resolution.choice == CHOICE_OFFICIAL_PAIR:
+            for candidate in candidates:
+                if candidate.candidate_id == resolution.candidate_id:
+                    return (_official_form(candidate, direction),)
+            return ()
+    if automatic_term_excluded:
+        return ()
+    return _candidate_forms(candidates, direction)
+
+
 class _OccurrenceModel:
     """The one set of target occurrences review-v2 credits to a mention.
 
-    An occurrence first qualifies on the full target: word boundaries, the
-    one-character name rule and bounded English inflection. Then the longest
-    match wins: an occurrence lying strictly inside an occurrence of a longer
-    form of a term the pair still asserts is not an occurrence of the shorter
-    form ("Echo" inside "Echo Set" when the source mentions both). A term
-    dismissed as not_a_term, or an unresolved ordinary word, reserves nothing,
-    so its span stays available to the shorter term.
-    Equal spans stay available to every form that reaches them, so an exact
-    "Echoes" and the plural of "Echo" both see it.
+    The rule, on every mapping path:
+
+    - A mention asserts the forms ``_asserted_forms`` gives it: every
+      candidate's form while unresolved, only the selected candidate's form
+      after ``official_pair``, none after ``not_a_term`` or as an unresolved
+      ordinary word. Each form also answers to its bounded inflection.
+    - Those forms, and only those, are what the mention is judged on, what it
+      claims in a guarded paragraph, and what it reserves.
+    - An occurrence qualifies on the full target (word boundaries, the
+      one-character name rule, inflection) and is available unless it lies
+      strictly inside an occurrence of a form some mention reserves: the
+      longest match wins ("Echo" inside a reserved "Echo Set" is not an Echo).
+      Equal spans stay available to every form that reaches them, so an
+      exact "Echoes" and the plural of "Echo" compete for it.
+    - A resolution on the shorter mention changes only what that mention
+      asserts and reserves. It never releases a span a longer mention still
+      reserves: confirming 声骸 = Echo while 声骸套装 asserts "Echo Set"
+      leaves the inner Echo unavailable, so a missing 声骸 is a conflict.
 
     The judge, its elsewhere veto and the paragraph guard all read
-    occurrences here, on every mapping path, so no two of them can disagree
-    about which spans a mention could take.
+    occurrences here, so none of them can disagree about which spans a
+    mention could take.
     """
 
     def __init__(
         self,
         target: str,
         direction: str,
-        reserving: Mapping[str, Sequence[ReviewCandidate]],
+        reserving: Iterable[tuple[Sequence[ReviewCandidate], tuple[str, ...]]],
     ) -> None:
         self._target = target
         self._direction = direction
         universe: set[tuple[int, int]] = set()
-        for candidates in reserving.values():
-            forms = _candidate_forms(candidates, direction)
+        for candidates, forms in reserving:
             finder = _target_occurrences(candidates, direction, forms)
             for form in forms:
                 universe.update(finder(target, form))
@@ -1064,14 +1096,14 @@ class _OccurrenceModel:
         self,
         surface: str,
         candidates: Sequence[ReviewCandidate],
+        forms: tuple[str, ...],
         region: tuple[int, int],
     ) -> frozenset[tuple[int, int]]:
-        """Every span in region that any candidate form of a mention can take.
+        """Every span in region that one of a mention's asserted forms can take.
 
         Used spans are deliberately not subtracted: the claim describes the
         region, not how far the review has got.
         """
-        forms = _candidate_forms(candidates, self._direction)
         available = self.occurrences(surface, candidates, forms)
         lo, hi = region
         return frozenset(
@@ -1413,20 +1445,16 @@ def _judge_mention_v2(
         # runs the authoritative check above; not_a_term is user intent.
         return not_evaluated(REASON_ORDINARY_WORD)
 
-    forms = (
-        (_official_form(selected, direction),)
-        if selected is not None
-        else _candidate_forms(candidates, direction)
-    )
+    forms = _asserted_forms(candidates, direction, resolution, automatic_term_excluded)
     occurrences = occurrence_model.occurrences(mention.source, candidates, forms)
 
     if corresponding is None:
         return not_evaluated(REASON_NO_TARGET_REGION)
 
     if ambiguous_repeat:
-        # Decided on every candidate's form, whatever the resolution picked: a
-        # confirmed conflict on a translation that is in fact correct is the
-        # outcome to avoid, so a selected pair does not lift the guard.
+        # Decided on the forms the mention asserts, a selected pair included:
+        # a confirmed conflict on a translation that is in fact correct is
+        # the outcome to avoid, so a selection does not lift the guard.
         return not_evaluated(REASON_AMBIGUOUS_REPEAT)
 
     lo, hi = corresponding
@@ -1741,33 +1769,34 @@ def _review_pair_v2(
     claims: dict[tuple[int, int], list[frozenset[tuple[int, int]]]] = {}
     claim_owner: dict[tuple[int, int], list[int]] = {}
     claim_cache: dict[
-        tuple[tuple[int, int], str], frozenset[tuple[int, int]]
+        tuple[tuple[int, int], str, tuple[str, ...]], frozenset[tuple[int, int]]
     ] = {}
     candidates_by_surface = {
         mention.source: _candidates_for(surfaces[mention.source], include_id=True)
         for mention in mentions
     }
 
-    def asserts_constraint(mention: _TermSpan) -> bool:
-        # A mention dismissed as not_a_term, or an unresolved ordinary word,
-        # asserts nothing: the judge sets it aside without a verdict, it does
-        # not compete in a guarded paragraph, and it reserves no span for the
-        # longest match. An explicit official_pair asserts again.
-        resolution = by_id.get(_span_mention_id(source, mention.start, mention.end))
-        if resolution is not None:
-            return resolution.choice != CHOICE_NOT_A_TERM
-        return mention.source not in automatic_exclusions
-
+    # What each mention asserts decides what it is judged on, what it claims
+    # in a guarded paragraph and what it reserves (see _OccurrenceModel).
+    asserted = [
+        _asserted_forms(
+            candidates_by_surface[mention.source],
+            direction,
+            by_id.get(_span_mention_id(source, mention.start, mention.end)),
+            mention.source in automatic_exclusions,
+        )
+        for mention in mentions
+    ]
     occurrence_model = _OccurrenceModel(
         target,
         direction,
         {
-            mention.source: candidates_by_surface[mention.source]
-            for mention in mentions
-            if asserts_constraint(mention)
-        },
+            (mention.source, forms): (candidates_by_surface[mention.source], forms)
+            for mention, forms in zip(mentions, asserted, strict=True)
+            if forms
+        }.values(),
     )
-    for mention in mentions:
+    for mention, forms in zip(mentions, asserted, strict=True):
         candidates = candidates_by_surface[mention.source]
         finding_id = _span_mention_id(source, mention.start, mention.end)
         resolution = by_id.get(finding_id)
@@ -1780,17 +1809,18 @@ def _review_pair_v2(
             guard = key if key in guarded_regions else None
         if (
             guard is not None
-            and asserts_constraint(mention)
+            and forms
             and region is not None
             and region.target is not None
         ):
-            # One term's mentions share candidates, hence the same claim.
-            cache_key = (guard, mention.source)
+            # Mentions of one term asserting the same forms share one claim.
+            cache_key = (guard, mention.source, forms)
             spans = claim_cache.get(cache_key)
             if spans is None:
                 spans = occurrence_model.claim(
                     mention.source,
                     candidates,
+                    forms,
                     (region.target.start, region.target.end),
                 )
                 claim_cache[cache_key] = spans

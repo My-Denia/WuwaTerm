@@ -548,8 +548,83 @@ _OCCURRENCE_ACTIONS = (
         (),
     ),
 )
+_C = (VERDICT_CONFLICT, None)
+# The resolution dimension: 星辉 has two candidates, "Echo Set" and
+# "Starlight", and 声骸 ("Echo") is confirmed in every row, so a wrong
+# reservation shows as a confirmed conflict. 星辉 is unresolved, resolved to
+# either candidate, dismissed, or an unresolved ordinary word; only the forms
+# it still asserts may reserve "Echo Set" and hide the "Echo" inside it.
+_SHORT_CONFIRMED = {0: ("official_pair", "Echo")}
+_RESOLUTION_STATES = (
+    ("unresolved", {}, ()),
+    ("selected Echo Set", {1: ("official_pair", "Echo Set")}, ()),
+    ("selected Starlight", {1: ("official_pair", "Starlight")}, ()),
+    ("dismissed", {1: ("not_a_term", None)}, ()),
+    ("excluded", {}, ("星辉",)),
+)
+_RESOLUTION_STRUCTURES = (
+    (
+        "nested present",
+        "Echo and Echo Set.",
+        {
+            "unresolved": [(_V, "Echo"), (_V, "Echo Set")],
+            "selected Echo Set": [(_V, "Echo"), (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echo"), _C],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+    (
+        "nested shorter missing",
+        "Echo Set.",
+        {
+            "unresolved": [_C, (_V, "Echo Set")],
+            "selected Echo Set": [_C, (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echo"), _C],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+    (
+        "inflected",
+        "Echoes and Echo Set.",
+        {
+            "unresolved": [(_V, "Echoes"), (_V, "Echo Set")],
+            "selected Echo Set": [(_V, "Echoes"), (_V, "Echo Set")],
+            "selected Starlight": [(_V, "Echoes"), _C],
+            "dismissed": [(_V, "Echoes"), _NA],
+            "excluded": [(_V, "Echoes"), _ORDINARY],
+        },
+    ),
+    (
+        "unrelated",
+        "Echo and Starlight.",
+        {
+            "unresolved": [(_V, "Echo"), (_V, "Starlight")],
+            "selected Echo Set": [(_V, "Echo"), _C],
+            "selected Starlight": [(_V, "Echo"), (_V, "Starlight")],
+            "dismissed": [(_V, "Echo"), _NA],
+            "excluded": [(_V, "Echo"), _ORDINARY],
+        },
+    ),
+)
+_OCCURRENCE_RESOLUTIONS = tuple(
+    (
+        f"{structure}, 星辉 {state}",
+        "声骸与星辉。",
+        target,
+        expected[state],
+        None,
+        {**_SHORT_CONFIRMED, **actions},
+        excluded,
+    )
+    for structure, target, expected in _RESOLUTION_STRUCTURES
+    for state, actions, excluded in _RESOLUTION_STATES
+)
 _OCCURRENCE_MATRIX = (
-    tuple((*row, {}, ()) for row in _OCCURRENCE_CASES) + _OCCURRENCE_ACTIONS
+    tuple((*row, {}, ()) for row in _OCCURRENCE_CASES)
+    + _OCCURRENCE_ACTIONS
+    + _OCCURRENCE_RESOLUTIONS
 )
 
 
@@ -583,6 +658,8 @@ def _matrix_service(tmp_path: Path, excluded: tuple[str, ...]) -> TermService:
                 TermRecord("character", "fixture", "jinhsi", "jinhsi", "今汐", "Jinhsi"),
                 TermRecord("item", "fixture", "echo-set", "echo-set", "声骸套装", "Echo Set"),
                 TermRecord("item", "fixture", "echoes", "echoes", "回响", "Echoes"),
+                TermRecord("item", "fixture", "xinghui-set", "xinghui-set", "星辉", "Echo Set"),
+                TermRecord("character", "fixture", "xinghui", "xinghui", "星辉", "Starlight"),
             ),
         )
         conn.commit()
@@ -612,11 +689,16 @@ def test_occurrence_matrix(
     report = _pair(service, source, target)
     if actions:
         resolutions = []
-        for index, choice in sorted(actions.items()):
+        for index, action in sorted(actions.items()):
+            choice, form = action if isinstance(action, tuple) else (action, None)
             finding = report.findings[index]
             resolution = {"mention_id": finding.id, "choice": choice}
             if choice == "official_pair":
-                resolution["candidate_id"] = finding.candidates[0].candidate_id
+                resolution["candidate_id"] = next(
+                    candidate.candidate_id
+                    for candidate in finding.candidates
+                    if form is None or candidate.en == form
+                )
             resolutions.append(resolution)
         report = _pair(
             service,
