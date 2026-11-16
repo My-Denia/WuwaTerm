@@ -70,20 +70,37 @@ deterministic function of each answer and its source.
 
 ## Results and one premise that holds only on this data, 2026-11-16
 
-All of L1–L6 hold. No model call was made.
+All of L1–L6 hold. No model call was made: on these inputs the requests are
+unchanged (51/51 bodies; 0 of 5 next-segment contexts change), so the stored
+answers are what the gateway returned.
 
-- L1: 51 of 51 request bodies (D 17, R 34) are identical to `d54957c`.
+Scope: the post-check runs wherever `translate_async` runs with a context.
+That covers API requests that send `context`, and every segment of the
+long-text path (`_translate_long_plain_text`), which always passes a
+context, including Telegram trusted messages over 2,000 characters. Calls
+without a context are unchanged: short Telegram, API and Web requests,
+channel posts, HTML and no-model translation.
+
+- L1: 51 of 51 request bodies (D 17, R 34) are identical to `d54957c`. This
+  holds by construction for each segment's own request: the post-check runs
+  after the answer, and the echo gateway's answers never trigger it.
 - L2: paragraph-count matches go from 31 to 33 of 34 segments in the
-  `disabled` and per-direction R runs and from 30 to 32 in the `low` run, and
-  stay at 14/14, 17/17 and 8/8 on D. Both end-to-end D-003
-  answers (31 and 8 paragraphs, 45 lines each) come out with 45 paragraphs.
+  `disabled` and per-direction R runs and from 30 to 32 in the `low` run.
+  They stay at 14/14 (D baseline), 17/17 (D `disabled`) and 8/8 (D
+  per-direction, zh→en documents only, a run not in the Problem table: 8
+  segments, 0 paragraph-count differences). Both end-to-end D-003 answers
+  (31 and 8 paragraphs, 45 lines each) come out with 45 paragraphs.
 - L3 and L4 hold for all 8 regrouped answers and every other segment.
 - L5: M-Gold, Set 1 and Set 2 are equal before and after on all three R runs
-  (664/120/38, 671/119/38, 667/120/38).
+  (664/120/38, 671/119/38, 667/120/38). This holds by construction: the
+  regression scorer maps translations by non-empty lines, which the
+  post-check never changes.
 
 "The request sent to the model does not change" holds for each segment's own
 text but not in general for the next segment: `_translate_long_plain_text`
 gives the next segment the end of this segment's translation as read-only
 context, so a regrouped answer whose changed blank lines fall within that
-tail changes the next request. On the D and R inputs none did (0 of 5
-following contexts changed). The change is blank lines only.
+tail changes the next request. On the D and R inputs none did: 0 of the 5
+regrouped segments that have a following segment changed its context
+(evidence: the local `downstream_context.py` replay, hashed on MY-231). The
+change is blank lines only.
