@@ -101,6 +101,19 @@ Optional LLM environment variables:
 - `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`, finite range `0.1..300`.
 - `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`, range `1..64`; max
   in-flight LLM calls.
+- `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into
+  English) and `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese),
+  each default `omit`; one of `omit`, `disabled`, `low`, `high`. `omit` sends
+  neither field, so the provider default applies, which on DeepSeek is
+  high-effort thinking and can outlast `WUWATERM_LLM_TIMEOUT_SECONDS` on a
+  long segment. `disabled` sends `thinking: {"type": "disabled"}`. Measured:
+  it removed the long-segment timeouts, which occur only into English; into
+  Chinese there is no timeout problem and it lowered translation quality;
+  into English it also let a one-character name be applied to an ordinary
+  word that contains the character. `low` and `high` turn thinking on at that
+  `reasoning_effort`. Translation requests only; a blank value is the default
+  and an unknown value logs a warning naming the variable and uses `omit`.
+  Read on every request.
 
 ## Configuration Validation
 

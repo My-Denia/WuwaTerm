@@ -50,6 +50,24 @@ does not distribute generated game data or generated SQLite databases.
   manuscript behavior changes; the shipped Windows 0.4.2 and Web 0.2.0
   records are unchanged.
 
+### Translation
+
+- New `WUWATERM_TRANSLATION_THINKING_ZH_EN` and
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH` settings for the reasoning field a
+  translation request carries, one per direction (Chinese into English,
+  English into Chinese). Both default to `omit`: no field is sent, the
+  request is unchanged, and the provider default applies. On DeepSeek that is
+  high-effort thinking, and a long segment can outlast the 45 s model
+  timeout, which happens only into English. `disabled` sends
+  `thinking: {"type": "disabled"}`; it was measured to remove those timeouts,
+  but lowered translation quality into Chinese and into English let a
+  one-character name be applied to an ordinary word, so it is not the
+  default. `low` and `high` turn thinking on at that effort. The settings
+  apply to plain and HTML translation on both surfaces and not to semantic
+  review, which keeps `WUWATERM_SEMANTIC_REVIEW_THINKING`. A blank value is the
+  default; an unknown value logs a warning naming the variable and uses
+  `omit`.
+
 ### Delivery And Deployment
 
 - `deploy/migrate-layout.sh` can be run again after a run was cut off between
