@@ -12,37 +12,35 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current source version is `0.9.0`, a review, dictionary and
-  translation-settings release on top of `v0.8.7`: `review-v2` judges terms
-  paragraph by paragraph when the sentence counts differ and the matcher label
-  moves to `wuwaterm-cjk-matcher-v7`, the dictionary adds the orphan area titles
-  and four-tier item base names (reference-only in Chinese text), translation
-  takes a per-direction thinking setting that defaults to the old request, the
-  layout migration can be rerun after a cut-off, the Web and Windows contract
-  pins move to manuscript v3, and the held-out usability evaluation protocol
-  (ADR 0020, scripts only) lands. The latest published Core release is
-  `v0.8.7`, a deployment-recovery maintenance release on top of `v0.8.6`:
+  published tag. The latest published Core release is `v0.9.0`, a review,
+  dictionary and translation-settings release on top of `v0.8.7`: `review-v2`
+  judges terms paragraph by paragraph when the sentence counts differ and the
+  matcher label moves to `wuwaterm-cjk-matcher-v7`, the dictionary adds the
+  orphan area titles and four-tier item base names (reference-only in Chinese
+  text), translation takes a per-direction thinking setting that defaults to
+  the old request, the layout migration can be rerun after a cut-off, the Web
+  and Windows contract pins move to manuscript v3, and the held-out usability
+  evaluation protocol (ADR 0020, scripts only) lands. The previous release,
+  `v0.8.7`, is a deployment-recovery maintenance release on top of `v0.8.6`:
   recovery runs the release that was invoked rather than `current`, a
   transaction that had committed and the release link are settled from the
   side that run verified, the layout migration's temporary links are
-  reentrant, and the tag names Telegram `v0.2.10`. The previous release,
-  `v0.8.6`, is a delivery and
-  dictionary release on top of `v0.8.5`: it bounds per-run build images,
-  detects the standalone Telegram container by Compose label, records
+  reentrant, and the tag names Telegram `v0.2.10`. Before it is `v0.8.6`, a
+  delivery and dictionary release on top of `v0.8.5`: it bounds per-run build
+  images, detects the standalone Telegram container by Compose label, records
   `old_bot_present` for stopped-bot rollback, adopts the `/opt/wuwaterm`
   `releases/rN` layout, retains the newest five deployment backups, and
   expands the 3.7 dictionary to 12,054 rows with singular/plural alignment
-  and `wuwaterm-cjk-matcher-v6`. Before it is `v0.8.5`, then `v0.8.4`, `v0.8.3`,
+  and `wuwaterm-cjk-matcher-v6`. Before that are `v0.8.5`, `v0.8.4`, `v0.8.3`,
   `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.2`, `v0.7.1` and `v0.7.0`. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.8.7` and its published asset hashes are recorded
-  there. Do not edit `products.core.release` to the prospective `0.9.0` before
-  that release is published, and do not invent an asset name or SHA-256 for it;
-  update it only after publication, using its actual asset names and SHA-256
-  values. Leave the `products.telegram` and `products.web` entries on their
-  published releases.
+  target-version file. Core `0.9.0` and its published asset hashes are recorded
+  there. For a future release, update `products.core.release` only after it is
+  published, using its actual asset names and SHA-256 values; do not invent an
+  asset name or SHA-256 for a release that does not exist yet. Leave the
+  `products.telegram` and `products.web` entries on their published releases.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
