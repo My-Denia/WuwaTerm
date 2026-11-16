@@ -73,8 +73,9 @@ deterministic function of each answer and its source.
 All of L1–L6 hold. No model call was made.
 
 - L1: 51 of 51 request bodies (D 17, R 34) are identical to `d54957c`.
-- L2: paragraph-count matches go from 31 to 33 of 34 segments in each of the
-  three R runs, and stay at 14/14, 17/17 and 8/8 on D. Both end-to-end D-003
+- L2: paragraph-count matches go from 31 to 33 of 34 segments in the
+  `disabled` and per-direction R runs and from 30 to 32 in the `low` run, and
+  stay at 14/14, 17/17 and 8/8 on D. Both end-to-end D-003
   answers (31 and 8 paragraphs, 45 lines each) come out with 45 paragraphs.
 - L3 and L4 hold for all 8 regrouped answers and every other segment.
 - L5: M-Gold, Set 1 and Set 2 are equal before and after on all three R runs
