@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    AREA_TITLE_KEY_RE,
+    ARIKATSU_MULTITEXT_SOURCE_FILE,
     CORE_TERM_KEYS,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_EXCLUSIONS_VERSION,
@@ -24,6 +26,7 @@ from .constants import (
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_VERSION,
     FREE_TEXT_LOCK_ZH_MAX_ALIGNED_RATIO,
     FREE_TEXT_LOCK_ZH_MIN_OCCURRENCES,
+    ITEM_TIER_BASE_SOURCE_PREFIX,
     OFFICIAL_ANNOUNCEMENT_SOURCE_FILE,
     OFFICIAL_ANNOUNCEMENT_TERMS,
     SourceProfile,
@@ -116,12 +119,6 @@ ARIKATSU_BIN_SPECS = (
 )
 
 
-# A location reaches the dictionary through an area/area.json row's Title. The
-# pinned TextMap also carries Area_<n>_Title keys that no area.json row
-# references (Area_41037_Title 拉贝尔学部 / Rabelle College and the rest of the
-# Startorch campus): those are imported directly, like the Term glossary.
-AREA_TITLE_KEY_RE = re.compile(r"Area_\d+_Title")
-
 # item/iteminfo.json ships some materials only as four tiers: 初级X / 中级X /
 # 高级X / 特级X with "Basic Y" / "Medium Y" / "Advanced Y" / "Premium Y".
 # Official text also names the material itself (密音筒 / Sealed Tube), so a
@@ -132,7 +129,6 @@ ITEM_TIER_PREFIXES = (
     ("高级", "Advanced "),
     ("特级", "Premium "),
 )
-ITEM_TIER_BASE_SOURCE_PREFIX = "tier-base:"
 
 
 class BuildError(RuntimeError):
@@ -369,8 +365,12 @@ def iter_arikatsu_records(
                 if record:
                     records.append(record)
 
-    # Area titles no area.json row references. Like the Term glossary import,
-    # no row filter applies; an empty or missing side is skipped as elsewhere.
+    # A location reaches the dictionary through an area/area.json row's Title.
+    # The pinned TextMap also carries Area_<n>_Title keys that no area.json
+    # row references (Area_41037_Title 拉贝尔学部 / Rabelle College and the rest
+    # of the Startorch campus): those are imported directly. Like the Term
+    # glossary import, no row filter applies; an empty or missing side is
+    # skipped as elsewhere.
     referenced_area_titles = {
         row.get("Title") for row in bin_rows["area/area.json"] if isinstance(row, dict)
     }
@@ -383,7 +383,7 @@ def iter_arikatsu_records(
             continue
         record = _record_for_key(
             category="location",
-            source_file="Textmaps/multi_text/MultiText.json",
+            source_file=ARIKATSU_MULTITEXT_SOURCE_FILE,
             source_id=text_key,
             text_key=text_key,
             zh_map=zh_map,
