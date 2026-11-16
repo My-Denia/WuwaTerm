@@ -57,6 +57,9 @@ from .lookup import TermService
 from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
+from .review import WHITESPACE as _SEGMENT_WHITESPACE
+from .review import _core as _segment_core
+from .review import _paragraph_ranges
 from .semantic_review_contract import PRECEDENT_WORDING
 
 
@@ -1115,7 +1118,10 @@ class SentenceTranslator:
                     context=context,
                 )
             translated = _require_nonblank_llm_output(translated)
-            return locked.restore(translated, to_en=not to_chinese)
+            restored = locked.restore(translated, to_en=not to_chinese)
+            if context is None:
+                return restored
+            return _regroup_lines_into_source_paragraphs(prepared, restored)
         except LLMTranslationError as exc:
             if propagate_errors:
                 raise
@@ -1540,6 +1546,40 @@ def _context_instruction(context) -> str:
             + "\n"
         )
     return text
+
+
+def _has_text(line: str) -> bool:
+    return any(char not in _SEGMENT_WHITESPACE for char in line)
+
+
+def _paragraph_line_counts(text: str) -> list[int]:
+    """Non-empty lines in each segmentation-v1 paragraph region of ``text``."""
+    return [
+        sum(1 for line in text[start:end].split("\n") if _has_text(line))
+        for start, end in _paragraph_ranges(text)
+    ]
+
+
+def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
+    """Put the lines of ``answer`` back into the paragraphs of ``source``.
+
+    A context-mode request keeps the blank lines of the segment it sends, but
+    the model decides the blank lines of its answer and sometimes drops or adds
+    them. When the answer has a different number of paragraphs but the same
+    number of non-empty lines as ``source``, its lines are regrouped into the
+    source's paragraphs: each line keeps its own text and order, and only the
+    blank lines between them change. Any other answer is returned unchanged,
+    with no second model call: a retry would double the wait on a path that
+    already runs into the model timeout.
+    """
+    source_layout = _paragraph_line_counts(source)
+    answer_layout = _paragraph_line_counts(answer)
+    if len(answer_layout) == len(source_layout) or sum(answer_layout) != sum(source_layout):
+        return answer
+    start, end = _segment_core(answer, 0, len(answer))
+    lines = iter(line for line in answer[start:end].split("\n") if _has_text(line))
+    paragraphs = ("\n".join(next(lines) for _ in range(count)) for count in source_layout)
+    return answer[:start] + "\n\n".join(paragraphs) + answer[end:]
 
 
 def _ensure_sync_llm_outside_running_loop() -> None:
