@@ -291,8 +291,9 @@ requests (English→Chinese stays `omit`), because it removes the long-segment
 timeouts: in the `disabled` arm, 0 timeouts, p95 8.6 s, and D zh→en usable
 122/128 against 38/128. The shipped zh→en requests are the same as that
 arm's. The quality guard was not met (M-Gold 664/675 against the frozen
-670; en→zh is unaffected because it stays `omit`). The owner decides
-whether to accept that trade-off; the decision is pending, and the change is
-held until then. With the default changed, ADR 0020's "no extra thinking
-field today" (Translation runs, Settings) describes the request at its
-freeze; later runs record the setting in their reuse key.
+670; en→zh is unaffected because it stays `omit`). Owner decision
+(2026-11-16): asked whether 0.9.1 should turn off thinking for
+Chinese→English, the owner answered 「关」. With the default changed, ADR
+0020's "no extra thinking field today" (Translation runs, Settings)
+describes the request at its freeze; later runs record the setting in their
+reuse key.
