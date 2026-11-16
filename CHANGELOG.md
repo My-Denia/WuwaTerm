@@ -15,6 +15,24 @@ does not distribute generated game data or generated SQLite databases.
   regrouped into the source's paragraphs. The lines and their order are
   unchanged; an answer whose line count differs is returned as before, with
   no extra model call. Calls without a context are unchanged (MY-231).
+- Chinese-to-English translation requests now send thinking disabled by
+  default, which removes the long-segment timeouts into English. Measured on
+  the evaluation development set with the same requests as the `disabled`
+  arm on that arm's dictionary (the 0.9.0 dictionary changes one D zh→en
+  request, D-004 segment 1): 0 timeouts, p95 8.6 s, and Chinese-to-English
+  usable paragraphs went from 38 to 122 of 128. Known regression: a
+  character-mechanic name that contains a one-character resonator name (for
+  example a 红椿蕊-type term) may be rendered with the resonator name, and the
+  frozen M-Gold score is 664/675, below its 670 guard. To restore the
+  previous behaviour, set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit`; an
+  existing `.env` that already sets it to `omit` keeps `omit`.
+  English-to-Chinese keeps `omit`. A blank or unknown value (the latter
+  logs a warning) now falls back to that direction's default, which into
+  English is `disabled`; in 0.9.0 both fell back to `omit`. The standalone
+  Telegram bot gets this default only after its Core pin moves to a release
+  that contains it, and an install whose `.env` was copied from
+  WuwaTerm-Telegram's `deploy/env.example` (which sets `omit` explicitly)
+  keeps `omit` until that file changes.
 
 ## 0.9.0
 

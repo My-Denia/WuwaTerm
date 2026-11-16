@@ -971,8 +971,10 @@ def test_translation_requests_do_not_take_the_semantic_review_thinking_setting(
     tmp_path, sample_db, monkeypatch
 ):
     configure_llm(monkeypatch)
-    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", raising=False)
-    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", raising=False)
+    # Chinese-to-English defaults to `disabled`; with both set to `omit` any
+    # reasoning field in the body can only have come from the review setting.
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "omit")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "omit")
     monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_THINKING", "high")
     model = FakeModel("译文")
     app, _, token = semantic_app(tmp_path, sample_db, model)
