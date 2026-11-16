@@ -282,12 +282,53 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "9ab24c4a45ced85eb867e8081767c40a80dd9b41",
-        "tree": "65f48a57bba8003218647f2e13199ee308a3a38e",
+        "commit": "6ddccae8aa2f89b56b662f9b756496be7d730ec7",
+        "tree": "f3763128634fcab8145f70ae6538e8a3711a43fe",
         "status": "success"
       },
-      "source_version": "0.3.0",
+      "source_version": "0.3.1",
       "release": {
+        "version": "0.3.1",
+        "tag": "v0.3.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.3.1",
+        "published_at": "2026-11-16T04:13:58Z",
+        "source_commit": "6ddccae8aa2f89b56b662f9b756496be7d730ec7",
+        "source_tree": "f3763128634fcab8145f70ae6538e8a3711a43fe",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz": "0f10bb13af3112cc089a482b2c37766959c0b19f149d67205b546305c17e3c48",
+          "manifest-root.json": "ac7b21bb64f6c27a2ee667470a7b5e1f1faadd5674b266c04058a3dea3005fa5",
+          "SHA256SUMS-root": "13bedb31aca7fe94a7f675d4247a3f49d8929551dc74e4de18f61177f976fef2",
+          "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz": "5bc01646045c51df6aacc2db8982dee6158d081cc50ed59bfc40e6c28b6c1b14",
+          "manifest-prefix.json": "c78dfa25ff357e8a24ed6660e4b7dba1ef35c069d589466f5d53d0994da48a31",
+          "SHA256SUMS-prefix": "14c2be65dadf8ec6a1fe72b915657c6d235a3be841859823cd409ff60eb489e4"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 43802468211 and 43802472098, promoted without rebuilding; the manifests name Web CI run 43801860994.",
+        "note": "v0.3.1 is a patch release on v0.3.0: the failure advice for a translation that fails no longer points to the review workbench, which only the experimental semantic workbench offers; it says to retry later or to split a long text into shorter parts and translate each in \"Sentence translation\". The BFF, the /v1 proxy, the manuscript formats, the database schema, dependencies and hosting configuration are unchanged since v0.3.0. v0.3.0 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.3.0",
         "tag": "v0.3.0",
         "status": "released",
@@ -326,48 +367,7 @@
           "SHA256SUMS-prefix": "5237784b2e4129162510cd7d3b46a2944d3892f80e165413da0b694cfe093615"
         },
         "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of Web CI run 43791077911, promoted without rebuilding.",
-        "note": "v0.3.0 is the first Web release that reads and writes wuwaterm-manuscript-v3, a file format Web 0.2.0 and Windows 0.4.2 reject: resumable long-manuscript review, clearer failures, choices on truncated segments, current exports, report import, and paragraphs kept on whole-text translation. The BFF, the /v1 proxy, the database schema, dependencies and hosting configuration are unchanged since v0.2.0. v0.2.0 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.2.0",
-        "tag": "v0.2.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.2.0",
-        "published_at": "2026-11-13T04:03:05Z",
-        "source_commit": "5aabe80bee3adda164e151de2da297a01860c301",
-        "source_tree": "94a27365810c4868159ebbd95398f9639e370990",
-        "builds": {
-          "root": {
-            "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": ""
-          },
-          "prefix": {
-            "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": "/private"
-          }
-        },
-        "assets": [
-          "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz",
-          "manifest-root.json",
-          "SHA256SUMS-root",
-          "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz",
-          "manifest-prefix.json",
-          "SHA256SUMS-prefix"
-        ],
-        "asset_sha256": {
-          "wuwaterm-web-v0.2.0-linux-x64-root.tar.gz": "3747f2e07228be4fd7bc7a8a09baca466c5808447b89ac0758f312425ab88e9b",
-          "manifest-root.json": "61980e9e2420356e285d4f2b2d2af3c5f1252d53697f7eda2a9feb5dadca4631",
-          "SHA256SUMS-root": "9dae20488168c4f6d375ac002a0fbd93f49138d0844230e753514e84cf619246",
-          "wuwaterm-web-v0.2.0-linux-x64-prefix-71708eb255bc.tar.gz": "00ceb92fe4720af7514b4b25b58dc387dd345fb7853a47c56a8cf58f27e8efd5",
-          "manifest-prefix.json": "d8c9bbe0df168bde311513c7418b62ff493485d98f4f96f377dfe8ea770dc895",
-          "SHA256SUMS-prefix": "0efb9b838f2841f737634b2cf8312ccbfe530e2d3ac02ce2b8ef350b9478f628"
-        },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000).",
-        "note": "v0.2.0 supersedes v0.1.1. Kept as history after v0.3.0; the release and its assets are still published, and v0.1.1 and earlier remain on the release page."
+        "note": "v0.3.0 is the first Web release that reads and writes wuwaterm-manuscript-v3, a file format Web 0.2.0 and Windows 0.4.2 reject: resumable long-manuscript review, clearer failures, choices on truncated segments, current exports, report import, and paragraphs kept on whole-text translation. The BFF, the /v1 proxy, the database schema, dependencies and hosting configuration are unchanged since v0.2.0. v0.2.0 and earlier releases and their assets remain on the release page. Kept as history after v0.3.1; the release and its assets are still published."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -403,8 +403,8 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/9ab24c4a45ced85eb867e8081767c40a80dd9b41/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/9ab24c4a45ced85eb867e8081767c40a80dd9b41/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/docs/self-hosting.md"
       ],
       "adoption_note": "The public Sites site runs saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301) with deployment status succeeded; a request to the root path https://wuwaterm.denia-official.chatgpt.site answered HTTP 200. Web v0.3.0 (9ab24c4a45ced85eb867e8081767c40a80dd9b41) is published and its root and /private candidates were replayed against Core v0.9.0 before publication; the Sites site has not been updated to it and still serves v0.2.0."
     }

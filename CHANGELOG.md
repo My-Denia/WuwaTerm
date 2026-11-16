@@ -3,7 +3,7 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.9.1
 
 ### Translation
 
