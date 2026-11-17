@@ -69,12 +69,35 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "c24cb5dc1f33619ba1026831ff4e4357ee8107af",
-        "tree": "c8f0c054a6ba8f11e567e4f0c41dd98b328d5115",
+        "commit": "5e431a6390f5246c98e5fa651f2e1c1ea37d8c0a",
+        "tree": "a8cd0e310f55b92ca333c468f10bb39f6ac7e5a0",
         "status": "success"
       },
-      "source_version": "0.9.1",
+      "source_version": "0.9.2",
       "release": {
+        "version": "0.9.2",
+        "tag": "v0.9.2",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.9.2",
+        "published_at": "2026-11-17T12:31:40Z",
+        "source_commit": "5e431a6390f5246c98e5fa651f2e1c1ea37d8c0a",
+        "source_tree": "a8cd0e310f55b92ca333c468f10bb39f6ac7e5a0",
+        "assets": [
+          "wuwaterm-0.9.2-py3-none-any.whl",
+          "wuwaterm-0.9.2.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.9.2-py3-none-any.whl": "ad9cd8188119246a13809b414fed3d6d34fd4daaadb48d7dfef7696a695c0c53",
+          "wuwaterm-0.9.2.tar.gz": "3a4f5d80b6dcfbc01f366c227522d7bb3f52950685e191318b2695d2abf4772b",
+          "release-manifest.json": "1a9f2f2a200b52b1bb75ac56aceba9838d65e923691f3f3a040d3d01bea2cd84",
+          "SHA256SUMS": "2160909d6e217b0ee7bdb9d2b3f41cae3cd180aa32db785a87e9a8a876da4a94"
+        },
+        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:c48b7d3e9c2c0c9b094577bda00fa31a72beebf8d75b27941ebe5a7e5de06360 and builder sha256:8934555f10b660f6af01a2243b0ff4b945dc1f62631b334788791f0124cc722d, first pushed as sha-5e431a6 and retagged by promote-images as v0.9.2 and 0.9.",
+        "note": "v0.9.2 reports an OpenAI-compatible endpoint that rejects provider-specific reasoning fields as a diagnostic instead of an ordinary HTTP error: an HTTP 400 whose error object carries code unsupported_parameter and param thinking or reasoning_effort gets the detail unsupported_thinking or unsupported_reasoning_effort, the server warning names only that parameter, the two configuration variables and the accepted alternative, and the provider message, the source text and the request URL are never copied into it. The failed request is still one POST, with no retry, no field removal and no inference from a model name, and the user-facing unavailable notice and the HTTP 503 llm_unavailable envelope are unchanged. Setting WUWATERM_TRANSLATION_THINKING_ZH_EN=omit or WUWATERM_TRANSLATION_THINKING_EN_ZH=omit keeps translating against such an endpoint by sending neither reasoning field. Translation strategy, prompts and the dictionary are unchanged from 0.9.1. v0.9.1 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.9.1",
         "tag": "v0.9.1",
         "status": "released",
@@ -95,30 +118,7 @@
           "SHA256SUMS": "991b70e08cdb0413d88cab6e677a115b717c86af1f3e2a24e14a44442fcc2f94"
         },
         "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:090ce444b6934db329e06af0212ccf6f71a46cea468c7beef5b7b6b480689d77 and builder sha256:19f75700ab2b29bec8771ef66479cbe2c57e97217f53a50094ee995372dc7ea7, first pushed as sha-c24cb5d and retagged by promote-images as v0.9.1 and 0.9.",
-        "note": "v0.9.1 keeps the source's paragraph layout in long translations when the model kept the lines, sends Chinese-to-English translation requests with thinking disabled by default (WUWATERM_TRANSLATION_THINKING_ZH_EN=omit restores the previous request; English-to-Chinese keeps omit), and moves the self-host installer's recorded defaults to Web v0.3.1 and Telegram v0.3.0. v0.9.0 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.9.0",
-        "tag": "v0.9.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.9.0",
-        "published_at": "2026-11-16T02:40:00Z",
-        "source_commit": "d54957cadf470bec2e91b5269c9f908c1409bc0b",
-        "source_tree": "3b0756b14a220f6207d40a4febda1b1d09931beb",
-        "assets": [
-          "wuwaterm-0.9.0-py3-none-any.whl",
-          "wuwaterm-0.9.0.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.9.0-py3-none-any.whl": "8435cb3b0ba1a941ac98d3838f1a6194e95cbda869ff0b17a9fd6597b55c14e5",
-          "wuwaterm-0.9.0.tar.gz": "b7762e9cf08cb8e82782a749e1afeeaa3579f8e66e6402e2ecef1ac53131ca99",
-          "release-manifest.json": "5f97e681a58d05db167899fa31dc38b9494ed5b80e43c821841bddfa0a8b03d3",
-          "SHA256SUMS": "592cb9cf598ef52b2a949bc1de124957a88ef772aa271f538a5ec34280ebe37a"
-        },
-        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:da581ce6ebf5ab12143d4344bbbee8962da188b08c91242cf0106d343b2c3060 and builder sha256:d7fb9bb47891a852507206bb6c2bab7349c99a6e9583020b46fdf3d393b62d40, first pushed as sha-d54957c and retagged by promote-images as v0.9.0 and 0.9.",
-        "note": "v0.9.0 judges review terms paragraph by paragraph when the sentence counts differ (matcher label wuwaterm-cjk-matcher-v7), adds the orphan area titles and four-tier item base names to the dictionary (reference-only in Chinese text), adds a per-direction thinking setting for translation requests that defaults to the old request, and moves the Web and Windows contract pins to manuscript v3. Kept as history after v0.9.1; the release and its assets are still published. v0.8.7 and earlier remain on the release page."
+        "note": "v0.9.1 keeps the source's paragraph layout in long translations when the model kept the lines, sends Chinese-to-English translation requests with thinking disabled by default (WUWATERM_TRANSLATION_THINKING_ZH_EN=omit restores the previous request; English-to-Chinese keeps omit), and moves the self-host installer's recorded defaults to Web v0.3.1 and Telegram v0.3.0. Kept as history after v0.9.2; the release and its assets are still published. v0.9.0 and earlier remain on the release page."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -138,11 +138,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.9.1 (c24cb5d) is deployed on the owner VPS since 2026-11-16 by a runtime-only update: release r5 is current, r4 is retained, and wuwaterm-api reports 0.9.1. terms.db is the 0.9.0 database, unchanged (12,089 terms, data pin 9218d612). WUWATERM_TRANSLATION_THINKING_ZH_EN is not set in .env, so Chinese-to-English translation requests use the new default disabled. The legacy in-Core wuwaterm-bot is stopped (status=created): the r5 update recreated it on the new image without starting it. Core v0.9.0 (d54957c) was deployed earlier the same day by a full update (release r4). Telegram runs as the standalone wuwaterm-telegram container, now 0.3.1 on Core 0.9.1.",
+      "adoption_note": "Core v0.9.2 (5e431a6) is deployed on the owner VPS since 2026-11-17 by a runtime-only update: release r6 is current, r5 is retained as the rollback point, and wuwaterm-api reports 0.9.2. /healthz and /readyz answer 200, the container restart count is 0, and the post-deploy error-log scan found no entries. terms.db is unchanged (sha256 3308e5fe…, data pin 9218d612). The legacy in-Core wuwaterm-bot stays stopped (status=created), and the standalone wuwaterm-telegram container keeps running Telegram v0.3.1 (209d4d4), which pins the published Core 0.9.1 wheel, with its health probe reporting ready.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/c24cb5dc1f33619ba1026831ff4e4357ee8107af/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/c24cb5dc1f33619ba1026831ff4e4357ee8107af/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/5e431a6390f5246c98e5fa651f2e1c1ea37d8c0a/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/5e431a6390f5246c98e5fa651f2e1c1ea37d8c0a/docs/data-refresh.md"
       ]
     },
     {

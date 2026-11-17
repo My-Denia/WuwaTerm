@@ -12,8 +12,8 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current source version is `0.9.2`, a maintenance release
-  on top of `v0.9.1`: an HTTP 400 whose `error` object carries
+  published tag. The latest published Core release is `v0.9.2`, a maintenance
+  release on top of `v0.9.1`: an HTTP 400 whose `error` object carries
   `code: "unsupported_parameter"` and `param` equal to `thinking` or
   `reasoning_effort` now reports `unsupported_thinking` or
   `unsupported_reasoning_effort` in server diagnostics and logs a fixed warning
@@ -24,13 +24,12 @@ release. That boundary has not moved.
   failed request is still one POST, with no retry and no automatic field
   removal, and the provider's own message is not copied into the diagnostic.
   Translation strategy, prompts and the dictionary are unchanged from `v0.9.1`.
-  The latest published Core release is `v0.9.1`, a patch release on top of
-  `v0.9.0`: long translations keep the source's paragraph layout when the
-  model kept the lines, Chinese-to-English translation requests send thinking
-  disabled by default
-  (`WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` restores the previous request),
-  and the self-host installer's default Web release moves to `v0.3.1`. The
-  previous release, `v0.9.0`, is a review, dictionary and
+  The previous release, `v0.9.1`, is a patch release on top of `v0.9.0`: long
+  translations keep the source's paragraph layout when the model kept the
+  lines, Chinese-to-English translation requests send thinking disabled by
+  default (`WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` restores the previous
+  request), and the self-host installer's default Web release moves to
+  `v0.3.1`. Before it is `v0.9.0`, a review, dictionary and
   translation-settings release on top of `v0.8.7`: `review-v2` judges terms
   paragraph by paragraph when the sentence counts differ and the matcher label
   moves to `wuwaterm-cjk-matcher-v7`, the dictionary adds the orphan area
@@ -54,12 +53,11 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.9.1` and its published asset hashes are recorded
-  there, and this preparation keeps that entry: do not edit
-  `products.core.release` to the prospective `0.9.2` before it is published, and
-  do not invent an asset name or SHA-256 for it; a follow-up pull request
-  updates it after publication, using its actual asset names and SHA-256
-  values. Leave the `products.telegram` entry on its published release.
+  target-version file. Core `0.9.2` and its published asset hashes are recorded
+  there. For a future release, update `products.core.release` only after it is
+  published, using its actual asset names and SHA-256 values; do not invent an
+  asset name or SHA-256 for a release that does not exist yet. Leave the
+  `products.telegram` entry on its published release.
   `products.web` records the published Web `v0.3.1`, because the installer
   takes its default Web release from that entry; `products.windows` records the
   published Windows `v0.5.1`.
