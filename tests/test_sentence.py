@@ -1624,6 +1624,196 @@ def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
     assert ("心", "心", "Hsin", "resonator") in locked.references
 
 
+def test_single_character_reference_scopes_exclude_mechanic_components(single_name_db):
+    source = "欢迎椿，椿的机制红椿蕊和红椿·蕾都很强，香椿仍是植物。"
+    locked = SentenceTranslator(single_name_db)._lock_terms_with_references(
+        source, to_chinese=False
+    )
+    assert locked.locked_text == source
+    assert locked.locks == ()
+    assert locked.references == (("椿", "椿", "Camellya", "resonator"),)
+    assert getattr(locked, "reference_spans", ()) == (("椿", 2, 3), ("椿", 4, 5))
+
+
+def test_single_character_reference_scope_survives_protected_boundaries(single_name_db):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    protected = protect_telegram_html("欢迎<b>椿</b>，红<i>椿</i>蕊。")
+    locked = SentenceTranslator(single_name_db)._lock_protected_terms_with_references(
+        protected.neutral, to_chinese=False
+    )
+    spans = getattr(locked, "reference_spans", ())
+    assert len(spans) == 1
+    source, start, end = spans[0]
+    assert source == locked.locked_text[start:end] == "椿"
+    assert start == locked.locked_text.index("椿")
+
+
+@pytest.mark.parametrize("source,mentions", [
+    ("椿·蕾很强。", 0),
+    ("给椿·蕾。", 0),
+    ("欢迎椿。", 1),
+    ("欢迎椿，给椿·蕾。", 1),
+])
+def test_selected_single_character_reference_uses_review_admission(single_name_db, source, mentions):
+    from wuwaterm.application import review_pair
+
+    translator = SentenceTranslator(single_name_db)
+    locked = translator._lock_terms_with_references(source, to_chinese=False)
+    assert locked.locked_text == source
+    assert locked.locks == ()
+    assert len(locked.reference_spans) == mentions
+    assert bool(locked.references) == bool(mentions)
+    report = review_pair(translator.service, source, "placeholder", "en", review_version="review-v2")
+    assert len(report.findings) == mentions
+
+
+@pytest.mark.parametrize("html,mentions", [
+    ("椿·蕾很强。", 0),
+    ("给<b>椿</b>·蕾。", 0),
+    ("<b>给椿</b>·蕾。", 0),
+    ("香<b>椿</b>。", 0),
+    ("欢迎<b>椿</b>。", 1),
+    ("欢迎<b>椿</b>，给<i>椿</i>·蕾。", 1),
+])
+def test_selected_html_reference_uses_complete_visible_context(single_name_db, html, mentions):
+    from wuwaterm.application import review_pair
+    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
+
+    translator = SentenceTranslator(single_name_db)
+    protected = protect_telegram_html(html)
+    locked = translator._lock_protected_terms_with_references(protected.neutral, to_chinese=False)
+    assert locked.locks == ()
+    assert len(locked.reference_spans) == mentions
+    assert bool(locked.references) == bool(mentions)
+    assert protected.restore(locked.locked_text) == html
+    assert all(locked.locked_text.count(token) == 1 for token, _ in protected.structures)
+    report = review_pair(translator.service, strip_telegram_html(html), "placeholder", "en", review_version="review-v2")
+    assert len(report.findings) == mentions
+
+
+def test_protected_reference_context_is_scanned_once_per_call(monkeypatch, ambiguous_material_db):
+    import wuwaterm.sentence as sentence_module
+    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
+
+    html = "<b>Echo</b> " * 8
+    visible = strip_telegram_html(html)
+    full_scans = []
+    scans = []
+    original = sentence_module.select_term_spans
+
+    def observe(text, *args, **kwargs):
+        scans.append(text)
+        if text == visible:
+            full_scans.append(text)
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(sentence_module, "select_term_spans", observe)
+    translator = SentenceTranslator(ambiguous_material_db)
+    locked = translator._lock_protected_terms_with_references(
+        protect_telegram_html(html).neutral, to_chinese=True, allow_plural_inflection=True,
+    )
+    assert len(locked.locks) == 8
+    assert len(full_scans) == 1
+    assert len(scans) == len(protect_telegram_html(html).neutral.visible_segments) + 1
+    # Context evidence is local to this call, never retained as sense memory.
+    ordinary = translator._lock_protected_terms_with_references(
+        protect_telegram_html("<b>ordinary</b> sealed tubes.").neutral,
+        to_chinese=True, allow_plural_inflection=True,
+    )
+    assert (ordinary.locks, ordinary.references) == ((), ())
+
+
+@pytest.fixture()
+def ambiguous_material_db(sample_db):
+    with connect(sample_db) as conn:
+        insert_records(conn, [
+            TermRecord("speaker", "fixture", "1513", "speaker", "调音师", "Tuner"),
+            TermRecord("item", "BinData/item/iteminfo.json", "tier-base:1", "tier-base:1", "调谐器", "Tuner"),
+            TermRecord("item", "BinData/item/iteminfo.json", "tier-base:2", "tier-base:2", "密音筒", "Sealed Tube"),
+        ])
+        conn.commit()
+    return sample_db
+
+
+def test_material_case_and_collision_add_choices_without_hard_lock(ambiguous_material_db):
+    translator = SentenceTranslator(ambiguous_material_db)
+    locked = translator._lock_terms_with_references(
+        "Use sealed tubes. Tuner: bring a guitar tuner.",
+        to_chinese=True, allow_plural_inflection=True,
+    )
+    assert locked.locks == ()
+    assert ("sealed tubes", "密音筒", "Sealed Tube", "item") in locked.references
+    assert ("Tuner", "调音师", "Tuner", "speaker") in locked.references
+    assert ("Tuner", "调谐器", "Tuner", "item") in locked.references
+    assert translator.lock_terms("Bring sealed tubes and a guitar tuner.").locks == ()
+    # The pre-existing exact speaker remains the deterministic primary.
+    assert _locked_pairs(translator, "Tuner speaks.") == [("调音师", "Tuner")]
+    assert translator.translate("Tuner", to_chinese=True) == "调音师"
+
+
+def test_new_material_spelling_requires_term_context_and_honors_exclusion(ambiguous_material_db):
+    translator = SentenceTranslator(ambiguous_material_db)
+    ordinary = translator._lock_terms_with_references(
+        "Bring sealed tubes and a guitar tuner.", to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert (ordinary.locks, ordinary.references) == ((), ())
+    game = translator._lock_terms_with_references(
+        "Echoes use sealed tubes.", to_chinese=True, allow_plural_inflection=True,
+    )
+    assert ("sealed tubes", "密音筒", "Sealed Tube", "item") in game.references
+    assert [(zh, en) for _, zh, en in game.locks] == [("声骸", "Echo")]
+    _set_exclusions(ambiguous_material_db, _exclusion_value([("Sealed Tube", 12, 0)]))
+    excluded = translator._lock_terms_with_references(
+        "Echoes use sealed tubes.", to_chinese=True, allow_plural_inflection=True,
+    )
+    assert excluded.references == ()
+
+
+def test_new_material_spelling_does_not_override_an_existing_cased_pair(ambiguous_material_db):
+    with connect(ambiguous_material_db) as conn:
+        insert_records(conn, [
+            TermRecord("item", "fixture", "existing", "existing", "密封试管", "sealed tube"),
+        ])
+        conn.commit()
+    locked = SentenceTranslator(ambiguous_material_db)._lock_terms_with_references(
+        "Echoes use sealed tubes.", to_chinese=True, allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in locked.locks] == [
+        ("声骸", "Echo"), ("密封试管", "sealed tube"),
+    ]
+    assert locked.references == ()
+
+
+def test_reference_coordinates_follow_the_actual_locked_message(single_name_db):
+    with connect(single_name_db) as conn:
+        insert_records(conn, [TermRecord("core_term", "fixture", "echo", "echo", "声骸", "Echo")])
+        conn.commit()
+    source = "Echo和椿使用红椿蕊。"
+    locked = SentenceTranslator(single_name_db)._lock_terms_with_references(
+        source, to_chinese=True
+    )
+    assert len(locked.locks) == 1
+    assert len(locked.reference_spans) == 1
+    surface, start, end = locked.reference_spans[0]
+    assert surface == locked.locked_text[start:end] == "椿"
+    assert start == locked.locked_text.index("椿") > source.index("椿")
+
+
+def test_reference_scope_reaches_actual_model_request(monkeypatch, single_name_db):
+    source = "欢迎椿，椿的机制红椿蕊很强。"
+    _, payload = _reference_payload(
+        monkeypatch, single_name_db, source, "translation", to_chinese=False
+    )
+    assert payload["messages"][1]["content"] == SentenceTranslator(single_name_db).prepare_text(source)
+    system = payload["messages"][0]["content"]
+    marker = "Reference occurrence ranges (JSON; zero-based, end-exclusive):\n"
+    assert marker in system
+    scopes = json.loads(system.split(marker, 1)[1].split("\n", 1)[0])
+    assert scopes == [{"source": "椿", "ranges": [[2, 3], [4, 5]]}]
+
+
 def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_reference(
     single_name_db,
 ):
@@ -2240,6 +2430,123 @@ def test_exclusions_keep_case_variant_ambiguity_and_exact_blocking(case_variant_
     assert _locked_pairs(translator, "Corin is here.") == [("柯林", "Corin")]
     # Other resonators keep their variants.
     assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+
+
+@pytest.mark.parametrize("other_en", ["vexil tube", "Vexil tube"])
+def test_exclusions_keep_derived_soft_spelling_casefold_ambiguity(
+    case_variant_db, other_en
+):
+    from wuwaterm.sentence import (
+        _exact_lockable_sources,
+        _model_reference_candidates,
+    )
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    with connect(case_variant_db) as conn:
+        insert_records(
+            conn,
+            [
+                TermRecord(
+                    "item",
+                    "BinData/item/iteminfo.json",
+                    "tier-base:91",
+                    "tier-base:91",
+                    "青纹管",
+                    "Vexil Tube",
+                ),
+                TermRecord(
+                    "item", "fixture", "92", "92", "青纹软管", other_en
+                ),
+                TermRecord(
+                    "item",
+                    "BinData/item/iteminfo.json",
+                    "tier-base:93",
+                    "tier-base:93",
+                    "青纹盒",
+                    "Vexil Box",
+                ),
+            ],
+        )
+        conn.commit()
+    _set_exclusions(
+        case_variant_db,
+        _exclusion_value(sorted([(other_en, 12, 0), ("vexil box", 12, 0)])),
+    )
+    translator = SentenceTranslator(case_variant_db)
+    entries = translator.service.entries()
+    pre_sources = _exact_lockable_sources(entries)
+    post_sources = {
+        key: value
+        for key, value in pre_sources.items()
+        if key not in {other_en, "vexil box"}
+    }
+    excluded = frozenset({other_en, "vexil box"})
+    direct_explicit = _model_reference_candidates(
+        entries, post_sources, excluded, pre_exclusion_sources=pre_sources
+    )
+    direct_default = _model_reference_candidates(entries, post_sources, excluded)
+    assert direct_explicit == direct_default
+    for blocked in ("vexil tube", "vexil tubes", "VEXIL TUBE", "VEXIL TUBES"):
+        assert blocked not in direct_explicit
+    assert direct_explicit["Vexil Tube"] == (("青纹管", "Vexil Tube", "item"),)
+    assert "vexil box" not in direct_explicit
+    assert direct_explicit["vexil boxes"] == (("青纹盒", "Vexil Box", "item"),)
+    assert direct_explicit["VEXIL BOX"] == (("青纹盒", "Vexil Box", "item"),)
+    assert direct_explicit["VEXIL BOXES"] == (("青纹盒", "Vexil Box", "item"),)
+
+    rows, _nfkc, _ref_only, snap_candidates = translator._read_lockable_sources()
+    lockable_map = dict(rows)
+    assert other_en not in lockable_map
+    assert lockable_map["Vexil Tube"] == ("青纹管", "Vexil Tube", "item")
+    assert snap_candidates == translator._reference_candidates()
+    for blocked in ("vexil tube", "vexil tubes", "VEXIL TUBE", "VEXIL TUBES"):
+        assert blocked not in snap_candidates
+        assert blocked not in lockable_map
+    assert "vexil box" not in snap_candidates
+    assert snap_candidates["vexil boxes"] == (("青纹盒", "Vexil Box", "item"),)
+
+    locked = translator._lock_terms_with_references(
+        "Tidecore: vexil tube, vexil tubes, VEXIL TUBE, VEXIL TUBES.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in locked.locks] == [("潮核", "Tidecore")]
+    assert locked.references == ()
+
+    protected_locked = translator._lock_protected_terms_with_references(
+        protect_telegram_html(
+            "<b>Tidecore</b>: vexil tubes, VEXIL TUBE, VEXIL TUBES."
+        ).neutral,
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in protected_locked.locks] == [
+        ("潮核", "Tidecore")
+    ]
+    assert protected_locked.references == ()
+
+    exact_locked = translator._lock_terms_with_references(
+        "Tidecore: Vexil Tube, Vexil Tubes.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in exact_locked.locks] == [
+        ("潮核", "Tidecore"),
+        ("青纹管", "Vexil Tube"),
+        ("青纹管", "Vexil Tube"),
+    ]
+
+    control_locked = translator._lock_terms_with_references(
+        "Tidecore: vexil box, vexil boxes.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in control_locked.locks] == [
+        ("潮核", "Tidecore")
+    ]
+    assert control_locked.references == (
+        ("vexil boxes", "青纹盒", "Vexil Box", "item"),
+    )
 
 
 # Chinese-surface free-text lock exclusions (the zh metadata key). The
