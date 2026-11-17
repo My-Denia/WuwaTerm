@@ -667,6 +667,7 @@ def _model_reference_candidates(
     entries: Iterable[TermEntry],
     sources: dict[str, tuple[str, str, str]],
     excluded: frozenset[str],
+    pre_exclusion_sources: dict[str, tuple[str, str, str]] | None = None,
 ) -> dict[str, tuple[tuple[str, str, str], ...]]:
     """Keep competing official pairs and soft casing of derived names.
 
@@ -674,10 +675,16 @@ def _model_reference_candidates(
     additional spellings here; they never enter deterministic locking.
     """
     entries = sorted(entries, key=_is_derived_name_entry)
+    folded_sources = (
+        _exact_lockable_sources(entries)
+        if pre_exclusion_sources is None
+        else pre_exclusion_sources
+    )
     groups: dict[str, list[tuple[str, str, str]]] = {}
     folded_owners: dict[str, set[tuple[str, str]]] = {}
-    for surface, official in sources.items():
-        folded_owners.setdefault(surface.casefold(), set()).add(official[:2])
+    for mapping in (folded_sources, sources):
+        for surface, official in mapping.items():
+            folded_owners.setdefault(surface.casefold(), set()).add(official[:2])
 
     def add(surface: str, official: tuple[str, str, str]) -> None:
         if surface in excluded or not _is_eligible_lockable(surface, official):
@@ -704,7 +711,12 @@ def _model_reference_candidates(
         ]
         for form in forms:
             for spelling in (form.lower(), form.upper()):
-                if spelling == form or spelling in sources or len(spelling) != len(form):
+                if (
+                    spelling == form
+                    or spelling in sources
+                    or spelling in folded_sources
+                    or len(spelling) != len(form)
+                ):
                     continue
                 # Include established meanings with the same original surface
                 # (Tuner the speaker and Tuner the material), not one winner.
@@ -1574,15 +1586,18 @@ class SentenceTranslator:
     def _read_lockable_sources(self) -> _SourceSnapshot:
         excluded = _free_text_exclusions(self.service.metadata())
         entries = self.service.entries()
-        sources = _exact_lockable_sources(entries)
+        pre_exclusion_sources = _exact_lockable_sources(entries)
+        sources = dict(pre_exclusion_sources)
         # Case variants come after every exact source, so an exact surface
         # always keeps its own record and wins equal-length overlaps. They are
         # computed before exclusions are removed, so an excluded surface still
         # blocks a variant equal to it and still counts for casefold ambiguity.
-        variants = _case_variant_sources(sources, excluded)
+        variants = _case_variant_sources(pre_exclusion_sources, excluded)
         # Same pre-exclusion snapshot: a spelling collision or exclusion still
         # counts even when one of the colliding surfaces is later removed.
-        nfkc_sources = _admissible_nfkc_sources(sources, variants, excluded)
+        nfkc_sources = _admissible_nfkc_sources(
+            pre_exclusion_sources, variants, excluded
+        )
         for surface in excluded:
             sources.pop(surface, None)
         for variant, official in variants:
@@ -1591,7 +1606,12 @@ class SentenceTranslator:
             tuple(sources.items()),
             nfkc_sources,
             _derived_reference_only_sources(entries),
-            _model_reference_candidates(entries, sources, excluded),
+            _model_reference_candidates(
+                entries,
+                sources,
+                excluded,
+                pre_exclusion_sources=pre_exclusion_sources,
+            ),
         )
 
     def _source_categories(self) -> dict[str, str]:
