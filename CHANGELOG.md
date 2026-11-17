@@ -3,6 +3,31 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.9.2
+
+### Provider Compatibility
+
+- An OpenAI-compatible endpoint that rejects provider-specific reasoning
+  fields now says so instead of failing as an ordinary HTTP error. An HTTP 400
+  whose `error` object has `code: "unsupported_parameter"` and `param` exactly
+  `thinking` or `reasoning_effort` gets the diagnostic detail
+  `unsupported_thinking` or `unsupported_reasoning_effort`, and the server
+  warning names only that parameter, the two configuration variables and the
+  accepted alternative. The provider's message, the source text, secrets and
+  the request URL are never copied into it, and an error whose message merely
+  mentions thinking does not qualify. The failed request still makes one POST:
+  WuwaTerm does not retry it, remove the field, or infer support from a model
+  name, and the user-facing unavailable notice and the HTTP 503
+  `llm_unavailable` envelope are unchanged.
+- To keep translating against such an endpoint, set
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` for Chinese into English or
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` for English into Chinese, or use a
+  provider that supports the requested field. `omit` sends neither reasoning
+  field and hands control to the provider default, which is not the same as
+  disabling thinking. Endpoints that accept the 0.9.1 defaults keep receiving
+  them, so translation strategy, prompts and the dictionary are unchanged from
+  0.9.1.
+
 ## 0.9.1
 
 ### Translation

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-16",
+  "observed_on": "2026-11-17",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The four releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -230,12 +230,46 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "44ff781938f0265eb4a3683344e868ffb7914f8d",
-        "tree": "d2e13fff5dbf9726efdab499111ca2fe8fbcc118",
+        "commit": "cb42b41dbde6c5cdf3b8d748cdc11e2a37fd2163",
+        "tree": "50c68754994e67185e4cd2dcc4b65a959c8335c5",
         "status": "success",
-        "status_note": "README-only commit (#26, record of 0.5.0 and its assets) on top of the release commit 277551c. ci.yml is skipped by its paths-ignore for docs-only changes, and the Dependency audit run succeeded (run 43847746394). The CI run that passed is on 277551c."
+        "status_note": "README-only commit (#29, record of 0.5.1 and its assets) on top of the release commit 62a6ae5. ci.yml is skipped by its paths-ignore for docs-only changes, and the Dependency audit run succeeded (run 44023923077). The CI run that passed is on 62a6ae5 (run 44020553485)."
       },
       "release": {
+        "version": "0.5.1",
+        "tag": "v0.5.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.5.1",
+        "published_at": "2026-11-17T05:15:56Z",
+        "source_commit": "62a6ae5a3e39ff13d6affad41830f6c17b8527ee",
+        "source_tree": "75bbab8ce4f2153867d7e952d874a96f0ec869aa",
+        "assets": [
+          "WuwaTerm-0.5.1-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.5.1-windows-x64.zip": "51b91dd8957535284fe8c60a066a4ff9ca45986a31cba3be73f9e315108788f5",
+          "manifest.json": "b89d3d4e876e0c8e8fa41a542ce44e8d5d85a32427c4ab7454b214199c3d19b0",
+          "SHA256SUMS": "c1a0fc2ccb25ed531d8516575e7a85801c7ad579904686a14768c800abf288ae"
+        },
+        "zip_sha256": "51b91dd8957535284fe8c60a066a4ff9ca45986a31cba3be73f9e315108788f5",
+        "signed": false,
+        "note": "v0.5.1 is a maintenance release on v0.5.0: during Chinese IME composition an empty manuscript pane no longer overlaps the placeholder text with the preedit string, and manuscript-level undo and redo now restore each pane's caret, selection, focus and scroll position (#27). The manuscript file format and the meaning of progress.current are unchanged, and the capabilities and service requirements are those of v0.5.0: manuscript v3, HTTP API v1, and review-v2 for manuscript review. v0.5.0 and its assets remain published under previous_release."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v3",
+        "note": "The client reads and writes wuwaterm-manuscript-v1, v2 and v3; local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.5.1: the native single-screen 150%-DPI real-time Chinese IME re-verification (AppliedDPI=144; Linear MY-201 https://linear.app/my-denia/issue/MY-201#comment-f4b65948-07bf-4453-9e2e-ddb3354f8b37, WuwaTerm-Windows#27) was done on the owner's Windows desktop on the candidate built from 4871732 (candidate ZIP fecb470e..., EXE 82dafc61...): both empty panes hide the placeholder text during composition with no overlap and Escape restores it, and in a 1,911-character segment at cell16 Undo/Redo kept the viewport and caret, with the pinyin typed right after the redo landing at index 694. The published ZIP (51b91dd8...) is built from 62a6ae5 (release build run 44021524321, validation run 44020553485). Not done: multi-monitor mixed-DPI window drag.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/cb42b41dbde6c5cdf3b8d748cdc11e2a37fd2163/README.md"
+      ],
+      "source_version": "0.5.1",
+      "previous_release": {
         "version": "0.5.0",
         "tag": "v0.5.0",
         "status": "released",
@@ -255,43 +289,9 @@
         },
         "zip_sha256": "9a15d4a6d35b4d0d40b7801ffb227a6961d391d96c279a3c33508dc5f60e22b5",
         "signed": false,
-        "note": "v0.5.0 reads and writes wuwaterm-manuscript-v3 and adds resumable long-manuscript work (#19-#22, #24, #25): per-segment term results, choices and progress saved in v3 and readable by Web 0.3.x, a Markdown review report export, and segment-list and editor fixes. Windows 0.4.2 and Web 0.2.0 and earlier reject v3 files. It requires HTTP API v1, and manuscript review also needs review-v2."
+        "note": "v0.5.0 reads and writes wuwaterm-manuscript-v3 and adds resumable long-manuscript work (#19-#22, #24, #25): per-segment term results, choices and progress saved in v3 and readable by Web 0.3.x, a Markdown review report export, and segment-list and editor fixes. Windows 0.4.2 and Web 0.2.0 and earlier reject v3 files. It requires HTTP API v1, and manuscript review also needs review-v2. Kept as history after v0.5.1; the release and its assets are still published. v0.4.2 and earlier remain on the release page."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v3",
-        "note": "The client reads and writes wuwaterm-manuscript-v1, v2 and v3; local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.5.0: the native single-screen 150%-DPI acceptance (Linear MY-201 https://linear.app/my-denia/issue/MY-201#comment-f4b65948-07bf-4453-9e2e-ddb3354f8b37, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612) with production Core 0.9.1; a895042 and the released 277551c have the same code, and only README.md differs. The published ZIP (9a15d4a6...) is built from 277551c (release build run 43843812553, validation run 43842606090). Not done: multi-monitor mixed-DPI window drag and live IME composition.",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/277551c8f43f5c95f9183c618779c21445587f09/README.md"
-      ],
-      "source_version": "0.5.0",
-      "previous_release": {
-        "version": "0.4.2",
-        "tag": "v0.4.2",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.2",
-        "published_at": "2026-11-12T13:35:30Z",
-        "source_commit": "14f0c36ce1767333a8c7bde0085594d61676ca12",
-        "source_tree": "26ecdbccb4c780eeff4c7ef63ff252253506a762",
-        "assets": [
-          "WuwaTerm-0.4.2-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.4.2-windows-x64.zip": "824b694c9b157a121e04ddd4bebb77f8cac2e7eb371fd610e94b39edf05d8d47",
-          "manifest.json": "c293a530acedf3e3e0518620e4d990f8b5ec69d6b46e90a52c8e993cf4fc26b2",
-          "SHA256SUMS": "c06f9c0a9440768120b215c8f4743952eaf54acfaa347b70b85e9d3c316eb9bb"
-        },
-        "zip_sha256": "824b694c9b157a121e04ddd4bebb77f8cac2e7eb371fd610e94b39edf05d8d47",
-        "signed": false,
-        "note": "v0.4.2 fixes the empty-state card layout and the term-row tab order. No new service capability is required. Kept as history after v0.5.0; the release and its assets are still published. v0.4.1 and earlier remain on the release page."
-      },
-      "adoption_note": "0.5.0 is published. The native single-screen 150%-DPI acceptance (Linear MY-201 https://linear.app/my-denia/issue/MY-201#comment-f4b65948-07bf-4453-9e2e-ddb3354f8b37, WuwaTerm-Windows#23) was done on the owner's Windows desktop on the candidate built from a895042 (CI run 43834353612), whose code is the released code and differs only in README.md. Not done: multi-monitor mixed-DPI window drag and live IME composition. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.5.0 ZIP."
+      "adoption_note": "0.5.1 is published. The native single-screen 150%-DPI real-time Chinese IME re-verification was done on the owner's Windows desktop on the candidate built from 4871732 (candidate ZIP fecb470e..., EXE 82dafc61...), whose tree is the tree of the released 3a46c94, and 62a6ae5 on top of it changes only README.md, the two version files, the version-resource test and uv.lock. Not done: multi-monitor mixed-DPI window drag. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.5.1 ZIP."
     },
     {
       "id": "web",
