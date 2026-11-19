@@ -137,7 +137,7 @@ DEFAULT_RATE_LIMIT_PER_MINUTE = 30
 # Authentication probes have their own per-verified-device budget. Browser
 # page and asset loads must not consume the business request allowance.
 DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE = 120
-DEFAULT_MAX_BODY_BYTES = 32 * 1024
+DEFAULT_MAX_BODY_BYTES = 64 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
 # Verifying a presented credential costs a deliberate ~16 MiB scrypt
 # derivation, and it happens BEFORE any per-device limit can apply. Bound how

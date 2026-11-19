@@ -16,7 +16,7 @@ import re
 import asyncio
 import inspect
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,12 +28,8 @@ from .cjk_span import (
     single_character_name_mention_at,
 )
 from .constants import (
-    AREA_TITLE_KEY_RE,
-    ARIKATSU_MULTITEXT_SOURCE_FILE,
-    CORE_TERM_KEYS,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
-    ITEM_TIER_BASE_SOURCE_PREFIX,
 )
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
 from .exclusion_metadata import (
@@ -54,6 +50,7 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     _structured_llm_error_text,
 )
 from .lookup import TermService
+from .lookup import derived_reference_only_sources as _derived_reference_only_sources
 from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
@@ -339,53 +336,6 @@ def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
             continue
         surfaces.update(surface for surface, _occurrences, _aligned in rows)
     return frozenset(surfaces)
-
-
-def _is_derived_name_entry(entry: TermEntry) -> bool:
-    """Return whether the builder derived ``entry`` instead of reading a pair.
-
-    Two mechanisms do: an Area_<n>_Title key no area/area.json row
-    references, imported from the TextMap as a location, and the base pair of
-    a complete four-tier item family (``tier-base:<id>``). A curated
-    CORE_TERM_KEYS row shares the TextMap source file and stays an ordinary
-    row.
-    """
-    if entry.source_id.startswith(ITEM_TIER_BASE_SOURCE_PREFIX):
-        return True
-    return (
-        entry.category == "location"
-        and entry.source_file == ARIKATSU_MULTITEXT_SOURCE_FILE
-        and entry.text_key not in CORE_TERM_KEYS
-        and AREA_TITLE_KEY_RE.fullmatch(entry.text_key) is not None
-    )
-
-
-def _derived_reference_only_sources(entries: Iterable[TermEntry]) -> frozenset[str]:
-    """Return the Chinese surfaces free text references but never locks.
-
-    A derived name row's Chinese surface is often also an everyday word
-    (教学楼 is any school's teaching building, 能量袋 any energy bag), and no
-    official row pairs it in a context that tells the two apart. It stays in
-    span selection, so it still owns its span and the model receives it as a
-    contextual reference, but it never becomes a placeholder: without a model
-    the text is left as written. A surface any other row also carries, also
-    under lookup normalization, keeps that row's behavior, and English
-    surfaces are not affected (en->zh still locks the exact "Academia Hall").
-    """
-    derived: set[str] = set()
-    established: set[str] = set()
-    for entry in entries:
-        surfaces = derived if _is_derived_name_entry(entry) else established
-        for surface in (entry.zh, entry.en):
-            if surface:
-                surfaces.add(surface)
-    established_norms = {normalize_text(surface) for surface in established}
-    return frozenset(
-        surface
-        for surface in derived
-        if any(map(_is_cjk_character, surface))
-        and normalize_text(surface) not in established_norms
-    )
 
 
 def _is_latin_word_char(char: str) -> bool:
@@ -1563,6 +1513,145 @@ def _paragraph_line_counts(text: str) -> list[int]:
     ]
 
 
+def _line_scalar_counts(text: str) -> list[int]:
+    """Non-whitespace scalars of each non-empty line, in reading order."""
+    return [
+        sum(1 for char in line if char not in _SEGMENT_WHITESPACE)
+        for line in text.split("\n")
+        if _has_text(line)
+    ]
+
+
+def _cumulative_cuts(layout: Sequence[int]) -> frozenset[int]:
+    """Where each paragraph ends, counted in non-empty lines."""
+    total = 0
+    cuts: set[int] = set()
+    for count in layout[:-1]:
+        total += count
+        cuts.add(total)
+    return frozenset(cuts)
+
+
+# What a merge and a split do to the running share of the text. A line that
+# absorbed its neighbour shifts every following line boundary by that
+# neighbour's share; a line that gave part of itself away is visible as a local
+# trough, or has shrunk so far that no local test is needed. Faithful
+# line-by-line answers keep their boundaries within a few percent of the
+# source's (measured p99 = 5% at +/-35% per-line length noise), so both bounds
+# are far outside ordinary variation.
+_MERGED_LINE_SHARE = 1.5
+_SPLIT_LINE_SHARE = 0.65
+_SPLIT_LINE_GROSS_SHARE = 0.55
+_PEAK_FACTOR = 1.4
+_VALLEY_FACTOR = 0.7
+_MERGE_SPLIT_WINDOW = 6
+# Largest tolerated gap between the two sides' running shares of the text.
+_BOUNDARY_DRIFT = 0.075
+
+
+def _is_local_extreme(
+    counts: Sequence[int], index: int, factor: float, *, peak: bool
+) -> bool:
+    neighbours = [
+        counts[other] for other in (index - 1, index + 1) if 0 <= other < len(counts)
+    ]
+    if not neighbours:
+        return False
+    if peak:
+        return all(counts[index] >= value * factor for value in neighbours)
+    return all(counts[index] <= value * factor for value in neighbours)
+
+
+def _line_boundary_drift(source_counts: Sequence[int], answer_counts: Sequence[int]) -> float:
+    """The furthest the answer's line boundaries run from the source's.
+
+    Both sides are read as a running share of their own text, which cancels the
+    overall Chinese-to-English expansion: boundary k sits at the same relative
+    position in a faithful line-by-line answer however much longer the
+    translation is. A merge pushes every boundary after it forward by the
+    absorbed line's share, and a split pulls the boundaries before it back, so
+    either one shows up here as a large gap.
+    """
+    source_total = sum(source_counts)
+    answer_total = sum(answer_counts)
+    if source_total <= 0 or answer_total <= 0:
+        return 0.0
+    source_share = 0.0
+    answer_share = 0.0
+    worst = 0.0
+    for source_scalars, answer_scalars in zip(
+        source_counts, answer_counts, strict=True
+    ):
+        source_share += source_scalars / source_total
+        answer_share += answer_scalars / answer_total
+        worst = max(worst, abs(source_share - answer_share))
+    return worst
+
+
+def _lines_merged_and_split(source: str, answer: str) -> bool:
+    """Whether ``answer`` merged one line and split another.
+
+    Equal line counts only say the *number* of lines survived. Under a
+    merge+split one answer line absorbed its neighbour and another gave part of
+    itself away, so line k no longer answers source line k even though the count
+    matches. Regrouping such an answer into the source's paragraphs would move
+    real content across paragraph boundaries, so it is left alone.
+
+    Two signals, either of which rejects: the running-share drift described in
+    ``_line_boundary_drift``, and a line whose share grew by half (a local peak
+    its source line was not) within six lines of one whose share fell
+    by a third (a local trough its source line was not, or a fall well under
+    half). Requiring the share change and the shape change together keeps
+    faithful line-by-line translations out: their own line-to-line length
+    variation cancels against the source's. Measured on synthetic faithful
+    answers, neither signal fires at +/-35% per-line noise, and a rejected
+    regrouping only leaves the model's own blank lines in place. The two halves
+    are looked for in either order, since a translation may split a line before
+    merging a later pair as readily as after.
+    """
+    source_counts = _line_scalar_counts(source)
+    answer_counts = _line_scalar_counts(answer)
+    if len(source_counts) != len(answer_counts):
+        return False
+    if (
+        _line_boundary_drift(source_counts, answer_counts) >= _BOUNDARY_DRIFT
+    ):
+        return True
+    source_total = sum(source_counts)
+    answer_total = sum(answer_counts)
+    if source_total <= 0 or answer_total <= 0:
+        return False
+    for index, source_scalars in enumerate(source_counts):
+        merged = (answer_counts[index] / answer_total) / (
+            source_scalars / source_total
+        )
+        if merged < _MERGED_LINE_SHARE:
+            continue
+        if not _is_local_extreme(answer_counts, index, _PEAK_FACTOR, peak=True):
+            continue
+        if _is_local_extreme(source_counts, index, _PEAK_FACTOR, peak=True):
+            continue
+        low = max(0, index - _MERGE_SPLIT_WINDOW)
+        high = min(len(answer_counts), index + 1 + _MERGE_SPLIT_WINDOW)
+        for other in range(low, high):
+            if other == index:
+                continue
+            shrunk = (answer_counts[other] / answer_total) / (
+                source_counts[other] / source_total
+            )
+            if shrunk <= _SPLIT_LINE_GROSS_SHARE:
+                return True
+            if shrunk > _SPLIT_LINE_SHARE:
+                continue
+            if _is_local_extreme(
+                answer_counts, other, _VALLEY_FACTOR, peak=False
+            ) and not _is_local_extreme(
+                source_counts, other, _VALLEY_FACTOR, peak=False
+            ):
+                return True
+    return False
+
+
 def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
     """Put the lines of ``answer`` back into the paragraphs of ``source``.
 
@@ -1574,10 +1663,29 @@ def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
     blank lines between them change. Any other answer is returned unchanged,
     with no second model call: a retry would double the wait on a path that
     already runs into the model timeout.
+
+    Three guards keep the regrouping conservative (MY-359). An answer whose
+    paragraph count already matches, or whose line count differs, is
+    byte-identical. Two layouts whose paragraph breaks cross - one keeps a
+    break the other drops before it drops one of its own - are left alone,
+    because no grouping of the answer's lines keeps both sides' paragraphs. And
+    an answer whose line shares show a merge plus a split is left alone too:
+    its lines no longer answer their own source lines. Every guard returns the
+    answer unchanged, so a rejected regrouping can only leave the model's own
+    blank lines in place, never move text.
     """
     source_layout = _paragraph_line_counts(source)
     answer_layout = _paragraph_line_counts(answer)
     if len(answer_layout) == len(source_layout) or sum(answer_layout) != sum(source_layout):
+        return answer
+    source_cuts = _cumulative_cuts(source_layout)
+    answer_cuts = _cumulative_cuts(answer_layout)
+    # One side's breaks must be a subset of the other's: a break that exists on
+    # both sides up to a point and then swaps sides is a crossing, not a
+    # dropped or added blank line.
+    if not (answer_cuts <= source_cuts or source_cuts <= answer_cuts):
+        return answer
+    if _lines_merged_and_split(source, answer):
         return answer
     start, end = _segment_core(answer, 0, len(answer))
     lines = iter(line for line in answer[start:end].split("\n") if _has_text(line))

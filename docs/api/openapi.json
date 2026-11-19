@@ -528,6 +528,7 @@
                     }
                   ]
                 },
+                "maxItems": 128,
                 "type": "array"
               },
               {
@@ -2000,7 +2001,7 @@
     },
     "/v1/reviews": {
       "post": {
-        "description": "Review a submitted source/target pair against dictionary constraints.",
+        "description": "Review a submitted source/target pair against dictionary constraints.\n\n`review-v2` callers may opt into additive review features with the\n`X-WuwaTerm-Review-Features` header, comma separated: `dense-128`\nraises the finding page from 32 to 128 (still bounded by the 64 KiB\nJSON ceiling), and `reason-v1` adds a `reason` to each `not_evaluated`\nfinding. Without the header the response is byte-identical to the\npublished 32-finding, seven-key document.",
         "operationId": "create_review_v1_reviews_post",
         "requestBody": {
           "content": {

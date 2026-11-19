@@ -93,6 +93,20 @@ candidates reserve nothing. The same input gave a different report under v6,
 so the basis must change. Stored resolution contexts and saved manuscript-v3
 segment results carrying v6 go stale by the existing freshness rule and are
 re-reviewed.
+
+wuwaterm-cjk-matcher-v8 changes no matcher input. Every matcher function, the
+lexicon slice and the single-character name rules are the v7 ones; what
+changed is review-v2's attribution, so the basis label a stored resolution
+context carries has to change with it. review-v2 now gives each mapped region
+its own claim and allocation step, so a shortage credits no mention instead of
+the first one a sweep reaches, and an inflection never answers a competing
+official form; a numbering dot ("1.", "IV.") no longer ends a sentence; an
+occurrence enclosed by a longer dictionary form is not a standalone hit for
+the shorter one; a lowercase spelling of a capitalized official term is an
+ordinary word; and a derived name surface asserts no constraint. The same
+input gave a different report under v7, so stored resolution contexts and
+saved manuscript-v3 segment results carrying v7 go stale by the existing
+freshness rule and are re-reviewed.
 """
 
 from __future__ import annotations
@@ -66537,7 +66551,7 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v7", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        ["wuwaterm-cjk-matcher-v8", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
