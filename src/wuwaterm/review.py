@@ -32,7 +32,7 @@ from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
 )
-from .lookup import TermService
+from .lookup import TermService, derived_reference_only_sources
 from .models import TermEntry
 
 LOGGER = logging.getLogger(__name__)
@@ -59,6 +59,10 @@ REASON_AMBIGUOUS_REPEAT = "ambiguous_repeat"
 _SURROGATE_MIN = "\ud800"
 _SURROGATE_MAX = "\udfff"
 _SENTENCE_END = re.compile(r"[。．.！？!?\n]")
+# Numbering such as "1. ", "12. " or "IV. " opens an item, and the dot closing
+# its label belongs to the numbering rather than to a sentence, so it may not
+# split one.
+_ROMAN_NUMERAL = re.compile(r"[IVXLCDM]+")
 
 # Categories whose English form is a proper name. A translation spells such a
 # name in its plural or not at all; accepting a reversed singular would make the
@@ -651,7 +655,42 @@ def _is_sentence_end_v2(text: str, index: int) -> bool:
         and text[index + 1].isdigit()
     ):
         return False
+    if char in {".", "．"} and _is_list_marker_dot(text, index):
+        return False
     return True
+
+
+def _is_list_marker_dot(text: str, index: int) -> bool:
+    """Whether the dot at ``index`` ends a list label, not a sentence.
+
+    A translation often writes "1." where the source wrote "一、", so the
+    marker is not part of either sentence's content. Counting it as a sentence
+    end would shift every following sentence pair by one, which turns a
+    genuinely aligned translation into a paragraph guard that cannot say which
+    mention answers which occurrence.
+
+    Only a label that opens the text, opens a line (leading spaces or tabs
+    allowed), or follows an item that already ended qualifies; the label is
+    ASCII digits or Roman numerals followed by a space or tab. A sentence that
+    merely ends after a number ("There are 3. Next") keeps its break, because
+    the text before that number is not a terminator.
+    """
+    if index + 1 >= len(text) or text[index + 1] not in " \t":
+        return False
+    start = index
+    while start > 0 and index - start < 8:
+        char = text[start - 1]
+        if not (char.isascii() and (char.isdigit() or char in "IVXLCDM")):
+            break
+        start -= 1
+    label = text[start:index]
+    if not label or not (label.isdigit() or _ROMAN_NUMERAL.fullmatch(label)):
+        return False
+    # Indentation before the label is layout, not content.
+    before = text[:start].rstrip(" \t")
+    if not before or before.endswith("\n"):
+        return True
+    return before[-1] in "。．！？!?."
 
 
 def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
@@ -953,6 +992,12 @@ def _target_occurrences(
     # "Mar" and "Wishes" must never accept "Wish". Every other category also
     # accepts the singular, because a Chinese term is just as often translated
     # in the singular (海蚀 -> "Waveworn Phenomenon").
+    #
+    # The whole candidate set, not just the forms this mention asserts, owns
+    # the exact spellings: after selecting "Wave", its plural "Waves" is still
+    # the other candidate's official form and must not become an inflection of
+    # the chosen one.
+    all_candidate_forms = frozenset(_candidate_forms(candidates, direction))
     name_forms = {
         _official_form(candidate, direction)
         for candidate in candidates
@@ -967,7 +1012,7 @@ def _target_occurrences(
                     if form in name_forms
                     else number_variants(form)
                 )
-                if variant not in forms
+                if variant not in all_candidate_forms
             )
             if direction == "en"
             else ()
@@ -1008,6 +1053,62 @@ def _asserted_forms(
     if automatic_term_excluded:
         return ()
     return _candidate_forms(candidates, direction)
+
+
+def _find_dictionary_spans(
+    target: str, surfaces: frozenset[str]
+) -> frozenset[tuple[int, int]]:
+    """Every occurrence of a dictionary surface in ``target``.
+
+    The scan is bounded by the target, not by the dictionary: surfaces are
+    bucketed by first character and length, so a 50k-row dictionary over a
+    2000-scalar target costs one pass of the target and a handful of set
+    lookups per position. ``surfaces`` is the already-filtered official set;
+    the caller keeps it per dictionary, so no second filter pass is needed.
+    """
+    usable = surfaces
+    if not usable or not target:
+        return frozenset()
+    exact_lengths: dict[str, set[int]] = {}
+    folded_lengths: dict[str, set[int]] = {}
+    compounds = frozenset(
+        surface.lower()
+        for surface in usable
+        if " " in surface and len(surface) >= 2 and "\n" not in surface
+    )
+    for surface in usable:
+        # A one-character form encloses nothing and a multi-line one is not a
+        # surface the target can spell.
+        if len(surface) < 2 or "\n" in surface:
+            continue
+        exact_lengths.setdefault(surface[0], set()).add(len(surface))
+    for folded in compounds:
+        folded_lengths.setdefault(folded[0], set()).add(len(folded))
+    limit = len(target)
+    found: set[tuple[int, int]] = set()
+    for start in range(limit):
+        char = target[start]
+        for size in exact_lengths.get(char, ()):
+            end = start + size
+            if end > limit:
+                continue
+            candidate = target[start:end]
+            if candidate in usable and _ascii_word_boundaries_ok(
+                target, start, end, candidate
+            ):
+                found.add((start, end))
+        # A case variant of a compound must still contain its space, so the
+        # folded pass only runs over slices that can match one.
+        for size in folded_lengths.get(char.lower(), ()):
+            end = start + size
+            if end > limit:
+                continue
+            candidate = target[start:end]
+            if " " not in candidate or candidate.lower() not in compounds:
+                continue
+            if _ascii_word_boundaries_ok(target, start, end, candidate):
+                found.add((start, end))
+    return frozenset(found)
 
 
 class _ContainmentIndex:
@@ -1053,10 +1154,15 @@ class _OccurrenceModel:
       asserts and reserves. It never releases a span a longer mention still
       reserves: confirming 声骸 = Echo while 声骸套装 asserts "Echo Set"
       leaves the inner Echo unavailable, so a missing 声骸 is a conflict.
+    - The dictionary supplies enclosing forms too. A longer official target
+      form owns its span even when the source never mentioned it, so the
+      "Echo" of a target "Echo Set" is never a standalone 声骸 hit
+      (``_find_dictionary_spans``). Ordinary-word exclusions and a dismissed
+      term keep their surfaces out of that set: neither may create a reserved
+      span out of a word the review already treats as prose.
 
-    The judge, its elsewhere veto and the paragraph guard all read
-    occurrences here, so none of them can disagree about which spans a
-    mention could take.
+    The judge, its elsewhere veto and the repeat guard all read occurrences
+    here, so none of them can disagree about which spans a mention could take.
     """
 
     def __init__(
@@ -1064,19 +1170,43 @@ class _OccurrenceModel:
         target: str,
         direction: str,
         reserving: Iterable[tuple[Sequence[ReviewCandidate], tuple[str, ...]]],
+        dictionary_forms: Iterable[str] = (),
     ) -> None:
         self._target = target
         self._direction = direction
-        universe: set[tuple[int, int]] = set()
+        asserted: set[tuple[int, int]] = set()
         for candidates, forms in reserving:
             finder = _target_occurrences(candidates, direction, forms)
             for form in forms:
-                universe.update(finder(target, form))
-        self._reserved = _ContainmentIndex(universe)
+                asserted.update(finder(target, form))
+        self._asserted = _ContainmentIndex(asserted)
+        self._dictionary = _ContainmentIndex(
+            _find_dictionary_spans(target, dictionary_forms)
+        )
         self._own: dict[str, _ContainmentIndex] = {}
         self._cache: dict[
             tuple[str, tuple[str, ...], str], list[tuple[int, int]]
         ] = {}
+
+    def claimed_by_mention(
+        self,
+        span: tuple[int, int],
+        surface: str,
+        candidates: Sequence[ReviewCandidate],
+    ) -> bool:
+        """Whether a span the review cannot credit is enclosed by a term it knows.
+
+        Two different enclosures look the same in the occurrence list. If the
+        longer candidate belongs to this mention, or a sibling mention asserts
+        that longer form, the review itself has established the longer term as
+        what the source meant, so a missing shorter term is a real omission and
+        a conflict. If the longer form merely exists in the dictionary, nothing
+        in the source claimed it, and the text may legitimately use that other
+        term; the finding then goes to a reader instead.
+        """
+        return self._asserted.strictly_contains(
+            span
+        ) or self._own_candidates(surface, candidates).strictly_contains(span)
 
     def _own_candidates(
         self, surface: str, candidates: Sequence[ReviewCandidate]
@@ -1111,7 +1241,8 @@ class _OccurrenceModel:
                 found = [
                     span
                     for span in qualified(text, form)
-                    if not self._reserved.strictly_contains(span)
+                    if not self._asserted.strictly_contains(span)
+                    and not self._dictionary.strictly_contains(span)
                     and not own.strictly_contains(span)
                 ]
                 self._cache[key] = found
@@ -1141,6 +1272,11 @@ class _OccurrenceModel:
         )
 
 
+# Above this many mentions in one region the exact assignment search is
+# skipped and the cheaper per-claim bound decides ambiguity.
+_MAX_MATCHING_MENTIONS = 8
+
+
 def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
     """How many of these spans can be taken at once without overlapping."""
     count = 0
@@ -1153,39 +1289,44 @@ def _non_overlapping_count(spans: frozenset[tuple[int, int]]) -> int:
 
 
 def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool]:
-    """Mark every claim whose paragraph cannot say which occurrence it owns.
+    """Mark every claim whose region cannot say which occurrence it owns.
 
     A claim is the set of available target spans one mention could take
     (see ``_OccurrenceModel``). Claims whose spans overlap, directly or
     through another claim, form one group: an exact "Echoes" and the plural
-    of "Echo" reach for the same span. A group is ambiguous
-    when one of its members can take fewer distinct spans than the group has
-    members, and then every member is, so no mention is credited with an
-    occurrence another one may own.
+    of "Echo" reach for the same span. A group is ambiguous when its members
+    cannot all be placed on distinct, non-overlapping occurrences, and then
+    every member is, so no mention is credited with an occurrence another one
+    may own. Counting distinct spans per claim is not enough: a mention with
+    two official forms present can take either, so it does not compete with a
+    neighbour that can take only one of them.
+
+    A mention that can take no span at all competes with nobody and is never
+    ambiguous; its judge reports the missing occurrence itself.
 
     Mentions of one term carry the same claim, so the work runs per distinct
     claim, and grouping is a sweep over spans sorted by start: a paragraph
     with hundreds of mentions stays linear-logarithmic.
     """
+    active = [index for index, claim in enumerate(claims) if claim]
+    flagged = [False] * len(claims)
+    if not active:
+        return flagged
     kinds: dict[frozenset[tuple[int, int]], int] = {}
-    kind_of = [kinds.setdefault(claim, len(kinds)) for claim in claims]
-    members = [0] * len(kinds)
-    for kind in kind_of:
-        members[kind] += 1
-
-    kept = list(kinds)
+    kind_of = [kinds.setdefault(claims[index], len(kinds)) for index in active]
 
     parent = list(range(len(kinds)))
 
-    def root(index: int) -> int:
+    def find(index: int) -> int:
         while parent[index] != index:
             parent[index] = parent[parent[index]]
             index = parent[index]
         return index
 
     def join(left: int, right: int) -> None:
-        parent[root(left)] = root(right)
+        parent[find(left)] = find(right)
 
+    kept = list(kinds)
     owners: dict[tuple[int, int], list[int]] = {}
     for kind, claim in enumerate(kept):
         for span in claim:
@@ -1202,15 +1343,57 @@ def _ambiguous_claims(claims: Sequence[frozenset[tuple[int, int]]]) -> list[bool
         if span[1] > reach:
             reach, reach_kind = span[1], first
 
-    group_size: dict[int, int] = {}
-    for kind in range(len(kinds)):
-        group_size[root(kind)] = group_size.get(root(kind), 0) + members[kind]
-    ambiguous_groups = {
-        root(kind)
-        for kind, claim in enumerate(kept)
-        if 0 < _non_overlapping_count(claim) < group_size[root(kind)]
-    }
-    return [root(kind) in ambiguous_groups for kind in kind_of]
+    # One entry per mention, duplicates included: two mentions of one term
+    # carry the same claim and still compete for the same occurrence.
+    group_claims: dict[int, list[frozenset[tuple[int, int]]]] = {}
+    for position, kind in enumerate(kind_of):
+        group_claims.setdefault(find(kind), []).append(claims[active[position]])
+    ambiguous_groups: set[int] = set()
+    for group, members_claims in group_claims.items():
+        reachable = _matching_size(members_claims)
+        if reachable is None:
+            # The search ran out of budget: keep the conservative reading that
+            # a claim shorter than the group is under-supplied.
+            if any(
+                0 < _non_overlapping_count(claim) < len(members_claims)
+                for claim in members_claims
+            ):
+                ambiguous_groups.add(group)
+            continue
+        if reachable < len(members_claims):
+            ambiguous_groups.add(group)
+    for position, kind in enumerate(kind_of):
+        if find(kind) in ambiguous_groups:
+            flagged[active[position]] = True
+    return flagged
+
+
+def _matching_size(
+    claims: Sequence[frozenset[tuple[int, int]]],
+) -> int | None:
+    """How many of these claims can be satisfied at once, or None if too big.
+
+    The crude "claim shorter than the group" test marks a mention ambiguous
+    even when a compatible assignment exists: one mention with two official
+    forms present (it reports needs_review anyway) and another with one do not
+    compete for the same span when the first can take the other form. What
+    matters is whether every competing mention can be placed on a distinct,
+    non-overlapping occurrence.
+    """
+    if not claims:
+        return 0
+    if len(claims) > _MAX_MATCHING_MENTIONS:
+        # Hundreds of mentions in one region is the pathological case the
+        # per-claim bound already handles; a full search would cost more than
+        # the answer is worth.
+        return None
+    assigned = _allocate_occurrences(
+        [sorted(claim, key=lambda span: (span[0], span[1])) for claim in claims],
+        budget=4000,
+    )
+    if assigned is None:
+        return None
+    return sum(1 for span in assigned if span is not None)
 
 
 def _span_at(text: str, start: int, end: int) -> ReviewSpan:
@@ -1414,6 +1597,111 @@ def _judge_mention(
     )
 
 
+def _lowercase_ordinary_hit(
+    target: str,
+    forms: Sequence[str],
+    region: tuple[int, int],
+    direction: str,
+    candidates: Sequence[ReviewCandidate],
+) -> bool:
+    """Whether the mapped region spells the term as an ordinary lowercase word.
+
+    An official English form is capitalized because it names the game's
+    concept. A target that writes the same word in lowercase is using it as
+    an ordinary noun, and the source mention asserts no terminology
+    constraint: 升级 -> "upgrade the core", 核心 -> "the planet's core". Both
+    spellings count, including the regular singular and plural of each
+    (upgrade/upgrades, core/cores), because the ordinary use chooses its own
+    number.
+
+    Names are excluded (resonator, speaker): a lowercase spelling of a proper
+    name is a casing decision, not evidence that the sentence means an
+    ordinary word, and `_PLURAL_ONLY_CATEGORIES` already governs those.
+    """
+    if direction != "en" or not candidates or not forms:
+        return False
+    if any(
+        candidate.category in _PLURAL_ONLY_CATEGORIES for candidate in candidates
+    ):
+        return False
+    if any(form != form.capitalize() for form in forms):
+        return False
+    lo, hi = region
+    for form in forms:
+        lowered = form.lower()
+        spellings = {lowered, *number_variants(lowered), *plural_forms(lowered)}
+        for spelling in spellings:
+            if not spelling or spelling == form:
+                continue
+            for start, end in _find_occurrences(target, spelling):
+                if lo <= start and end <= hi:
+                    return True
+    return False
+
+
+def _allocate_occurrences(
+    candidates: Sequence[Sequence[tuple[int, int]]],
+    *,
+    budget: int = 20000,
+) -> list[tuple[int, int] | None]:
+    """Give each competing mention one span, no two assigned spans overlapping.
+
+    Taking the first free span mention by mention is not enough: the official
+    forms "Red Echo" and "Echo Red" inside "Echo Red Echo Red. Red Echo."
+    interleave, so a left-to-right sweep can spend the span the next mention
+    needs while a compatible assignment exists. The search therefore tries
+    the mentions most constrained first (fewest candidate spans) and
+    backtracks until every mention is placed. The node budget bounds the
+    worst case: when it runs out the best partial assignment found so far is
+    kept, so a pathological paragraph degrades to a smaller credit instead of
+    a long request.
+
+    ``candidates[i]`` holds mention i's available spans in reading order.
+    """
+    assigned: list[tuple[int, int] | None] = [None] * len(candidates)
+    order = sorted(range(len(candidates)), key=lambda index: (len(candidates[index]), index))
+    # Assigned spans never overlap, so keeping their starts sorted makes the
+    # conflict test one binary search instead of a scan of every taken span.
+    taken: list[tuple[int, int]] = []
+    starts: list[int] = []
+    best = [0, list(assigned)]
+    nodes = 0
+
+    def conflicts(span: tuple[int, int]) -> bool:
+        position = bisect.bisect_left(starts, span[0])
+        if position and taken[position - 1][1] > span[0]:
+            return True
+        return position < len(taken) and taken[position][0] < span[1]
+
+    def place(position: int, count: int) -> bool:
+        nonlocal nodes
+        if count > best[0]:
+            best[0] = count
+            best[1] = list(assigned)
+        if position == len(order):
+            return True
+        nodes += 1
+        if nodes > budget:
+            return False
+        index = order[position]
+        for span in candidates[index]:
+            if conflicts(span):
+                continue
+            slot = bisect.bisect_left(starts, span[0])
+            starts.insert(slot, span[0])
+            taken.insert(slot, span)
+            assigned[index] = span
+            if place(position + 1, count + 1):
+                return True
+            taken.pop(slot)
+            starts.pop(slot)
+            assigned[index] = None
+        return False
+
+    if not place(0, 0):
+        return None if nodes > budget else best[1]
+    return assigned
+
 def _judge_mention_v2(
     *,
     source: str,
@@ -1422,7 +1710,7 @@ def _judge_mention_v2(
     mention: _TermSpan,
     candidates: tuple[ReviewCandidate, ...],
     corresponding: tuple[int, int] | None,
-    used_target: set[tuple[int, int]],
+    assigned: tuple[int, int] | None,
     resolution: ReviewResolution | None,
     occurrence_model: _OccurrenceModel,
     automatic_term_excluded: bool = False,
@@ -1430,10 +1718,14 @@ def _judge_mention_v2(
 ) -> ReviewFinding:
     """Judge one mention against its mapped target range.
 
-    ``ambiguous_repeat`` is set only in a guarded paragraph region, when the
-    paragraph holds fewer qualified occurrences than the mentions that could
-    take them: it cannot say which mention an occurrence answers, so the
-    mention is left unassessed instead of being credited or blamed.
+    ``assigned`` is the occurrence the region's allocation gave this mention
+    (see ``_allocate_occurrences``); the judge never takes one itself, so a
+    mention cannot be credited with an occurrence another mention needs.
+
+    ``ambiguous_repeat`` is set when the mapped region holds fewer qualified
+    occurrences than the mentions that could take them: it cannot say which
+    mention an occurrence answers, so the mention is left unassessed instead
+    of being credited or blamed.
     """
     finding_id = _span_mention_id(source, mention.start, mention.end)
     source_span = _span_at(source, mention.start, mention.end)
@@ -1488,43 +1780,79 @@ def _judge_mention_v2(
     in_region: dict[str, list[tuple[int, int]]] = {}
     appearing: list[str] = []
     for form in forms:
-        local = []
         # Qualify against the full text, then retain whole occurrences in
         # the mapped range. Arbitrary character alignments remain valid;
         # their edges simply cannot manufacture new English word boundaries.
-        for start, end in occurrences(target, form):
-            if start < lo or end > hi:
-                continue
-            absolute = (start, end)
-            if _span_available(absolute, used_target):
-                local.append(absolute)
+        local = [
+            (start, end)
+            for start, end in occurrences(target, form)
+            if lo <= start and end <= hi
+        ]
         in_region[form] = local
         if local:
             appearing.append(form)
 
     if selected is not None:
         chosen_form = _official_form(selected, direction)
-        hit = _next_unused(in_region.get(chosen_form, ()), used_target)
-        if hit is not None:
-            used_target.add(hit)
+        if assigned is not None:
             return ReviewFinding(
                 id=finding_id,
                 verdict=VERDICT_VERIFIED,
                 rule_id=RULE_TERM_PAIR,
                 source_span=source_span,
-                target_span=_span_at(target, hit[0], hit[1]),
+                target_span=_span_at(target, assigned[0], assigned[1]),
                 candidates=candidates,
             )
-        if _elsewhere_has_form(
-            target, corresponding, forms, occurrences=occurrences
-        ):
+        if in_region.get(chosen_form):
+            # The region does spell the selected pair, but the occurrence was
+            # needed by a mention whose claim came first. Crediting it twice
+            # would be wrong and blaming the translation would be worse.
+            return ReviewFinding(
+                id=finding_id,
+                verdict=VERDICT_NEEDS_REVIEW,
+                rule_id=RULE_TERM_PAIR,
+                source_span=source_span,
+                target_span=None,
+                candidates=candidates,
+            )
+        qualified_spans = [
+            (start, end)
+            for start, end in _target_occurrences(candidates, direction, forms)(
+                target, chosen_form
+            )
+            if lo <= start and end <= hi
+        ]
+        if qualified_spans:
+            # The selected form is spelled in the region but is not available:
+            # it sits inside a longer form. When that longer form is one this
+            # review knows from the source, the shorter term is genuinely
+            # missing and the conflict stands; when only the dictionary has it,
+            # the text may be naming that other term, so the finding is left
+            # for a reader.
+            enclosed_by_mention = any(
+                occurrence_model.claimed_by_mention(span, mention.source, candidates)
+                for span in qualified_spans
+            )
+            return ReviewFinding(
+                id=finding_id,
+                verdict=(
+                    VERDICT_CONFLICT
+                    if enclosed_by_mention
+                    else VERDICT_NEEDS_REVIEW
+                ),
+                rule_id=RULE_TERM_PAIR,
+                source_span=source_span,
+                target_span=None,
+                candidates=candidates,
+            )
+        if _elsewhere_has_form(target, corresponding, forms, occurrences=occurrences):
             return not_evaluated(REASON_FOUND_OUTSIDE_REGION)
-        mismatch = None
+        mismatch: tuple[int, int] | None = None
         for form, hits in in_region.items():
             if form == chosen_form:
                 continue
-            mismatch = _next_unused(hits, used_target)
-            if mismatch is not None:
+            if hits:
+                mismatch = hits[0]
                 break
         return ReviewFinding(
             id=finding_id,
@@ -1540,35 +1868,37 @@ def _judge_mention_v2(
         )
 
     if len(appearing) > 1:
-        hit = _next_unused(in_region[appearing[0]], used_target)
-        if hit is not None:
-            used_target.add(hit)
+        # An unresolved mention with several official forms in its region
+        # cannot say which meaning the translation used: it reports
+        # needs_review and holds no occurrence, so a single-meaning mention
+        # that needs that span is not starved by it.
         return ReviewFinding(
             id=finding_id,
             verdict=VERDICT_NEEDS_REVIEW,
             rule_id=RULE_TERM_PAIR,
             source_span=source_span,
-            target_span=_span_at(target, hit[0], hit[1]) if hit is not None else None,
+            target_span=(
+                _span_at(target, in_region[appearing[0]][0][0], in_region[appearing[0]][0][1])
+                if in_region[appearing[0]]
+                else None
+            ),
             candidates=candidates,
         )
 
-    if appearing:
-        hit = _next_unused(in_region[appearing[0]], used_target)
-        if hit is not None:
-            used_target.add(hit)
-            return ReviewFinding(
-                id=finding_id,
-                verdict=VERDICT_VERIFIED,
-                rule_id=RULE_TERM_PAIR,
-                source_span=source_span,
-                target_span=_span_at(target, hit[0], hit[1]),
-                candidates=candidates,
-            )
+    if assigned is not None:
+        return ReviewFinding(
+            id=finding_id,
+            verdict=VERDICT_VERIFIED,
+            rule_id=RULE_TERM_PAIR,
+            source_span=source_span,
+            target_span=_span_at(target, assigned[0], assigned[1]),
+            candidates=candidates,
+        )
 
-    if _elsewhere_has_form(
-        target, corresponding, forms, occurrences=occurrences
-    ):
+    if _elsewhere_has_form(target, corresponding, forms, occurrences=occurrences):
         return not_evaluated(REASON_FOUND_OUTSIDE_REGION)
+    if _lowercase_ordinary_hit(target, forms, corresponding, direction, candidates):
+        return not_evaluated(REASON_ORDINARY_WORD)
     return ReviewFinding(
         id=finding_id,
         verdict=VERDICT_NEEDS_REVIEW,
@@ -1735,7 +2065,13 @@ def _review_pair_v2(
         _coerce_resolution_context(resolution_context)
 
     surfaces = _surface_index(entries)
-    automatic_exclusions = _automatic_term_exclusions(snapshot.metadata)
+    # A derived name is a contextual reference, never a constraint: its Chinese
+    # surface is usually an everyday word (教学楼, 能量袋) and no official row
+    # pairs it in a context that tells the two apart. Review therefore treats
+    # it like an ordinary-word exclusion instead of reporting a miss.
+    automatic_exclusions = _automatic_term_exclusions(
+        snapshot.metadata
+    ) | derived_reference_only_sources(entries)
     mentions = _collect_mentions(
         source,
         surfaces,
@@ -1752,7 +2088,6 @@ def _review_pair_v2(
         # "Its" is never an "It" mention.
         excluded_sources=automatic_exclusions,
     )
-    guarded_regions: frozenset[tuple[int, int]] = frozenset()
     if alignments is None:
         source_sentences = _sentence_ranges_v2(source)
         target_sentences = _sentence_ranges_v2(target)
@@ -1767,11 +2102,20 @@ def _review_pair_v2(
                 )
             )
         else:
-            mappings, guarded_regions = _paragraph_pairing(source, target)
+            # Paragraph pairing still splits a paragraph whose sentence counts
+            # agree into one-to-one sentence regions. Each such sentence is an
+            # anchor: a mention's occurrence has to fall inside its own region,
+            # and one that appears only in another sentence is reported as
+            # found outside the region rather than credited. Inside one region
+            # the wording stays free, so "Echo of Jinhsi" still answers a
+            # source sentence naming both terms in the opposite order.
+            #
+            # The guarded set is no longer needed as a special case: every
+            # mapped region now runs the same claim and allocation step.
+            mappings, _guarded_regions = _paragraph_pairing(source, target)
     else:
         mappings = _coerce_alignments(alignments, source, target, mentions)
 
-    used_target: set[tuple[int, int]] = set()
     findings: list[ReviewFinding] = []
     seen_resolution_ids: set[str] = set()
     by_id: dict[str, ReviewResolution] = {}
@@ -1782,29 +2126,13 @@ def _review_pair_v2(
             )
         by_id[resolution.mention_id] = resolution
 
-    planned: list[
-        tuple[
-            _TermSpan,
-            tuple[ReviewCandidate, ...],
-            ReviewResolution | None,
-        ]
-    ] = []
-    # Per guarded source paragraph: the target spans each mention that still
-    # asserts a constraint could take there. Two mentions compete when any of
-    # their spans overlap, whatever form produced them: an exact "Echoes" and
-    # the plural of "Echo" claim the same occurrence.
-    claims: dict[tuple[int, int], list[frozenset[tuple[int, int]]]] = {}
-    claim_owner: dict[tuple[int, int], list[int]] = {}
-    claim_cache: dict[
-        tuple[tuple[int, int], str, tuple[str, ...]], frozenset[tuple[int, int]]
-    ] = {}
     candidates_by_surface = {
         mention.source: _candidates_for(surfaces[mention.source], include_id=True)
         for mention in mentions
     }
 
     # What each mention asserts decides what it is judged on, what it claims
-    # in a guarded paragraph and what it reserves (see _OccurrenceModel).
+    # in its region, and what it reserves (see _OccurrenceModel).
     asserted = [
         _asserted_forms(
             candidates_by_surface[mention.source],
@@ -1814,56 +2142,129 @@ def _review_pair_v2(
         )
         for mention in mentions
     ]
+    # Ordinary-word exclusions and dismissed terms keep their surfaces out of
+    # the enclosing-form set: a word the review already treats as prose must
+    # not reserve a span for a term.
+    # A term the reviewer dismissed, or the official corpus uses as an
+    # ordinary word, encloses nothing: 声骸套装 dismissed as prose means the
+    # "Echo Set" the target spells is prose too, so a 声骸 mention may still
+    # answer its own "Echo" inside it.
+    unasserted_forms = {
+        _official_form(candidate, direction)
+        for mention in mentions
+        if (
+            mention.source in automatic_exclusions
+            or (
+                by_id.get(_span_mention_id(source, mention.start, mention.end))
+                is not None
+                and by_id[
+                    _span_mention_id(source, mention.start, mention.end)
+                ].choice
+                == CHOICE_NOT_A_TERM
+            )
+        )
+        for candidate in candidates_by_surface[mention.source]
+    }
+    dictionary_forms = frozenset(
+        surface
+        for entry in entries
+        for surface in ((entry.en,) if direction == "en" else (entry.zh,))
+        if surface
+        and "\n" not in surface
+        and surface not in automatic_exclusions
+        and surface not in unasserted_forms
+    )
     occurrence_model = _OccurrenceModel(
         target,
         direction,
-        {
-            (mention.source, forms): (candidates_by_surface[mention.source], forms)
+        [
+            (candidates_by_surface[mention.source], forms)
             for mention, forms in zip(mentions, asserted, strict=True)
             if forms
-        }.values(),
+        ],
+        dictionary_forms,
     )
-    for mention, forms in zip(mentions, asserted, strict=True):
+
+    # Each mapped region decides on its own which occurrence answers which
+    # mention: only the region's own text can say that. Regions never overlap
+    # in the target, so a decision inside one cannot starve another.
+    regions = [_mapped_target_range(mention, mappings) for mention in mentions]
+    by_region: dict[tuple[int, int], list[int]] = {}
+    for index, region in enumerate(regions):
+        if region is not None and asserted[index]:
+            by_region.setdefault(region, []).append(index)
+
+    claims: list[frozenset[tuple[int, int]]] = [
+        frozenset() for _ in mentions
+    ]
+    for region, indexes in by_region.items():
+        for index in indexes:
+            claims[index] = occurrence_model.claim(
+                mentions[index].source,
+                candidates_by_surface[mentions[index].source],
+                asserted[index],
+                region,
+            )
+    ambiguous: set[int] = set()
+    for region, indexes in by_region.items():
+        for index, flagged in zip(
+            indexes,
+            _ambiguous_claims([claims[index] for index in indexes]),
+            strict=True,
+        ):
+            if flagged:
+                ambiguous.add(index)
+
+    # Allocation: one occurrence per mention, no two the same or overlapping.
+    # A mention whose region already cannot tell its occurrence apart is left
+    # unassessed, and a mention with several official forms present reports
+    # needs_review without holding any, so neither can starve a mention whose
+    # meaning is unambiguous.
+    assigned: list[tuple[int, int] | None] = [None] * len(mentions)
+    for region, indexes in by_region.items():
+        lo, hi = region
+        competitors: list[int] = []
+        competing_spans: list[list[tuple[int, int]]] = []
+        for index in indexes:
+            if index in ambiguous:
+                continue
+            forms = asserted[index]
+            candidates = candidates_by_surface[mentions[index].source]
+            available = occurrence_model.occurrences(
+                mentions[index].source, candidates, forms
+            )
+            per_form = {
+                form: [
+                    span
+                    for span in available(target, form)
+                    if lo <= span[0] and span[1] <= hi
+                ]
+                for form in forms
+            }
+            appearing = [form for form in forms if per_form[form]]
+            if len(appearing) != 1:
+                # Either nothing to take, or several meanings: the judge
+                # reports needs_review and nobody loses a span to it.
+                continue
+            competitors.append(index)
+            competing_spans.append(per_form[appearing[0]])
+        if not competitors:
+            continue
+        allocated = _allocate_occurrences(competing_spans)
+        if allocated is None:
+            # No complete assignment was found within the search budget.
+            # Crediting nothing is the honest outcome: the judge then reports
+            # needs_review instead of inventing an owner for an occurrence.
+            allocated = [None] * len(competing_spans)
+        for index, span in zip(competitors, allocated, strict=True):
+            assigned[index] = span
+
+    for index, mention in enumerate(mentions):
         candidates = candidates_by_surface[mention.source]
         finding_id = _span_mention_id(source, mention.start, mention.end)
         resolution = by_id.get(finding_id)
         if resolution is not None:
             seen_resolution_ids.add(finding_id)
-        region = _mapped_alignment(mention, mappings)
-        guard = None
-        if region is not None:
-            key = (region.source.start, region.source.end)
-            guard = key if key in guarded_regions else None
-        if (
-            guard is not None
-            and forms
-            and region is not None
-            and region.target is not None
-        ):
-            # Mentions of one term asserting the same forms share one claim.
-            cache_key = (guard, mention.source, forms)
-            spans = claim_cache.get(cache_key)
-            if spans is None:
-                spans = occurrence_model.claim(
-                    mention.source,
-                    candidates,
-                    forms,
-                    (region.target.start, region.target.end),
-                )
-                claim_cache[cache_key] = spans
-            claims.setdefault(guard, []).append(spans)
-            claim_owner.setdefault(guard, []).append(len(planned))
-        planned.append((mention, candidates, resolution))
-
-    ambiguous: set[int] = set()
-    for guard, region_claims in claims.items():
-        for owner, flagged in zip(
-            claim_owner[guard], _ambiguous_claims(region_claims), strict=True
-        ):
-            if flagged:
-                ambiguous.add(owner)
-
-    for index, (mention, candidates, resolution) in enumerate(planned):
         findings.append(
             _judge_mention_v2(
                 source=source,
@@ -1871,8 +2272,8 @@ def _review_pair_v2(
                 direction=direction,
                 mention=mention,
                 candidates=candidates,
-                corresponding=_mapped_target_range(mention, mappings),
-                used_target=used_target,
+                corresponding=regions[index],
+                assigned=assigned[index],
                 resolution=resolution,
                 occurrence_model=occurrence_model,
                 automatic_term_excluded=mention.source in automatic_exclusions,

@@ -16,7 +16,7 @@ import re
 import asyncio
 import inspect
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,12 +28,9 @@ from .cjk_span import (
     single_character_name_mention_at,
 )
 from .constants import (
-    AREA_TITLE_KEY_RE,
-    ARIKATSU_MULTITEXT_SOURCE_FILE,
-    CORE_TERM_KEYS,
+    CATEGORY_ORDER,
     FREE_TEXT_LOCK_EXCLUSIONS_KEY,
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
-    ITEM_TIER_BASE_SOURCE_PREFIX,
 )
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
 from .exclusion_metadata import (
@@ -54,6 +51,8 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     _structured_llm_error_text,
 )
 from .lookup import TermService
+from .lookup import derived_reference_only_sources as _derived_reference_only_sources
+from .lookup import is_derived_name_entry as _is_derived_name_entry
 from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
@@ -98,6 +97,15 @@ class LockedSentence:
     # default keeps every existing LockedSentence call site and every
     # deterministic restore bit-identical.
     references: tuple[tuple[str, str, str, str], ...] = ()
+    # Coordinates in locked_text, not in an earlier source or visible-text
+    # view. Only a one-character name mention needs them: the model may apply
+    # that reference at the admitted occurrences and nowhere else.
+    reference_spans: tuple[tuple[str, int, int], ...] = ()
+    # Whether the references need the scope explanation: an admitted
+    # one-character name, one surface with several official pairs, or a
+    # soft-cased derived spelling. A request with plain single-meaning
+    # references keeps the exact prompt bytes it had.
+    reference_scope: bool = False
 
     def restore(self, translated: str, *, to_en: bool = True) -> str:
         result = translated
@@ -145,6 +153,23 @@ class _TermSpan:
 
 def _is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
+
+
+def _reference_span_admitted(span: _TermSpan, text: str, offset: int) -> bool:
+    """Apply review's one-character admission to an already selected span.
+
+    A one-character dictionary surface is eligible, but only the surrounding
+    text can say whether this occurrence names someone: 欢迎椿 does, the 椿
+    inside 红椿蕊 does not. Translation and review consult the same helper, so
+    whichever name reaches the model is also the name review reports.
+    """
+    return (
+        len(span.source) != 1
+        or not _is_cjk_character(span.source)
+        or single_character_name_mention_at(
+            text, offset + span.start, offset + span.end
+        )
+    )
 
 
 def _is_ascii_word_char(char: str) -> bool:
@@ -256,6 +281,17 @@ CASE_VARIANT_CATEGORIES = frozenset({"resonator"})
 # articles cannot be chosen by a fixed substitution.
 CONTEXTUAL_REFERENCE_CATEGORIES = frozenset({"resonator", "speaker"})
 
+# One source surface can carry several official pairs (the speaker 调音师 and
+# the material 调谐器 both answer to "Tuner"), and a derived name can appear in
+# another casing. Both reach the model as alternatives in a reference list.
+_ReferenceCandidates = dict[str, tuple[tuple[str, str, str], ...]]
+_SourceSnapshot = tuple[
+    tuple[tuple[str, tuple[str, str, str]], ...],
+    frozenset[str],
+    frozenset[str],
+    _ReferenceCandidates,
+]
+
 
 def _has_latin_letter(text: str) -> bool:
     return any(
@@ -339,53 +375,6 @@ def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
             continue
         surfaces.update(surface for surface, _occurrences, _aligned in rows)
     return frozenset(surfaces)
-
-
-def _is_derived_name_entry(entry: TermEntry) -> bool:
-    """Return whether the builder derived ``entry`` instead of reading a pair.
-
-    Two mechanisms do: an Area_<n>_Title key no area/area.json row
-    references, imported from the TextMap as a location, and the base pair of
-    a complete four-tier item family (``tier-base:<id>``). A curated
-    CORE_TERM_KEYS row shares the TextMap source file and stays an ordinary
-    row.
-    """
-    if entry.source_id.startswith(ITEM_TIER_BASE_SOURCE_PREFIX):
-        return True
-    return (
-        entry.category == "location"
-        and entry.source_file == ARIKATSU_MULTITEXT_SOURCE_FILE
-        and entry.text_key not in CORE_TERM_KEYS
-        and AREA_TITLE_KEY_RE.fullmatch(entry.text_key) is not None
-    )
-
-
-def _derived_reference_only_sources(entries: Iterable[TermEntry]) -> frozenset[str]:
-    """Return the Chinese surfaces free text references but never locks.
-
-    A derived name row's Chinese surface is often also an everyday word
-    (教学楼 is any school's teaching building, 能量袋 any energy bag), and no
-    official row pairs it in a context that tells the two apart. It stays in
-    span selection, so it still owns its span and the model receives it as a
-    contextual reference, but it never becomes a placeholder: without a model
-    the text is left as written. A surface any other row also carries, also
-    under lookup normalization, keeps that row's behavior, and English
-    surfaces are not affected (en->zh still locks the exact "Academia Hall").
-    """
-    derived: set[str] = set()
-    established: set[str] = set()
-    for entry in entries:
-        surfaces = derived if _is_derived_name_entry(entry) else established
-        for surface in (entry.zh, entry.en):
-            if surface:
-                surfaces.add(surface)
-    established_norms = {normalize_text(surface) for surface in established}
-    return frozenset(
-        surface
-        for surface in derived
-        if any(map(_is_cjk_character, surface))
-        and normalize_text(surface) not in established_norms
-    )
 
 
 def _is_latin_word_char(char: str) -> bool:
@@ -621,10 +610,11 @@ def select_term_spans(
 def _exact_lockable_sources(
     entries: Iterable[TermEntry],
 ) -> dict[str, tuple[str, str, str]]:
-    # Entries arrive in lookup priority order, so the first record carrying a
-    # surface owns it.
+    # Preserve an established surface's primary when derived candidates share
+    # it. A derived row never displaces the row the dictionary already had;
+    # the model path exposes the competing pairs separately.
     sources: dict[str, tuple[str, str, str]] = {}
-    for entry in entries:
+    for entry in sorted(entries, key=_is_derived_name_entry):
         if "\n" in entry.zh or "\n" in entry.en:
             continue
         official = (entry.zh, entry.en, entry.category)
@@ -633,6 +623,85 @@ def _exact_lockable_sources(
         if entry.en:
             sources.setdefault(entry.en, official)
     return sources
+
+
+def _model_reference_candidates(
+    entries: Iterable[TermEntry],
+    sources: dict[str, tuple[str, str, str]],
+    excluded: frozenset[str],
+    pre_exclusion_sources: dict[str, tuple[str, str, str]] | None = None,
+) -> _ReferenceCandidates:
+    """Keep competing official pairs and soft casing of derived names.
+
+    Exact owners and both exclusion lists still win. Only derived names gain
+    additional spellings here; they never enter deterministic locking.
+
+    A surface whose rows agree on (zh, en) has one meaning however many tables
+    carry it: 今汐 appears in several candidate tables and is one reference
+    line, not one per row. A differing category among those rows keeps the
+    highest CATEGORY_ORDER one, because the category only decides whether the
+    span is safe to force. Different pairs stay separate candidates, which is
+    what makes the surface ambiguous instead of wrongly resolved.
+    """
+    entries = sorted(entries, key=_is_derived_name_entry)
+    folded_sources = (
+        _exact_lockable_sources(entries)
+        if pre_exclusion_sources is None
+        else pre_exclusion_sources
+    )
+    # (zh, en) -> category; the pair is the meaning, the category is its rank.
+    groups: dict[str, dict[tuple[str, str], str]] = {}
+    folded_owners: dict[str, set[tuple[str, str]]] = {}
+    for mapping in (folded_sources, sources):
+        for surface, official in mapping.items():
+            folded_owners.setdefault(surface.casefold(), set()).add(official[:2])
+
+    def add(surface: str, official: tuple[str, str, str]) -> None:
+        if surface in excluded or not _is_eligible_lockable(surface, official):
+            return
+        pair = (official[0], official[1])
+        bucket = groups.setdefault(surface, {})
+        current = bucket.get(pair)
+        if current is None or CATEGORY_ORDER.get(
+            official[2], 999
+        ) < CATEGORY_ORDER.get(current, 999):
+            bucket[pair] = official[2]
+
+    for entry in entries:
+        official = (entry.zh, entry.en, entry.category)
+        for surface in (entry.zh, entry.en):
+            if surface in sources:
+                add(surface, official)
+    for entry in entries:
+        if not _is_derived_name_entry(entry) or entry.en in excluded:
+            continue
+        if not _has_latin_letter(entry.en) or any(map(_is_cjk_character, entry.en)):
+            continue
+        if len(folded_owners.get(entry.en.casefold(), ())) > 1:
+            continue
+        forms = [entry.en] + [
+            entry.en + suffix
+            for suffix in _plural_suffix_candidates(entry.en, (entry.zh, entry.en))
+        ]
+        for form in forms:
+            for spelling in (form.lower(), form.upper()):
+                if (
+                    spelling == form
+                    or spelling in sources
+                    or spelling in folded_sources
+                    or len(spelling) != len(form)
+                ):
+                    continue
+                # Include established meanings with the same original surface
+                # (Tuner the speaker and Tuner the material), not one winner.
+                for (zh, en), category in groups.get(
+                    entry.en, {(entry.zh, entry.en): entry.category}
+                ).items():
+                    add(spelling, (zh, en, category))
+    return {
+        surface: tuple((zh, en, category) for (zh, en), category in bucket.items())
+        for surface, bucket in groups.items()
+    }
 
 
 def exact_lockable_sources(
@@ -691,9 +760,12 @@ class SentenceTranslator:
         self._llm_client: httpx.AsyncClient | None = None
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
-        self._lockable_sources_cache: tuple[
-            tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-        ] = ((), frozenset(), frozenset())
+        self._lockable_sources_cache: _SourceSnapshot = (
+            (),
+            frozenset(),
+            frozenset(),
+            {},
+        )
         self._source_categories_cache_key: tuple[object, ...] | None = None
         self._source_categories_cache: dict[str, str] = {}
 
@@ -765,6 +837,8 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool = False,
         placeholder_prefix: str | None = None,
         placeholder_offset: int = 0,
+        context_has_terms: bool | None = None,
+        soft_sources: frozenset[str] | None = None,
     ) -> LockedSentence:
         """Lock the same spans, but hand contextual ones to the model as text.
 
@@ -786,6 +860,8 @@ class SentenceTranslator:
             allow_nfkc_spelling=allow_nfkc_spelling,
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=placeholder_offset,
+            context_has_terms=context_has_terms,
+            soft_sources=soft_sources,
         )
 
     def _lock_terms_selected(
@@ -799,6 +875,8 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool,
         placeholder_prefix: str | None,
         placeholder_offset: int,
+        context_has_terms: bool | None = None,
+        soft_sources: frozenset[str] | None = None,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
@@ -809,6 +887,11 @@ class SentenceTranslator:
             nfkc_sources = frozenset()
         if not allow_nfkc_spelling:
             nfkc_sources = frozenset()
+        candidates = self._reference_candidates() if to_chinese is not None else {}
+        if soft_sources is None:
+            soft_sources = frozenset(
+                candidates.keys() - {source for source, _official in lockable}
+            )
         selected = select_term_spans(
             text,
             lockable,
@@ -817,6 +900,57 @@ class SentenceTranslator:
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=nfkc_sources,
         )
+        if to_chinese is not None:
+            selected = [
+                span
+                for span in selected
+                if _reference_span_admitted(span, context_text, context_offset)
+            ]
+        # A new casing hint needs actual dictionary context in the submitted
+        # segment. Ordinary prose such as "the energy core of a star" must not
+        # acquire game hints merely because a derived base has that form.
+        has_term_context = bool(selected)
+        if soft_sources and not has_term_context and context_text != text:
+            if context_has_terms is not None:
+                has_term_context = context_has_terms
+            else:
+                has_term_context = any(
+                    _reference_span_admitted(span, context_text, 0)
+                    for span in select_term_spans(
+                        context_text,
+                        lockable,
+                        context_text,
+                        0,
+                        allow_plural_inflection=allow_plural_inflection,
+                    )
+                )
+        # Without even a literal soft spelling in this fragment there is
+        # nothing new to select. Keep the existing spans instead of scanning
+        # the whole primary dictionary a second time for every inline tag.
+        if (
+            soft_sources
+            and has_term_context
+            and any(source in text for source in soft_sources)
+        ):
+            lockable += tuple(
+                (source, (choices[0][0], choices[0][1]))
+                for source, choices in candidates.items()
+                if source in soft_sources and choices
+            )
+            selected = select_term_spans(
+                text,
+                lockable,
+                context_text,
+                context_offset,
+                allow_plural_inflection=allow_plural_inflection,
+                nfkc_spelling_sources=nfkc_sources,
+            )
+            if to_chinese is not None:
+                selected = [
+                    span
+                    for span in selected
+                    if _reference_span_admitted(span, context_text, context_offset)
+                ]
         prefix = placeholder_prefix or _new_placeholder_prefix(text)
         # The span carries the official pair only; the category is needed to
         # decide whether a term is safe to force, so read it from the same
@@ -827,33 +961,70 @@ class SentenceTranslator:
         locks: list[tuple[str, str, str]] = []
         references: list[tuple[str, str, str, str]] = []
         seen_references: set[tuple[str, str, str, str]] = set()
+        reference_spans: list[tuple[str, int, int]] = []
+        reference_scope = False
+        # Source positions of the spans already turned into a placeholder, and
+        # how much each swap lengthened the model text, so a one-character
+        # mention found later is reported at the offset the model itself sees.
+        replacements: list[tuple[int, int]] = []
+        output_length = 0
         index = 0
         for span in selected:
             locked_parts.append(text[index : span.start])
+            output_length += span.start - index
             zh, en = span.official
+            choices = candidates.get(span.source) or candidates.get(en) or ()
             # An inflected span's own text ("Resonators") is not a dictionary
             # key; the official English surface it came from is.
             category = (
                 categories.get(span.source)
                 or categories.get(en)
                 or categories.get(zh)
+                or (choices[0][2] if choices else "")
                 or ""
             )
+            # One surface with several official pairs is ambiguous, not
+            # resolved: the model gets every pair as an alternative and the
+            # target text keeps its own wording.
+            ambiguous = len({(pair_zh, pair_en) for pair_zh, pair_en, _c in choices}) > 1
             # A derived name's Chinese surface is never forced, whatever the
             # path; without a model (to_chinese is None) nothing receives a
             # reference and the text stays as written.
-            if span.source in reference_only or (
-                category and _is_contextual_reference(category, to_chinese=to_chinese)
+            if (
+                span.source in reference_only
+                or span.source in soft_sources
+                or ambiguous
+                or (
+                    category
+                    and _is_contextual_reference(category, to_chinese=to_chinese)
+                )
             ):
                 locked_parts.append(text[span.start : span.end])
-                reference = (span.source, zh, en, category)
-                if to_chinese is not None and reference not in seen_references:
-                    seen_references.add(reference)
-                    references.append(reference)
+                if to_chinese is not None:
+                    for choice in choices or ((zh, en, category),):
+                        reference = (span.source, *choice)
+                        if reference not in seen_references:
+                            seen_references.add(reference)
+                            references.append(reference)
+                    if ambiguous or span.source in soft_sources:
+                        reference_scope = True
+                    if len(span.source) == 1 and _is_cjk_character(span.source):
+                        reference_spans.append(
+                            (
+                                span.source,
+                                output_length,
+                                output_length + span.end - span.start,
+                            )
+                        )
+                output_length += span.end - span.start
             else:
                 placeholder = f"{prefix}{placeholder_offset + len(locks):04d}__"
                 locked_parts.append(placeholder)
                 locks.append((placeholder, zh, en))
+                replacements.append(
+                    (span.end, len(placeholder) - (span.end - span.start))
+                )
+                output_length += len(placeholder)
             index = span.end
         if to_chinese is not None:
             # Single-character resonator names the narrow lock whitelist
@@ -870,8 +1041,6 @@ class SentenceTranslator:
                 if category not in CONTEXTUAL_REFERENCE_CATEGORIES:
                     continue
                 reference = (source, official[0], official[1], category)
-                if reference in seen_references:
-                    continue
                 start = text.find(source)
                 while start != -1:
                     end = start + 1
@@ -880,15 +1049,26 @@ class SentenceTranslator:
                     ) and single_character_name_mention_at(
                         context_text, context_offset + start, context_offset + end
                     ):
-                        seen_references.add(reference)
-                        references.append(reference)
-                        break
+                        if reference not in seen_references:
+                            seen_references.add(reference)
+                            references.append(reference)
+                        position = start + sum(
+                            delta for edge, delta in replacements if edge <= start
+                        )
+                        reference_spans.append((source, position, position + 1))
                     start = text.find(source, start + 1)
         locked_parts.append(text[index:])
         return LockedSentence(
             locked_text="".join(locked_parts),
             locks=tuple(locks),
             references=tuple(references),
+            reference_spans=tuple(
+                sorted(
+                    set(reference_spans),
+                    key=lambda item: (item[1], item[2], item[0]),
+                )
+            ),
+            reference_scope=reference_scope or bool(reference_spans),
         )
 
     def _lock_protected_terms(
@@ -935,12 +1115,41 @@ class SentenceTranslator:
                 context_parts.append(context)
                 offset += len(context)
         context_text = "".join(context_parts)
+        # This is a boolean source-match check for this request, not a meaning
+        # chosen in another segment. Reuse it across unmatched HTML fragments
+        # instead of rescanning the identical visible text per tag.
+        context_has_terms = None
+        soft_sources = None
+        if to_chinese is not None:
+            primary_sources = {source for source, _official in lockable}
+            soft_sources = frozenset(
+                self._reference_candidates().keys() - primary_sources
+            )
+            if soft_sources and len(segments) > 1:
+                context_has_terms = any(
+                    _reference_span_admitted(span, context_text, 0)
+                    for span in select_term_spans(
+                        context_text,
+                        lockable,
+                        context_text,
+                        0,
+                        allow_plural_inflection=allow_plural_inflection,
+                    )
+                )
         locked_segments: list[str] = []
         locks: list[tuple[str, str, str]] = []
         references: list[tuple[str, str, str, str]] = []
         seen_references: set[tuple[str, str, str, str]] = set()
         prefix = _new_placeholder_prefix(protected.for_model())
-        for segment, offset in zip(segments, offsets, strict=True):
+        reference_spans: list[tuple[str, int, int]] = []
+        reference_scope = False
+        # What the model reads interleaves the visible segments with one
+        # structural placeholder between neighbours, so a segment's admitted
+        # ranges shift by the full width of everything emitted before it.
+        model_offset = 0
+        for segment_index, (segment, offset) in enumerate(
+            zip(segments, offsets, strict=True)
+        ):
             # Protected visible text skips plain preparation: its coordinates
             # are the adapter's, so the raw-vs-NFKC comparison candidate
             # applied to prepared plain text must not run here.
@@ -964,9 +1173,19 @@ class SentenceTranslator:
                     allow_nfkc_spelling=False,
                     placeholder_prefix=prefix,
                     placeholder_offset=len(locks),
+                    context_has_terms=context_has_terms,
+                    soft_sources=soft_sources,
                 )
             locked_segments.append(locked.locked_text)
             locks.extend(locked.locks)
+            reference_scope = reference_scope or locked.reference_scope
+            reference_spans.extend(
+                (source, start + model_offset, end + model_offset)
+                for source, start, end in locked.reference_spans
+            )
+            model_offset += len(locked.locked_text)
+            if segment_index < len(protected.structures):
+                model_offset += protected.placeholder_length
             for reference in locked.references:
                 if reference not in seen_references:
                     seen_references.add(reference)
@@ -975,6 +1194,8 @@ class SentenceTranslator:
             locked_text=protected.for_model(tuple(locked_segments)),
             locks=tuple(locks),
             references=tuple(references),
+            reference_spans=tuple(reference_spans),
+            reference_scope=reference_scope,
         )
 
     @staticmethod
@@ -1047,10 +1268,16 @@ class SentenceTranslator:
                     locked.locks,
                     to_chinese=True,
                     references=locked.references,
+                    reference_spans=locked.reference_spans,
+                    reference_scope=locked.reference_scope,
                 )
             else:
                 translated = self._call_llm_sync(
-                    locked.locked_text, locked.locks, references=locked.references
+                    locked.locked_text,
+                    locked.locks,
+                    references=locked.references,
+                    reference_spans=locked.reference_spans,
+                    reference_scope=locked.reference_scope,
                 )
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
@@ -1109,6 +1336,8 @@ class SentenceTranslator:
                     locked.locks,
                     to_chinese=True,
                     references=locked.references,
+                    reference_spans=locked.reference_spans,
+                    reference_scope=locked.reference_scope,
                     before_llm_call=before_llm_call,
                     context=context,
                 )
@@ -1117,6 +1346,8 @@ class SentenceTranslator:
                     locked.locked_text,
                     locked.locks,
                     references=locked.references,
+                    reference_spans=locked.reference_spans,
+                    reference_scope=locked.reference_scope,
                     before_llm_call=before_llm_call,
                     context=context,
                 )
@@ -1154,6 +1385,8 @@ class SentenceTranslator:
             html_mode=True,
             to_chinese=to_chinese,
             references=locked.references,
+            reference_spans=locked.reference_spans,
+            reference_scope=locked.reference_scope,
         )
         return self._restore_protected(
             protected, locked, _require_nonblank_llm_output(translated),
@@ -1177,6 +1410,8 @@ class SentenceTranslator:
             html_mode=True,
             to_chinese=to_chinese,
             references=locked.references,
+            reference_spans=locked.reference_spans,
+            reference_scope=locked.reference_scope,
             before_llm_call=before_llm_call,
         )
         return self._restore_protected(
@@ -1207,6 +1442,8 @@ class SentenceTranslator:
         html_mode: bool = False,
         to_chinese: bool = False,
         references: tuple[tuple[str, str, str, str], ...] = (),
+        reference_spans: tuple[tuple[str, int, int], ...] = (),
+        reference_scope: bool = False,
         before_llm_call=None,
         context=None,
     ) -> str:
@@ -1222,6 +1459,8 @@ class SentenceTranslator:
                 ("html_mode", html_mode),
                 ("to_chinese", to_chinese),
                 ("references", references),
+                ("reference_spans", reference_spans),
+                ("reference_scope", reference_scope),
                 ("en_zh_protocol", self._en_zh_protocol),
                 ("timeout_seconds", self.llm_timeout_seconds),
                 ("client", client),
@@ -1284,6 +1523,8 @@ class SentenceTranslator:
         html_mode: bool = False,
         to_chinese: bool = False,
         references: tuple[tuple[str, str, str, str], ...] = (),
+        reference_spans: tuple[tuple[str, int, int], ...] = (),
+        reference_scope: bool = False,
     ) -> str:
         kwargs: dict[str, object] = {}
         supported = inspect.signature(_call_llm).parameters
@@ -1291,6 +1532,8 @@ class SentenceTranslator:
             ("html_mode", html_mode),
             ("to_chinese", to_chinese),
             ("references", references),
+            ("reference_spans", reference_spans),
+            ("reference_scope", reference_scope),
             ("en_zh_protocol", self._en_zh_protocol),
             ("timeout_seconds", self.llm_timeout_seconds),
         ):
@@ -1351,13 +1594,33 @@ class SentenceTranslator:
         return f"{official}: {body}" if body else f"{official}:"
 
     def _exact_official(self, query: str) -> str | None:
-        result = self.service.lookup_exact(query, limit=5)
-        if not result.exact or not result.best:
+        entry = self._preferred_exact_entry(query)
+        if entry is None:
             return None
-        official = result.best.entry.en
+        official = entry.en
         if not official or "\n" in official:
             return None
         return official
+
+    def _preferred_exact_entry(self, query: str) -> TermEntry | None:
+        """The exact hit a fixed substitution may restore, if any.
+
+        An established row wins over a derived one, so a name the builder
+        derived never displaces the meaning the dictionary already paired.
+        The remaining candidates stay available to lookup; only the
+        deterministic path picks one.
+        """
+        result = self.service.lookup_exact(query, limit=5)
+        if not result.exact or result.best is None:
+            return None
+        return next(
+            (
+                candidate.entry
+                for candidate in result.candidates
+                if not _is_derived_name_entry(candidate.entry)
+            ),
+            result.best.entry,
+        )
 
     def _eligible_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
         return self._eligible_rows(self._lockable_sources())
@@ -1377,7 +1640,7 @@ class SentenceTranslator:
     ) -> tuple[
         tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
     ]:
-        rows, nfkc_sources, _reference_only = self._lockable_snapshot()
+        rows, nfkc_sources, _reference_only, _candidates = self._lockable_snapshot()
         return self._eligible_rows(rows), nfkc_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
@@ -1394,22 +1657,24 @@ class SentenceTranslator:
             provenance,
         )
 
-    def _read_lockable_sources(
-        self,
-    ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-    ]:
+    def _read_lockable_sources(self) -> _SourceSnapshot:
         excluded = _free_text_exclusions(self.service.metadata())
         entries = self.service.entries()
-        sources = _exact_lockable_sources(entries)
+        pre_exclusion_sources = _exact_lockable_sources(entries)
+        sources = dict(pre_exclusion_sources)
         # Case variants come after every exact source, so an exact surface
         # always keeps its own record and wins equal-length overlaps. They are
         # computed before exclusions are removed, so an excluded surface still
         # blocks a variant equal to it and still counts for casefold ambiguity.
-        variants = _case_variant_sources(sources, excluded)
+        # Reading them from the pre-exclusion snapshot keeps a spelling
+        # collision that another layer then excluded; dropping it would let an
+        # ordinary word inherit a name's casing variant.
+        variants = _case_variant_sources(pre_exclusion_sources, excluded)
         # Same pre-exclusion snapshot: a spelling collision or exclusion still
         # counts even when one of the colliding surfaces is later removed.
-        nfkc_sources = _admissible_nfkc_sources(sources, variants, excluded)
+        nfkc_sources = _admissible_nfkc_sources(
+            pre_exclusion_sources, variants, excluded
+        )
         for surface in excluded:
             sources.pop(surface, None)
         for variant, official in variants:
@@ -1418,6 +1683,12 @@ class SentenceTranslator:
             tuple(sources.items()),
             nfkc_sources,
             _derived_reference_only_sources(entries),
+            _model_reference_candidates(
+                entries,
+                sources,
+                excluded,
+                pre_exclusion_sources=pre_exclusion_sources,
+            ),
         )
 
     def _source_categories(self) -> dict[str, str]:
@@ -1448,11 +1719,11 @@ class SentenceTranslator:
         """Chinese surfaces that are references, never locks (derived names)."""
         return self._lockable_snapshot()[2]
 
-    def _lockable_snapshot(
-        self,
-    ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-    ]:
+    def _reference_candidates(self) -> _ReferenceCandidates:
+        """Surface -> every official pair the model path may offer for it."""
+        return self._lockable_snapshot()[3]
+
+    def _lockable_snapshot(self) -> _SourceSnapshot:
         # Each source text (Chinese OR English form) maps to the official
         # (zh, en, category) record, retaining single-character name provenance.
         # The eligible lock pairs can be restored in either
@@ -1506,6 +1777,22 @@ _CONTEXTUAL_REFERENCE_INSTRUCTION = (
     "number and article the sentence needs: Resonators, Echoes, a Resonator, "
     "the Echo.\n"
 )
+# Appended only when the references need scope: a one-character name mention
+# that applies at listed ranges, one surface carrying several official pairs,
+# or a derived name spelling that differs from its official casing. A request
+# with plain single-meaning references keeps the exact prompt bytes it had.
+_SCOPED_REFERENCE_INSTRUCTION = (
+    "Multiple official pairs for one source surface are alternatives: select "
+    "the meaning supported by this occurrence, never combine or enforce all "
+    "of them. A casing variant is only a hint, not proof of an official sense. "
+    "If occurrence ranges are listed, that reference applies only at those "
+    "ranges in the user message; a character embedded elsewhere in a longer "
+    "compound is not a name reference and does not establish an official "
+    "translation for the whole compound.\n"
+)
+_REFERENCE_RANGE_HEADER = (
+    "\nReference occurrence ranges (JSON; zero-based, end-exclusive):\n"
+)
 
 
 # translation-context-v1 (ADR 0019): added only when a request opts in, so a
@@ -1513,7 +1800,11 @@ _CONTEXTUAL_REFERENCE_INSTRUCTION = (
 _CONTEXT_RULES_INSTRUCTION = (
     "\nContext rules: keep every pronoun and elided subject pointing at the same "
     "person or thing as in the source text. Keep every negation and every "
-    "number, unit, date and version exactly as the source text states it. "
+    "number, numeric shorthand such as 3+1 or S0R1, unit, date and version "
+    "exactly as the source text states it. Resolve an omitted actor from the "
+    "complete clause and its context; in a rhetorical question do not make "
+    "the addressee the actor unless the source does. Translate every clause "
+    "and do not leave isolated source-language prose untranslated. "
     "Read-only context below only helps you understand the source text: do not "
     "translate, repeat or continue it, and return only the translation of the "
     "user message.\n"
@@ -1563,6 +1854,145 @@ def _paragraph_line_counts(text: str) -> list[int]:
     ]
 
 
+def _line_scalar_counts(text: str) -> list[int]:
+    """Non-whitespace scalars of each non-empty line, in reading order."""
+    return [
+        sum(1 for char in line if char not in _SEGMENT_WHITESPACE)
+        for line in text.split("\n")
+        if _has_text(line)
+    ]
+
+
+def _cumulative_cuts(layout: Sequence[int]) -> frozenset[int]:
+    """Where each paragraph ends, counted in non-empty lines."""
+    total = 0
+    cuts: set[int] = set()
+    for count in layout[:-1]:
+        total += count
+        cuts.add(total)
+    return frozenset(cuts)
+
+
+# What a merge and a split do to the running share of the text. A line that
+# absorbed its neighbour shifts every following line boundary by that
+# neighbour's share; a line that gave part of itself away is visible as a local
+# trough, or has shrunk so far that no local test is needed. Faithful
+# line-by-line answers keep their boundaries within a few percent of the
+# source's (measured p99 = 5% at +/-35% per-line length noise), so both bounds
+# are far outside ordinary variation.
+_MERGED_LINE_SHARE = 1.5
+_SPLIT_LINE_SHARE = 0.65
+_SPLIT_LINE_GROSS_SHARE = 0.55
+_PEAK_FACTOR = 1.4
+_VALLEY_FACTOR = 0.7
+_MERGE_SPLIT_WINDOW = 6
+# Largest tolerated gap between the two sides' running shares of the text.
+_BOUNDARY_DRIFT = 0.075
+
+
+def _is_local_extreme(
+    counts: Sequence[int], index: int, factor: float, *, peak: bool
+) -> bool:
+    neighbours = [
+        counts[other] for other in (index - 1, index + 1) if 0 <= other < len(counts)
+    ]
+    if not neighbours:
+        return False
+    if peak:
+        return all(counts[index] >= value * factor for value in neighbours)
+    return all(counts[index] <= value * factor for value in neighbours)
+
+
+def _line_boundary_drift(source_counts: Sequence[int], answer_counts: Sequence[int]) -> float:
+    """The furthest the answer's line boundaries run from the source's.
+
+    Both sides are read as a running share of their own text, which cancels the
+    overall Chinese-to-English expansion: boundary k sits at the same relative
+    position in a faithful line-by-line answer however much longer the
+    translation is. A merge pushes every boundary after it forward by the
+    absorbed line's share, and a split pulls the boundaries before it back, so
+    either one shows up here as a large gap.
+    """
+    source_total = sum(source_counts)
+    answer_total = sum(answer_counts)
+    if source_total <= 0 or answer_total <= 0:
+        return 0.0
+    source_share = 0.0
+    answer_share = 0.0
+    worst = 0.0
+    for source_scalars, answer_scalars in zip(
+        source_counts, answer_counts, strict=True
+    ):
+        source_share += source_scalars / source_total
+        answer_share += answer_scalars / answer_total
+        worst = max(worst, abs(source_share - answer_share))
+    return worst
+
+
+def _lines_merged_and_split(source: str, answer: str) -> bool:
+    """Whether ``answer`` merged one line and split another.
+
+    Equal line counts only say the *number* of lines survived. Under a
+    merge+split one answer line absorbed its neighbour and another gave part of
+    itself away, so line k no longer answers source line k even though the count
+    matches. Regrouping such an answer into the source's paragraphs would move
+    real content across paragraph boundaries, so it is left alone.
+
+    Two signals, either of which rejects: the running-share drift described in
+    ``_line_boundary_drift``, and a line whose share grew by half (a local peak
+    its source line was not) followed within a few lines by one whose share fell
+    by a third (a local trough its source line was not, or a fall well under
+    half). Requiring the share change and the shape change together keeps
+    faithful line-by-line translations out: their own line-to-line length
+    variation cancels against the source's. Measured on synthetic faithful
+    answers, neither signal fires at +/-35% per-line noise, and a rejected
+    regrouping only leaves the model's own blank lines in place. The two halves
+    are looked for in either order, since a translation may split a line before
+    merging a later pair as readily as after.
+    """
+    source_counts = _line_scalar_counts(source)
+    answer_counts = _line_scalar_counts(answer)
+    if len(source_counts) != len(answer_counts):
+        return False
+    if (
+        _line_boundary_drift(source_counts, answer_counts) >= _BOUNDARY_DRIFT
+    ):
+        return True
+    source_total = sum(source_counts)
+    answer_total = sum(answer_counts)
+    if source_total <= 0 or answer_total <= 0:
+        return False
+    for index, source_scalars in enumerate(source_counts):
+        merged = (answer_counts[index] / answer_total) / (
+            source_scalars / source_total
+        )
+        if merged < _MERGED_LINE_SHARE:
+            continue
+        if not _is_local_extreme(answer_counts, index, _PEAK_FACTOR, peak=True):
+            continue
+        if _is_local_extreme(source_counts, index, _PEAK_FACTOR, peak=True):
+            continue
+        low = max(0, index - _MERGE_SPLIT_WINDOW)
+        high = min(len(answer_counts), index + 1 + _MERGE_SPLIT_WINDOW)
+        for other in range(low, high):
+            if other == index:
+                continue
+            shrunk = (answer_counts[other] / answer_total) / (
+                source_counts[other] / source_total
+            )
+            if shrunk <= _SPLIT_LINE_GROSS_SHARE:
+                return True
+            if shrunk > _SPLIT_LINE_SHARE:
+                continue
+            if _is_local_extreme(
+                answer_counts, other, _VALLEY_FACTOR, peak=False
+            ) and not _is_local_extreme(
+                source_counts, other, _VALLEY_FACTOR, peak=False
+            ):
+                return True
+    return False
+
+
 def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
     """Put the lines of ``answer`` back into the paragraphs of ``source``.
 
@@ -1574,10 +2004,29 @@ def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
     blank lines between them change. Any other answer is returned unchanged,
     with no second model call: a retry would double the wait on a path that
     already runs into the model timeout.
+
+    Three guards keep the regrouping conservative (MY-359). An answer whose
+    paragraph count already matches, or whose line count differs, is
+    byte-identical. Two layouts whose paragraph breaks cross - one keeps a
+    break the other drops before it drops one of its own - are left alone,
+    because no grouping of the answer's lines keeps both sides' paragraphs. And
+    an answer whose line shares show a merge plus a split is left alone too:
+    its lines no longer answer their own source lines. Every guard returns the
+    answer unchanged, so a rejected regrouping can only leave the model's own
+    blank lines in place, never move text.
     """
     source_layout = _paragraph_line_counts(source)
     answer_layout = _paragraph_line_counts(answer)
     if len(answer_layout) == len(source_layout) or sum(answer_layout) != sum(source_layout):
+        return answer
+    source_cuts = _cumulative_cuts(source_layout)
+    answer_cuts = _cumulative_cuts(answer_layout)
+    # One side's breaks must be a subset of the other's: a break that exists on
+    # both sides up to a point and then swaps sides is a crossing, not a
+    # dropped or added blank line.
+    if not (answer_cuts <= source_cuts or source_cuts <= answer_cuts):
+        return answer
+    if _lines_merged_and_split(source, answer):
         return answer
     start, end = _segment_core(answer, 0, len(answer))
     lines = iter(line for line in answer[start:end].split("\n") if _has_text(line))
@@ -1601,15 +2050,22 @@ def _call_llm(
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     en_zh_protocol: bool = False,
     references: tuple[tuple[str, str, str, str], ...] = (),
+    reference_spans: tuple[tuple[str, int, int], ...] = (),
+    reference_scope: bool = False,
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
     # Tests and embedders replace the async transport with a callable that may
-    # predate term references; only pass the keyword when it is accepted.
-    optional = (
-        {"references": references}
-        if "references" in inspect.signature(_call_llm_async).parameters
-        else {}
-    )
+    # predate term references; only pass a keyword when it is accepted.
+    supported = inspect.signature(_call_llm_async).parameters
+    optional = {
+        name: value
+        for name, value in (
+            ("references", references),
+            ("reference_spans", reference_spans),
+            ("reference_scope", reference_scope),
+        )
+        if name in supported
+    }
     return asyncio.run(
         _call_llm_async(
             locked_text,
@@ -1633,6 +2089,8 @@ async def _call_llm_async(
     client: httpx.AsyncClient | None = None,
     en_zh_protocol: bool = False,
     references: tuple[tuple[str, str, str, str], ...] = (),
+    reference_spans: tuple[tuple[str, int, int], ...] = (),
+    reference_scope: bool = False,
     context=None,
 ) -> str:
     if client is not None:
@@ -1643,6 +2101,8 @@ async def _call_llm_async(
             html_mode=html_mode,
             to_chinese=to_chinese,
             references=references,
+            reference_spans=reference_spans,
+            reference_scope=reference_scope,
             en_zh_protocol=en_zh_protocol,
             context=context,
         )
@@ -1656,6 +2116,8 @@ async def _call_llm_async(
             html_mode=html_mode,
             to_chinese=to_chinese,
             references=references,
+            reference_spans=reference_spans,
+            reference_scope=reference_scope,
             en_zh_protocol=en_zh_protocol,
             context=context,
         )
@@ -1705,6 +2167,8 @@ async def _call_llm_async_with_client(
     to_chinese: bool = False,
     en_zh_protocol: bool = False,
     references: tuple[tuple[str, str, str, str], ...] = (),
+    reference_spans: tuple[tuple[str, int, int], ...] = (),
+    reference_scope: bool = False,
     context=None,
 ) -> str:
     # locks are (placeholder, zh_official, en_official); show the model the
@@ -1745,9 +2209,22 @@ async def _call_llm_async_with_client(
             system_content += _HTML_MODE_INSTRUCTION
     system_content += f"Locked terms:\n{lock_lines}"
     if reference_lines:
-        system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION + (
-            f"Dictionary term references:\n{reference_lines}"
-        )
+        system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION
+        if reference_scope:
+            system_content += _SCOPED_REFERENCE_INSTRUCTION
+        system_content += f"Dictionary term references:\n{reference_lines}"
+        scoped: dict[str, list[list[int]]] = {}
+        for source, start, end in reference_spans:
+            if len(source) == 1 and _is_cjk_character(source):
+                scoped.setdefault(source, []).append([start, end])
+        if scoped:
+            system_content += _REFERENCE_RANGE_HEADER + json.dumps(
+                [
+                    {"source": source, "ranges": ranges}
+                    for source, ranges in scoped.items()
+                ],
+                ensure_ascii=False,
+            ) + "\n"
     if context is not None:
         system_content += _context_instruction(context)
     messages = [

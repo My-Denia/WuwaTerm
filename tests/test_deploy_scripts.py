@@ -1326,7 +1326,8 @@ def test_env_example_covers_the_api_surface():
         "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
         "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
         "WUWATERM_API_RATE_LIMIT_PER_MINUTE=30",
-        "WUWATERM_API_MAX_BODY_BYTES=32768",
+        # MY-356 raised the default to 64 KiB so a full review pair fits.
+        "WUWATERM_API_MAX_BODY_BYTES=65536",
         "WUWATERM_API_REQUEST_TIMEOUT_SECONDS=90",
     ):
         assert name in text, name

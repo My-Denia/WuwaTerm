@@ -49,6 +49,8 @@ from wuwaterm.application import (
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
     KIND_LLM,
+    REVIEW_DENSE_MAX_FINDINGS,
+    REVIEW_MAX_FINDINGS,
     REVIEW_MAX_SIDE_SCALARS,
     SEMANTIC_CATEGORIES,
     SEMANTIC_CONFIDENCES,
@@ -116,6 +118,49 @@ AUTH_STATUS_RESPONSE_HEADERS = {
     "Cache-Control": {"description": "Always no-store", "schema": {"type": "string"}},
     "X-Request-Id": {"description": "Server-generated request ID", "schema": {"type": "string"}},
 }
+
+# Additive review-v2 features. A client asks for them explicitly, so a caller
+# that sends no header keeps the published response exactly: a 32-finding page
+# whose findings carry the seven published keys.
+REVIEW_FEATURES_HEADER = "X-WuwaTerm-Review-Features"
+REVIEW_FEATURE_DENSE = "dense-128"
+REVIEW_FEATURE_REASON = "reason-v1"
+REVIEW_FEATURES = frozenset({REVIEW_FEATURE_DENSE, REVIEW_FEATURE_REASON})
+
+
+def _review_features(request: Request, review_version: str) -> frozenset[str]:
+    """Parse the caller's review feature header, failing closed.
+
+    Every header line is read, and each line may hold a comma separated list.
+    The grammar is deliberately exact, and it matches what the shipped web BFF
+    sends, so the two never disagree about what a request asked for:
+    a missing header means no features, and a header that is present must name
+    at least one known token, must not repeat one, and must not contain an
+    empty part. An empty part (a trailing comma or a blank line of its own), a
+    duplicated token or an unknown one is `invalid_request`, because a caller
+    must never be left believing it switched something on. Any header at all on
+    `review-v1` is refused, since that protocol has none of these features.
+    """
+    values = request.headers.getlist(REVIEW_FEATURES_HEADER)
+    if not values:
+        return frozenset()
+    if review_version != "review-v2":
+        raise ApiError(ERROR_INVALID_REQUEST, "review features require review-v2")
+    tokens: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            token = part.strip()
+            if not token:
+                raise ApiError(
+                    ERROR_INVALID_REQUEST, "review feature list has an empty entry"
+                )
+            tokens.append(token)
+    if len(set(tokens)) != len(tokens):
+        raise ApiError(ERROR_INVALID_REQUEST, "review feature is repeated")
+    unknown = set(tokens) - REVIEW_FEATURES
+    if unknown:
+        raise ApiError(ERROR_INVALID_REQUEST, "review feature is not supported")
+    return frozenset(tokens)
 
 
 def _status_response_headers(request: Request) -> dict[str, str]:
@@ -368,6 +413,8 @@ class ReviewRequestBody(BaseModel):
     direction: Literal["en", "zh"] = Field(
         description="Target language of the submitted translation (same meaning as translations.to)."
     )
+    # One resolution per submitted finding is enough for any pair inside the
+    # 2,000-scalar side limit; the ceiling bounds the body, not the protocol.
     resolutions: (
         list[
             OfficialPairResolutionBody
@@ -375,7 +422,7 @@ class ReviewRequestBody(BaseModel):
             | NotATermResolutionBody
         ]
         | None
-    ) = None
+    ) = Field(default=None, max_length=128)
     alignments: list[ReviewAlignmentBody] | None = Field(default=None, max_length=64)
     resolution_context: ReviewResolutionContextBody | None = None
 
@@ -1933,7 +1980,15 @@ def _register_routes(app: FastAPI) -> None:
         body: ReviewRequestBody,
         device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
     ) -> JSONResponse:
-        """Review a submitted source/target pair against dictionary constraints."""
+        """Review a submitted source/target pair against dictionary constraints.
+
+        `review-v2` callers may opt into additive review features with the
+        `X-WuwaTerm-Review-Features` header, comma separated: `dense-128`
+        raises the finding page from 32 to 128 (still bounded by the 64 KiB
+        JSON ceiling), and `reason-v1` adds a `reason` to each `not_evaluated`
+        finding. Without the header the response is byte-identical to the
+        published 32-finding, seven-key document.
+        """
         await _require_active_device(request, device)
         matcher_basis = request.headers.get("X-WuwaTerm-Matcher-Basis")
         use_matcher_basis = body.review_version == "review-v2" and matcher_basis == "1"
@@ -1941,6 +1996,7 @@ def _register_routes(app: FastAPI) -> None:
             raise ApiError(
                 ERROR_INVALID_REQUEST, "matcher basis capability is not valid"
             )
+        features = _review_features(request, body.review_version)
         resolutions = []
         for item in body.resolutions or ():
             dumped = item.model_dump()
@@ -1975,7 +2031,16 @@ def _register_routes(app: FastAPI) -> None:
             )
         except ReviewRequestError as exc:
             raise ApiError(exc.code, exc.message)
-        projected = project_review_report(report, _request_id(request))
+        projected = project_review_report(
+            report,
+            _request_id(request),
+            max_findings=(
+                REVIEW_DENSE_MAX_FINDINGS
+                if REVIEW_FEATURE_DENSE in features
+                else REVIEW_MAX_FINDINGS
+            ),
+            include_reason=REVIEW_FEATURE_REASON in features,
+        )
         if not use_matcher_basis:
             projected.pop("matcher_revision", None)
         LOGGER.info(
@@ -1986,7 +2051,12 @@ def _register_routes(app: FastAPI) -> None:
             _request_id(request),
         )
         await _require_active_device(request, device, serve_on_store_error=True)
-        return JSONResponse(content=projected)
+        headers = (
+            {"X-WuwaTerm-Review-Features": ",".join(sorted(features))}
+            if features
+            else None
+        )
+        return JSONResponse(content=projected, headers=headers)
 
     @app.get(
         f"{prefix}/capabilities",

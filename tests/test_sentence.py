@@ -1591,6 +1591,32 @@ def test_skipped_single_character_name_is_still_offered_as_a_reference(
     assert ("椿", "椿", "Camellya", "resonator") in locked.references
 
 
+@pytest.mark.parametrize(
+    "text", ["心·蕾", "释放「椿·蕾」", "红·椿", "红·椿绽放"]
+)
+def test_middle_dot_compound_is_never_a_name(single_name_db, text):
+    # matcher v8 closes both boundaries at a middle dot. The deterministic path
+    # must not lock the character and the model path must not reference it:
+    # one half of 红·椿 or 椿·蕾 is not the standalone name.
+    if "心" in text:
+        with connect(single_name_db) as conn:
+            insert_records(
+                conn,
+                [TermRecord("resonator", "fixture", "5", "5", "心", "Hsin")],
+            )
+            conn.commit()
+    translator = SentenceTranslator(single_name_db)
+
+    locked = translator.lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+    with_references = translator._lock_terms_with_references(text, to_chinese=False)
+    assert with_references.locks == ()
+    assert with_references.references == ()
+    assert with_references.reference_spans == ()
+
+
 @pytest.mark.parametrize("text", ["香椿加入菜单。", "椿树很高。", "春天的风吹过。"])
 def test_ordinary_plant_words_are_not_offered_as_name_references(
     single_name_db, text
@@ -3013,6 +3039,54 @@ def test_regrouping_restores_only_the_blank_lines_of_the_source_layout(source, a
         assert len(_paragraph_ranges(out)) == len(_paragraph_ranges(source))
         stripped = [[line.strip() for line in text.split("\n") if line.strip()] for text in (out, answer)]
         assert stripped[0] == stripped[1]
+
+
+# MY-359 guards: equal line counts do not prove the answer's line k answers
+# source line k, so two extra cases are refused instead of regrouped.
+@pytest.mark.parametrize(
+    ("source", "answer"),
+    [
+        # One line absorbed its neighbour ("A1 A2") and another split in two
+        # ("B2x" + "B2y"): regrouping would move a real line across the break.
+        ("a1\na2\n\nb1\nb2", "A1 A2\nB1\nB2x\nB2y"),
+        # The paragraph breaks cross: the answer keeps a break the source drops
+        # before dropping one of its own, so no grouping satisfies both.
+        ("a1\na2\n\nb1\nb2", "A1 A2\nB1\n\nB2x\nB2y"),
+    ],
+)
+def test_regrouping_refuses_an_answer_that_no_longer_maps_line_for_line(
+    source, answer
+):
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+def test_regrouping_accepts_a_genuine_line_for_line_answer_with_collapsed_paragraphs():
+    from wuwaterm.sentence import (
+        _paragraph_line_counts,
+        _regroup_lines_into_source_paragraphs,
+    )
+
+    source = (
+        "第一段第一句。\n第一段第二句。\n\n第二段第一句。\n第二段第二句。\n\n第三段。"
+    )
+    # A faithful translation expands every line by roughly the same factor and
+    # keeps a little per-line variation, then drops every blank line.
+    answer = (
+        "The first sentence of the first paragraph.\n"
+        "The second sentence stays short.\n"
+        "The first sentence of the second paragraph.\n"
+        "The second sentence of the second paragraph, a little longer.\n"
+        "The third paragraph."
+    )
+
+    out = _regroup_lines_into_source_paragraphs(source, answer)
+
+    assert _paragraph_line_counts(out) == _paragraph_line_counts(source)
+    assert [line.strip() for line in out.split("\n") if line.strip()] == [
+        line.strip() for line in answer.split("\n") if line.strip()
+    ]
 
 
 def _paragraph_model(monkeypatch, sample_db, answer_for):

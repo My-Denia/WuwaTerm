@@ -104,3 +104,51 @@ tail changes the next request. On the D and R inputs none did: 0 of the 5
 regrouped segments that have a following segment changed its context
 (evidence: the local `downstream_context.py` replay, hashed on MY-231). The
 change is blank lines only.
+
+## Amendment: conservative regrouping guard, 2026-11-19 (MY-359)
+
+The post-check above is unchanged in what it publishes for a dropped blank
+line. Two guards now decide when *not* to regroup, because an answer can keep
+the source's line count and still no longer answer line for line.
+
+- A line whose text merged with its neighbour and another line that split in
+  two produce equal line counts. Grouping such an answer into the source's
+  paragraphs moves real content across a paragraph boundary. The answer is
+  therefore left alone when the two sides' running shares of the text diverge
+  by more than 7.5%, or when a line whose share grew by half (a local peak its
+  source line was not) is followed within six lines by one whose share fell by a
+  third (a local trough its source line was not). Both bounds sit far outside
+  ordinary variation: on synthetic faithful line-by-line answers with ±35%
+  per-line length noise the drift stays under 5% at p99 and neither signal
+  fires, while a merge+split reaches 8% or more. `source = "a1\na2\n\nb1\nb2"`
+  against `answer = "A1 A2\nB1\nB2x\nB2y"` is rejected by that rule.
+- Two layouts whose paragraph breaks cross — one keeps a break the other drops
+  before dropping one of its own — cannot be reconciled by any grouping of the
+  answer's lines, so the answer is left alone too.
+
+Every guard returns the answer byte-identical, so a rejected regrouping can
+only leave the model's own blank lines in place; it never moves text.
+
+Replay (`python scripts/verify_paragraph_regroup.py`), on stored artifacts
+under `goal-runs/`, none of them sealed:
+
+- L4: all 15 stored D-003 answers in
+  `names-critical-batch-20261116/evaluator/*/raw_outputs.json` already have the
+  source's 45 paragraphs and come back byte-identical, and so do the 30 stored
+  R answers in the same tree (their paragraph counts match their source's, or
+  their line counts differ, which the post-check already leaves alone).
+- L2/L3: the stored 31-paragraph and 8-paragraph D-003 answers the frozen
+  criteria describe are not present in this workspace (the recorded runs are
+  `run_failed`, and every stored D-003 answer has 45 paragraphs), so their
+  layout is reproduced from a stored 45-paragraph answer by removing blank
+  lines: 45 lines, 31 and 8 paragraphs. Both regroup to the source's 45
+  paragraphs with the identical line sequence.
+- Guards: the merge+split and crossing-break cases are returned unchanged.
+
+The reproduction is not a stored answer: only the blank-line layout is
+reproduced, from real stored translation text. A future run that stores a
+31-paragraph or 8-paragraph answer should replace the reproduction, and the
+script will pick it up as an L4 case only if it is stored with its own layout.
+The six regrouped R segments recorded in the original criteria table are not in
+this workspace either; the 30 stored R answers here need no regrouping, so the
+replay can only hold them to L4.

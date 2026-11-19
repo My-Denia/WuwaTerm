@@ -819,10 +819,26 @@ def probe_database(service: TermService) -> bool:
 # --------------------------------------------------------------------------
 
 REVIEW_MAX_FINDINGS = 32
+# A dense review asks for the larger page explicitly. It is still bounded by
+# REVIEW_MAX_JSON_BYTES, so a caller cannot turn the expanded page into an
+# unbounded response.
+REVIEW_DENSE_MAX_FINDINGS = 128
 REVIEW_MAX_CANDIDATES = 8
 REVIEW_MAX_SOURCES = 8
 REVIEW_MAX_JSON_BYTES = 65536
 REVIEW_MAX_SIDE_SCALARS = MAX_SIDE_SCALARS
+# The only reasons review-v2 can attach to a not_evaluated finding, as wire
+# literals. A client that opts into reason-v1 receives one of these; every
+# evaluated verdict keeps the seven-key finding shape.
+REVIEW_WIRE_REASONS = frozenset(
+    {
+        "not_a_term",
+        "ordinary_word",
+        "no_target_region",
+        "found_outside_region",
+        "ambiguous_repeat",
+    }
+)
 
 
 def review_pair(
@@ -860,7 +876,9 @@ def _review_span_to_wire(span: object) -> dict[str, object] | None:
     return {"start": span.start, "end": span.end, "text": span.text}
 
 
-def _review_finding_to_wire(finding: object) -> dict[str, object]:
+def _review_finding_to_wire(
+    finding: object, *, include_reason: bool = False
+) -> dict[str, object]:
     candidates_truncated = bool(finding.candidates_truncated)
     wire_candidates: list[dict[str, object]] = []
     if len(finding.candidates) > REVIEW_MAX_CANDIDATES:
@@ -882,7 +900,7 @@ def _review_finding_to_wire(finding: object) -> dict[str, object]:
         if candidate.candidate_id is not None:
             wire_candidate["candidate_id"] = candidate.candidate_id
         wire_candidates.append(wire_candidate)
-    return {
+    finding_body: dict[str, object] = {
         "id": finding.id,
         "verdict": finding.verdict,
         "rule_id": finding.rule_id,
@@ -891,6 +909,13 @@ def _review_finding_to_wire(finding: object) -> dict[str, object]:
         "candidates": wire_candidates,
         "candidates_truncated": candidates_truncated,
     }
+    if (
+        include_reason
+        and finding.verdict == "not_evaluated"
+        and finding.reason in REVIEW_WIRE_REASONS
+    ):
+        finding_body["reason"] = finding.reason
+    return finding_body
 
 
 def _review_json_bytes(body: dict[str, object]) -> bytes:
@@ -1102,15 +1127,27 @@ async def semantic_review_async(
     )
 
 
-def project_review_report(report: ReviewReport, request_id: str) -> dict[str, object]:
-    """Project a review report to the published HTTP exact-key document."""
+def project_review_report(
+    report: ReviewReport,
+    request_id: str,
+    *,
+    max_findings: int = REVIEW_MAX_FINDINGS,
+    include_reason: bool = False,
+) -> dict[str, object]:
+    """Project a review report to the published HTTP exact-key document.
+
+    ``max_findings`` and ``include_reason`` carry the client's opt-in review
+    features: the default page and the seven-key finding stay exactly as
+    published, so a client that sends no feature header cannot observe the
+    larger page or the extra reason key.
+    """
     ordered = sorted(
         report.findings,
         key=lambda item: (item.source_span.start, -item.source_span.end, item.id),
     )
     truncated = bool(report.truncated)
-    if len(ordered) > REVIEW_MAX_FINDINGS:
-        ordered = ordered[:REVIEW_MAX_FINDINGS]
+    if len(ordered) > max_findings:
+        ordered = ordered[:max_findings]
         truncated = True
     dictionary: dict[str, object] = {
         "schema_version": report.dictionary.schema_version,
@@ -1135,7 +1172,10 @@ def project_review_report(report: ReviewReport, request_id: str) -> dict[str, ob
             "not_evaluated": report.coverage.not_evaluated,
             "rules": list(report.coverage.rules),
         },
-        "findings": [_review_finding_to_wire(item) for item in ordered],
+        "findings": [
+            _review_finding_to_wire(item, include_reason=include_reason)
+            for item in ordered
+        ],
         "truncated": truncated,
     }
     while len(_review_json_bytes(body)) > REVIEW_MAX_JSON_BYTES:
