@@ -49,8 +49,10 @@ VERDICT_VERIFIED = "verified_constraint"
 VERDICT_CONFLICT = "confirmed_conflict"
 VERDICT_NEEDS_REVIEW = "needs_review"
 VERDICT_NOT_EVALUATED = "not_evaluated"
-# Why review-v2 left a mention unassessed. Internal: the HTTP projection does
-# not carry it, because both clients reject unknown finding keys.
+# Why review-v2 left a mention unassessed. The default HTTP projection does
+# not carry it, because both clients reject unknown finding keys; it appears on
+# the wire only when the request enables the ``reason-v1``
+# ``X-WuwaTerm-Review-Features`` capability, and is omitted otherwise.
 REASON_NOT_A_TERM = "not_a_term"
 REASON_ORDINARY_WORD = "ordinary_word"
 REASON_NO_TARGET_REGION = "no_target_region"
@@ -644,6 +646,13 @@ def _sentence_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def _is_sentence_end_v2(text: str, index: int) -> bool:
+    """segmentation-v1 sentence end: only a decimal dot is not a break.
+
+    This is the boundary the published contract pins (docs/segmentation-v1.md)
+    and ``segmentation`` imports it through ``_sentence_ranges_v2``, so it
+    stays exactly the spec rule. The review-only list-label rule is a separate
+    predicate (``_is_review_sentence_end_v2``) that never reaches this one.
+    """
     char = text[index]
     if not _SENTENCE_END.match(char):
         return False
@@ -655,9 +664,18 @@ def _is_sentence_end_v2(text: str, index: int) -> bool:
         and text[index + 1].isdigit()
     ):
         return False
-    if char in {".", "．"} and _is_list_marker_dot(text, index):
-        return False
     return True
+
+
+def _is_review_sentence_end_v2(text: str, index: int) -> bool:
+    """Review-v2 sentence end: a list label is not a break either.
+
+    Only the review's own sentence pairing uses this predicate; the shared
+    segmentation-v1 boundary keeps ``_is_sentence_end_v2``.
+    """
+    if not _is_sentence_end_v2(text, index):
+        return False
+    return not (text[index] in {".", "．"} and _is_list_marker_dot(text, index))
 
 
 def _is_list_marker_dot(text: str, index: int) -> bool:
@@ -693,16 +711,22 @@ def _is_list_marker_dot(text: str, index: int) -> bool:
     return before[-1] in "。．！？!?."
 
 
-def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
-    """V2 sentence ranges, keeping decimal punctuation inside a sentence."""
+def _scan_sentence_ranges_v2(
+    text: str, is_end: Callable[[str, int], bool]
+) -> list[tuple[int, int]]:
+    """Cut ``text`` at the scalar a sentence-end predicate accepts.
+
+    One loop for both boundaries: the shared segmentation-v1 one and the
+    review's own, which differ only in the predicate.
+    """
     ranges: list[tuple[int, int]] = []
     start = 0
     index = 0
     length = len(text)
     while index < length:
-        if _is_sentence_end_v2(text, index):
+        if is_end(text, index):
             end = index + 1
-            while end < length and _is_sentence_end_v2(text, end):
+            while end < length and is_end(text, end):
                 end += 1
             if start < end and not _separator_only(text, start, end):
                 ranges.append((start, end))
@@ -715,6 +739,21 @@ def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
     if not ranges and text and not _separator_only(text, 0, length):
         ranges.append((0, length))
     return ranges
+
+
+def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
+    """V2 sentence ranges, keeping decimal punctuation inside a sentence.
+
+    These are the segmentation-v1 boundaries, and that rule alone: a list
+    label such as "1." stops a sentence here, because the published contract
+    says so and other repositories consume it.
+    """
+    return _scan_sentence_ranges_v2(text, _is_sentence_end_v2)
+
+
+def _review_sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
+    """Review-v2 sentence ranges: a list label does not end a sentence."""
+    return _scan_sentence_ranges_v2(text, _is_review_sentence_end_v2)
 
 
 # Exactly the scalars of the spec (docs/segmentation-v1.md); str.isspace() has a
@@ -878,8 +917,8 @@ def _paragraph_pairing(
     for (s_lo, s_hi), (t_lo, t_hi) in zip(
         source_paragraphs, target_paragraphs, strict=True
     ):
-        source_sentences = _sentence_ranges_v2(source[s_lo:s_hi])
-        target_sentences = _sentence_ranges_v2(target[t_lo:t_hi])
+        source_sentences = _review_sentence_ranges_v2(source[s_lo:s_hi])
+        target_sentences = _review_sentence_ranges_v2(target[t_lo:t_hi])
         if len(source_sentences) == len(target_sentences):
             for (a, b), (c, d) in zip(
                 source_sentences, target_sentences, strict=True
@@ -1643,7 +1682,7 @@ def _allocate_occurrences(
     candidates: Sequence[Sequence[tuple[int, int]]],
     *,
     budget: int = 20000,
-) -> list[tuple[int, int] | None]:
+) -> list[tuple[int, int] | None] | None:
     """Give each competing mention one span, no two assigned spans overlapping.
 
     Taking the first free span mention by mention is not enough: the official
@@ -1651,12 +1690,13 @@ def _allocate_occurrences(
     interleave, so a left-to-right sweep can spend the span the next mention
     needs while a compatible assignment exists. The search therefore tries
     the mentions most constrained first (fewest candidate spans) and
-    backtracks until every mention is placed. The node budget bounds the
-    worst case: exhausting it returns ``None``, and every caller then credits
-    no span at all, so a pathological region degrades to an unassessed entry
-    instead of a long request or an invented owner. A search that finishes
-    inside the budget without a complete assignment returns the largest
-    partial one, whose assigned spans still never overlap.
+    backtracks until every mention is placed, leaving a mention unassigned
+    when none of its spans is free. The node budget bounds the worst case:
+    exhausting it returns ``None``, and every caller then credits no span at
+    all, so a pathological region degrades to an unassessed entry instead of
+    a long request or an invented owner. A search that finishes inside the
+    budget without a complete assignment returns the partial one that assigns
+    the most mentions, whose assigned spans still never overlap.
 
     ``candidates[i]`` holds mention i's available spans in reading order.
     """
@@ -1677,11 +1717,18 @@ def _allocate_occurrences(
 
     def place(position: int, count: int) -> bool:
         nonlocal nodes
+        remaining = len(order) - position
+        # Even assigning every mention still to come would not beat the best
+        # partial assignment already recorded, so this subtree cannot matter.
+        if count + remaining <= best[0]:
+            return False
         if count > best[0]:
             best[0] = count
             best[1] = list(assigned)
-        if position == len(order):
-            return True
+        if remaining == 0:
+            # Every position is decided: only placing all of them is the
+            # complete assignment the search is looking for.
+            return count == len(order)
         nodes += 1
         if nodes > budget:
             return False
@@ -1698,11 +1745,15 @@ def _allocate_occurrences(
             taken.pop(slot)
             starts.pop(slot)
             assigned[index] = None
-        return False
+        # No span of this mention is free: keep the mentions already placed
+        # instead of failing the whole assignment, and look for more further
+        # on so the partial assignment is the largest one.
+        return place(position + 1, count)
 
     if not place(0, 0):
         return None if nodes > budget else best[1]
     return assigned
+
 
 def _judge_mention_v2(
     *,
@@ -2091,8 +2142,8 @@ def _review_pair_v2(
         excluded_sources=automatic_exclusions,
     )
     if alignments is None:
-        source_sentences = _sentence_ranges_v2(source)
-        target_sentences = _sentence_ranges_v2(target)
+        source_sentences = _review_sentence_ranges_v2(source)
+        target_sentences = _review_sentence_ranges_v2(target)
         if len(source_sentences) == len(target_sentences):
             mappings = tuple(
                 ReviewAlignment(

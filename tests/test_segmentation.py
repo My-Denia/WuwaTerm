@@ -392,3 +392,28 @@ def test_smaller_limit_parameter_is_honoured():
     segs = segment_text("甲" * 25, 10)
     assert all(s.core_end - s.core_start <= 10 for s in segs)
     assert segs[0].end == 10
+
+
+def test_list_labels_still_end_a_segmentation_sentence():
+    """A numbering dot is a sentence end in segmentation-v1.
+
+    The review engine ignores list labels ("1. ", "I. ") when it pairs
+    sentences, because a translation may number items the source does not.
+    That rule is review-only: ``segment_text`` and ``pair_segments`` are the
+    published segmentation-v1 boundary and other repositories consume them,
+    so their cuts must follow the spec rule alone. Here the label keeps its
+    break, the pieces pack without a hard cut, and the pair is reported as a
+    manual split instead of being cut into two "ready" segments.
+    """
+    text = "Intro. 1. " + "a" * 1798 + "."
+    assert seg._sentence_ranges_v2(text) == [(0, 6), (6, 9), (9, 1809)]
+    assert _spans(segment_text(text, L)) == [
+        (0, 10, 0, 9, False),
+        (10, 1809, 10, 1809, False),
+    ]
+
+    source = "前言。一、" + "甲" * 900 + "。二、" + "乙" * 900 + "。"
+    target = "Intro. I. " + "a" * 900 + ". II. " + "b" * 900 + "."
+    assert _pairs(pair_segments(source, target, L)) == [
+        (seg.STATUS_NEEDS_MANUAL_SPLIT, False, (0, 1809), (0, 1817))
+    ]

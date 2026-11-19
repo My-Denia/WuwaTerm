@@ -33,8 +33,11 @@ from wuwaterm.review import (
     VERDICT_NOT_EVALUATED,
     VERDICT_VERIFIED,
     ReviewRequestError,
+    _allocate_occurrences,
     _collect_mentions,
+    _matching_size,
     _paragraph_ranges,
+    _review_sentence_ranges_v2,
     _sentence_ranges,
     _sentence_ranges_v2,
     _surface_index,
@@ -157,6 +160,43 @@ def test_frozen_single_region_oracles(
         for item in findings
         if item.target_span is not None
     ] == target_spans
+
+
+def test_partial_assignment_still_assigns_the_most_mentions():
+    # The first two mentions want the same span and the third has its own, so
+    # no assignment places all three. The search must keep the third and drop
+    # one of the competing two, instead of stopping at a single span and
+    # reporting a smaller reachable count than the region allows.
+    assert _allocate_occurrences([[(0, 5)], [(0, 5)], [(10, 15)]]) == [
+        (0, 5),
+        None,
+        (10, 15),
+    ]
+    assert (
+        _matching_size(
+            [
+                frozenset({(0, 5)}),
+                frozenset({(0, 5)}),
+                frozenset({(10, 15)}),
+            ]
+        )
+        == 2
+    )
+
+
+def test_complete_assignment_and_exhausted_budget():
+    assert _allocate_occurrences([[(0, 5)], [(5, 10)]]) == [(0, 5), (5, 10)]
+    # Exhausting the node budget reports the region as too big to assess, so
+    # every caller credits no span at all.
+    assert _allocate_occurrences([[(0, 1)]], budget=0) is None
+
+
+def test_partial_assignment_keeps_spans_disjoint():
+    assigned = _allocate_occurrences([[(0, 5), (5, 10)], [(0, 5)]], budget=20000)
+    taken = [span for span in assigned if span is not None]
+    assert len(taken) == 2
+    (a, b), (c, d) = taken[0], taken[1]
+    assert b <= c or d <= a
 
 
 def test_v2_decimal_segmentation_does_not_split_between_digits():
@@ -322,7 +362,9 @@ def _official_pair_for(report, index: int) -> dict[str, object]:
 
 def _differing_counts(source: str, target: str) -> None:
     """The pair reaches paragraph pairing: sentence counts differ."""
-    assert len(_sentence_ranges_v2(source)) != len(_sentence_ranges_v2(target))
+    assert len(_review_sentence_ranges_v2(source)) != len(
+        _review_sentence_ranges_v2(target)
+    )
 
 
 def test_list_markers_no_longer_split_a_sentence(v2_service):
@@ -332,7 +374,11 @@ def test_list_markers_no_longer_split_a_sentence(v2_service):
     # and each mention is credited inside its own sentence.
     source = "一、机制\n\n1. 今汐登场。\n\n声骸出现。"
     target = "I. Mechanics\n\n1. Jinhsi appears.\n\nAn Echo appears."
-    assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target)) == 3
+    assert (
+        len(_review_sentence_ranges_v2(source))
+        == len(_review_sentence_ranges_v2(target))
+        == 3
+    )
     source_paragraphs = _paragraph_ranges(source)
     target_paragraphs = _paragraph_ranges(target)
     assert len(source_paragraphs) == len(target_paragraphs) == 3
@@ -739,7 +785,9 @@ def test_occurrence_matrix(
         assert len(_paragraph_ranges(source)) == len(_paragraph_ranges(target))
         expected = guarded or equal
     else:
-        assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target))
+        assert len(_review_sentence_ranges_v2(source)) == len(
+            _review_sentence_ranges_v2(target)
+        )
 
     report = _pair(service, source, target)
     if actions:

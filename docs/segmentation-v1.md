@@ -58,8 +58,9 @@ with no non-WS scalar has no paragraph regions.
 
 ### Sentence regions
 
-Sentence boundaries are the review-v2 boundaries (`review._sentence_ranges_v2`,
-applied to the core of the region being split): a run of the scalars
+Sentence boundaries are the shared review/segmentation boundaries
+(`review._sentence_ranges_v2`, applied to the core of the region being split):
+a run of the scalars
 `。．.！？!?` and U+000A ends a sentence, except that `.` and `．` do not end
 one when both neighbours are digits (Python `str.isdigit()`; this keeps `3.7`
 inside one sentence). A candidate sentence made only of those ending scalars
@@ -69,6 +70,12 @@ its own; it stays with the sentence before it. That one test uses Python's
 review-v2 rule; every other whitespace test in this document uses WS. The region is cut at the first non-WS
 scalar of every sentence after the first, so WS between sentences stays with
 the previous sentence. A region with a single sentence is not cut.
+
+The review's own sentence pairing ignores one more dot: a list label (`1.`,
+`IV.`) that opens the text, opens a line, or follows an item that already
+ended, because a translation may number items the source does not. That rule
+is review-only and never moves a boundary here, so this contract stays the
+same whatever numbering a translation writes.
 
 ### Natural boundary
 

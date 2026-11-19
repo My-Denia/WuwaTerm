@@ -30,6 +30,7 @@ from wuwaterm.review import (
     VERDICT_NEEDS_REVIEW,
     VERDICT_NOT_EVALUATED,
     VERDICT_VERIFIED,
+    _review_sentence_ranges_v2,
     _sentence_ranges_v2,
     review_pair,
 )
@@ -246,12 +247,12 @@ def test_dismissed_longer_term_stops_reserving_its_span(tmp_path):
     ),
 )
 def test_list_numbering_does_not_split_a_sentence(text):
-    assert len(_sentence_ranges_v2(text)) <= 2
+    assert len(_review_sentence_ranges_v2(text)) <= 2
 
 
 def test_a_sentence_ending_after_a_number_keeps_its_break():
     text = "There are 3. Next comes the Echo."
-    assert len(_sentence_ranges_v2(text)) == 2
+    assert len(_review_sentence_ranges_v2(text)) == 2
 
 
 def test_numbered_items_map_one_sentence_to_one_sentence(tmp_path):
@@ -277,6 +278,31 @@ def test_an_occurrence_outside_its_own_numbered_item_is_not_credited(tmp_path):
     report = _pair(service, source, target)
     assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
     assert [item.reason for item in report.findings] == [REASON_FOUND_OUTSIDE_REGION] * 2
+
+
+def test_the_list_label_rule_stays_inside_the_review(tmp_path):
+    """Ignoring list labels is review-only, not a segmentation-v1 change.
+
+    ``_sentence_ranges_v2`` is the boundary segmentation imports and other
+    repositories consume, so a numbering dot still ends a sentence there.
+    review-v2 pairing keeps ignoring the label, which is what makes items
+    with a marker on one side only still pair one to one.
+    """
+    target = "1. Jinhsi appears. 2. An Echo appears."
+    assert len(_sentence_ranges_v2(target)) == 4
+    assert len(_review_sentence_ranges_v2(target)) == 2
+    assert len(_sentence_ranges_v2("I. Jinhsi appears. II. An Echo appears.")) == 4
+    assert len(_review_sentence_ranges_v2("I. Jinhsi appears. II. An Echo appears.")) == 2
+
+    service = _service(tmp_path)
+    source = "1. 今汐登场。2. 声骸出现。"
+    report = _pair(service, source, target)
+    assert [item.verdict for item in report.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_VERIFIED,
+    ]
+    assert _by_surface(report)["今汐"].target_span.text == "Jinhsi"
+    assert _by_surface(report)["声骸"].target_span.text == "Echo"
 
 
 # --------------------------------------------------------------------------
