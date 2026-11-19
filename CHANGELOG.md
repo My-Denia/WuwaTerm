@@ -20,7 +20,7 @@ does not distribute generated game data or generated SQLite databases.
   too, so a partial assignment is the largest one rather than the first one it
   finds. The CJK matcher input is unchanged and its basis label moves to
   `wuwaterm-cjk-matcher-v8`, because the same request now gives a different
-  report: stored resolution contexts and saved manuscript-v3 segment results
+  report: stored resolution contexts and saved manuscript segment results
   carrying `wuwaterm-cjk-matcher-v7` go stale by the existing freshness rule
   and are re-reviewed (MY-355).
 - The derived name predicates `is_derived_name_entry` and
@@ -70,6 +70,15 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Compatibility and distribution
 
+- The Web and Windows contract pins move to Web `v0.4.0` (`7cfbc4d5`) and
+  Windows `v0.6.0` (`eaceb8bb`), the two clients of the `wuwaterm-manuscript-v4`
+  format: it sends `X-WuwaTerm-Review-Features: dense-128,reason-v1` and stores
+  the 128-finding page with a reason on each not-evaluated finding, which is
+  what this release serves. `contracts/web-ref.txt`, `contracts/windows-ref.txt`,
+  the `split_web_revision` / `split_windows_revision` values in
+  `contracts/ci-source-epochs.json` and the matching assertions in
+  `tests/test_ci_source_epoch.py` carry them together; no Core API version,
+  OpenAPI shape or translation behaviour changes with the pin.
 - Every LLM request byte, term lock and reference list is identical to 0.9.2,
   and the builder and the `terms.db` it produces are unchanged, so an install
   keeps the database it built. The review feature header and the larger body

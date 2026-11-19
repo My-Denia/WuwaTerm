@@ -219,16 +219,17 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries, which #264 moved to the manuscript v3 commits. This
-  preparation keeps those pins. When the Web and Windows commits that consume
-  the dense/reason review contract reach their `main` branches, one final
-  commit moves `contracts/web-ref.txt`, `contracts/windows-ref.txt`, the
-  `split_web_revision` / `split_windows_revision` entries of
-  `contracts/ci-source-epochs.json` and the two revision assertions in
-  `tests/test_ci_source_epoch.py` (lines 128-129) together, because
-  `scripts/ci_source_epoch.py resolve` compares the source's pin blob to that
-  config and fails the release preflight when the two disagree, and that test
-  pins the same two revisions.
+  release carries. `0.10.0` pins Web `v0.4.0`
+  (`7cfbc4d5f9f396688eb0fdf7f05394f78bb2d634`) and Windows `v0.6.0`
+  (`eaceb8bbe847f4db14f227dea274261fa2dc5784`), the two consumers of the
+  `wuwaterm-manuscript-v4` format, which sends
+  `X-WuwaTerm-Review-Features: dense-128,reason-v1` and stores the 128-finding
+  page with its reasons. The `split_web_revision` / `split_windows_revision`
+  values in `contracts/ci-source-epochs.json` and the two assertions in
+  `tests/test_ci_source_epoch.py` (lines 128-129) carry the same revisions,
+  because `scripts/ci_source_epoch.py resolve` compares the source's pin blob
+  to that config and fails the release preflight when the two disagree. A pin
+  move is one commit over all four files.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.3.1 pins the published Core
   `v0.9.1` wheel and is deployed, so the 0.9.1 library reaches Telegram users
