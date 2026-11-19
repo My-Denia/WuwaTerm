@@ -33,8 +33,11 @@ from wuwaterm.review import (
     VERDICT_NOT_EVALUATED,
     VERDICT_VERIFIED,
     ReviewRequestError,
+    _allocate_occurrences,
     _collect_mentions,
+    _matching_size,
     _paragraph_ranges,
+    _review_sentence_ranges_v2,
     _sentence_ranges,
     _sentence_ranges_v2,
     _surface_index,
@@ -159,6 +162,43 @@ def test_frozen_single_region_oracles(
     ] == target_spans
 
 
+def test_partial_assignment_still_assigns_the_most_mentions():
+    # The first two mentions want the same span and the third has its own, so
+    # no assignment places all three. The search must keep the third and drop
+    # one of the competing two, instead of stopping at a single span and
+    # reporting a smaller reachable count than the region allows.
+    assert _allocate_occurrences([[(0, 5)], [(0, 5)], [(10, 15)]]) == [
+        (0, 5),
+        None,
+        (10, 15),
+    ]
+    assert (
+        _matching_size(
+            [
+                frozenset({(0, 5)}),
+                frozenset({(0, 5)}),
+                frozenset({(10, 15)}),
+            ]
+        )
+        == 2
+    )
+
+
+def test_complete_assignment_and_exhausted_budget():
+    assert _allocate_occurrences([[(0, 5)], [(5, 10)]]) == [(0, 5), (5, 10)]
+    # Exhausting the node budget reports the region as too big to assess, so
+    # every caller credits no span at all.
+    assert _allocate_occurrences([[(0, 1)]], budget=0) is None
+
+
+def test_partial_assignment_keeps_spans_disjoint():
+    assigned = _allocate_occurrences([[(0, 5), (5, 10)], [(0, 5)]], budget=20000)
+    taken = [span for span in assigned if span is not None]
+    assert len(taken) == 2
+    (a, b), (c, d) = taken[0], taken[1]
+    assert b <= c or d <= a
+
+
 def test_v2_decimal_segmentation_does_not_split_between_digits():
     text = FROZEN["decimal"]["target"]
     assert len(_sentence_ranges(text)) == 2
@@ -222,17 +262,18 @@ def test_frozen_mismatched_counts_pair_the_single_paragraph(
 
 
 def test_frozen_repeat_shortage_does_not_reuse_target_span(v2_service):
+    # Two 今汐 mentions, one "Jinhsi": the region cannot say which one the
+    # translation means, so neither is credited and neither is blamed. The
+    # previous greedy sweep verified the first and left the second without an
+    # occurrence, which is exactly the reuse item 7 of MY-355 removes.
     report = _v2(v2_service, "repeat-shortage")
     findings = _term_findings(report)
 
-    assert [item.verdict for item in findings] == [
-        VERDICT_VERIFIED,
-        VERDICT_NEEDS_REVIEW,
-    ]
-    assert report.coverage.evaluated == 2
-    assert report.coverage.not_evaluated == 1
-    assert findings[0].target_span is not None
-    assert findings[1].target_span is None
+    assert [item.verdict for item in findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in findings] == [REASON_AMBIGUOUS_REPEAT] * 2
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 3
+    assert all(finding.target_span is None for finding in findings)
 
 
 def test_frozen_swapped_default_regions_do_not_verify_elsewhere(v2_service):
@@ -321,13 +362,23 @@ def _official_pair_for(report, index: int) -> dict[str, object]:
 
 def _differing_counts(source: str, target: str) -> None:
     """The pair reaches paragraph pairing: sentence counts differ."""
-    assert len(_sentence_ranges_v2(source)) != len(_sentence_ranges_v2(target))
+    assert len(_review_sentence_ranges_v2(source)) != len(
+        _review_sentence_ranges_v2(target)
+    )
 
 
-def test_paragraph_pairing_survives_a_list_marker_the_source_lacks(v2_service):
+def test_list_markers_no_longer_split_a_sentence(v2_service):
+    # "1." and "I." are numbering, not sentence ends (matcher v8). Ignoring
+    # them keeps the sentence counts equal, so every paragraph pair maps one
+    # sentence to one sentence instead of falling back to a paragraph guard,
+    # and each mention is credited inside its own sentence.
     source = "一、机制\n\n1. 今汐登场。\n\n声骸出现。"
     target = "I. Mechanics\n\n1. Jinhsi appears.\n\nAn Echo appears."
-    _differing_counts(source, target)
+    assert (
+        len(_review_sentence_ranges_v2(source))
+        == len(_review_sentence_ranges_v2(target))
+        == 3
+    )
     source_paragraphs = _paragraph_ranges(source)
     target_paragraphs = _paragraph_ranges(target)
     assert len(source_paragraphs) == len(target_paragraphs) == 3
@@ -350,7 +401,12 @@ def test_paragraph_pairing_survives_a_list_marker_the_source_lacks(v2_service):
     ("source", "target"),
     (
         # Strict region pairs: the sentence counts agree inside each paragraph.
-        ("一、机制\n\n今汐登场。\n\n声骸出现。", "I. Mechanics\n\nAn Echo appears.\n\nJinhsi appears."),
+        # The extra 机制。 sentence keeps the totals different; the list markers
+        # alone no longer do, because a numbering dot is not a sentence end.
+        (
+            "一、机制\n\n今汐登场。\n\n声骸出现。机制。",
+            "I. Mechanics\n\nAn Echo appears.\n\nJinhsi appears.",
+        ),
         # The first paragraph pair is guarded, its form is in the other paragraph.
         ("今汐登场。\n\n声骸出现。", "An Echo appears. Truly.\n\nJinhsi appears."),
     ),
@@ -396,12 +452,13 @@ def test_guarded_paragraph_with_fewer_occurrences_than_mentions_is_ambiguous(v2_
     assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
     assert [item.reason for item in resolved.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
 
-    # The same shortage inside agreeing sentence counts keeps its old verdicts.
+    # A shortage inside agreeing sentence counts is the same shortage: the two
+    # 今汐 mentions claim one "Jinhsi", so neither is credited. This used to
+    # credit the first mention because the greedy sweep reached it first, which
+    # is the attribution item 7 of MY-355 fixes.
     equal = _v2(v2_service, "repeat-shortage")
-    assert [item.verdict for item in equal.findings] == [
-        VERDICT_VERIFIED,
-        VERDICT_NEEDS_REVIEW,
-    ]
+    assert [item.verdict for item in equal.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in equal.findings] == [REASON_AMBIGUOUS_REPEAT] * 2
 
 
 def test_guarded_mentions_compete_for_an_inflected_occurrence(tmp_path):
@@ -420,10 +477,13 @@ def test_guarded_mentions_compete_for_an_inflected_occurrence(tmp_path):
     resolved = _pair(service, source, target, **_official_pair_for(report, 1))
     assert [item.verdict for item in resolved.findings] == [VERDICT_NOT_EVALUATED] * 2
 
-    # 今汐 can take only "Echoes", which 声骸 may also take: the whole group
-    # stays unassessed rather than crediting 声骸 with 今汐's occurrence.
+    # 今汐 can take only "Echoes", which 声骸 may also take. Two distinct spans
+    # exist, so both are credited on their own occurrence: a compatible
+    # assignment is preferred over marking the whole group ambiguous (MY-355
+    # item 7b).
     report = _pair(service, source, "Echoes and an Echo. Indeed.")
-    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.verdict for item in report.findings] == [VERDICT_VERIFIED] * 2
+    assert {item.target_span.text for item in report.findings} == {"Echoes", "Echo"}
 
     # Each mention can take two spans: both are credited, on distinct spans.
     report = _pair(service, source, "Echoes and Echoes. Indeed.")
@@ -454,8 +514,11 @@ _OCCURRENCE_CASES = (
         "inflection competes",
         "回响与声骸。",
         "Echoes.",
-        # Equal counts keep the positional greedy of repeat-shortage.
-        [(_V, "Echoes"), (_NR, None)],
+        # One span, two claims: "Echoes" is 回响's exact form and 声骸's plural.
+        # A region that cannot tell them apart credits neither, on every
+        # mapping path; before MY-355 item 7 the equal-count path verified
+        # whichever mention the greedy sweep reached first.
+        [_AMBIGUOUS, _AMBIGUOUS],
         [_AMBIGUOUS, _AMBIGUOUS],
     ),
     (
@@ -483,7 +546,9 @@ _OCCURRENCE_CASES = (
         "repeated, one occurrence",
         "今汐与今汐。",
         "Jinhsi.",
-        [(_V, "Jinhsi"), (_NR, None)],
+        # Same shortage in agreeing sentence counts: ambiguous, not a greedy
+        # first-mention win.
+        [_AMBIGUOUS, _AMBIGUOUS],
         [_AMBIGUOUS, _AMBIGUOUS],
     ),
     (
@@ -580,7 +645,10 @@ _RESOLUTION_STRUCTURES = (
         {
             "unresolved": [_C, (_V, "Echo Set")],
             "selected Echo Set": [_C, (_V, "Echo Set")],
-            "selected Starlight": [(_V, "Echo"), _C],
+            # 星辉 resolved as Starlight while the target spells the longer
+            # official form "Echo Set": the inner "Echo" is not a standalone
+            # 声骸 hit whatever the shorter mention resolved to (MY-355 item 2).
+            "selected Starlight": [(_NR, None), _C],
             "dismissed": [(_V, "Echo"), _NA],
             "excluded": [(_V, "Echo"), _ORDINARY],
         },
@@ -707,12 +775,19 @@ def test_occurrence_matrix(
     service = _matrix_service(tmp_path, excluded)
     expected = equal
     if path == "guarded":
-        source, target = "一、" + source, "I. " + target
+        # A paragraph guard needs genuinely different sentence counts. The
+        # list markers used here used not to count as sentence ends, so
+        # prefixing them was enough; matcher v8 ignores a numbering dot, so the
+        # source gains one extra sentence instead and the target keeps the
+        # markers only as text.
+        source, target = "一、" + source + "机制。", "I. " + target
         _differing_counts(source, target)
         assert len(_paragraph_ranges(source)) == len(_paragraph_ranges(target))
         expected = guarded or equal
     else:
-        assert len(_sentence_ranges_v2(source)) == len(_sentence_ranges_v2(target))
+        assert len(_review_sentence_ranges_v2(source)) == len(
+            _review_sentence_ranges_v2(target)
+        )
 
     report = _pair(service, source, target)
     if actions:
@@ -1202,7 +1277,9 @@ def test_frozen_before_after_measurement(v2_service):
     assert matrix["swapped"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 0
     assert matrix["unmatched"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 0
     assert matrix["omitted-map"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 1
-    assert matrix["repeat-shortage"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 1
+    # A shortage credits nobody: the two 今汐 mentions cannot both answer the
+    # one "Jinhsi", so neither is verified (MY-355 item 7).
+    assert matrix["repeat-shortage"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 0
 
     print("FROZEN_REVIEW_METRICS=" + json.dumps(matrix, ensure_ascii=False, sort_keys=True))
 
@@ -1424,16 +1501,13 @@ def test_review_v2_repeated_term_does_not_reuse_cross_word_span(sample_db):
     )
     echoes = [item for item in report.findings if item.source_span.text == "Echo"]
     assert len(echoes) == 2
-    first, second = echoes
-    assert first.verdict == VERDICT_VERIFIED
-    assert first.target_span is not None
-    assert (first.target_span.start, first.target_span.end, first.target_span.text) == (
-        0,
-        2,
-        "声骸",
-    )
-    assert second.verdict == VERDICT_NEEDS_REVIEW
-    assert second.target_span is None
+    # The cross-word occurrence inside 回声骸骨 never counts, so both mentions
+    # claim the one real 声骸. A region that cannot say which mention it answers
+    # credits neither, on every mapping path (MY-355 item 7). Before that rule
+    # the first mention was verified because the greedy sweep reached it first.
+    assert [item.verdict for item in echoes] == [VERDICT_NOT_EVALUATED] * 2
+    assert [item.reason for item in echoes] == [REASON_AMBIGUOUS_REPEAT] * 2
+    assert all(item.target_span is None for item in echoes)
 
 
 @pytest.mark.parametrize(

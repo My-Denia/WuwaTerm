@@ -458,9 +458,10 @@ def test_excluded_official_pair_with_stale_candidate_id_is_rejected(excluded_ser
 
 
 def test_repeated_explicit_selections_do_not_reuse_the_target_span(excluded_service):
-    # Both "Tea" mentions are explicitly selected; the target holds one valid
-    # occurrence, so exactly one verifies and the other conflicts without
-    # reusing the span.
+    # Both "Tea" mentions are explicitly selected and the target holds one valid
+    # occurrence. Neither may take it: a selected pair does not lift the
+    # shortage guard, so the region that cannot place both mentions leaves them
+    # unassessed instead of reusing the span (MY-355 item 7).
     source, target = "Tea and Tea.", "Tea is here."
     baseline = _v2(excluded_service, source, target, "en")
     candidate = baseline.findings[0].candidates[0]
@@ -475,15 +476,8 @@ def test_repeated_explicit_selections_do_not_reuse_the_target_span(excluded_serv
         resolutions=resolutions,
         resolution_context=_context(baseline, source),
     )
-    assert [f.verdict for f in report.findings] == [VERDICT_VERIFIED, VERDICT_CONFLICT]
-    first, second = report.findings
-    assert (first.target_span.start, first.target_span.end, first.target_span.text) == (
-        0,
-        3,
-        "Tea",
-    )
-    assert second.target_span is None
-    assert second.target_span is not first.target_span
+    assert [f.verdict for f in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert all(f.target_span is None for f in report.findings)
 
 
 def test_nonexcluded_controls_keep_the_existing_automatic_verdicts(excluded_service):
@@ -495,10 +489,12 @@ def test_nonexcluded_controls_keep_the_existing_automatic_verdicts(excluded_serv
         "Jinhsi",
     )
 
-    # Repeated control with a short target keeps verified + needs_review.
+    # Repeated control with a short target: one "Jinhsi" for two mentions, so
+    # neither is credited (MY-355 item 7). Before that rule the first mention
+    # won it, purely from the order of the sweep.
     report = _v2(excluded_service, "今汐与今汐。", "Jinhsi.", "en")
-    assert [f.verdict for f in report.findings] == [VERDICT_VERIFIED, VERDICT_NEEDS_REVIEW]
-    assert report.findings[1].target_span is None
+    assert [f.verdict for f in report.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert all(f.target_span is None for f in report.findings)
 
     # A nonexcluded formless target keeps needs_review: no new false pass.
     report = _v2(excluded_service, "茶汤很好。", "Nothing relevant.", "en")
@@ -634,16 +630,12 @@ def test_gated_finding_reserves_no_target_span(excluded_service, plain_service):
         "Tea",
     )
 
-    # Without the metadata the excluded mention claims the span first and the
-    # shared-form control is left unassessed — the pre-F10 allocation.
+    # Without the metadata both mentions assert the same form and compete for
+    # the one span, so the region cannot credit either (MY-355 item 7). The
+    # exclusion metadata is therefore what decides this case, not scan order.
     plain = _v2(plain_service, source, target, "en")
-    assert plain.findings[0].verdict == VERDICT_VERIFIED
-    assert (plain.findings[0].target_span.start, plain.findings[0].target_span.text) == (
-        0,
-        "Tea",
-    )
-    assert plain.findings[1].verdict == VERDICT_NEEDS_REVIEW
-    assert plain.findings[1].target_span is None
+    assert [f.verdict for f in plain.findings] == [VERDICT_NOT_EVALUATED] * 2
+    assert all(f.target_span is None for f in plain.findings)
 
 
 def test_v1_findings_are_unchanged_by_exclusion_metadata(excluded_service, plain_service):

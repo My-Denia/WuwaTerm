@@ -3015,6 +3015,76 @@ def test_regrouping_restores_only_the_blank_lines_of_the_source_layout(source, a
         assert stripped[0] == stripped[1]
 
 
+# MY-359 guards: equal line counts do not prove the answer's line k answers
+# source line k, so these cases are refused instead of regrouped.
+@pytest.mark.parametrize(
+    ("source", "answer"),
+    [
+        # One line absorbed its neighbour ("A1 A2") and another split in two
+        # ("B2x" + "B2y"): regrouping would move a real line across the break.
+        ("a1\na2\n\nb1\nb2", "A1 A2\nB1\nB2x\nB2y"),
+        # The paragraph breaks cross: the answer keeps a break the source drops
+        # before dropping one of its own, so no grouping satisfies both.
+        ("a1\na2\n\nb1\nb2", "A1 A2\nB1\n\nB2x\nB2y"),
+    ],
+)
+def test_regrouping_refuses_an_answer_that_no_longer_maps_line_for_line(
+    source, answer
+):
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+def test_regrouping_refuses_layouts_whose_paragraph_breaks_cross():
+    # Three source paragraphs against two answer paragraphs of unequal size:
+    # the line counts already differ in which side each break falls on
+    # (source cuts at 1 and 3, answer cuts at 2), so no grouping of the
+    # answer's four lines reproduces the source's paragraph cuts.
+    from wuwaterm.sentence import (
+        _cumulative_cuts,
+        _paragraph_line_counts,
+        _regroup_lines_into_source_paragraphs,
+    )
+
+    source = "a1\n\na2\na3\n\nb1"
+    answer = "A1\nA2\n\nA3\nB1"
+
+    source_cuts = _cumulative_cuts(_paragraph_line_counts(source))
+    answer_cuts = _cumulative_cuts(_paragraph_line_counts(answer))
+    assert source_cuts == frozenset({1, 3})
+    assert answer_cuts == frozenset({2})
+    assert not (answer_cuts <= source_cuts or source_cuts <= answer_cuts)
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+def test_regrouping_accepts_a_genuine_line_for_line_answer_with_collapsed_paragraphs():
+    from wuwaterm.sentence import (
+        _paragraph_line_counts,
+        _regroup_lines_into_source_paragraphs,
+    )
+
+    source = (
+        "第一段第一句。\n第一段第二句。\n\n第二段第一句。\n第二段第二句。\n\n第三段。"
+    )
+    # A faithful translation expands every line by roughly the same factor and
+    # keeps a little per-line variation, then drops every blank line.
+    answer = (
+        "The first sentence of the first paragraph.\n"
+        "The second sentence stays short.\n"
+        "The first sentence of the second paragraph.\n"
+        "The second sentence of the second paragraph, a little longer.\n"
+        "The third paragraph."
+    )
+
+    out = _regroup_lines_into_source_paragraphs(source, answer)
+
+    assert _paragraph_line_counts(out) == _paragraph_line_counts(source)
+    assert [line.strip() for line in out.split("\n") if line.strip()] == [
+        line.strip() for line in answer.split("\n") if line.strip()
+    ]
+
+
 def _paragraph_model(monkeypatch, sample_db, answer_for):
     """A translator whose mock model answers ``answer_for(sent text)``."""
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")

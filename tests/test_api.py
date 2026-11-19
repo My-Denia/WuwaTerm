@@ -1540,7 +1540,9 @@ API_NUMERIC_SETTING_CASES = (
     (
         "WUWATERM_API_MAX_BODY_BYTES",
         "max_body_bytes",
-        32 * 1024,
+        # MY-356: 64 KiB carries a full 2,000-scalar review pair with its
+        # resolutions, which the previous 32 KiB ceiling truncated.
+        64 * 1024,
         ("64", 64),
         (str(1024 * 1024), 1024 * 1024),
         ("SENSITIVE_RAW_DO_NOT_ECHO", "63", str(1024 * 1024 + 1)),
@@ -3972,3 +3974,291 @@ def test_translation_retains_final_device_recheck_policy(
     assert response.status_code == expected
     assert len(calls) == 1
     assert app.state.llm_budget.in_window() == 1
+
+
+# --------------------------------------------------------------------------
+# Review features (MY-356): dense page and finding reasons
+# --------------------------------------------------------------------------
+
+
+def _many_mentions(count: int) -> tuple[str, str]:
+    """A pair whose review produces ``count`` findings for one mention each."""
+    return "今汐，" * count, "Jinhsi, " * count
+
+
+def _review_call(app, token, source, target, *, version="review-v2", features=None):
+    headers = {**bearer(token)}
+    if version == "review-v2":
+        headers["X-WuwaTerm-Matcher-Basis"] = "1"
+    if features is not None:
+        headers["X-WuwaTerm-Review-Features"] = features
+    return run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": version,
+                "source": source,
+                "target": target,
+                "direction": "en",
+            },
+            headers=headers,
+        )
+    )
+
+
+def test_review_dense_128_page_is_opt_in(tmp_path, sample_db):
+    source, target = _many_mentions(40)
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    _, token = issue_device(store, "owner desktop")
+
+    default = _review_call(app, token, source, target)
+    assert default.status_code == 200, default.text
+    assert len(default.json()["findings"]) == 32
+    assert default.json()["truncated"] is True
+    assert "X-WuwaTerm-Review-Features" not in default.headers
+
+    dense = _review_call(app, token, source, target, features="dense-128")
+    assert dense.status_code == 200, dense.text
+    body = dense.json()
+    assert len(body["findings"]) == 40
+    assert body["truncated"] is False
+    assert dense.headers["X-WuwaTerm-Review-Features"] == "dense-128"
+
+
+def test_review_reason_v1_adds_reason_only_to_unassessed_findings(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    ambiguous = _review_call(
+        app, token, "今汐与今汐。", "Jinhsi.", features="reason-v1"
+    )
+    assert ambiguous.status_code == 200, ambiguous.text
+    findings = ambiguous.json()["findings"]
+    assert [item["verdict"] for item in findings] == ["not_evaluated"] * 2
+    assert [item["reason"] for item in findings] == ["ambiguous_repeat"] * 2
+
+    verified = _review_call(app, token, "今汐。", "Jinhsi.", features="reason-v1")
+    assert verified.status_code == 200, verified.text
+    finding = verified.json()["findings"][0]
+    assert finding["verdict"] == "verified_constraint"
+    assert set(finding) == {
+        "candidates",
+        "candidates_truncated",
+        "id",
+        "rule_id",
+        "source_span",
+        "target_span",
+        "verdict",
+    }
+
+
+def test_review_reason_is_absent_without_the_header(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(app, token, "今汐与今汐。", "Jinhsi.")
+
+    assert response.status_code == 200, response.text
+    for finding in response.json()["findings"]:
+        assert "reason" not in finding
+
+
+def test_review_feature_header_echoes_sorted_active_tokens(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(
+        app, token, "今汐。", "Jinhsi.", features="reason-v1, dense-128"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["X-WuwaTerm-Review-Features"] == "dense-128,reason-v1"
+
+
+def test_review_unknown_feature_token_is_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(app, token, "今汐。", "Jinhsi.", features="dense-128,fast")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_feature_header_on_v1_is_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(
+        app, token, "今汐。", "Jinhsi.", version="review-v1", features="reason-v1"
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_absent_feature_header_enables_nothing(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(app, token, "今汐。", "Jinhsi.")
+
+    assert response.status_code == 200, response.text
+    assert "X-WuwaTerm-Review-Features" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "features",
+    ("dense-128,", "reason-v1, ", " , ", "dense-128,,reason-v1"),
+    ids=["trailing-comma", "trailing-space", "blank-list", "empty-entry"],
+)
+def test_review_feature_header_with_an_empty_entry_is_invalid_request(
+    tmp_path, sample_db, features
+):
+    # A present header must name tokens: an empty part is refused rather than
+    # read as "nothing asked for", so no client is left thinking it switched a
+    # feature on that the server quietly ignored.
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(app, token, "今汐。", "Jinhsi.", features=features)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_duplicate_feature_token_is_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = _review_call(
+        app, token, "今汐。", "Jinhsi.", features="dense-128,dense-128"
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_duplicate_token_across_header_lines_is_invalid_request(
+    tmp_path, sample_db,
+):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+            },
+            headers=[
+                ("Authorization", f"Bearer {token}"),
+                ("X-WuwaTerm-Matcher-Basis", "1"),
+                ("X-WuwaTerm-Review-Features", "dense-128"),
+                ("X-WuwaTerm-Review-Features", "dense-128"),
+            ],
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_second_unknown_header_line_is_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+            },
+            headers=[
+                ("Authorization", f"Bearer {token}"),
+                ("X-WuwaTerm-Matcher-Basis", "1"),
+                ("X-WuwaTerm-Review-Features", "dense-128"),
+                ("X-WuwaTerm-Review-Features", "bogus-unknown"),
+            ],
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_two_known_header_lines_are_both_used(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+            },
+            headers=[
+                ("Authorization", f"Bearer {token}"),
+                ("X-WuwaTerm-Matcher-Basis", "1"),
+                ("X-WuwaTerm-Review-Features", "reason-v1"),
+                ("X-WuwaTerm-Review-Features", "dense-128"),
+            ],
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["X-WuwaTerm-Review-Features"] == "dense-128,reason-v1"
+
+
+def test_review_dense_page_stays_within_the_json_ceiling(tmp_path, sample_db):
+    from wuwaterm.db import connect, insert_records
+    from wuwaterm.models import TermRecord
+
+    with connect(sample_db) as conn:
+        extra = []
+        for candidate in range(8):
+            for source_index in range(8):
+                extra.append(
+                    TermRecord(
+                        category="resonator",
+                        source_file=(
+                            "RoleInfoDense.json/" + "N" * 180
+                        )
+                        + f"{candidate}_{source_index}",
+                        source_id=f"RoleInfo_dense_{candidate}_{source_index}_Name",
+                        text_key=f"RoleInfo_dense_{candidate}_{source_index}_Name",
+                        zh="今汐",
+                        en=f"Jinhsi{candidate}",
+                    )
+                )
+        insert_records(conn, extra)
+        conn.commit()
+
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    _, token = issue_device(store, "owner desktop")
+    source, target = _many_mentions(129)
+
+    response = _review_call(app, token, source, target, features="dense-128")
+
+    assert response.status_code == 200, response.text
+    assert len(response.content) <= 65536
+    body = response.json()
+    assert len(body["findings"]) <= 128
+    assert body["truncated"] is True
