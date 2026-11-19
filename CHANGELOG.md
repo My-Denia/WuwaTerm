@@ -3,6 +3,79 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.10.0
+
+### Review
+
+- `review-v2` gives every mapped region its own claim and allocation step. When
+  the occurrences a region holds cannot cover the mentions competing for them,
+  it credits none of those mentions rather than whichever one a sweep reaches
+  first, and an inflection never answers a competing official form. In the
+  review's own sentence pairing a numbering dot (`1.`, `IV.`) no longer ends a
+  sentence; an occurrence enclosed by a longer official form is not a
+  standalone hit for the shorter one unless the source itself claims that
+  longer term; a lowercase spelling of a capitalized official term is an
+  ordinary word; and a derived name surface asserts no constraint.
+  `_allocate_occurrences` searches the leave-this-mention-unassigned branch
+  too, so a partial assignment is the largest one rather than the first one it
+  finds. The CJK matcher input is unchanged and its basis label moves to
+  `wuwaterm-cjk-matcher-v8`, because the same request now gives a different
+  report: stored resolution contexts and saved manuscript-v3 segment results
+  carrying `wuwaterm-cjk-matcher-v7` go stale by the existing freshness rule
+  and are re-reviewed (MY-355).
+- The derived name predicates `is_derived_name_entry` and
+  `derived_reference_only_sources` move from `sentence` to `lookup`, so
+  sentence locking and pair review read one predicate. A derived name's Chinese
+  surface stays a contextual reference and never becomes a placeholder, a
+  derived version title is a reference on both sides, a surface another
+  dictionary row also carries keeps that row's behaviour, and the predicate
+  also recognizes an uncurated `Advertising_VersionTitle_<n>` row, whose
+  builder is a separate change (MY-355).
+- The HTTP API's default request body ceiling
+  (`WUWATERM_API_MAX_BODY_BYTES`) moves from 32 KiB to 64 KiB so dense
+  `/v1/reviews` requests fit. `review-v2` callers opt into two additive features
+  with `X-WuwaTerm-Review-Features`, comma separated: `dense-128` raises the
+  finding page from 32 to 128 and stays bounded by that ceiling, and
+  `reason-v1` adds a `reason` to each `not_evaluated` finding. The grammar is
+  exact: a header that is present must name at least one known token, must not
+  repeat one and must not hold an empty part, and any header on `review-v1` is
+  refused, so an unknown, repeated or empty token is `invalid_request` instead
+  of a caller believing it switched something on. A response that enabled a
+  feature echoes the accepted set in the same header, and a request without the
+  header answers the published 32-finding, seven-key document (MY-356).
+- `segmentation-v1` keeps the boundary it publishes. The list-label rule the
+  review needs lives in review-v2's own pairing predicate instead, so
+  `segment_text` and `pair_segments` still end a sentence at a `1.`-style
+  numbering dot exactly as `docs/segmentation-v1.md` pins it: a long numbered
+  region splits cleanly between its sentences rather than being forced into a
+  mid-word hard cut. review-v2's own sentence pairing ignores list-item
+  markers, so attribution does not shift by one when a translation numbers
+  items the source does not (MY-355).
+
+### Translation
+
+- Paragraph regrouping of a context-mode answer into the source's paragraphs
+  now refuses two layouts instead of rewriting the blank lines. A layout whose
+  paragraph breaks cross the source's — where one side keeps a break that the
+  other drops before dropping one of its own — is left alone, because no
+  grouping of the answer's lines keeps both sides' paragraphs; and an answer
+  whose line shares show a merge plus a split, detected from the running share
+  of the text and from a line that grew by half within six lines of one that
+  fell by a third, is left alone too, because those lines no longer answer
+  their own source lines. A refused answer keeps the model's own blank lines,
+  because a rejected regrouping returns the answer unchanged. The criteria were
+  frozen in `docs/eval/paragraph-layout-criteria.md` first, and
+  `scripts/verify_paragraph_regroup.py` replays them against the stored D-003
+  answers (MY-359).
+
+### Compatibility and distribution
+
+- Every LLM request byte, term lock and reference list is identical to 0.9.2,
+  and the builder and the `terms.db` it produces are unchanged, so an install
+  keeps the database it built. The review feature header and the larger body
+  ceiling are additive on the wire, and the matcher basis label is the one
+  stored value that changes.
+
 ## 0.9.2
 
 ### Provider Compatibility

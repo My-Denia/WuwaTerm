@@ -12,7 +12,18 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.9.2`, a maintenance
+  published tag. The current source version is `0.10.0`, a review and
+  translation release on top of `v0.9.2`: `review-v2` gives every mapped region
+  its own claim and allocation step, answers a numbering dot only in its own
+  sentence pairing, keeps an inflection from answering a competing official
+  form, refuses a shorter form enclosed by a longer official form the source
+  does not claim, treats a lowercase spelling of a capitalized official term as
+  an ordinary word and asserts no constraint from a derived name surface, with
+  the matcher basis label moving to `wuwaterm-cjk-matcher-v8`;
+  `POST /v1/reviews` accepts a 64 KiB body and `review-v2` callers may send
+  `X-WuwaTerm-Review-Features: dense-128,reason-v1`; and regrouping a
+  context-mode answer refuses a crossing paragraph break and a merge-plus-split
+  line layout. The latest published Core release is `v0.9.2`, a maintenance
   release on top of `v0.9.1`: an HTTP 400 whose `error` object carries
   `code: "unsupported_parameter"` and `param` equal to `thinking` or
   `reasoning_effort` now reports `unsupported_thinking` or
@@ -208,8 +219,16 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries, which #264 moved to the manuscript v3 commits; this
-  checklist does not move them again.
+  release carries, which #264 moved to the manuscript v3 commits. This
+  preparation keeps those pins. When the Web and Windows commits that consume
+  the dense/reason review contract reach their `main` branches, one final
+  commit moves `contracts/web-ref.txt`, `contracts/windows-ref.txt`, the
+  `split_web_revision` / `split_windows_revision` entries of
+  `contracts/ci-source-epochs.json` and the two revision assertions in
+  `tests/test_ci_source_epoch.py` (lines 128-129) together, because
+  `scripts/ci_source_epoch.py resolve` compares the source's pin blob to that
+  config and fails the release preflight when the two disagree, and that test
+  pins the same two revisions.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.3.1 pins the published Core
   `v0.9.1` wheel and is deployed, so the 0.9.1 library reaches Telegram users
@@ -249,8 +268,9 @@ The installer and Web checks from 0.7.x still apply to this release:
   resonator and speaker names, which take the plural only. Without alignments,
   a pair whose sentence counts differ but whose paragraph counts match is still
   judged paragraph by paragraph instead of being left unassessed. The canonical
-  matcher label is `wuwaterm-cjk-matcher-v7`, so resolution contexts carrying
-  the older hash are stale by design, not by accident.
+  matcher label is `wuwaterm-cjk-matcher-v8` with the v7 matcher functions and
+  lexicon slice, so resolution contexts carrying an older hash, `v7` included,
+  are stale by design, not by accident.
 - `docs/self-hosting.md`'s backup and restore steps still match what
   `./deploy/setup.sh --with-web` writes under `state-web/`.
 - `docs/api/openapi.json` matches the generated document after the version and
