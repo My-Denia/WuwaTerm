@@ -165,13 +165,20 @@ def _rows(counts: list[int]) -> str:
 
 
 def _two_paragraph_source(
-    rows: int, scalars: int = 41, long_row: int | None = None
+    rows: int,
+    scalars: int = 41,
+    long_row: int | None = None,
+    counts: list[int] | None = None,
 ) -> tuple[str, list[int]]:
-    """``rows`` equal source lines in two paragraphs, one row optionally long."""
-    counts = [scalars] * rows
-    if long_row is not None:
-        counts[long_row] = scalars * 3
-    half = rows // 2
+    """``rows`` source lines in two paragraphs, one row optionally long.
+
+    Pass ``counts`` to give the lines themselves rather than ``scalars``.
+    """
+    if counts is None:
+        counts = [scalars] * rows
+        if long_row is not None:
+            counts[long_row] = scalars * 3
+    half = len(counts) // 2
     return f"{_rows(counts[:half])}\n\n{_rows(counts[half:])}", counts
 
 
@@ -247,6 +254,34 @@ def _counterexamples() -> list[tuple[str, str, str]]:
                 _merged_and_split_answer(counts, rows - 2, 0),
             )
         )
+    # PR #282 review: a merge of two unequal lines. The absorbed line is three
+    # quarters of the absorber's length, so the merged line holds 1.75 lines'
+    # worth, and a 20% noise draw that comes out short leaves it at 1.42 - under
+    # 1.5, so the 2026-11-20 guard as first published regrouped these answers
+    # and moved source line 3 into the first paragraph.
+    reported = [40, 30, 30, 30]
+    reported_source, _ = _two_paragraph_source(len(reported), counts=reported)
+    cases.append(
+        (
+            "4 lines, merge a line three quarters as long + split last",
+            reported_source,
+            _rows([56, 36, 18, 18]),
+        )
+    )
+    for rows in (20, 40):
+        uneven = [40, 30] + [30] * (rows - 2)
+        uneven_source, uneven_counts = _two_paragraph_source(len(uneven), counts=uneven)
+        for half in (0.5, 0.6):
+            cases.append(
+                (
+                    f"{rows} lines, merge two unequal lines + split last, "
+                    f"{half:.1f} halves, 20% translation noise",
+                    uneven_source,
+                    _merged_and_split_answer(
+                        uneven_counts, 0, rows - 1, half=half, noise=0.2, rng=rng
+                    ),
+                )
+            )
     long_row_source, long_row_counts = _two_paragraph_source(20, long_row=2)
     cases.append(
         (

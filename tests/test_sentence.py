@@ -3123,6 +3123,46 @@ def test_regrouping_refuses_a_distant_merge_and_split(
     assert _regroup_lines_into_source_paragraphs(source, answer) == answer
 
 
+@pytest.mark.parametrize(
+    ("source_counts", "answer_counts"),
+    [
+        # MY-359 follow-up (PR #282 review). The absorbed line is three quarters
+        # of the absorber's length, so the merged line holds 1.75 lines' worth;
+        # a 20% noise draw that comes out short leaves it at 1.42, under the 1.5
+        # the first version of this guard required. Both split halves are 0.61,
+        # above that version's lone-line bound as well, so nothing fired and the
+        # regrouped answer put source line 3 at the end of paragraph 1.
+        ([40, 30, 30, 30], [56, 36, 18, 18]),
+        # The same shape with the halves swapped for a long line and a short one.
+        ([40, 30, 30, 30], [60, 32, 24, 12]),
+    ],
+)
+def test_regrouping_refuses_a_merge_of_unequal_lines(source_counts, answer_counts):
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    source = _two_paragraph(source_counts)
+    answer = _rows(answer_counts)
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+@pytest.mark.parametrize("rows", [20, 40])
+@pytest.mark.parametrize("half", [0.5, 0.6])
+def test_regrouping_refuses_a_merge_of_unequal_lines_with_noise(rows, half):
+    # The reported shape at 20 and 40 lines: a long opening line absorbed by its
+    # shorter neighbour, the last line split, and 20% translation noise on every
+    # line. The merged line no longer stands 1.5 lines' worth clear on its own.
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    counts = [40, 30] + [30] * (rows - 2)
+    source = _two_paragraph(counts)
+    answer = _merged_then_split(
+        counts, 0, rows - 1, half=half, noise=0.2, rng=random.Random(4)
+    )
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
 @pytest.mark.parametrize("long_row", [1, 2])
 def test_regrouping_refuses_a_merge_beside_a_naturally_long_source_line(long_row):
     # The merged line is next to a source line three times its length (or is the

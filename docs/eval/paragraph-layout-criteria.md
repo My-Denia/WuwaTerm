@@ -169,7 +169,7 @@ What was wrong:
   bound; on 40 lines, 2.5%. The signal shrinks as the input grows while the
   noise it competes with does not: at +/-35% per-line length noise a faithful
   answer already reaches a 5.0% running-share gap at p99 on 45 lines and 9.9%
-on 10. Measured over 10,000 faithful answers per line count, that
+  on 10. Measured over 10,000 faithful answers per line count, that
   bound alone rejects 7.6% at 10 lines, 0.7% at 20 and 0.01% at 45. A bound
   that low is unusable at either end.
 - The split half of the guard was restricted to `index ± 6`. A merge in the
@@ -187,31 +187,56 @@ on 10. Measured over 10,000 faithful answers per line count, that
 What replaced it. Both events are now read from a per-line share ratio,
 `(answer line / answer total) / (source line / source total)`, which cancels the
 translation's overall expansion and each source line's own length, and which
-does not dilute as the segment grows. A merge is a line holding at least
-1.5 lines' worth of text and standing clear of the segment's median line by a
-factor of 1.4, or a line whose text matches its own source line plus a
-neighbour's much more closely (half the gap or less) than its own source
-line by itself, where the neighbour is at least three quarters of its length. A split is
-a line left with at most 0.65 of its own text, or two adjacent lines that
-together carry one line's worth (sum within 0.85-1.35) with each below 0.75.
-The two are looked for over the whole segment, at any distance and in either
-order; the guard refuses when both appear, and only when both appear, because
-either one alone is ordinary line-to-line variation.
+does not dilute as the segment grows. A merge is a line holding at least 1.4
+lines' worth of text and standing clear of the segment's median line by a factor
+of 1.3, or a line whose text matches its own source line plus a neighbour's much
+more closely (half the gap or less) than its own source line by itself, where
+the neighbour is at least three quarters of its length. A split is a line left
+with at most 0.55 of its own text, or the two halves of one line split in two,
+each at most 0.65 and the two together holding one line's worth (sum within
+0.75-1.25). The two are looked for over the whole segment, at any distance and
+in either order; the guard refuses when both appear, and only when both appear,
+because either one alone is ordinary line-to-line variation.
 
-Bounds, measured rather than asserted: on 10,000 synthetic faithful answers per
-line count (10, 20, 45 lines, source lines 6-40 scalars, +/-35% per-line length
-noise) the pair never occurs, so the false-rejection rate is 0.0000 at each
+Bounds, measured rather than asserted. On synthetic faithful answers (10, 20
+and 45 lines, source lines 6-40 scalars, +/-35% per-line length noise) the pair
+never occurs: no rejection in 50,000 trials at each line count, and the same
+0.0000 that `scripts/verify_paragraph_regroup.py` prints from its own 10,000 per
 count. A merge plus a split is recognised with the two 19 or 39 lines apart, in
 equal halves and in 60/40 halves, with and without 20% translation noise, in
-either order, and with the merged line next to a source line three times its
-length or having absorbed one. The residual bound is a merge of two very
-unequal lines: when the absorbed line is under three quarters of the absorber's
-length the guard does not call it a merge, and the content that moved is under
-a third of one line. Each case above is replayed by
-`scripts/verify_paragraph_regroup.py`
-(`--trials`, default 10,000), and the counterexamples are in `tests/test_sentence.py`;
-the eight parametrised merge+split cases fail on the 2026-11-19 guard and pass
-here.
+either order, with the merged line next to a source line three times its length
+or having absorbed one, and with the merged line a 40/30 pair drawing 20% short.
+
+The split bounds carry the precision, and that is what pays for the loose merge
+bound. Lowering the merge bound from 1.5 to 1.4 on its own, against the 0.65
+lone-line bound this guard first shipped with, would have refused 0.3% of
+faithful 45-line answers: a faithful line at -35% reaches 0.65, so one unlucky
+short line plus one unlucky long one satisfied both sides by chance. A line
+counts as the halves of a split now only when each half is at most 0.65 and the
+two together hold one line's worth, and a lone shrunk line has to reach 0.55,
+which no faithful line does at +/-35%.
+
+The residual bound is narrower than "a merge of two very unequal lines", and
+worth stating exactly. When the absorbed line is under roughly half the
+absorber's length, so that the merged line holds under 1.4 lines' worth, and the
+lines after it are of similar length, the merge leaves no signature in the line
+lengths at all: no per-line ratio is outside what variation alone produces, and
+the content that moved is under a third of a line. On the 40/30 shape roughly
+one 20% noise draw in a hundred leaves the merged line under that bound, and an
+answer drawn that way is regrouped. The mirror case, a split whose halves are both above 0.65
+and together hold more than 1.25 lines' worth, is missed the same way, for the
+same reason: nothing in the lengths says a line was cut.
+
++/-35% is used because it matches the stored evidence rather than a convenient
+round number: the two real D-003 answers give 90 line ratios spanning 0.77-1.32
+with median 0.99, so a faithful line stays inside about +/-30%. At wider noise
+the two-sided test loosens with it - false rejection is still 0.0000 at 10 and
+20 lines at +/-40% and reaches about 1.5% of 45-line trials - which is the price
+of refusing a merge whose line a noisy model drew 20% short.
+
+Each case above is replayed by `scripts/verify_paragraph_regroup.py` (`--trials`,
+default 10,000), and the counterexamples are in `tests/test_sentence.py`; the
+parametrised merge+split cases fail on the 2026-11-19 guard and pass here.
 
 The 4-line sample the first amendment quoted
 (`source = "a1\na2\n\nb1\nb2"` against `answer = "A1 A2\nB1\nB2x\nB2y"`) no
@@ -232,3 +257,19 @@ criteria table are also absent from this workspace; the 30 stored R answers
 here need no regrouping, so the replay can only hold them to L4. A future run
 that stores a 31-paragraph, 8-paragraph or regrouped answer should replace the
 synthesis, and these results should then be re-read rather than reused.
+
+### Revision, 2026-11-20, after PR #282 review
+
+The paragraphs above first shipped with a 1.5 merge bound, a 1.4 peer factor, a
+0.65 lone-line bound and a 0.85-1.35 two-half sum. Review found the regression
+that shape leaves: a 4-line source of 40, 30, 30, 30 scalars, answered as 56,
+36, 18, 18 (the first two lines merged, the last split, 20% noise), gives ratios
+1.42, 1.22, 0.61, 0.61 against a median of 0.91. The merged line missed 1.5, the
+halves missed the lone-line bound, and the answer was regrouped, putting source
+line 3 at the end of paragraph 1. The 2026-11-19 guard did refuse this answer -
+with four lines the absorbed line is 23% of the text, so the running-share gap
+reaches 18%, four times that bound - which is the dilution argument working in
+reverse: a short segment is where that bound is at its strongest. The four
+bounds above are the corrected ones, and the replayed cases now include this
+answer, the same shape at 20 and 40 lines with 20% noise, and a 40/30 merge next
+to a long line.

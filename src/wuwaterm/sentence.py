@@ -1548,19 +1548,26 @@ def _cumulative_cuts(layout: Sequence[int]) -> frozenset[int]:
 # moves the running share by 1/N (5% at 20 lines, 2.2% at 45), while a faithful
 # answer at +/-35% per-line length noise already reaches a 5% running-share gap
 # at p99, so that signal cannot separate the two at any N.
-_MERGED_LINE_SHARE = 1.5
-# A merged line also stands clear of the segment's median line, so a whole-answer
-# expansion bias cannot lift an ordinary line over the bound above.
-_MERGED_LINE_PEER = 1.4
+_MERGED_LINE_SHARE = 1.4
+# A merged line also stands this clear of the segment's median line, so a
+# whole-answer length bias cannot lift an ordinary line over the bound above.
+# The two bounds work together: the first keeps an ordinary line out, the second
+# keeps a line out whose segment runs long or short as a whole. 1.3 rather than
+# a rounder 1.5 because a merge of two unequal lines lands lower: a line of 40
+# with a neighbour of 30 holds 1.75 lines' worth, and a 20% noise draw that
+# comes out short leaves 1.42, which a 1.5 peer bound on a median of 1.0 denies,
+# while the split bounds below are what keep faithful answers out.
+_MERGED_LINE_PEER = 1.3
 # The neighbour a merged line absorbed, as a fraction of its own length: a merge
 # of two very unequal lines moves too little text to tell from variation.
 _ABSORBED_NEIGHBOUR_SHARE = 0.75
-# One line left with at most this much of its own text.
-_SPLIT_LINE_SHARE = 0.65
-# Or two adjacent lines that together carry one line's worth (a split in two),
-# each of them below the bound above.
-_SPLIT_PAIR_LINE_SHARE = 0.75
-_SPLIT_PAIR_TOTAL = (0.85, 1.35)
+# One line left with about half of its text.
+_SPLIT_LINE_SHARE = 0.55
+# Or the two halves of one line split in two: each half this small, and the two
+# together holding one line's worth (a split conserves the line's text, so their
+# ratios sum to about 1 however unevenly the model cut it).
+_SPLIT_PAIR_LINE_SHARE = 0.65
+_SPLIT_PAIR_TOTAL = (0.75, 1.25)
 
 
 def _line_share_ratios(
@@ -1584,13 +1591,20 @@ def _merged_line_indices(
 ) -> list[int]:
     """Answer lines that carry their own source line and a neighbour.
 
-    Two readings of the same event: the line holds at least one and a half
-    lines' worth of text and stands clear of the segment's median line, or its
-    text matches its own source line plus a neighbour's far better than its own
-    source line alone. The second covers a merge of two unequal lines, where the
-    ratio stays under the first bound; the neighbour has to be a real part of
-    the pair, so a short adjacent line cannot turn ordinary variation into
-    evidence.
+    The reference reading: the line holds at least 1.4 lines' worth of text and
+    stands 1.3 times as clear of the segment's median line. Both bounds are
+    needed. The first is what a merge of two similar lines shows (their sum is
+    two lines' worth), and it sits above what per-line length variation alone
+    produces; the second rescales it for a segment whose answer runs long or
+    short as a whole, where every ratio moves with it.
+
+    The second reading covers a merge the first misses: an answer line whose
+    text matches its own source line plus a neighbour's, within half the
+    distance it sits from its own source line alone. It needs a neighbour that
+    is a real part of the pair (three quarters of the line's length), so a short
+    adjacent line cannot turn ordinary variation into evidence, and it never
+    fires below 1.5 lines' worth, so it only decides a merge the median bound
+    held back.
     """
     source_total = sum(source_counts)
     answer_total = sum(answer_counts)
@@ -1620,7 +1634,7 @@ def _merged_line_indices(
 
 
 def _split_line_indices(ratios: Sequence[float]) -> list[int]:
-    """Answer lines that gave part of their text away to a second line."""
+    """Answer lines that gave text away, on their own or as two halves."""
     split = [index for index, ratio in enumerate(ratios) if ratio <= _SPLIT_LINE_SHARE]
     for index in range(len(ratios) - 1):
         left, right = ratios[index], ratios[index + 1]
@@ -1645,13 +1659,15 @@ def _lines_merged_and_split(source: str, answer: str) -> bool:
     The two events are looked for over the whole segment, at any distance: a
     merge in the first line and a split in the last would otherwise cancel out
     of every count the layout shows. Refusing needs both - a line that carries
-    two source lines and another that carries part of one - because either
-    alone is ordinary line-to-line variation. Measured on synthetic faithful
-    answers with +/-35% per-line length noise, the pair never occurs in 10,000
-    trials at 10, 20 and 45 lines, while a merge plus a split is recognised at
-    a distance, in either order, and with the merged line next to a naturally
-    long source line. A rejected regrouping only leaves the model's own blank
-    lines in place.
+    two source lines and another that carries half of one, or two adjacent
+    halves of one - because either alone is ordinary line-to-line variation.
+    Measured on synthetic faithful answers with +/-35% per-line length noise,
+    the pair never occurs in 50,000 trials at 10, 20 and 45 lines, while a merge
+    plus a split is recognised at a distance, in either order, with the merged
+    line next to a naturally long source line, and when the absorbed line is
+    three quarters of the absorber's length and the merged line comes out 20%
+    short. A rejected regrouping only leaves the model's own blank lines in
+    place.
     """
     source_counts = _line_scalar_counts(source)
     answer_counts = _line_scalar_counts(answer)
