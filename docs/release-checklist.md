@@ -12,15 +12,16 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current source version is `0.10.1`, a translation release
-  on top of `v0.10.0`: paragraph regrouping of a context-mode answer now reads a
-  per-line share ratio over the whole segment instead of the 7.5% running-share
-  bound and the six-line window, so a merge and a split at any distance and in
-  either order are refused, and a distant merge-plus-split answer is left for a
-  manual split instead of shifting its lines across paragraphs. The Web and
-  Windows contract pins move to Web `v0.4.1` and Windows `v0.6.1`, and the
-  self-host installer's recorded defaults move with the pins: they name Web
-  `v0.4.1` and keep Telegram `v0.4.0`. The latest published Core release is
+  published tag. The latest published Core release is `v0.10.1`, a translation
+  release on top of `v0.10.0`: paragraph regrouping of a context-mode answer now
+  reads a per-line share ratio over the whole segment instead of the 7.5%
+  running-share bound and the six-line window, so a merge and a split at any
+  distance and in either order are refused, and a distant merge-plus-split
+  answer is left for a manual split instead of shifting its lines across
+  paragraphs. The Web and Windows contract pins move to Web `v0.4.1` and Windows
+  `v0.6.1`, and the self-host installer's recorded defaults named Web `v0.4.1`
+  and Telegram `v0.4.0`; `main` names Telegram `v0.4.1` too, because that
+  release, built on this Core, was published after the tag. Before it is
   `v0.10.0`, a review and translation release on top of `v0.9.2`: `review-v2`
   gives every mapped region its own claim and allocation step, answers a
   numbering dot only in its own sentence pairing, keeps an inflection from
@@ -73,11 +74,13 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.10.0` and its published asset hashes are recorded
+  target-version file. Core `0.10.1` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
   `products.telegram` entry on its published release.
+  `products.telegram` records the published Telegram `v0.4.1`, because the
+  installer takes its default Telegram release from that entry.
   `products.web` records the published Web `v0.4.1`, because the installer
   takes its default Web release from that entry; `products.windows` records the
   published Windows `v0.6.1`.
@@ -85,24 +88,25 @@ release. That boundary has not moved.
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` and the
-  `v0.10.1` tag record and print `v0.4.0`, the Telegram release that pins Core
-  `v0.10.0`. A Core tag can only record a client release that already exists,
-  so the `v0.10.0` tag, frozen
-  before Telegram `v0.4.0` was published, keeps `v0.3.1` in its `products.json`
-  and `setup.sh`; that is what the `v0.9.2` tag records too, which pins Core
-  `v0.9.1`. An install from the `v0.10.0` tag therefore names the newer release
-  (`WUWATERM_TELEGRAM_VERSION=v0.4.0`) or runs from `main`. Clones of `v0.9.1`
-  and `v0.9.0` record `v0.3.0` (pinning Core `v0.9.0`) and `v0.2.10`, and a clone
-  of `v0.8.6` records `v0.2.9`. The tag always names a published release; there
-  is no `latest`.
+  `docs/self-hosting.md` name the same published release: `main` records and
+  prints `v0.4.1`, the Telegram release that pins Core `v0.10.1`. A Core tag can
+  only record a client release that already exists, so the `v0.10.1` tag, frozen
+  before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
+  and `setup.sh`, which pins Core `v0.10.0`. An install from the `v0.10.1` tag
+  therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.4.1`) or runs
+  from `main`. The `v0.10.0` tag, frozen before Telegram `v0.4.0` was published,
+  keeps `v0.3.1`; that is what the `v0.9.2` tag records too, which pins Core
+  `v0.9.1`. Clones of `v0.9.1` and `v0.9.0` record `v0.3.0` (pinning Core
+  `v0.9.0`) and `v0.2.10`, and a clone of `v0.8.6` records `v0.2.9`. The tag
+  always names a published release; there is no `latest`.
 - The Web release works the same way: `products.web.release.tag`,
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` and the `v0.10.1` tag record and install Web `v0.4.1`; the
-  `v0.10.0` tag's frozen snapshot records `v0.3.1`, so an install from that tag
-  passes `WUWATERM_WEB_VERSION=v0.4.0` or runs from `main`. A clone of `v0.9.0`
+  they differ. `main` and the `v0.10.1` tag record and install Web `v0.4.1`, so
+  a `v0.10.1` checkout needs no Web override; the `v0.10.0` tag's frozen
+  snapshot records `v0.3.1`, so an install from that tag passes
+  `WUWATERM_WEB_VERSION=v0.4.1` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
@@ -247,8 +251,8 @@ The 0.8.0 capability checks still apply to this release:
   to that config and fails the release preflight when the two disagree. A pin
   move is one commit over all four files.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
-  own lock is moved and released. Telegram 0.4.0 pins the published Core
-  `v0.10.0` wheel and is deployed, so the 0.10.0 library reaches Telegram users
+  own lock is moved and released. Telegram 0.4.1 pins the published Core
+  `v0.10.1` wheel and is deployed, so the 0.10.1 library reaches Telegram users
   through that product's own release. A later Core release reaches Telegram
   users only after WuwaTerm-Telegram moves its lock to the new tag and
   releases, which this checklist does not assume.

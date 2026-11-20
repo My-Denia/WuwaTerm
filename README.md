@@ -97,26 +97,28 @@ still carries; that became an explicit `--with-legacy-bot`.
 
 A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10
 and a clone of the v0.9.1 tag those of Telegram v0.3.0 (which pins Core
-v0.9.0), the release each tag records. `main` and the v0.10.1 tag record Telegram
-v0.4.0, which pins Core v0.10.0. The v0.10.0 tag was frozen before that Telegram
-release was published, so its own `contracts/products.json` and `deploy/setup.sh`
-still name v0.3.1, which is what the v0.9.2 tag records as well and pins Core
-v0.9.1; a checkout of the v0.10.0 tag names the newer release, or runs from
-`main`, to install it:
+v0.9.0), the release each tag records. `main` records Telegram v0.4.1, which
+pins Core v0.10.1. The v0.10.1 tag was frozen before that Telegram release was
+published, so its own `contracts/products.json` and `deploy/setup.sh` still name
+v0.4.0, which pins Core v0.10.0; a checkout of that tag names the newer release,
+or runs from `main`, to install it:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.4.0 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.4.1 ./deploy/setup.sh --with-telegram
 ```
+
+The v0.10.0 tag predates both and still names v0.3.1, which is what the v0.9.2
+tag records as well and pins Core v0.9.1.
 
 The variable always names a published tag, never `latest`.
 
 The Web option also defaults to the release the checkout records: a clone of
 the Core v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and
 the v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` and the v0.10.1
-tag record Web v0.4.1, so a v0.10.0 checkout passes the tag explicitly:
+tag record Web v0.4.1, so an earlier checkout passes the tag explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.4.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.4.1 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
