@@ -268,6 +268,18 @@ def _counterexamples() -> list[tuple[str, str, str]]:
             _rows([56, 36, 18, 18]),
         )
     )
+    # PR #282's second report: a short third source line, the split turned round,
+    # ratios 1.56 / 0.59 / 1.00 / 0.67. The shrunk half sits at 0.593, so the
+    # lone-line bound has to reach 0.60 to see it.
+    second = [40, 30, 20, 30]
+    second_source, _ = _two_paragraph_source(len(second), counts=second)
+    cases.append(
+        (
+            "4 lines, merge and split around a short source line",
+            second_source,
+            _rows([56, 16, 18, 18]),
+        )
+    )
     for rows in (20, 40):
         uneven = [40, 30] + [30] * (rows - 2)
         uneven_source, uneven_counts = _two_paragraph_source(len(uneven), counts=uneven)

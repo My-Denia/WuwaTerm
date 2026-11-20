@@ -3135,6 +3135,14 @@ def test_regrouping_refuses_a_distant_merge_and_split(
         ([40, 30, 30, 30], [56, 36, 18, 18]),
         # The same shape with the halves swapped for a long line and a short one.
         ([40, 30, 30, 30], [60, 32, 24, 12]),
+        # PR #282's second report: the source's third line is short (20 where the
+        # others are 30), and the split goes the other way. Ratios 1.56, 0.59,
+        # 1.00, 0.67 against a median of 0.83, so the merge bound fires and the
+        # shrunk half sits at 0.593 - under the 0.55 lone-line bound of c67133e,
+        # which accepted this answer, and over the 0.60 bound that catches it.
+        # Both 68eccee and 26b7d4ba refused it; only the tightened split bound
+        # had to move to recover it.
+        ([40, 30, 20, 30], [56, 16, 18, 18]),
     ],
 )
 def test_regrouping_refuses_a_merge_of_unequal_lines(source_counts, answer_counts):
@@ -3149,9 +3157,12 @@ def test_regrouping_refuses_a_merge_of_unequal_lines(source_counts, answer_count
 @pytest.mark.parametrize("rows", [20, 40])
 @pytest.mark.parametrize("half", [0.5, 0.6])
 def test_regrouping_refuses_a_merge_of_unequal_lines_with_noise(rows, half):
-    # The reported shape at 20 and 40 lines: a long opening line absorbed by its
-    # shorter neighbour, the last line split, and 20% translation noise on every
-    # line. The merged line no longer stands 1.5 lines' worth clear on its own.
+    # The reported shape at 20 and 40 lines, with 20% translation noise on every
+    # line: a long opening line absorbed by its shorter neighbour, and a later
+    # line split into two halves. This seed happens to draw the merged line long
+    # (ratios about 1.57 to 1.62 against a median near 1.0), so it does not
+    # exercise the 1.4 bound on its own; the fixed-answer cases above are what
+    # pin that bound, and this one keeps a whole noisy answer refused.
     from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
 
     counts = [40, 30] + [30] * (rows - 2)

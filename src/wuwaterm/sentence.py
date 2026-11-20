@@ -1561,8 +1561,12 @@ _MERGED_LINE_PEER = 1.3
 # The neighbour a merged line absorbed, as a fraction of its own length: a merge
 # of two very unequal lines moves too little text to tell from variation.
 _ABSORBED_NEIGHBOUR_SHARE = 0.75
-# One line left with about half of its text.
-_SPLIT_LINE_SHARE = 0.55
+# One line left with well under its own text. 0.60 rather than a tighter 0.55:
+# a split whose two halves both come out long leaves the shorter half at about
+# 0.59 (40, 30, 20, 30 answered as 56, 16, 18, 18 has one at 0.593), which a 0.55
+# bound misses while 0.60 catches it, and no faithful line reaches 0.60 at the
+# +/-35% per-line noise this guard is calibrated against.
+_SPLIT_LINE_SHARE = 0.60
 # Or the two halves of one line split in two: each half this small, and the two
 # together holding one line's worth (a split conserves the line's text, so their
 # ratios sum to about 1 however unevenly the model cut it).
@@ -1659,8 +1663,8 @@ def _lines_merged_and_split(source: str, answer: str) -> bool:
     The two events are looked for over the whole segment, at any distance: a
     merge in the first line and a split in the last would otherwise cancel out
     of every count the layout shows. Refusing needs both - a line that carries
-    two source lines and another that carries half of one, or two adjacent
-    halves of one - because either alone is ordinary line-to-line variation.
+    two source lines and another that carries well under one, or two halves of
+    one - because either alone is ordinary line-to-line variation.
     Measured on synthetic faithful answers with +/-35% per-line length noise,
     the pair never occurs in 50,000 trials at 10, 20 and 45 lines, while a merge
     plus a split is recognised at a distance, in either order, with the merged
