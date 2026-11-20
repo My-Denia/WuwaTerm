@@ -262,9 +262,10 @@ Telegram is one UI and transport, not the domain model.
 | Linked channel | Admission, translate, deliver/edit, flood retry | `src/wuwaterm/channel.py` |
 | HTML/text helpers | Protect/validate Telegram HTML; chunk limits | `telegram_html.py`, `telegram_text.py` |
 
-Domain (`lookup`, `normalize`, `models`, `review`, term-lock policy in `sentence`) and
-storage (`db` reads, `settings`, `channel_reply_index`) must remain usable from
-CLI and tests without a live Telegram session. See [ADR 0001](adr/0001-telegram-as-presentation-layer.md).
+Domain (`lookup`, `normalize`, `models`, `review`, `term_matching`,
+`term_preparation`) and storage (`db` reads, `settings`, `channel_reply_index`)
+must remain usable from CLI and tests without a live Telegram session. See
+[ADR 0001](adr/0001-telegram-as-presentation-layer.md).
 
 ## HTTP API as presentation layer
 
@@ -294,15 +295,18 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
   |-> bot / channel                  |-> app / auth / errors / settings / cli / web
   |     |-> application  <-----------'        (allowlisted imports only)
   |     |     |-> lookup / review / sentence / normalize / translation_policy   domain
+  |     |     |                    |-> term_preparation -> term_matching
+  |     |     |                    `-> term_matching
   |     |-> settings / channel_reply_* / channel_runtime         local infra
   |     |-> telegram_html / telegram_text                 presentation helpers
   |-> builder / data_source / db (write) / build_pinyin          builder path
+  |     `-> term_matching                                       pure matching
   |-> lookup / sentence / db (read)                              offline CLI
 ```
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -320,6 +324,15 @@ automatic-assessment policy both consume that same corpus evidence while
 keeping their own policies separate. The bounded English plural rule lives
 in `english_plural`, so `sentence` locking (en→zh) and `review-v2` admit the
 same inflected spellings instead of two drifting copies.
+
+`term_matching` owns dictionary-surface admission and non-overlapping span
+selection. The builder uses it directly with exact matching for both corpus
+measurements. Prepared plain translation can opt into the existing admissible
+NFKC spellings; protected text retains exact matching. `term_preparation` uses
+those spans and the supplied dictionary snapshot to choose locks, contextual
+references or unchanged text, then merges visible segments in order with one
+placeholder namespace. `sentence` retains the database snapshots, model calls
+and restoration.
 
 **The API import allowlist.** `src/wuwaterm_api` may import exactly four
 modules from `wuwaterm`: `application`, `models`, `translation_policy`,
@@ -366,9 +379,12 @@ Observed edges (static imports among shipped modules):
   which imports the shared input ceiling rather than restating it. Those three
   modules are the whole of what the package imports from `wuwaterm` today; the
   guard permits one more (`models`) and nothing beyond the four.
-- `sentence` → `lookup`, `normalize`, `protected_text`, `httpx`; only its old
-  `translate_html`, `translate_html_async`, and `_restore_html` methods lazily
-  import their matching Telegram compatibility functions.
+- `sentence` → `lookup`, `normalize`, `protected_text`, `term_matching`,
+  `term_preparation`, `httpx`; only its old `translate_html`,
+  `translate_html_async`, and `_restore_html` methods lazily import their
+  matching Telegram compatibility functions.
+- `term_preparation` → `term_matching`, `cjk_span`, `protected_text`;
+  `builder` → `term_matching` for both free-text exclusion measurements.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
 - Runtime image refuses `build-db` and excludes builder tooling, while
