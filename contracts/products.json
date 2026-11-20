@@ -79,12 +79,35 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "67e27da7e3a5a108a43f2cf15b7a4eed82dcfe84",
-        "tree": "7d20f75850ee56a941edd7bc871f043711600d9b",
+        "commit": "dd2383035e8957f24acc4bec5b96bb8d24dada63",
+        "tree": "6102936f9296929751499e14c8a2de749cee040a",
         "status": "success"
       },
-      "source_version": "0.10.0",
+      "source_version": "0.10.1",
       "release": {
+        "version": "0.10.1",
+        "tag": "v0.10.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.10.1",
+        "published_at": "2026-11-20T07:24:40Z",
+        "source_commit": "dd2383035e8957f24acc4bec5b96bb8d24dada63",
+        "source_tree": "6102936f9296929751499e14c8a2de749cee040a",
+        "assets": [
+          "wuwaterm-0.10.1-py3-none-any.whl",
+          "wuwaterm-0.10.1.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.10.1-py3-none-any.whl": "0b38d3bcf40ee4658e2fdb4423eb5f99620e9d9262614224b5a737aa4cb0529d",
+          "wuwaterm-0.10.1.tar.gz": "3f844924be7304961961bf6387fb43b97bdf76a0103109378d417e51e422a869",
+          "release-manifest.json": "bcac1904283cd8927f6ab47550acd62c615bb21f8206d7c3111c75b0ed1ad9c4",
+          "SHA256SUMS": "161d30b2427ad6a22433d64d7aec2d7b8a5e400648630b17d95f235fd114d811"
+        },
+        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:5b4cbfef31be39ea2338d30051f838139c1ceb2583c2f8dca844a3ed604531c9 and builder sha256:80a71493934c0f3b2dca1e7582afd4b5ec387b43b3e9230d2d5a83d6afd082bd, first pushed as sha-dd23830 and retagged by promote-images as v0.10.1 and 0.10.",
+        "note": "v0.10.1 is a translation release on top of v0.10.0. Paragraph regrouping of a context-mode answer into the source's paragraphs now compares a per-line share ratio, (answer line / answer total) / (source line / source total), over the whole segment instead of the 7.5% running-share bound and the six-line window, so a merge and a split at any distance and in either order are refused and a distant merge-plus-split answer keeps the model's own blank lines for a manual split. A merge is a line carrying at least 1.4 lines' worth of text that also stands 1.3 clear of the segment's median, or a line whose text matches its own source line plus a neighbour's; a split is a line left with at most 0.60 of its own text, or two adjacent lines carrying at most 0.65 each and 0.75 to 1.25 together, and a refusal needs both. The criteria were frozen in docs/eval/paragraph-layout-criteria.md before the change and scripts/verify_paragraph_regroup.py replays them (MY-359): 50,000 synthetic faithful answers at each of 10, 20 and 45 lines with plus or minus 35% per-line length noise reject 0.0000, the eight parametrised counterexamples fail on the previous guard and pass here, and the stored D-003 31- and 8-paragraph reproductions still regroup to the source's 45 paragraphs with their line sequence intact. The Web and Windows contract pins move to Web v0.4.1 (c1b9fd5c) and Windows v0.6.1 (4da26ba9), the patch releases of the two wuwaterm-manuscript-v4 clients, and contracts/web-ref.txt, contracts/windows-ref.txt, the split revisions of contracts/ci-source-epochs.json and the matching assertions in tests/test_ci_source_epoch.py carry them together; no Core API version, OpenAPI shape or translation request changes with the pins, and the OpenAPI document moves only its info.version. The dictionary, the builder and the terms.db it produces are those of v0.10.0. The snapshot frozen in this tag names Web v0.4.1 and Telegram v0.4.0 for the installer, so an install from the v0.10.1 tag needs no Web override; Telegram v0.4.1, the release built on this Core, was published after the tag and is recorded on main, and an install from the tag names it with WUWATERM_TELEGRAM_VERSION=v0.4.1 or runs from main. CI run 44692505542 passed on dd23830, the dry run 44694133479 built every artifact without pushing images, the draft release run 44694379176 built the published assets, and the release-triggered run 44694763373 promoted the image tags."
+      },
+      "previous_release": {
         "version": "0.10.0",
         "tag": "v0.10.0",
         "status": "released",
@@ -105,30 +128,7 @@
           "SHA256SUMS": "2fbc7d258d2540055d53ca9d25301c592c9fb118fcb456173c425d45c96c50d1"
         },
         "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:a1b32cfdd6a973db92ab7920db86289d297356bd6f3a2e668d29ee7bd191fc42 and builder sha256:9c4624ad2d0edc46f922d9a3e9d7fc93539990180d40e49880afb6f853c3926f, first pushed as sha-67e27da and retagged by promote-images as v0.10.0 and 0.10.",
-        "note": "v0.10.0 is a review and translation release. review-v2 gives every mapped region its own claim and allocation step: when the occurrences a region holds cannot cover the mentions competing for them, it credits none of those mentions instead of whichever one a sweep reaches first, a partial assignment is the largest one rather than the first one found, an inflection never answers a competing official form, a numbering dot no longer ends a sentence where review-v2 pairs them (segmentation-v1 keeps the boundary it publishes), an occurrence enclosed by a longer official form is not a standalone hit unless the source claims that longer term, a lowercase spelling of a capitalized official term is an ordinary word, and a derived name surface asserts no constraint. The CJK matcher basis label moves to wuwaterm-cjk-matcher-v8, so stored resolution contexts and saved v3 segment results carrying -v7 go stale by the existing freshness rule and are re-reviewed. POST /v1/reviews accepts a 64 KiB body instead of 32 KiB, and review-v2 callers may opt into dense-128 and reason-v1 with X-WuwaTerm-Review-Features under an exact grammar that echoes the accepted set back. Regrouping a context-mode answer into the source's paragraphs refuses a crossing paragraph break and a merge-plus-split line layout and keeps the model's own blank lines. Every LLM request byte, term lock and reference list is identical to 0.9.2, and the builder and the terms.db it produces are unchanged, so an install keeps the database it built. The Web and Windows contract pins move to Web v0.4.0 (7cfbc4d5) and Windows v0.6.0 (eaceb8bb), the two consumers of wuwaterm-manuscript-v4; no Core API version or OpenAPI shape changes with the pins. CI run 44599508979 passed on 67e27da, the draft release run 44602177160 built the assets, and the release-triggered run 44602964761 promoted the image tags. v0.9.2 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.9.2",
-        "tag": "v0.9.2",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.9.2",
-        "published_at": "2026-11-17T12:31:40Z",
-        "source_commit": "5e431a6390f5246c98e5fa651f2e1c1ea37d8c0a",
-        "source_tree": "a8cd0e310f55b92ca333c468f10bb39f6ac7e5a0",
-        "assets": [
-          "wuwaterm-0.9.2-py3-none-any.whl",
-          "wuwaterm-0.9.2.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.9.2-py3-none-any.whl": "ad9cd8188119246a13809b414fed3d6d34fd4daaadb48d7dfef7696a695c0c53",
-          "wuwaterm-0.9.2.tar.gz": "3a4f5d80b6dcfbc01f366c227522d7bb3f52950685e191318b2695d2abf4772b",
-          "release-manifest.json": "1a9f2f2a200b52b1bb75ac56aceba9838d65e923691f3f3a040d3d01bea2cd84",
-          "SHA256SUMS": "2160909d6e217b0ee7bdb9d2b3f41cae3cd180aa32db785a87e9a8a876da4a94"
-        },
-        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:c48b7d3e9c2c0c9b094577bda00fa31a72beebf8d75b27941ebe5a7e5de06360 and builder sha256:8934555f10b660f6af01a2243b0ff4b945dc1f62631b334788791f0124cc722d, first pushed as sha-5e431a6 and retagged by promote-images as v0.9.2 and 0.9.",
-        "note": "v0.9.2 reports an OpenAI-compatible endpoint that rejects provider-specific reasoning fields as a diagnostic instead of an ordinary HTTP error: an HTTP 400 whose error object carries code unsupported_parameter and param thinking or reasoning_effort gets the detail unsupported_thinking or unsupported_reasoning_effort, the server warning names only that parameter, the two configuration variables and the accepted alternative, and the provider message, the source text and the request URL are never copied into it. The failed request is still one POST, with no retry, no field removal and no inference from a model name, and the user-facing unavailable notice and the HTTP 503 llm_unavailable envelope are unchanged. Setting WUWATERM_TRANSLATION_THINKING_ZH_EN=omit or WUWATERM_TRANSLATION_THINKING_EN_ZH=omit keeps translating against such an endpoint by sending neither reasoning field. Translation strategy, prompts and the dictionary are unchanged from 0.9.1. Kept as history after v0.10.0; the release and its assets are still published. v0.9.0 and earlier remain on the release page."
+        "note": "v0.10.0 is a review and translation release. review-v2 gives every mapped region its own claim and allocation step: when the occurrences a region holds cannot cover the mentions competing for them, it credits none of those mentions instead of whichever one a sweep reaches first, a partial assignment is the largest one rather than the first one found, an inflection never answers a competing official form, a numbering dot no longer ends a sentence where review-v2 pairs them (segmentation-v1 keeps the boundary it publishes), an occurrence enclosed by a longer official form is not a standalone hit unless the source claims that longer term, a lowercase spelling of a capitalized official term is an ordinary word, and a derived name surface asserts no constraint. The CJK matcher basis label moves to wuwaterm-cjk-matcher-v8, so stored resolution contexts and saved v3 segment results carrying -v7 go stale by the existing freshness rule and are re-reviewed. POST /v1/reviews accepts a 64 KiB body instead of 32 KiB, and review-v2 callers may opt into dense-128 and reason-v1 with X-WuwaTerm-Review-Features under an exact grammar that echoes the accepted set back. Regrouping a context-mode answer into the source's paragraphs refuses a crossing paragraph break and a merge-plus-split line layout and keeps the model's own blank lines. Every LLM request byte, term lock and reference list is identical to 0.9.2, and the builder and the terms.db it produces are unchanged, so an install keeps the database it built. The Web and Windows contract pins move to Web v0.4.0 (7cfbc4d5) and Windows v0.6.0 (eaceb8bb), the two consumers of wuwaterm-manuscript-v4; no Core API version or OpenAPI shape changes with the pins. CI run 44599508979 passed on 67e27da, the draft release run 44602177160 built the assets, and the release-triggered run 44602964761 promoted the image tags. Kept as history after v0.10.1; the release and its assets are still published. v0.9.2 and earlier remain on the release page."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -148,11 +148,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.10.0 (67e27da) is deployed on the owner VPS by a runtime-only update: release r7 is current and wuwaterm-api reports restart count 0, with a post-deploy error-log scan that found 0 entries. The rollback point is release r6 with the image tag wuwaterm-runtime:rollback-runtime-67e27da7e3a5-283098 retained, and the retention pass reports keep=2 current=r7 kept=r6,r7 removed=r5. /healthz and /readyz answer 200. terms.db is unchanged (sha256 3308e5fe…, data pin 9218d612). The legacy in-Core wuwaterm-bot stays stopped (status=created). The standalone wuwaterm-telegram container runs Telegram 0.4.0 on this release and shares that database, with its health check reporting ready; the telegram entry carries that adoption.",
+      "adoption_note": "Core v0.10.1 (dd23830) is deployed on the owner VPS by a runtime-only update on 2026-11-20: release r8 is current and wuwaterm-api reports 0.10.1 with restart count 0, with a post-deploy error-log scan that found 0 entries. /healthz and /readyz answer 200, and the deploy reachability smoke inside the compose service reports getMe: ok (TELEGRAM_TEST_CHAT_ID is unset, so sendMessage is skipped). The rollback point is release r7 with the image tag wuwaterm-runtime:rollback-runtime-dd2383035e89-307827 retained, and that retention pass removed r6. terms.db is unchanged (sha256 3308e5fe…, data pin 9218d612). The legacy in-Core wuwaterm-bot stays stopped (status=created). The standalone wuwaterm-telegram container runs Telegram 0.4.1 on this release and shares that database with wuwaterm-api, with its operations health check reporting ready; the telegram entry carries that adoption.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/67e27da7e3a5a108a43f2cf15b7a4eed82dcfe84/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/67e27da7e3a5a108a43f2cf15b7a4eed82dcfe84/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/dd2383035e8957f24acc4bec5b96bb8d24dada63/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/dd2383035e8957f24acc4bec5b96bb8d24dada63/docs/data-refresh.md"
       ]
     },
     {
@@ -160,12 +160,53 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
       "responsibility": "Standalone Telegram bot and its installation, operation and state.",
       "main": {
-        "commit": "6f86c26cc6246c0cc2fddc4a705aea40714115f8",
-        "tree": "043471f9c1ea78eea93ff7509e5680e89dd21233",
+        "commit": "6fb7f74d75d85aa016d9b3b76c9050dc6b7dee44",
+        "tree": "6a16ffc96a98afc41f987c0bf2b42c44c8e04f47",
         "status": "success"
       },
-      "source_version": "0.4.0",
+      "source_version": "0.4.1",
       "release": {
+        "version": "0.4.1",
+        "tag": "v0.4.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.4.1",
+        "published_at": "2026-11-20T07:50:14Z",
+        "source_commit": "6fb7f74d75d85aa016d9b3b76c9050dc6b7dee44",
+        "source_tree": "6a16ffc96a98afc41f987c0bf2b42c44c8e04f47",
+        "assets": [
+          "wuwaterm_telegram-0.4.1-py3-none-any.whl",
+          "wuwaterm_telegram-0.4.1.tar.gz",
+          "bundle.json",
+          "image.oci.tar",
+          "install-probe.json",
+          "source.tar",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm_telegram-0.4.1-py3-none-any.whl": "52e393eacc4ac73164710d1ffc68232e18479cbfe721d26fb5e9c4e9e182f70d",
+          "wuwaterm_telegram-0.4.1.tar.gz": "be91de3ff7ff3cb3cdb22f010f9a37f704477c018e54deab302a8e572c8fe491",
+          "bundle.json": "1dcd327e2e9a527563516a775aa9872ad3b047157ed5862f0c14dc0eceb3be32",
+          "image.oci.tar": "48b0d0a06fb8a3c314735afa23f10c04965c6a291b2dfc04e16cf0c1a2cd030c",
+          "install-probe.json": "f53bc825dfadd1332554c9f4ef4f561574dbec2c32b7d7b89e79488c7306295a",
+          "source.tar": "88e2578bd1d56243929548a0e59d10e7dcf959003b0237013a662b78b3dd0f26",
+          "SHA256SUMS": "da694d4e21f16b2aebc0ea6a2339ae737611daf2406ee8931b7ac0d7b5a650c2"
+        },
+        "note": "v0.4.1 pins the published Core 0.10.1 wheel, whose SHA-256 0b38d3bcf40ee4658e2fdb4423eb5f99620e9d9262614224b5a737aa4cb0529d is the core_binding this bundle records, with core_source_commit dd238303 and the compatibility it declares exact (OCI index sha256:5c68d0d7e45ce67928ddb66c84a83cb75afbdd8b1faef2166c9363dad7768f63, manifest sha256:f94cf6fae5b79388f3c2578e476caa088df9e79604d161fb077163eed27b05c7, config sha256:501746ea792ad53e84116fdbd14e4fe2214f1c68f986e35ad0922389dbadd84e, built by image-bundle run 44697588205). It is a patch release on v0.4.0. The code change (#43) makes a failed shared-pointer send visible instead of silent: both send branches of _point_to_shared_result go through _notice_failed_delivery, so a reuser, including a waiter served the pointer after the same content was queued, receives the failure notice with its resend button while the job stays undelivered, and pressing it or submitting the same content again sends the stored report without another model call. Automatic retry narrows to a send that provably never left: _is_presend_network_error walks the cause chain and accepts only httpx.ConnectError and httpx.ProxyError, so ReadError, RemoteProtocolError, WriteError, a bare NetworkError, BadRequest, Forbidden and TimedOut are not retried, and no retry happens once any chunk has reached the chat. The failure notice splits by outcome: the existing notice says the result was not delivered, and a new uncertain notice says Telegram may have received it and a resend may duplicate, which is the path a ConnectTimeout takes because python-telegram-bot 22.8 raises TimedOut for it rather than NetworkError. Seven test cases cover the two files. The release-prep change (#44) is the Core pin, the package metadata and the docs that describe it, and the tag push produced no duplicate CI run: the only run on this commit that the tag started is the release run itself."
+      },
+      "adoption": "deployed",
+      "compatibility": {
+        "core_package_version": "0.10.1",
+        "core_wheel_sha256": "0b38d3bcf40ee4658e2fdb4423eb5f99620e9d9262614224b5a737aa4cb0529d",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6fb7f74d75d85aa016d9b3b76c9050dc6b7dee44/core-lock.json",
+        "terms_database_schema_version": "2",
+        "http_api_required": false,
+        "note": "core-lock.json pins the published Core v0.10.1 wheel; release-to-release dependency, not a CI artifact."
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6fb7f74d75d85aa016d9b3b76c9050dc6b7dee44/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6fb7f74d75d85aa016d9b3b76c9050dc6b7dee44/docs/artifact-verification.md"
+      ],
+      "previous_release": {
         "version": "0.4.0",
         "tag": "v0.4.0",
         "status": "released",
@@ -191,50 +232,9 @@
           "source.tar": "5995b1f514ce35a938238988acd85884d2965183f7a8a3cb901421c81ce44b96",
           "SHA256SUMS": "426137d9b1d3f71730c30112a902a877af3ae3d9cef3bb371fa7e6fe377ed696"
         },
-        "note": "v0.4.0 pins the published Core 0.10.0 wheel, whose SHA-256 d4d5b095b43fa4b11a79cf3d43cc04d0b3756c89c786fcab668ebcf06bcd2e84 is the core_binding this bundle records (OCI index sha256:c403f27520dc912cc2e3695463cf40492cd8b84f0532943733d687da2e47b9b4, manifest sha256:2c06fb1426b9004267001f1a70a0a0a1636b0374bfb68eb4f600011946d00648, config sha256:b58ba044e6eab04659a3461fee84c33f624c4fb5789d4f6cd62c5839b013f424, built by image-bundle run 44607623811). Core moves a minor version, so Telegram moves a minor version; the release-prep change (#42) is the Core pin, the package metadata and the docs that describe what Core now does. The code change is #41: a chat's delivering slot is no longer evicted while a report is being delivered and a full slot set answers the busy notice instead, a member who submits the same text while the source job runs is queued by user and served from the finished report without another model call, a send retry is limited to a network error confirmed not to have reached Telegram, the failure notice carries a resend button guarded against double clicks, expired toasts are bilingual, dead job state is removed, and a tag push no longer triggers a second CI run. /review findings follow Core's wuwaterm-cjk-matcher-v8 basis and its numbering-dot rule, and long /tr paragraph regrouping refuses a crossing break and a merge-plus-split layout. Every LLM request byte, term lock and reference list is identical to Core 0.9.2, and the builder and its terms.db are unchanged, so an existing install keeps the database it built. v0.3.1 and its assets remain published under previous_release."
+        "note": "v0.4.0 pins the published Core 0.10.0 wheel, whose SHA-256 d4d5b095b43fa4b11a79cf3d43cc04d0b3756c89c786fcab668ebcf06bcd2e84 is the core_binding this bundle records (OCI index sha256:c403f27520dc912cc2e3695463cf40492cd8b84f0532943733d687da2e47b9b4, manifest sha256:2c06fb1426b9004267001f1a70a0a0a1636b0374bfb68eb4f600011946d00648, config sha256:b58ba044e6eab04659a3461fee84c33f624c4fb5789d4f6cd62c5839b013f424, built by image-bundle run 44607623811). Core moves a minor version, so Telegram moves a minor version; the release-prep change (#42) is the Core pin, the package metadata and the docs that describe what Core now does. The code change is #41: a chat's delivering slot is no longer evicted while a report is being delivered and a full slot set answers the busy notice instead, a member who submits the same text while the source job runs is queued by user and served from the finished report without another model call, a send retry is limited to a network error confirmed not to have reached Telegram, the failure notice carries a resend button guarded against double clicks, expired toasts are bilingual, dead job state is removed, and a tag push no longer triggers a second CI run. /review findings follow Core's wuwaterm-cjk-matcher-v8 basis and its numbering-dot rule, and long /tr paragraph regrouping refuses a crossing break and a merge-plus-split layout. Every LLM request byte, term lock and reference list is identical to Core 0.9.2, and the builder and its terms.db are unchanged, so an existing install keeps the database it built. Kept as history after v0.4.1; the release and its assets are still published. v0.3.1 and earlier remain on the release page."
       },
-      "adoption": "deployed",
-      "compatibility": {
-        "core_package_version": "0.10.0",
-        "core_wheel_sha256": "d4d5b095b43fa4b11a79cf3d43cc04d0b3756c89c786fcab668ebcf06bcd2e84",
-        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6f86c26cc6246c0cc2fddc4a705aea40714115f8/core-lock.json",
-        "terms_database_schema_version": "2",
-        "http_api_required": false,
-        "note": "core-lock.json pins the published Core v0.10.0 wheel; release-to-release dependency, not a CI artifact."
-      },
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6f86c26cc6246c0cc2fddc4a705aea40714115f8/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/6f86c26cc6246c0cc2fddc4a705aea40714115f8/docs/artifact-verification.md"
-      ],
-      "previous_release": {
-        "version": "0.3.1",
-        "tag": "v0.3.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.3.1",
-        "published_at": "2026-11-16T08:12:55Z",
-        "source_commit": "209d4d49b13e70622a9a3b724fd21fcd58d7b39f",
-        "source_tree": "9b48f8aef21e7cf31f6a77d23f47f0bba8f2d4a8",
-        "assets": [
-          "wuwaterm_telegram-0.3.1-py3-none-any.whl",
-          "wuwaterm_telegram-0.3.1.tar.gz",
-          "bundle.json",
-          "image.oci.tar",
-          "install-probe.json",
-          "source.tar",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm_telegram-0.3.1-py3-none-any.whl": "46ef03f337e8e105517d15646aa5c2dc50e7742fa96eb8cf8b07d16dc5d07bef",
-          "wuwaterm_telegram-0.3.1.tar.gz": "ef67ed7e0316dff7c94b73d77973d12e6356ff846637c04067aac44a0b52a6a0",
-          "bundle.json": "d504252f3cf6b78332cf23b95638d897b78bf305072471652fe140f77e58d6af",
-          "image.oci.tar": "61913a2843f5682cc3dd20b419b227261c2c092fc60d98b7395dc595c1ca8fc5",
-          "install-probe.json": "0bf59c74ba2d4e889b1c1dace0c329da2032f7242af95c4f86656483d9e80eb3",
-          "source.tar": "092c0837ff435c51855245c5fc89fc69fb72ed07a4fceb3ce85890e9b0186d2c",
-          "SHA256SUMS": "4265ed142c2688c7d7926cb53c1e1bde91265eae06247d4e7f0caa453c699c84"
-        },
-        "note": "v0.3.1 pins the published Core 0.9.1 wheel (OCI index sha256:fedaf01484b68cd6c19797901f8a63942b8757ce76c6f451198488470ebc8862, manifest sha256:88018781d9f768efa23b60ac4c49ead147b16b5e25adfb30f32eafe9012556af, config sha256:aa58a053ccd40297fcfc8fb95c1dcde2339135b30cca0d87fff373cbe022b3a7). It is a patch release with no Telegram code changes beyond the Core pin (#40): long /tr and /sentence texts keep the source's paragraph layout, Chinese-to-English translation sends thinking disabled by default, and deploy/env.example now sets WUWATERM_TRANSLATION_THINKING_ZH_EN=disabled (the 0.3.0 file set omit, so an install copied from it kept thinking on). Kept as history after v0.4.0; the release and its assets are still published. v0.3.0 and earlier remain on the release page."
-      },
-      "adoption_note": "Standalone Telegram 0.4.0 on Core 0.10.0 is deployed on the owner VPS since 2026-11-19T20:30:06Z: the wuwaterm-telegram container runs image sha256:b5f98a3dd2d3d78035d0c15bec84cda92646e8461095f70339fc686faea3f589 and reports wuwaterm 0.10.0 and wuwaterm-telegram 0.4.0, with RestartCount 0 and the operations health check reporting ready. It shares /opt/wuwaterm/data/terms.db (sha256 3308e5fe…) with wuwaterm-api 0.10.0 at releases/r7."
+      "adoption_note": "Standalone Telegram 0.4.1 on Core 0.10.1 is deployed on the owner VPS on 2026-11-20: the wuwaterm-telegram container runs image sha256:71e5a0f1ace4d96195c071ee94110dce62b61d4638b52493124afc245748622a and reports wuwaterm 0.10.1 and wuwaterm-telegram 0.4.1, switched with 1.389s of downtime as the deploy run reported, with RestartCount 0 and the operations health check reporting ready. It shares /opt/wuwaterm/data/terms.db (sha256 3308e5fe…) with wuwaterm-api 0.10.1 at releases/r8. The previous image is retained under the tag wuwaterm-telegram:rollback-0.4.0-local, and the state backup /opt/wuwaterm/telegram/state-backup-20261120T075142Z is kept."
     },
     {
       "id": "windows",
