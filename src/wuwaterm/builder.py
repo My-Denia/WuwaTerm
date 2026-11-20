@@ -526,7 +526,7 @@ def measure_free_text_exclusions(
     with surfaces sorted, so equal inputs give equal bytes.
     """
     from .lookup import TermService
-    from .sentence import exact_lockable_sources, select_term_spans
+    from .term_matching import exact_lockable_sources, select_term_spans
 
     entries = TermService(db_path).entries()
     lockable = exact_lockable_sources(entries)
@@ -623,7 +623,7 @@ def measure_free_text_zh_exclusions(
     give equal bytes.
     """
     from .lookup import TermService
-    from .sentence import exact_lockable_sources, select_term_spans
+    from .term_matching import exact_lockable_sources, select_term_spans
 
     entries = TermService(db_path).entries()
     lockable = exact_lockable_sources(entries)
