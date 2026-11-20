@@ -152,3 +152,83 @@ script will pick it up as an L4 case only if it is stored with its own layout.
 The six regrouped R segments recorded in the original criteria table are not in
 this workspace either; the 30 stored R answers here need no regrouping, so the
 replay can only hold them to L4.
+
+## Amendment: full-segment merge+split guard, 2026-11-20 (MY-359)
+
+The 2026-11-19 amendment's guard has two bounds, and both were defeated by a
+merge and a split that sit far apart. This amendment replaces them; it does not
+change what the post-check publishes for a dropped blank line, and every guard
+still returns the answer byte-identical, so a rejected regrouping can only
+leave the model's own blank lines in place.
+
+What was wrong:
+
+- The running-share drift bound (7.5%) was compared across the whole segment,
+  and a merge plus a split move the boundaries between them by exactly one
+  source line's share, which is `1/N`. On 20 equal lines that is 5%, under the
+  bound; on 40 lines, 2.5%. The signal shrinks as the input grows while the
+  noise it competes with does not: at +/-35% per-line length noise a faithful
+  answer already reaches a 5.0% running-share gap at p99 on 45 lines and 9.9%
+on 10. Measured over 10,000 faithful answers per line count, that
+  bound alone rejects 7.6% at 10 lines, 0.7% at 20 and 0.01% at 45. A bound
+  that low is unusable at either end.
+- The split half of the guard was restricted to `index ± 6`. A merge in the
+  first line and a split in the last sit 19 rows apart on a 20-row input and
+  39 on a 40-row one, out past that window.
+- Even within the window, a split in two equal halves produced no local trough
+  (each half's neighbour is the other half), and a peak test failed as soon as
+  the merged line sat next to a naturally long source line.
+- Consequence: a 20-line two-paragraph source whose answer merged lines 1 and 2
+  and split line 20 came back regrouped into `[10, 10]`, putting source line 11
+  at the end of the first paragraph, and the document reported `ready` in both
+  views instead of the manual split the user should have been offered. That is
+  the MY-359 report.
+
+What replaced it. Both events are now read from a per-line share ratio,
+`(answer line / answer total) / (source line / source total)`, which cancels the
+translation's overall expansion and each source line's own length, and which
+does not dilute as the segment grows. A merge is a line holding at least
+1.5 lines' worth of text and standing clear of the segment's median line by a
+factor of 1.4, or a line whose text matches its own source line plus a
+neighbour's much more closely (half the gap or less) than its own source
+line by itself, where the neighbour is at least three quarters of its length. A split is
+a line left with at most 0.65 of its own text, or two adjacent lines that
+together carry one line's worth (sum within 0.85-1.35) with each below 0.75.
+The two are looked for over the whole segment, at any distance and in either
+order; the guard refuses when both appear, and only when both appear, because
+either one alone is ordinary line-to-line variation.
+
+Bounds, measured rather than asserted: on 10,000 synthetic faithful answers per
+line count (10, 20, 45 lines, source lines 6-40 scalars, +/-35% per-line length
+noise) the pair never occurs, so the false-rejection rate is 0.0000 at each
+count. A merge plus a split is recognised with the two 19 or 39 lines apart, in
+equal halves and in 60/40 halves, with and without 20% translation noise, in
+either order, and with the merged line next to a source line three times its
+length or having absorbed one. The residual bound is a merge of two very
+unequal lines: when the absorbed line is under three quarters of the absorber's
+length the guard does not call it a merge, and the content that moved is under
+a third of one line. Each case above is replayed by
+`scripts/verify_paragraph_regroup.py`
+(`--trials`, default 10,000), and the counterexamples are in `tests/test_sentence.py`;
+the eight parametrised merge+split cases fail on the 2026-11-19 guard and pass
+here.
+
+The 4-line sample the first amendment quoted
+(`source = "a1\na2\n\nb1\nb2"` against `answer = "A1 A2\nB1\nB2x\nB2y"`) no
+longer demonstrates the guard and is replaced in the replay by a case with
+realistic counts: its "split" halves carry 3 + 3 scalars against a 2-scalar
+source line, a 1.33x merge and a 0.67x split, which a faithful answer can show
+on its own. The replay's merge+split sample is now `alpha one / beta two /
+gamma e / delta f` answered as `alpha one beta two / gamma e / delta / f`
+(8, 7, 6, 6 against 15, 6, 5, 1). The crossing-break sample is unchanged: it is
+decided by the paragraph cuts alone.
+
+Evidence boundary, unchanged by this amendment: the 31-paragraph and
+8-paragraph D-003 answers the frozen criteria describe are **not** stored in
+this workspace, and the ones the replay uses are synthesized by removing blank
+lines from a stored 45-paragraph translation (the text and the 45-line sequence
+are real, the layout is not). The six regrouped R segments in the original
+criteria table are also absent from this workspace; the 30 stored R answers
+here need no regrouping, so the replay can only hold them to L4. A future run
+that stores a 31-paragraph, 8-paragraph or regrouped answer should replace the
+synthesis, and these results should then be re-read rather than reused.

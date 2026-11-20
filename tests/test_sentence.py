@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import shutil
 
@@ -3020,9 +3021,13 @@ def test_regrouping_restores_only_the_blank_lines_of_the_source_layout(source, a
 @pytest.mark.parametrize(
     ("source", "answer"),
     [
-        # One line absorbed its neighbour ("A1 A2") and another split in two
-        # ("B2x" + "B2y"): regrouping would move a real line across the break.
-        ("a1\na2\n\nb1\nb2", "A1 A2\nB1\nB2x\nB2y"),
+        # One line absorbed its neighbour and another came back as two: the
+        # answer keeps four lines (8, 7, 6, 6 scalars against 15, 6, 5, 1), so
+        # regrouping would move real text across the paragraph break.
+        (
+            "alpha one\nbeta two\n\ngamma e\ndelta f",
+            "alpha one beta two\ngamma e\ndelta\nf",
+        ),
         # The paragraph breaks cross: the answer keeps a break the source drops
         # before dropping one of its own, so no grouping satisfies both.
         ("a1\na2\n\nb1\nb2", "A1 A2\nB1\n\nB2x\nB2y"),
@@ -3034,6 +3039,135 @@ def test_regrouping_refuses_an_answer_that_no_longer_maps_line_for_line(
     from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
 
     assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+def _row_counts(rows: int, scalars: int = 41, long_row: int | None = None) -> list[int]:
+    counts = [scalars] * rows
+    if long_row is not None:
+        counts[long_row] = scalars * 3
+    return counts
+
+
+def _rows(counts):
+    return "\n".join("字" * count for count in counts)
+
+
+def _two_paragraph(counts):
+    half = len(counts) // 2
+    return f"{_rows(counts[:half])}\n\n{_rows(counts[half:])}"
+
+
+def _merged_then_split(counts, merge_at, split_at, *, half=0.5, noise=0.0, rng=None):
+    """An answer that merged two source lines into one and split another in two."""
+    answer: list[int] = []
+    index = 0
+    while index < len(counts):
+        if index == merge_at:
+            answer.append(counts[index] + counts[index + 1])
+            index += 2
+        else:
+            answer.append(counts[index])
+            index += 1
+    position = split_at if split_at < merge_at else split_at - 1
+    whole = answer[position]
+    first = int(whole * half)
+    answer[position : position + 1] = [first, whole - first]
+    if noise and rng is not None:
+        answer = [
+            max(2, round(count * (1 + rng.uniform(-noise, noise))))
+            for count in answer
+        ]
+    return _rows(answer)
+
+
+@pytest.mark.parametrize(
+    ("rows", "merge_at", "split_at", "half", "noise"),
+    [
+        # MY-359's report: 20 equal lines in two paragraphs, the first two
+        # merged and the last split in equal halves. One line of shift is 5% of
+        # the segment, and the merge and the split are 19 lines apart, so
+        # neither the 2026-11-19 running-drift bound nor its six-line window
+        # could see this pair.
+        (20, 0, 19, 0.5, 0.0),
+        # The same merge with an asymmetric split (60/40), which puts both
+        # halves above the single-line bound and below the merge bound.
+        (20, 0, 19, 0.6, 0.0),
+        # ... and with the noise an ordinary translation carries added on top.
+        (20, 0, 19, 0.5, 0.2),
+        (20, 0, 19, 0.6, 0.2),
+        # 40 lines: one line of shift is only 2.5% of the segment.
+        (40, 0, 39, 0.5, 0.0),
+        (40, 0, 39, 0.6, 0.2),
+        # Split before merge: the translation split the first line and merged
+        # the last two, the other order of the same two events.
+        (20, 18, 0, 0.5, 0.0),
+        (40, 38, 0, 0.5, 0.0),
+    ],
+)
+def test_regrouping_refuses_a_distant_merge_and_split(
+    rows, merge_at, split_at, half, noise
+):
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    counts = _row_counts(rows)
+    source = _two_paragraph(counts)
+    answer = _merged_then_split(
+        counts,
+        merge_at,
+        split_at,
+        half=half,
+        noise=noise,
+        rng=random.Random(4),
+    )
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+@pytest.mark.parametrize("long_row", [1, 2])
+def test_regrouping_refuses_a_merge_beside_a_naturally_long_source_line(long_row):
+    # The merged line is next to a source line three times its length (or is the
+    # one that absorbed it), so the answer's long line is not a local peak its
+    # neighbours are short against; only the line's own share shows the merge.
+    from wuwaterm.sentence import _regroup_lines_into_source_paragraphs
+
+    counts = _row_counts(20, long_row=long_row)
+    source = _two_paragraph(counts)
+    answer = _merged_then_split(counts, 0, 19)
+
+    assert _regroup_lines_into_source_paragraphs(source, answer) == answer
+
+
+def test_regrouping_accepts_a_faithful_answer_with_per_line_length_noise():
+    # The same layout question with no merge and no split: per-line length
+    # variation alone must not be read as one, or a real answer loses its
+    # paragraphs. 10, 20 and 45 lines, +/-35% per line, fixed seed.
+    from wuwaterm.sentence import _paragraph_line_counts, _regroup_lines_into_source_paragraphs
+
+    rng = random.Random(20261119)
+    for rows in (10, 20, 45):
+        counts = [rng.randint(6, 40) for _ in range(rows)]
+        source = _two_paragraph(counts)
+        answer = _rows(
+            [
+                max(2, round(count * (1 + rng.uniform(-0.35, 0.35))))
+                for count in counts
+            ]
+        )
+        out = _regroup_lines_into_source_paragraphs(source, answer)
+
+        assert out != answer
+        assert _paragraph_line_counts(out) == _paragraph_line_counts(source)
+
+
+def test_relative_line_shares_cancel_source_length_variation():
+    # One source row twice the length of another, rendered faithfully, yields
+    # the same ratio: the measure the guard reads is how many lines' worth of
+    # text a line carries, not how long the source line was.
+    from wuwaterm.sentence import _line_share_ratios
+
+    ratios = _line_share_ratios([10, 20, 30, 40], [19, 38, 57, 76])
+
+    assert ratios == pytest.approx([1.0, 1.0, 1.0, 1.0])
 
 
 def test_regrouping_refuses_layouts_whose_paragraph_breaks_cross():

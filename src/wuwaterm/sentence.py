@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import secrets
+import statistics
 import re
 import asyncio
 import inspect
@@ -1532,60 +1533,104 @@ def _cumulative_cuts(layout: Sequence[int]) -> frozenset[int]:
     return frozenset(cuts)
 
 
-# What a merge and a split do to the running share of the text. A line that
-# absorbed its neighbour shifts every following line boundary by that
-# neighbour's share; a line that gave part of itself away is visible as a local
-# trough, or has shrunk so far that no local test is needed. Faithful
-# line-by-line answers keep their boundaries within a few percent of the
-# source's (measured p99 = 5% at +/-35% per-line length noise), so both bounds
-# are far outside ordinary variation.
+# Absorbing one line into another and giving a third away as two leaves the
+# count where it was, and shifts the content: from the absorbing line to the
+# giving one, each answer line answers the source line before it, and after that
+# they agree again. Regrouping such an answer would carry text across a break.
+#
+# Both events are read from a per-line share ratio,
+# ``(answer line / answer total) / (source line / source total)``. The ratio
+# cancels the translation's overall expansion and each source line's own
+# length, so a line that absorbed a naturally long neighbour still reads as two
+# lines' worth of text rather than as a local peak against short ones. It also
+# does not dilute as the segment grows, which is why this guard is a per-line
+# test rather than a check on the two sides' running shares: a one-line shift
+# moves the running share by 1/N (5% at 20 lines, 2.2% at 45), while a faithful
+# answer at +/-35% per-line length noise already reaches a 5% running-share gap
+# at p99, so that signal cannot separate the two at any N.
 _MERGED_LINE_SHARE = 1.5
+# A merged line also stands clear of the segment's median line, so a whole-answer
+# expansion bias cannot lift an ordinary line over the bound above.
+_MERGED_LINE_PEER = 1.4
+# The neighbour a merged line absorbed, as a fraction of its own length: a merge
+# of two very unequal lines moves too little text to tell from variation.
+_ABSORBED_NEIGHBOUR_SHARE = 0.75
+# One line left with at most this much of its own text.
 _SPLIT_LINE_SHARE = 0.65
-_SPLIT_LINE_GROSS_SHARE = 0.55
-_PEAK_FACTOR = 1.4
-_VALLEY_FACTOR = 0.7
-_MERGE_SPLIT_WINDOW = 6
-# Largest tolerated gap between the two sides' running shares of the text.
-_BOUNDARY_DRIFT = 0.075
+# Or two adjacent lines that together carry one line's worth (a split in two),
+# each of them below the bound above.
+_SPLIT_PAIR_LINE_SHARE = 0.75
+_SPLIT_PAIR_TOTAL = (0.85, 1.35)
 
 
-def _is_local_extreme(
-    counts: Sequence[int], index: int, factor: float, *, peak: bool
-) -> bool:
-    neighbours = [
-        counts[other] for other in (index - 1, index + 1) if 0 <= other < len(counts)
-    ]
-    if not neighbours:
-        return False
-    if peak:
-        return all(counts[index] >= value * factor for value in neighbours)
-    return all(counts[index] <= value * factor for value in neighbours)
-
-
-def _line_boundary_drift(source_counts: Sequence[int], answer_counts: Sequence[int]) -> float:
-    """The furthest the answer's line boundaries run from the source's.
-
-    Both sides are read as a running share of their own text, which cancels the
-    overall Chinese-to-English expansion: boundary k sits at the same relative
-    position in a faithful line-by-line answer however much longer the
-    translation is. A merge pushes every boundary after it forward by the
-    absorbed line's share, and a split pulls the boundaries before it back, so
-    either one shows up here as a large gap.
-    """
+def _line_share_ratios(
+    source_counts: Sequence[int], answer_counts: Sequence[int]
+) -> list[float]:
+    """How many source lines' worth of text each answer line carries."""
     source_total = sum(source_counts)
     answer_total = sum(answer_counts)
     if source_total <= 0 or answer_total <= 0:
-        return 0.0
-    source_share = 0.0
-    answer_share = 0.0
-    worst = 0.0
-    for source_scalars, answer_scalars in zip(
-        source_counts, answer_counts, strict=True
-    ):
-        source_share += source_scalars / source_total
-        answer_share += answer_scalars / answer_total
-        worst = max(worst, abs(source_share - answer_share))
-    return worst
+        return []
+    return [
+        (answer / answer_total) / (source / source_total)
+        for source, answer in zip(source_counts, answer_counts, strict=True)
+    ]
+
+
+def _merged_line_indices(
+    source_counts: Sequence[int],
+    answer_counts: Sequence[int],
+    ratios: Sequence[float],
+) -> list[int]:
+    """Answer lines that carry their own source line and a neighbour.
+
+    Two readings of the same event: the line holds at least one and a half
+    lines' worth of text and stands clear of the segment's median line, or its
+    text matches its own source line plus a neighbour's far better than its own
+    source line alone. The second covers a merge of two unequal lines, where the
+    ratio stays under the first bound; the neighbour has to be a real part of
+    the pair, so a short adjacent line cannot turn ordinary variation into
+    evidence.
+    """
+    source_total = sum(source_counts)
+    answer_total = sum(answer_counts)
+    if source_total <= 0 or answer_total <= 0 or not ratios:
+        return []
+    source_shares = [count / source_total for count in source_counts]
+    answer_shares = [count / answer_total for count in answer_counts]
+    peer = statistics.median(ratios)
+    merged: list[int] = []
+    for index, ratio in enumerate(ratios):
+        if ratio >= _MERGED_LINE_SHARE and ratio >= peer * _MERGED_LINE_PEER:
+            merged.append(index)
+            continue
+        own = source_shares[index]
+        excess = abs(answer_shares[index] - own)
+        if excess <= 0:
+            continue
+        for other in (index + 1, index - 1):
+            if not 0 <= other < len(source_counts):
+                continue
+            if source_shares[other] < own * _ABSORBED_NEIGHBOUR_SHARE:
+                continue
+            if abs(answer_shares[index] - (own + source_shares[other])) <= excess / 2:
+                merged.append(index)
+                break
+    return merged
+
+
+def _split_line_indices(ratios: Sequence[float]) -> list[int]:
+    """Answer lines that gave part of their text away to a second line."""
+    split = [index for index, ratio in enumerate(ratios) if ratio <= _SPLIT_LINE_SHARE]
+    for index in range(len(ratios) - 1):
+        left, right = ratios[index], ratios[index + 1]
+        if (
+            left <= _SPLIT_PAIR_LINE_SHARE
+            and right <= _SPLIT_PAIR_LINE_SHARE
+            and _SPLIT_PAIR_TOTAL[0] <= left + right <= _SPLIT_PAIR_TOTAL[1]
+        ):
+            split.append(index)
+    return split
 
 
 def _lines_merged_and_split(source: str, answer: str) -> bool:
@@ -1597,59 +1642,27 @@ def _lines_merged_and_split(source: str, answer: str) -> bool:
     matches. Regrouping such an answer into the source's paragraphs would move
     real content across paragraph boundaries, so it is left alone.
 
-    Two signals, either of which rejects: the running-share drift described in
-    ``_line_boundary_drift``, and a line whose share grew by half (a local peak
-    its source line was not) within six lines of one whose share fell
-    by a third (a local trough its source line was not, or a fall well under
-    half). Requiring the share change and the shape change together keeps
-    faithful line-by-line translations out: their own line-to-line length
-    variation cancels against the source's. Measured on synthetic faithful
-    answers, neither signal fires at +/-35% per-line noise, and a rejected
-    regrouping only leaves the model's own blank lines in place. The two halves
-    are looked for in either order, since a translation may split a line before
-    merging a later pair as readily as after.
+    The two events are looked for over the whole segment, at any distance: a
+    merge in the first line and a split in the last would otherwise cancel out
+    of every count the layout shows. Refusing needs both - a line that carries
+    two source lines and another that carries part of one - because either
+    alone is ordinary line-to-line variation. Measured on synthetic faithful
+    answers with +/-35% per-line length noise, the pair never occurs in 10,000
+    trials at 10, 20 and 45 lines, while a merge plus a split is recognised at
+    a distance, in either order, and with the merged line next to a naturally
+    long source line. A rejected regrouping only leaves the model's own blank
+    lines in place.
     """
     source_counts = _line_scalar_counts(source)
     answer_counts = _line_scalar_counts(answer)
-    if len(source_counts) != len(answer_counts):
+    if len(source_counts) != len(answer_counts) or len(source_counts) < 2:
         return False
-    if (
-        _line_boundary_drift(source_counts, answer_counts) >= _BOUNDARY_DRIFT
-    ):
-        return True
-    source_total = sum(source_counts)
-    answer_total = sum(answer_counts)
-    if source_total <= 0 or answer_total <= 0:
+    ratios = _line_share_ratios(source_counts, answer_counts)
+    if not ratios:
         return False
-    for index, source_scalars in enumerate(source_counts):
-        merged = (answer_counts[index] / answer_total) / (
-            source_scalars / source_total
-        )
-        if merged < _MERGED_LINE_SHARE:
-            continue
-        if not _is_local_extreme(answer_counts, index, _PEAK_FACTOR, peak=True):
-            continue
-        if _is_local_extreme(source_counts, index, _PEAK_FACTOR, peak=True):
-            continue
-        low = max(0, index - _MERGE_SPLIT_WINDOW)
-        high = min(len(answer_counts), index + 1 + _MERGE_SPLIT_WINDOW)
-        for other in range(low, high):
-            if other == index:
-                continue
-            shrunk = (answer_counts[other] / answer_total) / (
-                source_counts[other] / source_total
-            )
-            if shrunk <= _SPLIT_LINE_GROSS_SHARE:
-                return True
-            if shrunk > _SPLIT_LINE_SHARE:
-                continue
-            if _is_local_extreme(
-                answer_counts, other, _VALLEY_FACTOR, peak=False
-            ) and not _is_local_extreme(
-                source_counts, other, _VALLEY_FACTOR, peak=False
-            ):
-                return True
-    return False
+    if not _merged_line_indices(source_counts, answer_counts, ratios):
+        return False
+    return bool(_split_line_indices(ratios))
 
 
 def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
@@ -1669,10 +1682,10 @@ def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
     byte-identical. Two layouts whose paragraph breaks cross - one keeps a
     break the other drops before it drops one of its own - are left alone,
     because no grouping of the answer's lines keeps both sides' paragraphs. And
-    an answer whose line shares show a merge plus a split is left alone too:
-    its lines no longer answer their own source lines. Every guard returns the
-    answer unchanged, so a rejected regrouping can only leave the model's own
-    blank lines in place, never move text.
+    an answer whose line shares show a merge plus a split anywhere in the
+    segment is left alone too: its lines no longer answer their own source
+    lines. Every guard returns the answer unchanged, so a rejected regrouping
+    can only leave the model's own blank lines in place, never move text.
     """
     source_layout = _paragraph_line_counts(source)
     answer_layout = _paragraph_line_counts(answer)
