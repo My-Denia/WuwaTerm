@@ -12,8 +12,11 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.10.1`, a translation
-  release on top of `v0.10.0`: paragraph regrouping of a context-mode answer now
+  published tag. The latest published Core release is `v0.10.2`, which separates
+  component deployment, transaction recovery and verification (#285), and
+  terminology matching and preparation from sentence translation (#286). The
+  data and client contract pins remain unchanged. Before it is `v0.10.1`, a
+  translation release on top of `v0.10.0`: paragraph regrouping of a context-mode answer now
   reads a per-line share ratio over the whole segment instead of the 7.5%
   running-share bound and the six-line window, so a merge and a split at any
   distance and in either order are refused, and a distant merge-plus-split
@@ -74,7 +77,7 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.10.1` and its published asset hashes are recorded
+  target-version file. Core `0.10.2` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
@@ -83,13 +86,14 @@ release. That boundary has not moved.
   installer takes its default Telegram release from that entry.
   `products.web` records the published Web `v0.4.1`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.1`.
+  published Windows `v0.6.2`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` records and
-  prints `v0.4.1`, the Telegram release that pins Core `v0.10.1`. A Core tag can
+  `docs/self-hosting.md` name the same published release: `main` and the
+  `v0.10.2` tag record and print `v0.4.1`, the Telegram release that pins Core
+  `v0.10.1`. A Core tag can
   only record a client release that already exists, so the `v0.10.1` tag, frozen
   before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
   and `setup.sh`, which pins Core `v0.10.0`. An install from the `v0.10.1` tag
@@ -103,14 +107,14 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` and the `v0.10.1` tag record and install Web `v0.4.1`, so
-  a `v0.10.1` checkout needs no Web override; the `v0.10.0` tag's frozen
+  they differ. `main` and the `v0.10.1` and `v0.10.2` tags record and install
+  Web `v0.4.1`, so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
   `WUWATERM_WEB_VERSION=v0.4.1` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.1), released independently.
+- Windows product: [v0.6.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.2), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -239,7 +243,7 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.1` pins Web `v0.4.1`
+  release carries. `0.10.1` and `0.10.2` pin Web `v0.4.1`
   (`c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260`) and Windows `v0.6.1`
   (`4da26ba9f394475432ff0b2890ae24d21f7606b1`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends

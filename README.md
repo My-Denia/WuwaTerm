@@ -133,7 +133,7 @@ release checksums, and needs the HTTPS origin your proxy serves (`--web-origin`)
 
 ### Windows client
 
-Download the portable package from [WuwaTerm-Windows v0.6.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
+Download the portable package from [WuwaTerm-Windows v0.6.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 
