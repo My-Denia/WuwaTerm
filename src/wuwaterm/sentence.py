@@ -13,6 +13,7 @@ import logging
 import os
 import secrets
 import statistics
+import sys
 import re
 import asyncio
 import inspect
@@ -1288,9 +1289,9 @@ class SentenceTranslator:
         prepared = self.prepare_text(text)
         if not prepared:
             return ""
-        exact = self.service.lookup_exact(prepared, limit=5)
-        if exact.exact and exact.best:
-            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
+        exact = self._preferred_exact_entry(prepared)
+        if exact is not None:
+            official = exact.zh if to_chinese else exact.en
             if official:
                 return official
         # C1: plural inflection is admitted only when the target is Chinese
@@ -1362,9 +1363,9 @@ class SentenceTranslator:
         )
         if not prepared:
             return ""
-        exact = self.service.lookup_exact(prepared, limit=5)
-        if exact.exact and exact.best:
-            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
+        exact = self._preferred_exact_entry(prepared)
+        if exact is not None:
+            official = exact.zh if to_chinese else exact.en
             if official:
                 return official
         if not _llm_configured():
@@ -1661,7 +1662,9 @@ class SentenceTranslator:
             return None
         return official
 
-    def _preferred_exact_entry(self, query: str) -> TermEntry | None:
+    def _preferred_exact_entry(
+        self, query: str, *, service: TermService | None = None
+    ) -> TermEntry | None:
         """The exact hit a fixed substitution may restore, if any.
 
         An established row wins over a derived one, so a name the builder
@@ -1669,7 +1672,10 @@ class SentenceTranslator:
         The remaining candidates stay available to lookup; only the
         deterministic path picks one.
         """
-        result = self.service.lookup_exact(query, limit=5)
+        lookup_service = self.service if service is None else service
+        # lookup_exact already loads all matching rows. Do not truncate them
+        # before searching for an established owner of the exact surface.
+        result = lookup_service.lookup_exact(query, limit=sys.maxsize)
         if not result.exact or result.best is None:
             return None
         return next(

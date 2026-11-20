@@ -409,9 +409,9 @@ def _dictionary_stage(
     # Direction is auto-detected from the visible text unless the caller
     # supplies an explicit target. Dictionary and LLM use the same direction.
     to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
-    result = service.lookup_exact(prepared, limit=5)
-    if result.exact and result.best:
-        official = result.best.entry.zh if to_chinese else result.best.entry.en
+    exact = translator._preferred_exact_entry(prepared, service=service)
+    if exact is not None:
+        official = exact.zh if to_chinese else exact.en
         if official:
             return _DictionaryStage(
                 prepared,

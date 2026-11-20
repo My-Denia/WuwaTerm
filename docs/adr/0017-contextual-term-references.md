@@ -105,3 +105,32 @@ supplement covers seven surfaces (`香椿`, `臭椿`, `椿树`, `椿芽`, `春�
 guards free user text, not official lines. This is a narrower reference and
 reporting set with measured evidence, which the Consequences above name as the
 permitted response, not a per-word exception to forced substitution.
+
+## Candidate supplement: scoped alternatives (2026-11-20)
+
+The q6 candidate retains the decisions above and adds occurrence-scoped
+references. A surface with different official pairs supplies alternatives to
+the model rather than a hard lock. An exact whole-input translation prefers an
+established dictionary row over a derived row and keeps all pairs available to
+dictionary lookup. A derived reference remains guidance to the model; it does
+not create a human precedent or a verified review finding.
+
+Single-character name references require a plausible right boundary as well as
+the existing ordinary-word and name-context checks. An unknown CJK continuation
+or a middle dot does not establish a separate name mention. Translation and
+review share this admission rule, and the matcher revision changes with it.
+
+For Chinese-to-English requests the candidate also derives two-character skill
+prefixes from official skill-type rows 2, 3, 5, 6 and 11. The candidate requires
+positive action and game-context evidence local to the occurrence in the
+submitted translation segment. When the same prefix has several meanings, a
+unique local sense marker is required. Ordinary uses elsewhere do not veto a
+candidate. The previous segment's read-only context and a separately scanned
+whole document do not enter this admission decision.
+
+The request supplies each admitted occurrence as a zero-based, end-exclusive
+range in the actual model input after placeholder replacement. A skill range also
+identifies its candidate target, so two meanings of one prefix retain their own
+positions. References and ranges are hints; the model still resolves meaning in
+context. These rules describe the candidate before the frozen D, R and H2
+quality gates have been evaluated.

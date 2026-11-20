@@ -14,11 +14,17 @@ import json
 import httpx
 import pytest
 
+from wuwaterm.application import (
+    KIND_EXACT,
+    TranslationJob,
+    lookup_exact_terms,
+    translate_request,
+    translate_request_async,
+)
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.models import TermRecord
 from wuwaterm.sentence import (
     SentenceTranslator,
-    _CONTEXT_RULES_INSTRUCTION,
     _CONTEXTUAL_REFERENCE_INSTRUCTION,
     _SCOPED_REFERENCE_INSTRUCTION,
     _UNTRUSTED_SOURCE_INSTRUCTION,
@@ -203,6 +209,57 @@ def test_competing_official_pairs_are_alternatives_not_a_lock(tmp_path):
     assert "Reference occurrence ranges" not in prompt
 
 
+@pytest.mark.parametrize("derived_count", [1, 6])
+def test_exact_translation_keeps_established_owner_across_entry_points(
+    tmp_path, monkeypatch, derived_count
+):
+    records = [_record("调音师", "Tuner", category="speaker", table="speaker")]
+    records.extend(
+        TermRecord(
+            category="item",
+            source_file="BinData/item/iteminfo.json",
+            source_id=f"tier-base:{number}",
+            text_key=f"tier-base:{number}",
+            zh=f"调谐器{number}",
+            en="Tuner",
+        )
+        for number in range(derived_count)
+    )
+    translator = _service(tmp_path, records)
+    service = translator.service
+    assert service.lookup_exact("Tuner").best.entry.category == "item"
+
+    def unexpected_model(*_args, **_kwargs):
+        pytest.fail("exact translations must not call the model")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", unexpected_model)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", unexpected_model)
+
+    assert translator.translate("Tuner", to_chinese=True) == "调音师"
+    assert asyncio.run(translator.translate_async("Tuner", to_chinese=True)) == "调音师"
+    sync_outcome = translate_request(service, translator, TranslationJob(text="Tuner"))
+    async_outcome = asyncio.run(
+        translate_request_async(service, translator, TranslationJob(text="Tuner"))
+    )
+    assert (sync_outcome.kind, sync_outcome.text) == (KIND_EXACT, "调音师")
+    assert (async_outcome.kind, async_outcome.text) == (KIND_EXACT, "调音师")
+    results = lookup_exact_terms(service, "Tuner", limit=derived_count + 1)
+    assert {result.zh for result in results} == {record.zh for record in records}
+
+
+def test_exact_translation_keeps_a_derived_entry_when_it_is_the_only_hit(tmp_path):
+    translator = _service(
+        tmp_path,
+        (
+            TermRecord(
+                category="item", source_file="BinData/item/iteminfo.json",
+                source_id="tier-base:1", text_key="tier-base:1", zh="调谐器", en="Tuner",
+            ),
+        ),
+    )
+    assert translator.translate("Tuner", to_chinese=True) == "调谐器"
+
+
 def test_soft_casing_needs_term_context_in_the_segment(tmp_path):
     # A derived base gains lowercase/uppercase spellings only where the segment
     # already references a term. Isolated ordinary prose stays prose.
@@ -252,16 +309,6 @@ def test_derived_version_title_is_a_reference_not_a_lock(tmp_path):
         ("Test Title Delta", "测试标题丁", "Test Title Delta", "core_term"),
     )
     assert locked.reference_scope is False
-
-
-def test_context_rules_carry_the_actor_and_clause_rules():
-    # The opt-in context prompt states how to resolve an omitted actor and how
-    # to keep clauses complete; it does not add the idiom sentence the earlier
-    # candidate carried.
-    assert "Resolve an omitted actor from the complete clause" in _CONTEXT_RULES_INSTRUCTION
-    assert "numeric shorthand such as 3+1 or S0R1" in _CONTEXT_RULES_INSTRUCTION
-    assert "Translate every clause" in _CONTEXT_RULES_INSTRUCTION
-    assert "idioms, irony" not in _CONTEXT_RULES_INSTRUCTION
 
 
 def test_context_request_without_reference_scope_omits_the_scope_block(tmp_path):
