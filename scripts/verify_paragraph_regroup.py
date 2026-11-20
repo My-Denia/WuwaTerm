@@ -21,7 +21,15 @@ removing blank lines, which keeps the text and the 45-line sequence real. L2 is
 checked on that reproduction, and the guards are checked on the merge+split and
 crossing-break cases the criteria name.
 
-    python scripts/verify_paragraph_regroup.py [--goal-runs PATH]
+MY-359's amendment (2026-11-20) widened the merge+split guard to the whole
+segment, so this script also replays the counterexamples that broke the earlier
+six-line window - a merge in the first line and a split in the last, at 20 and
+40 lines, in either order, with and without ordinary translation noise, and
+with the merged line beside a naturally long source line - and measures the
+guard's false-rejection rate on synthetic faithful answers at +/-35% per-line
+length noise.
+
+    python scripts/verify_paragraph_regroup.py [--goal-runs PATH] [--trials N]
 
 Exit status is 0 only when every case behaves as documented.
 """
@@ -31,6 +39,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -150,6 +159,179 @@ def _load_stored(goal_runs: Path) -> tuple[str, list[tuple[str, str]]]:
     return source_text, answers
 
 
+def _rows(counts: list[int]) -> str:
+    """One line per count, each ``count`` non-whitespace scalars long."""
+    return "\n".join("\u5b57" * count for count in counts)
+
+
+def _two_paragraph_source(
+    rows: int,
+    scalars: int = 41,
+    long_row: int | None = None,
+    counts: list[int] | None = None,
+) -> tuple[str, list[int]]:
+    """``rows`` source lines in two paragraphs, one row optionally long.
+
+    Pass ``counts`` to give the lines themselves rather than ``scalars``.
+    """
+    if counts is None:
+        counts = [scalars] * rows
+        if long_row is not None:
+            counts[long_row] = scalars * 3
+    half = len(counts) // 2
+    return f"{_rows(counts[:half])}\n\n{_rows(counts[half:])}", counts
+
+
+def _merged_and_split_answer(
+    counts: list[int],
+    merge_at: int,
+    split_at: int,
+    *,
+    half: float = 0.5,
+    noise: float = 0.0,
+    rng: random.Random | None = None,
+) -> str:
+    """A one-paragraph answer that merged one line and split another.
+
+    Source lines ``merge_at`` and ``merge_at + 1`` come back as one answer line,
+    and the line answering source line ``split_at`` comes back as two lines that
+    take ``half`` and ``1 - half`` of its text. The line count is unchanged, so
+    only the per-line lengths show that entry k is not source entry k.
+    """
+    answer: list[int] = []
+    index = 0
+    while index < len(counts):
+        if index == merge_at:
+            answer.append(counts[index] + counts[index + 1])
+            index += 2
+        else:
+            answer.append(counts[index])
+            index += 1
+    position = split_at if split_at < merge_at else split_at - 1
+    whole = answer[position]
+    first = int(whole * half)
+    answer[position : position + 1] = [first, whole - first]
+    if noise and rng is not None:
+        answer = [
+            max(2, round(count * (1 + rng.uniform(-noise, noise))))
+            for count in answer
+        ]
+    return _rows(answer)
+
+
+def _counterexamples() -> list[tuple[str, str, str]]:
+    """The distant merge+split answers the 2026-11-20 amendment names.
+
+    Each is (label, source, answer): the answer keeps the source's line count
+    and loses its blank lines, so the post-check would regroup it into the
+    source's paragraphs and move real text across a break if the guard missed.
+    """
+    rng = random.Random(11)
+    cases: list[tuple[str, str, str]] = []
+    for rows in (20, 40):
+        source, counts = _two_paragraph_source(rows)
+        for half, label in ((0.5, "equal halves"), (0.6, "60/40 halves")):
+            cases.append(
+                (
+                    f"{rows} lines, merge first + split last, {label}",
+                    source,
+                    _merged_and_split_answer(counts, 0, rows - 1, half=half),
+                )
+            )
+            cases.append(
+                (
+                    f"{rows} lines, {label}, 20% translation noise",
+                    source,
+                    _merged_and_split_answer(
+                        counts, 0, rows - 1, half=half, noise=0.2, rng=rng
+                    ),
+                )
+            )
+        cases.append(
+            (
+                f"{rows} lines, split first + merge last",
+                source,
+                _merged_and_split_answer(counts, rows - 2, 0),
+            )
+        )
+    # PR #282 review: a merge of two unequal lines. The absorbed line is three
+    # quarters of the absorber's length, so the merged line holds 1.75 lines'
+    # worth, and a 20% noise draw that comes out short leaves it at 1.42 - under
+    # 1.5, so the 2026-11-20 guard as first published regrouped these answers
+    # and moved source line 3 into the first paragraph.
+    reported = [40, 30, 30, 30]
+    reported_source, _ = _two_paragraph_source(len(reported), counts=reported)
+    cases.append(
+        (
+            "4 lines, merge a line three quarters as long + split last",
+            reported_source,
+            _rows([56, 36, 18, 18]),
+        )
+    )
+    # PR #282's second report: a short third source line, the split turned round,
+    # ratios 1.56 / 0.59 / 1.00 / 0.67. The shrunk half sits at 0.593, so the
+    # lone-line bound has to reach 0.60 to see it.
+    second = [40, 30, 20, 30]
+    second_source, _ = _two_paragraph_source(len(second), counts=second)
+    cases.append(
+        (
+            "4 lines, merge and split around a short source line",
+            second_source,
+            _rows([56, 16, 18, 18]),
+        )
+    )
+    for rows in (20, 40):
+        uneven = [40, 30] + [30] * (rows - 2)
+        uneven_source, uneven_counts = _two_paragraph_source(len(uneven), counts=uneven)
+        for half in (0.5, 0.6):
+            cases.append(
+                (
+                    f"{rows} lines, merge two unequal lines + split last, "
+                    f"{half:.1f} halves, 20% translation noise",
+                    uneven_source,
+                    _merged_and_split_answer(
+                        uneven_counts, 0, rows - 1, half=half, noise=0.2, rng=rng
+                    ),
+                )
+            )
+    long_row_source, long_row_counts = _two_paragraph_source(20, long_row=2)
+    cases.append(
+        (
+            "20 lines, merged line beside a naturally long source line",
+            long_row_source,
+            _merged_and_split_answer(long_row_counts, 0, 19),
+        )
+    )
+    long_absorbed_source, long_absorbed_counts = _two_paragraph_source(20, long_row=1)
+    cases.append(
+        (
+            "20 lines, merge absorbs a naturally long source line",
+            long_absorbed_source,
+            _merged_and_split_answer(long_absorbed_counts, 0, 19),
+        )
+    )
+    return cases
+
+
+def _faithful_noise_rate(rows: int, trials: int) -> float:
+    """Share of faithful line-by-line answers with noise that a guard rejects."""
+    rng = random.Random(20261120)
+    rejected = 0
+    for _ in range(trials):
+        counts = [rng.randint(6, 40) for _ in range(rows)]
+        half = rows // 2
+        source = f"{_rows(counts[:half])}\n\n{_rows(counts[half:])}"
+        answer = _rows(
+            [
+                max(2, round(count * (1 + rng.uniform(-0.35, 0.35))))
+                for count in counts
+            ]
+        )
+        if _regroup_lines_into_source_paragraphs(source, answer) == answer:
+            rejected += 1
+    return rejected / trials if trials else 0.0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -157,6 +339,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=ROOT.parent / "goal-runs",
         help="goal-runs directory holding the stored answers",
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=10000,
+        help="faithful-answer trials per line count for the noise replay",
     )
     args = parser.parse_args(argv)
     source_text, answers = _load_stored(args.goal_runs)
@@ -235,28 +423,40 @@ def main(argv: list[str] | None = None) -> int:
         r_regrouped += 1
     regrouped += r_regrouped
 
-    # Guards: a merge plus a split, and crossing paragraph breaks.
-    guards = (
-        (
-            "merge and split inside one collapsed paragraph",
-            "a1\na2\n\nb1\nb2",
-            "A1 A2\nB1\nB2x\nB2y",
-        ),
+    # Guards: the counterexamples the 2026-11-20 amendment names, plus the
+    # crossing-break sample kept from the earlier amendment.
+    guards = list(_counterexamples()) + [
         (
             "crossing paragraph breaks",
             "a1\na2\n\nb1\nb2",
             "A1 A2\nB1\n\nB2x\nB2y",
         ),
-    )
+    ]
     for name, source, candidate in guards:
         checked += 1
         if _regroup_lines_into_source_paragraphs(source, candidate) != candidate:
             failures.append(f"{name}: a rejected layout was rewritten")
 
+    # The other direction: a faithful line-by-line answer with ordinary per-line
+    # length noise must still regroup. A guard that fires here costs a real
+    # answer its paragraph layout, so the rate is reported and a single hit
+    # fails the replay.
+    rates = []
+    for rows in (10, 20, 45):
+        rate = _faithful_noise_rate(rows, args.trials)
+        rates.append(f"N={rows}:{rate:.4f}")
+        checked += args.trials
+        if rate > 0.0:
+            failures.append(
+                f"faithful answers at N={rows} were rejected in "
+                f"{rate:.2%} of {args.trials} trials"
+            )
+
     print(
         f"source={DOC_ID} paragraphs={source_paragraphs} "
         f"answers={len(answers)} cases={checked} regrouped={regrouped}"
     )
+    print("faithful-noise rejection rate " + " ".join(rates))
     if failures:
         print("\n".join(f"FAIL {item}" for item in failures), file=sys.stderr)
         return 1
