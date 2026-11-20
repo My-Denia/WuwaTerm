@@ -267,10 +267,11 @@ class SentenceTranslator:
         """Lock the same spans, but hand contextual ones to the model as text.
 
         ``_lock_terms`` keeps its deterministic placeholder behavior for the
-        no-model path, the public ``lock_terms`` API and the builder's
-        measurement. Only the model-facing translation paths call this, so a
-        term whose meaning depends on the sentence, or whose English form has
-        to inflect, stays visible instead of being replaced.
+        no-model path and the public ``lock_terms`` API. The builder's corpus
+        measurement uses the shared matcher directly with its exact default.
+        Only model-facing translation paths call this, so a term whose meaning
+        depends on the sentence, or whose English form has to inflect, stays
+        visible instead of being replaced.
 
         ``allow_nfkc_spelling`` is enabled only by the plain prepared-text
         paths; protected text is not prepared and must not use the candidate.

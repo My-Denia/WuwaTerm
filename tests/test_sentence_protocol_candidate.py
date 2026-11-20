@@ -16,7 +16,7 @@ def test_api_protocol_opt_in_preserves_other_payloads(monkeypatch, sample_db, tm
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-only")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-only")
-    monkeypatch.setattr("wuwaterm.sentence.secrets.token_hex", lambda _: "fixedtest")
+    monkeypatch.setattr("secrets.token_hex", lambda _: "fixedtest")
     payloads = []
 
     def response(request):
@@ -142,7 +142,7 @@ def test_public_translation_entries_preserve_default_payloads(
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-only")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-only")
-    monkeypatch.setattr("wuwaterm.sentence.secrets.token_hex", lambda _: "fixedtest")
+    monkeypatch.setattr("secrets.token_hex", lambda _: "fixedtest")
     payloads = []
 
     def response(request):
