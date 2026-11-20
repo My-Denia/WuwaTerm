@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-20",
-  "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The four releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256.",
+  "observed_on": "2026-11-21",
+  "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256. For Web, release is this checkout's installer default; newer public releases are described in its adoption note and the product guide.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
     "work_tracking": "The existing Linear WuwaTerm project remains authoritative for work tracking."
@@ -46,7 +46,7 @@
         "web"
       ],
       "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/contracts/manuscript-v4/SPEC.md",
-      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4). The v4 contract ships in Web 0.4.0 and 0.4.1 and in Windows 0.6.0 and 0.6.1, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4). The v4 contract ships in Web 0.4.0, 0.4.1 and 0.4.2 and in Windows 0.6.0, 0.6.1 and 0.6.2, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -79,12 +79,35 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "dd2383035e8957f24acc4bec5b96bb8d24dada63",
-        "tree": "6102936f9296929751499e14c8a2de749cee040a",
+        "commit": "1d4bcdc8ef5c6edfccfb7720556d88c7fa998981",
+        "tree": "ad6b0336b265d28c65a702cee2cdb2ae2afa73be",
         "status": "success"
       },
-      "source_version": "0.10.1",
+      "source_version": "0.10.2",
       "release": {
+        "version": "0.10.2",
+        "tag": "v0.10.2",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.10.2",
+        "published_at": "2026-11-20T15:52:54Z",
+        "source_commit": "1d4bcdc8ef5c6edfccfb7720556d88c7fa998981",
+        "source_tree": "ad6b0336b265d28c65a702cee2cdb2ae2afa73be",
+        "assets": [
+          "wuwaterm-0.10.2-py3-none-any.whl",
+          "wuwaterm-0.10.2.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.10.2-py3-none-any.whl": "170ff500d43f64e345d13c2e0cd173f93fda3ab367220feb601a3ae8377553a7",
+          "wuwaterm-0.10.2.tar.gz": "d6e552917ad76b07d71c336faf1a839eac5a43ff4a3dd0f42b92e5825bfa573e",
+          "release-manifest.json": "5ea6b71103cd30f7c18fea58e692464a1c4d14eeeca8b4d2dcd74e4c689dea3b",
+          "SHA256SUMS": "a56ebfc3199ac359be741ec86abeaab8a597031224ccdb49176a69d106cffb59"
+        },
+        "manifest_note": "The release manifest records the source commit, pinned upstream data revision and image digests: runtime sha256:3037e2f3ea92516cbde259c3bdf4426254198fb568b92ba6c22c158a50189672 and builder sha256:a676957b67c935487b0121d2da6a613328be644adb392bc1e9f8438fd0ff48c3. Both were first pushed under sha-1d4bcdc and promoted to v0.10.2 and 0.10 after publication; the historical version tags were retained.",
+        "note": "v0.10.2 separates component deployment entry points, runtime/full transactions, saved-source recovery and shared verification (#285); each transaction keeps its own update and rollback sequence, while recovery verifies and executes the source saved with the transaction. It also separates terminology matching and preparation from sentence translation (#286): the builder and translation share matching, and translation keeps database snapshots, model requests and restoration. The public and compatibility commands, FD9 lock and transaction formats remain in scope; Protocol 1 stays closed. The #285 validation exercised four Protocol 2 interruption and recovery scenarios with real containers, and #286 compared 20 real entry scenarios and 16 in-memory transport requests byte for byte. Source CI run 44764090818 passed on 1d4bcdc with schema 2, dry run 44764145794 passed, draft release run 44766187279 built the published artifacts, and release-triggered run 44767708544 promoted the image tags. All four public assets were downloaded anonymously and matched the draft checksums. The data pin and the Web and Windows contract pins stay as recorded in ci_pins; this checkout names Telegram v0.4.1 and Web v0.4.1 for the installer."
+      },
+      "previous_release": {
         "version": "0.10.1",
         "tag": "v0.10.1",
         "status": "released",
@@ -107,29 +130,6 @@
         "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:5b4cbfef31be39ea2338d30051f838139c1ceb2583c2f8dca844a3ed604531c9 and builder sha256:80a71493934c0f3b2dca1e7582afd4b5ec387b43b3e9230d2d5a83d6afd082bd, first pushed as sha-dd23830 and retagged by promote-images as v0.10.1 and 0.10.",
         "note": "v0.10.1 is a translation release on top of v0.10.0. Paragraph regrouping of a context-mode answer into the source's paragraphs now compares a per-line share ratio, (answer line / answer total) / (source line / source total), over the whole segment instead of the 7.5% running-share bound and the six-line window, so a merge and a split at any distance and in either order are refused and a distant merge-plus-split answer keeps the model's own blank lines for a manual split. A merge is a line carrying at least 1.4 lines' worth of text that also stands 1.3 clear of the segment's median, or a line whose text matches its own source line plus a neighbour's; a split is a line left with at most 0.60 of its own text, or two adjacent lines carrying at most 0.65 each and 0.75 to 1.25 together, and a refusal needs both. The criteria were frozen in docs/eval/paragraph-layout-criteria.md before the change and scripts/verify_paragraph_regroup.py replays them (MY-359): 50,000 synthetic faithful answers at each of 10, 20 and 45 lines with plus or minus 35% per-line length noise reject 0.0000, the eight parametrised counterexamples fail on the previous guard and pass here, and the stored D-003 31- and 8-paragraph reproductions still regroup to the source's 45 paragraphs with their line sequence intact. The Web and Windows contract pins move to Web v0.4.1 (c1b9fd5c) and Windows v0.6.1 (4da26ba9), the patch releases of the two wuwaterm-manuscript-v4 clients, and contracts/web-ref.txt, contracts/windows-ref.txt, the split revisions of contracts/ci-source-epochs.json and the matching assertions in tests/test_ci_source_epoch.py carry them together; no Core API version, OpenAPI shape or translation request changes with the pins, and the OpenAPI document moves only its info.version. The dictionary, the builder and the terms.db it produces are those of v0.10.0. The snapshot frozen in this tag names Web v0.4.1 and Telegram v0.4.0 for the installer, so an install from the v0.10.1 tag needs no Web override; Telegram v0.4.1, the release built on this Core, was published after the tag and is recorded on main, and an install from the tag names it with WUWATERM_TELEGRAM_VERSION=v0.4.1 or runs from main. CI run 44692505542 passed on dd23830, the dry run 44694133479 built every artifact without pushing images, the draft release run 44694379176 built the published assets, and the release-triggered run 44694763373 promoted the image tags."
       },
-      "previous_release": {
-        "version": "0.10.0",
-        "tag": "v0.10.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.10.0",
-        "published_at": "2026-11-19T19:53:18Z",
-        "source_commit": "67e27da7e3a5a108a43f2cf15b7a4eed82dcfe84",
-        "source_tree": "7d20f75850ee56a941edd7bc871f043711600d9b",
-        "assets": [
-          "wuwaterm-0.10.0-py3-none-any.whl",
-          "wuwaterm-0.10.0.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.10.0-py3-none-any.whl": "d4d5b095b43fa4b11a79cf3d43cc04d0b3756c89c786fcab668ebcf06bcd2e84",
-          "wuwaterm-0.10.0.tar.gz": "15b94502e4a391e055d121a9107fea3abbaade8df625aebb43876991acfe7acd",
-          "release-manifest.json": "3e2e24cbc7cd993357931f8330288c265f685d295751925085a03067768d55cb",
-          "SHA256SUMS": "2fbc7d258d2540055d53ca9d25301c592c9fb118fcb456173c425d45c96c50d1"
-        },
-        "manifest_note": "The release manifest records source_commit, the runtime and builder image digests and the pinned upstream data revision: runtime sha256:a1b32cfdd6a973db92ab7920db86289d297356bd6f3a2e668d29ee7bd191fc42 and builder sha256:9c4624ad2d0edc46f922d9a3e9d7fc93539990180d40e49880afb6f853c3926f, first pushed as sha-67e27da and retagged by promote-images as v0.10.0 and 0.10.",
-        "note": "v0.10.0 is a review and translation release. review-v2 gives every mapped region its own claim and allocation step: when the occurrences a region holds cannot cover the mentions competing for them, it credits none of those mentions instead of whichever one a sweep reaches first, a partial assignment is the largest one rather than the first one found, an inflection never answers a competing official form, a numbering dot no longer ends a sentence where review-v2 pairs them (segmentation-v1 keeps the boundary it publishes), an occurrence enclosed by a longer official form is not a standalone hit unless the source claims that longer term, a lowercase spelling of a capitalized official term is an ordinary word, and a derived name surface asserts no constraint. The CJK matcher basis label moves to wuwaterm-cjk-matcher-v8, so stored resolution contexts and saved v3 segment results carrying -v7 go stale by the existing freshness rule and are re-reviewed. POST /v1/reviews accepts a 64 KiB body instead of 32 KiB, and review-v2 callers may opt into dense-128 and reason-v1 with X-WuwaTerm-Review-Features under an exact grammar that echoes the accepted set back. Regrouping a context-mode answer into the source's paragraphs refuses a crossing paragraph break and a merge-plus-split line layout and keeps the model's own blank lines. Every LLM request byte, term lock and reference list is identical to 0.9.2, and the builder and the terms.db it produces are unchanged, so an install keeps the database it built. The Web and Windows contract pins move to Web v0.4.0 (7cfbc4d5) and Windows v0.6.0 (eaceb8bb), the two consumers of wuwaterm-manuscript-v4; no Core API version or OpenAPI shape changes with the pins. CI run 44599508979 passed on 67e27da, the draft release run 44602177160 built the assets, and the release-triggered run 44602964761 promoted the image tags. Kept as history after v0.10.1; the release and its assets are still published. v0.9.2 and earlier remain on the release page."
-      },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
         "base_commit": "dcd0e2066c82982a5a9fc96c6eec3f6b2a015f39",
@@ -148,11 +148,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.10.1 (dd23830) is deployed on the owner VPS by a runtime-only update on 2026-11-20: release r8 is current and wuwaterm-api reports 0.10.1 with restart count 0, with a post-deploy error-log scan that found 0 entries. /healthz and /readyz answer 200, and the deploy reachability smoke inside the compose service reports getMe: ok (TELEGRAM_TEST_CHAT_ID is unset, so sendMessage is skipped). The rollback point is release r7 with the image tag wuwaterm-runtime:rollback-runtime-dd2383035e89-307827 retained, and that retention pass removed r6. terms.db is unchanged (sha256 3308e5fe…, data pin 9218d612). The legacy in-Core wuwaterm-bot stays stopped (status=created). The standalone wuwaterm-telegram container runs Telegram 0.4.1 on this release and shares that database with wuwaterm-api, with its operations health check reporting ready; the telegram entry carries that adoption.",
+      "adoption_note": "Core v0.10.2 (1d4bcdc8ef5c6edfccfb7720556d88c7fa998981) is deployed by a runtime-only update that exited 0; the API started on 2026-11-21 at 00:03:19 +08. Release r9 is current, and both .deploy_commit and the current checkout HEAD match that source commit exactly. The rollback point is r8 (Core v0.10.1, dd23830), with the previous runtime image and marker checked and the image retained; managed retention removed r7. The API is running with restart count 0 and /healthz and /readyz return HTTP 200; the legacy in-Core bot remains stopped. The standalone Telegram 0.4.1 container, image, start time, status and restart count 0 are unchanged; it still pins the Core 0.10.1 wheel and shares the same terms database with the API. The database SHA-256 remains 3308e5fe…, and .env contents are unchanged with mode 0600. Sanitized error, critical, fatal and traceback scans over the preceding 10 minutes found 0 entries for both services. No staging, archive or run containers from this update, or incoming/current temporary files, remained.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/dd2383035e8957f24acc4bec5b96bb8d24dada63/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/dd2383035e8957f24acc4bec5b96bb8d24dada63/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/1d4bcdc8ef5c6edfccfb7720556d88c7fa998981/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/1d4bcdc8ef5c6edfccfb7720556d88c7fa998981/docs/data-refresh.md"
       ]
     },
     {
@@ -234,19 +234,53 @@
         },
         "note": "v0.4.0 pins the published Core 0.10.0 wheel, whose SHA-256 d4d5b095b43fa4b11a79cf3d43cc04d0b3756c89c786fcab668ebcf06bcd2e84 is the core_binding this bundle records (OCI index sha256:c403f27520dc912cc2e3695463cf40492cd8b84f0532943733d687da2e47b9b4, manifest sha256:2c06fb1426b9004267001f1a70a0a0a1636b0374bfb68eb4f600011946d00648, config sha256:b58ba044e6eab04659a3461fee84c33f624c4fb5789d4f6cd62c5839b013f424, built by image-bundle run 44607623811). Core moves a minor version, so Telegram moves a minor version; the release-prep change (#42) is the Core pin, the package metadata and the docs that describe what Core now does. The code change is #41: a chat's delivering slot is no longer evicted while a report is being delivered and a full slot set answers the busy notice instead, a member who submits the same text while the source job runs is queued by user and served from the finished report without another model call, a send retry is limited to a network error confirmed not to have reached Telegram, the failure notice carries a resend button guarded against double clicks, expired toasts are bilingual, dead job state is removed, and a tag push no longer triggers a second CI run. /review findings follow Core's wuwaterm-cjk-matcher-v8 basis and its numbering-dot rule, and long /tr paragraph regrouping refuses a crossing break and a merge-plus-split layout. Every LLM request byte, term lock and reference list is identical to Core 0.9.2, and the builder and its terms.db are unchanged, so an existing install keeps the database it built. Kept as history after v0.4.1; the release and its assets are still published. v0.3.1 and earlier remain on the release page."
       },
-      "adoption_note": "Standalone Telegram 0.4.1 on Core 0.10.1 is deployed on the owner VPS on 2026-11-20: the wuwaterm-telegram container runs image sha256:71e5a0f1ace4d96195c071ee94110dce62b61d4638b52493124afc245748622a and reports wuwaterm 0.10.1 and wuwaterm-telegram 0.4.1, switched with 1.389s of downtime as the deploy run reported, with RestartCount 0 and the operations health check reporting ready. It shares /opt/wuwaterm/data/terms.db (sha256 3308e5fe…) with wuwaterm-api 0.10.1 at releases/r8. The previous image is retained under the tag wuwaterm-telegram:rollback-0.4.0-local, and the state backup /opt/wuwaterm/telegram/state-backup-20261120T075142Z is kept."
+      "adoption_note": "Standalone Telegram 0.4.1 on Core 0.10.1 is deployed on the owner VPS on 2026-11-20: the wuwaterm-telegram container runs image sha256:71e5a0f1ace4d96195c071ee94110dce62b61d4638b52493124afc245748622a and reports wuwaterm 0.10.1 and wuwaterm-telegram 0.4.1, switched with 1.389s of downtime as the deploy run reported, with RestartCount 0 and the operations health check reporting ready. It shares /opt/wuwaterm/data/terms.db (sha256 3308e5fe…) with wuwaterm-api 0.10.2 at releases/r9; Telegram remains on its Core 0.10.1 wheel. The previous image is retained under the tag wuwaterm-telegram:rollback-0.4.0-local, and the state backup /opt/wuwaterm/telegram/state-backup-20261120T075142Z is kept."
     },
     {
       "id": "windows",
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "1962deb3227804ebaa57196f5bbf303a03e78c55",
-        "tree": "a0187632efdc9428a4ea3914a86431536d38aad4",
+        "commit": "f4f0e7ef2614c67c97b2a7610636cf8830cb2189",
+        "tree": "3e489757069ea4465f3f8ba262322418ce357e74",
         "status": "success",
-        "status_note": "README-only commit (#33, record of 0.6.1 and its assets) on top of the release commit 4da26ba9. ci.yml is skipped by its paths-ignore for docs-only changes, and the locked-dependencies audit (critical/high) passed (run 44677503053). The CI run 44674837925 that passed, the dependency audit 44674837951 and the release build run 44676073282 are on 4da26ba9."
+        "status_note": "README-only release record (#35) on top of the release source f60e1461. The locked-dependencies audit passed on this commit (run 44763511671); source CI run 44747897498 and release build run 44759124071 passed on f60e1461."
       },
       "release": {
+        "version": "0.6.2",
+        "tag": "v0.6.2",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.2",
+        "published_at": "2026-11-20T15:15:07Z",
+        "source_commit": "f60e14618b60eacf9841c4b1aca5d3e427fa37a0",
+        "source_tree": "da82a0ee64f01ecea9e13030f8420c43f141644e",
+        "assets": [
+          "WuwaTerm-0.6.2-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.6.2-windows-x64.zip": "62d3183cd51077d8aa218f07fa516bf3f6255369c9b0e8ac2d83e2263c94dcba",
+          "manifest.json": "10f1ecd93084b22de714ebe99086a9668ec8f6f45f5d8e507c1578cb3aac261b",
+          "SHA256SUMS": "21fd57ab3a680a9d1cabad3ff0b88c17394c68bb7e001d8fcee19eb80ce0121f"
+        },
+        "zip_sha256": "62d3183cd51077d8aa218f07fa516bf3f6255369c9b0e8ac2d83e2263c94dcba",
+        "signed": false,
+        "note": "v0.6.2 centralizes long-manuscript segment review state and scheduling (#34): the domain layer supplies the state, live-basis probe and next segment to review, and the Qt workbench uses those results. With terminology review enabled, reopening first obtains the current service basis before scheduling needed terminology and semantic reviews. Manuscript formats v1 through v4 and the HTTP API contract are unchanged. The release ZIP is 57,296,633 bytes and is built from f60e1461 by release run 44759124071 after source CI run 44747897498. The release record and verification are in README at f4f0e7ef (#35)."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v4",
+        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.6.2: source CI run 44747897498 and release build run 44759124071 passed on f60e1461. The publicly downloaded release ZIP passed both offscreen and default Windows graphical-environment --self-check (exit 0); it is unsigned. Separately, a native Windows session launched source candidate fd281946 and passed real-manuscript save, edit, close, reopen and character comparison. Windows f60e1461 and Web dfa3cf40c2c5ff8e18c6c2de31b9a94a368b5bef passed six shared state cases and 13 bidirectional manuscript checks for v1 through v4 (#34, https://github.com/My-Denia/WuwaTerm-Windows/pull/34; Web #48, https://github.com/My-Denia/WuwaTerm-Web/pull/48).",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/f4f0e7ef2614c67c97b2a7610636cf8830cb2189/README.md"
+      ],
+      "source_version": "0.6.2",
+      "previous_release": {
         "version": "0.6.1",
         "tag": "v0.6.1",
         "status": "released",
@@ -266,54 +300,20 @@
         },
         "zip_sha256": "a9a5b16556aae70c574861b8e79c0bff3d8b6f98609be4ba199ebcc9c6fb92c4",
         "signed": false,
-        "note": "v0.6.1 is a maintenance release on v0.6.0 (#32). A term-group place taken from a reopened v3 or v4 manuscript has no review basis for this session yet, so it is a saved result: the group reads 待核对依据 and 已保存，尚未核对当前依据 instead of 已核, the 待处理 filter lists it rather than hiding it behind a confirmed status, occurrence rows, the 按出现顺序 rows and the occurrence detail badge carry the same note where they would otherwise say 约束已核, and a recorded conflict still stays a decision to make. Group status never confirms while any of its places is a saved result, and saved_count says how many are. Grouping only reads the records, so the saved report, its per-occurrence spans and its distribution are unchanged and the first live check restores 已核; the file formats and the service requirements are those of 0.6.0, HTTP API v1 with review-v2 for manuscript review. The published ZIP (a9a5b165…) is built from 4da26ba9 (Windows release run 44676073282, CI run 44674837925, manifest validation_run_id 44674837925), and the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. v0.6.0 and its assets remain published under previous_release."
+        "note": "v0.6.1 is a maintenance release on v0.6.0 (#32). A term-group place taken from a reopened v3 or v4 manuscript has no review basis for this session yet, so it is a saved result: the group reads 待核对依据 and 已保存，尚未核对当前依据 instead of 已核, the 待处理 filter lists it rather than hiding it behind a confirmed status, occurrence rows, the 按出现顺序 rows and the occurrence detail badge carry the same note where they would otherwise say 约束已核, and a recorded conflict still stays a decision to make. Group status never confirms while any of its places is a saved result, and saved_count says how many are. Grouping only reads the records, so the saved report, its per-occurrence spans and its distribution are unchanged and the first live check restores 已核; the file formats and the service requirements are those of 0.6.0, HTTP API v1 with review-v2 for manuscript review. The published ZIP (a9a5b165…) is built from 4da26ba9 (Windows release run 44676073282, CI run 44674837925, manifest validation_run_id 44674837925), and the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. v0.6.0 and its assets remain published at https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.0."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v4",
-        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.6.1: CI run 44674837925 passed on 4da26ba9 (Pure manuscript contract, Windows build and contracts / build and test), and the locked-dependencies audit (critical/high) passed in run 44674837951. The published ZIP (a9a5b165…) is built from 4da26ba9 by release run 44676073282, whose manifest records source_commit 4da26ba9, validation_run_id 44674837925 and signed false; the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. The commit adds scripts/capture_workbench.py 09e-term-groups-saved-reopen, a reopened manuscript whose saved group the screenshot shows before the check; this record does not read that capture set. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371).",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/1962deb3227804ebaa57196f5bbf303a03e78c55/README.md"
-      ],
-      "source_version": "0.6.1",
-      "previous_release": {
-        "version": "0.6.0",
-        "tag": "v0.6.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.0",
-        "published_at": "2026-11-19T18:28:06Z",
-        "source_commit": "eaceb8bbe847f4db14f227dea274261fa2dc5784",
-        "source_tree": "5200801b0057d06bb7f0a75fa7c96acef07b9f41",
-        "assets": [
-          "WuwaTerm-0.6.0-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.6.0-windows-x64.zip": "0b46cd1664a12fb4bcc5088c162d775198c0eac0752532e594f0ef98fa30a841",
-          "manifest.json": "27378c05b2e6da1000c8a5108e7b5f29e5d5cf43d2d239bef62cf943bdaccdce",
-          "SHA256SUMS": "43f47a64f43d716b707b6ad298692823ab2c92447547f0f5b60ca717f87d2aee"
-        },
-        "zip_sha256": "0b46cd1664a12fb4bcc5088c162d775198c0eac0752532e594f0ef98fa30a841",
-        "signed": false,
-        "note": "v0.6.0 reads and writes wuwaterm-manuscript-v4 and adds term grouping and per-occurrence work in the review panel (#30). Findings, resolutions and choices per manuscript or segment rise from 32 to 128, a not_evaluated finding can carry a structured reason, and the review request declares X-WuwaTerm-Review-Features: dense-128,reason-v1; a writer stores the lowest format that holds the content (v1/v2, then v3, then v4), so a manuscript that does not need v4 keeps its lower format and old clients keep opening it. The panel groups the occurrences of one term by form and candidate with a pending filter and reads \"another N segments to review\" and the not-evaluated reason, per-occurrence replace and revise work in the group, the editor fixes Enter, CRLF and a bare CR concatenation and keeps the caret and selection of a rejected edit, an unreviewed short segment shows as pending again instead of reviewed, and a text that cannot be split reliably after translation gets a jump entry. It requires HTTP API v1, and manuscript review also needs review-v2. Windows 0.5.1 and Web 0.3.1 reject v4 files. Kept as history after v0.6.1; the release and its assets are still published. v0.5.1 and earlier remain on the release page."
-      },
-      "adoption_note": "0.6.1 is published. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.6.1 ZIP. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371)."
+      "adoption_note": "0.6.2 is published. Adoption is unknown: no record shows whether the owner desktop runs the published 0.6.2 ZIP."
     },
     {
       "id": "web",
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260",
-        "tree": "45dc7dc38af6082e631a5ba81074174db61a1f29",
+        "commit": "262d715527eeb7c64ee9c6d922b3c34d7722813b",
+        "tree": "aa855aa6afc911f05816ac0651054ba1f553925f",
         "status": "success"
       },
-      "source_version": "0.4.1",
+      "source_version": "0.4.2",
       "release": {
         "version": "0.4.1",
         "tag": "v0.4.1",
@@ -421,7 +421,7 @@
         "release_write": "completed_as_v0_1_0",
         "note": "Recorded while publication was still a read-only rehearsal; the write path was later exercised by the v0.1.0 release."
       },
-      "adoption": "unknown",
+      "adoption": "deployed",
       "compatibility": {
         "api": "v1",
         "review": "review-v2",
@@ -430,10 +430,10 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility. The client writes wuwaterm-manuscript-v4 only when a review or a decision needs it and keeps the lower format otherwise, so Windows 0.5.1 keeps opening files that do not use the v4 limits."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/262d715527eeb7c64ee9c6d922b3c34d7722813b/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/262d715527eeb7c64ee9c6d922b3c34d7722813b/docs/self-hosting.md"
       ],
-      "adoption_note": "Neither Web v0.4.1 nor v0.4.0 is deployed to the public Sites site, and no self-hosted instance is recorded for either. That site continues to run Sites version 31 on the application code of Web v0.3.1: it was deployed on 2026-11-16 by the owner-dispatched Sites session from Web 78384b7064637030f57bf325b56c1fee3f0f4d3c (package 0.3.0) on hosting commit 79b8216ddf4203d499ae7f0672d773393c40cef1, with native deployment succeeded, the homepage answering HTTP 200, and the public access setting and environment revision 29 unchanged (Linear MY-200 https://linear.app/my-denia/issue/MY-200#comment-07e97540-e6f2-45d0-84f2-c2d1b48be946). From 78384b7 to the v0.3.1 tag commit 6ddccae8aa2f89b56b662f9b756496be7d730ec7 only docs/self-hosting.md, package.json and package-lock.json change. It had replaced saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301)."
+      "adoption_note": "Web v0.4.2 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.4.2, from source commit 262d715527eeb7c64ee9c6d922b3c34d7722813b and tree aa855aa6afc911f05816ac0651054ba1f553925f. The root archive SHA-256 is 1068eaf33f24e556ef2dab76c630d5b5ab8419aa7511bd1b0a0f8c6a44858bdc and the /private archive SHA-256 is 779f13b4b8b1329c581f5fb335a37a7f4fcf2d83ec81f02453c50f49754eb5b3. Its six public assets were checked anonymously; both archives passed Node standalone smoke and replay against real Core 0.10.1. Public Sites version 33 is deployed from that same tree: its homepage, application script, capabilities and metadata endpoints returned HTTP 200. Sites version 32 is the previous rollback version. The release field continues to name v0.4.1, this Core checkout’s installer default."
     }
   ],
   "ci_pins": {
