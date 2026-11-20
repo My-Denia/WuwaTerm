@@ -3,6 +3,62 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.10.1
+
+### Translation
+
+- Paragraph regrouping of a context-mode answer into the source's paragraphs now
+  looks for a merge and a split over the whole segment, at any distance and in
+  either order, instead of comparing the two sides' running share of the text
+  against 7.5% and looking for a line that grew by half within six lines of one
+  that fell by a third. Both of those bounds missed a distant pair: one line of
+  shift moves the running share by `1/N`, which is 5% at 20 lines and 2.5% at
+  40, and a merge in a paragraph's first line with a split in its last is 19
+  lines away. A 20-line two-paragraph source was therefore regrouped as
+  `[10, 10]` with source line 11 moved to the end of the first paragraph, and
+  both views reported ready instead of the manual split.
+- The guard reads a per-line share ratio, `(answer line / answer total) /
+  (source line / source total)`, which cancels the translation's overall
+  expansion and each source line's own length and does not dilute as the
+  segment grows. A merge is a line carrying at least `_MERGED_LINE_SHARE = 1.4`
+  lines' worth of text that also stands `_MERGED_LINE_PEER = 1.3` clear of the
+  segment's median, or a line whose text matches its own source line plus a
+  neighbour's, closer than half the gap its own source line leaves; a split is
+  a line left with at most `_SPLIT_LINE_SHARE = 0.60` of its own text, or two
+  adjacent lines that carry at most `_SPLIT_PAIR_LINE_SHARE = 0.65` each and
+  `_SPLIT_PAIR_TOTAL = (0.75, 1.25)` together. The answer is refused only when
+  both appear, so a 20-line answer of `[10, 10]`, a 40-line `[20, 20]` and a
+  noisy pair of unequal lines keep the model's own blank lines for a manual
+  split instead of moving lines across paragraphs.
+- Replay and tests: 50,000 synthetic faithful answers at each of 10, 20 and 45
+  lines with ±35% per-line length noise reject 0.0000, the eight parametrised
+  counterexamples (20 and 40 lines, equal and 60/40 halves, 20% translation
+  noise, split before merge, a merged line beside a naturally long source line)
+  fail on the previous guard and pass here, and the stored D-003 31- and
+  8-paragraph reproductions still regroup to the source's 45 paragraphs with
+  their line sequence intact. The criteria were frozen in
+  `docs/eval/paragraph-layout-criteria.md` first, and
+  `scripts/verify_paragraph_regroup.py` replays them against the stored answers
+  (MY-359).
+
+### Compatibility and distribution
+
+- The Web and Windows contract pins move to the published Web `v0.4.1`
+  (`c1b9fd5c`) and Windows `v0.6.1` (`4da26ba9`), the patch releases of the
+  `wuwaterm-manuscript-v4` clients this release serves: both keep a reopened
+  manuscript's term groups pending until a live check confirms the saved review
+  basis. `contracts/web-ref.txt`, `contracts/windows-ref.txt`, the
+  `split_web_revision` / `split_windows_revision` values in
+  `contracts/ci-source-epochs.json` and the matching assertions in
+  `tests/test_ci_source_epoch.py` carry them together. No Core API version,
+  OpenAPI shape or translation request changes with the pins.
+- The installer defaults recorded inside this tag point directly at the latest
+  published client releases, so an install from `v0.10.1` needs no version
+  override: `contracts/products.json` and `deploy/setup.sh` name Web `v0.4.1`
+  for `--with-web` and Telegram `v0.4.0` for `--with-telegram`. The `v0.10.0`
+  tag predates both of them and still records Web `v0.3.1` and Telegram
+  `v0.3.1`, so an install from that tag names the newer tags on the command.
+
 ## 0.10.0
 
 ### Review

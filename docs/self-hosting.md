@@ -84,11 +84,11 @@ install describable later.
 A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10, and a
 clone of the v0.9.1 tag those of Telegram v0.3.0, which pins Core v0.9.0,
 because each Core release records its Telegram tag in `contracts/products.json`
-and `deploy/setup.sh` takes the recorded tag. `main` records Telegram v0.4.0,
-which pins Core v0.10.0. The v0.10.0 tag was frozen before that Telegram release
-was published, so its snapshot still names v0.3.1, the release the v0.9.2 tag
-records too, which pins Core v0.9.1; a checkout of that tag passes the newer
-release explicitly:
+and `deploy/setup.sh` takes the recorded tag. `main` and the v0.10.1 tag record
+Telegram v0.4.0, which pins Core v0.10.0. The v0.10.0 tag was frozen before that
+Telegram release was published, so its snapshot still names v0.3.1, the release
+the v0.9.2 tag records too, which pins Core v0.9.1; a checkout of that tag passes
+the newer release explicitly:
 
 ```bash
 WUWATERM_TELEGRAM_VERSION=v0.4.0 ./deploy/setup.sh --with-telegram
@@ -98,9 +98,9 @@ The variable names a published tag; there is no `latest`.
 
 The Web release also defaults to the one the checkout records: a clone of the
 v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and the
-v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.4.0,
-which reads and writes manuscript v4, and a v0.10.0 checkout passes the tag
-explicitly:
+v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` and the v0.10.1 tag
+record Web v0.4.1, which reads and writes manuscript v4, so a v0.10.0 checkout
+passes the tag explicitly:
 
 ```bash
 WUWATERM_WEB_VERSION=v0.4.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example

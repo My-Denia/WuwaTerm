@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-19",
+  "observed_on": "2026-11-20",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The four releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -45,8 +45,8 @@
         "windows",
         "web"
       ],
-      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/7cfbc4d5f9f396688eb0fdf7f05394f78bb2d634/contracts/manuscript-v4/SPEC.md",
-      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4). The v4 contract ships in Web 0.4.0 and Windows 0.6.0, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
+      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/contracts/manuscript-v4/SPEC.md",
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4). The v4 contract ships in Web 0.4.0 and 0.4.1 and in Windows 0.6.0 and 0.6.1, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -241,12 +241,46 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "6a525ed9cda4bb6ef101792055804803b714715d",
-        "tree": "12e74edf04d86d6fe3518dd89d07fde2dcb8bbeb",
+        "commit": "1962deb3227804ebaa57196f5bbf303a03e78c55",
+        "tree": "a0187632efdc9428a4ea3914a86431536d38aad4",
         "status": "success",
-        "status_note": "README-only commit (#31, record of 0.6.0 and its assets) on top of the release commit eaceb8bb. ci.yml is skipped by its paths-ignore for docs-only changes, and the locked-dependencies audit (critical/high) passed (run 44588562473). The CI run that passed and the release build run 44586162075 are on eaceb8bb."
+        "status_note": "README-only commit (#33, record of 0.6.1 and its assets) on top of the release commit 4da26ba9. ci.yml is skipped by its paths-ignore for docs-only changes, and the locked-dependencies audit (critical/high) passed (run 44677503053). The CI run 44674837925 that passed, the dependency audit 44674837951 and the release build run 44676073282 are on 4da26ba9."
       },
       "release": {
+        "version": "0.6.1",
+        "tag": "v0.6.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.1",
+        "published_at": "2026-11-20T04:50:53Z",
+        "source_commit": "4da26ba9f394475432ff0b2890ae24d21f7606b1",
+        "source_tree": "2e47842c5315220e29198160b6512a148c208389",
+        "assets": [
+          "WuwaTerm-0.6.1-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.6.1-windows-x64.zip": "a9a5b16556aae70c574861b8e79c0bff3d8b6f98609be4ba199ebcc9c6fb92c4",
+          "manifest.json": "5b4133bedfb04bb1eb184b420e7c3969509ea23d6ca517569d31e8b9228d8724",
+          "SHA256SUMS": "ce195df73ab1faaa7e7444007d2355a5bc245f17882b087d716358238d4985ba"
+        },
+        "zip_sha256": "a9a5b16556aae70c574861b8e79c0bff3d8b6f98609be4ba199ebcc9c6fb92c4",
+        "signed": false,
+        "note": "v0.6.1 is a maintenance release on v0.6.0 (#32). A term-group place taken from a reopened v3 or v4 manuscript has no review basis for this session yet, so it is a saved result: the group reads 待核对依据 and 已保存，尚未核对当前依据 instead of 已核, the 待处理 filter lists it rather than hiding it behind a confirmed status, occurrence rows, the 按出现顺序 rows and the occurrence detail badge carry the same note where they would otherwise say 约束已核, and a recorded conflict still stays a decision to make. Group status never confirms while any of its places is a saved result, and saved_count says how many are. Grouping only reads the records, so the saved report, its per-occurrence spans and its distribution are unchanged and the first live check restores 已核; the file formats and the service requirements are those of 0.6.0, HTTP API v1 with review-v2 for manuscript review. The published ZIP (a9a5b165…) is built from 4da26ba9 (Windows release run 44676073282, CI run 44674837925, manifest validation_run_id 44674837925), and the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. v0.6.0 and its assets remain published under previous_release."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v4",
+        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.6.1: CI run 44674837925 passed on 4da26ba9 (Pure manuscript contract, Windows build and contracts / build and test), and the locked-dependencies audit (critical/high) passed in run 44674837951. The published ZIP (a9a5b165…) is built from 4da26ba9 by release run 44676073282, whose manifest records source_commit 4da26ba9, validation_run_id 44674837925 and signed false; the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. The commit adds scripts/capture_workbench.py 09e-term-groups-saved-reopen, a reopened manuscript whose saved group the screenshot shows before the check; this record does not read that capture set. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371).",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/1962deb3227804ebaa57196f5bbf303a03e78c55/README.md"
+      ],
+      "source_version": "0.6.1",
+      "previous_release": {
         "version": "0.6.0",
         "tag": "v0.6.0",
         "status": "released",
@@ -266,55 +300,62 @@
         },
         "zip_sha256": "0b46cd1664a12fb4bcc5088c162d775198c0eac0752532e594f0ef98fa30a841",
         "signed": false,
-        "note": "v0.6.0 reads and writes wuwaterm-manuscript-v4 and adds term grouping and per-occurrence work in the review panel (#30). Findings, resolutions and choices per manuscript or segment rise from 32 to 128, a not_evaluated finding can carry a structured reason, and the review request declares X-WuwaTerm-Review-Features: dense-128,reason-v1; a writer stores the lowest format that holds the content (v1/v2, then v3, then v4), so a manuscript that does not need v4 keeps its lower format and old clients keep opening it. The panel groups the occurrences of one term by form and candidate with a pending filter and reads \"another N segments to review\" and the not-evaluated reason, per-occurrence replace and revise work in the group, the editor fixes Enter, CRLF and a bare CR concatenation and keeps the caret and selection of a rejected edit, an unreviewed short segment shows as pending again instead of reviewed, and a text that cannot be split reliably after translation gets a jump entry. It requires HTTP API v1, and manuscript review also needs review-v2. Windows 0.5.1 and Web 0.3.1 reject v4 files. v0.5.1 and its assets remain published under previous_release."
+        "note": "v0.6.0 reads and writes wuwaterm-manuscript-v4 and adds term grouping and per-occurrence work in the review panel (#30). Findings, resolutions and choices per manuscript or segment rise from 32 to 128, a not_evaluated finding can carry a structured reason, and the review request declares X-WuwaTerm-Review-Features: dense-128,reason-v1; a writer stores the lowest format that holds the content (v1/v2, then v3, then v4), so a manuscript that does not need v4 keeps its lower format and old clients keep opening it. The panel groups the occurrences of one term by form and candidate with a pending filter and reads \"another N segments to review\" and the not-evaluated reason, per-occurrence replace and revise work in the group, the editor fixes Enter, CRLF and a bare CR concatenation and keeps the caret and selection of a rejected edit, an unreviewed short segment shows as pending again instead of reviewed, and a text that cannot be split reliably after translation gets a jump entry. It requires HTTP API v1, and manuscript review also needs review-v2. Windows 0.5.1 and Web 0.3.1 reject v4 files. Kept as history after v0.6.1; the release and its assets are still published. v0.5.1 and earlier remain on the release page."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v4",
-        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.6.0: at 1cc0aa8 the pure contract gate (203 passed, WUWATERM_CONTRACTS_REQUIRED=1, Core and Web checked out at the revisions contracts/sources.json pins: Core 9a4f680f, Web 7837d0f4) and the full cross-repository and UI suite (833 passed, 1 skipped) both exited 0. The visual acceptance read 16 captured 1440x900 workbench screenshots (light and dark) at that commit against public in-game text and real term data: no truncated or overlapping text, no horizontal overflow, no whole list dumped as raw text, no backtracking loading state, no ambiguous number or label and no duplicated row, and the pending, group-count and not-evaluated-reason labels match src/wuwaterm_client/strings.py. The published ZIP (0b46cd16...) is built from eaceb8bb (Windows release run 44586162075, CI run 44584175515, manifest validation_run_id 44584175515), and the three assets downloaded again match their SHA-256 in manifest.json and SHA256SUMS. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371).",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/6a525ed9cda4bb6ef101792055804803b714715d/README.md"
-      ],
-      "source_version": "0.6.0",
-      "previous_release": {
-        "version": "0.5.1",
-        "tag": "v0.5.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.5.1",
-        "published_at": "2026-11-17T05:15:56Z",
-        "source_commit": "62a6ae5a3e39ff13d6affad41830f6c17b8527ee",
-        "source_tree": "75bbab8ce4f2153867d7e952d874a96f0ec869aa",
-        "assets": [
-          "WuwaTerm-0.5.1-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.5.1-windows-x64.zip": "51b91dd8957535284fe8c60a066a4ff9ca45986a31cba3be73f9e315108788f5",
-          "manifest.json": "b89d3d4e876e0c8e8fa41a542ce44e8d5d85a32427c4ab7454b214199c3d19b0",
-          "SHA256SUMS": "c1a0fc2ccb25ed531d8516575e7a85801c7ad579904686a14768c800abf288ae"
-        },
-        "zip_sha256": "51b91dd8957535284fe8c60a066a4ff9ca45986a31cba3be73f9e315108788f5",
-        "signed": false,
-        "note": "v0.5.1 is a maintenance release on v0.5.0: during Chinese IME composition an empty manuscript pane no longer overlaps the placeholder text with the preedit string, and manuscript-level undo and redo now restore each pane's caret, selection, focus and scroll position (#27). The manuscript file format and the meaning of progress.current are unchanged, and the capabilities and service requirements are those of v0.5.0: manuscript v3, HTTP API v1, and review-v2 for manuscript review. Kept as history after v0.6.0; the release and its assets are still published. v0.5.0 and earlier remain on the release page."
-      },
-      "adoption_note": "0.6.0 is published. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.6.0 ZIP. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371)."
+      "adoption_note": "0.6.1 is published. Adoption is unknown: no record shows whether the owner's desktop runs the published 0.6.1 ZIP. Not done: Windows code signing, and mixed-DPI multi-monitor window drag (Linear MY-371)."
     },
     {
       "id": "web",
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "7cfbc4d5f9f396688eb0fdf7f05394f78bb2d634",
-        "tree": "cc4664bffbe975e18b9274932bb907a45def943a",
+        "commit": "c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260",
+        "tree": "45dc7dc38af6082e631a5ba81074174db61a1f29",
         "status": "success"
       },
-      "source_version": "0.4.0",
+      "source_version": "0.4.1",
       "release": {
+        "version": "0.4.1",
+        "tag": "v0.4.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.4.1",
+        "published_at": "2026-11-20T04:21:11Z",
+        "source_commit": "c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260",
+        "source_tree": "45dc7dc38af6082e631a5ba81074174db61a1f29",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.4.1-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.4.1-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.4.1-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.4.1-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.4.1-linux-x64-root.tar.gz": "8ccfbd307dc877f9a2e5241205137cbe8bf1ef740dd0e80053d1239c63ae95f3",
+          "manifest-root.json": "5b48f5454ce7ecef28ec97e112b999dce968546908ba47980ad3706ebe853e8f",
+          "SHA256SUMS-root": "03adc3c911b14b63b4b095f28c788d8fdbcc1f820cb2eef784c58d1cf24bede5",
+          "wuwaterm-web-v0.4.1-linux-x64-prefix-71708eb255bc.tar.gz": "02ebb5b3e7ee06f1f49cf42fc850acbdb07fabbb5104e102e347e1e0e50dac58",
+          "manifest-prefix.json": "feea4f12a14cf058587d7fc6fd1b54a6ab162521275a312f2733009d6e69997b",
+          "SHA256SUMS-prefix": "4f2f8fdeb8144095a0e7f53a07de6d8e825293e6700a4c13019f2eac73166fe4"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 44673369509 (artifact 14600813968) and 44673393468 (artifact 14600968591, base path /private), promoted without rebuilding; both manifests name Web CI run 44672713409 and carry tag_status proposed, so the release separately verifies that the v0.4.1 tag resolves to source_sha c1b9fd5c.",
+        "note": "v0.4.1 is a patch release on v0.4.0 (#47). A term-group place taken from a reopened v3 or v4 manuscript stays pending (待处理, shown as 已保存，尚未核对当前词典与规则) until a live review request shows that Core's dictionary and matcher basis still equal the saved basis, so the to-do filter lists that group instead of hiding it behind a confirmed status; a saved place is pending unless it is a confirmed conflict, no group reads confirmed while one of its places sits on a saved result, and a group counts the places that do (savedCount). Choices, renderings and the per-place detail stay untouched, and the v3 and v4 file formats, the BFF response shape, the /v1 proxy, the database schema, the dependencies, the hosting configuration and the Core and Windows contract pins are those of 0.4.0. The release prep moves package.json and package-lock.json to 0.4.1 with no other version field moved, adds a Version 0.4.1 section to docs/self-hosting.md whose publication steps use v0.4.1, and reflows docs/sites.md line 150 to the width of its paragraph with no wording change. The published root and prefix archives match their manifests and SHA256SUMS. v0.4.0 and its assets remain published under previous_release."
+      },
+      "previous_release": {
         "version": "0.4.0",
         "tag": "v0.4.0",
         "status": "released",
@@ -353,48 +394,7 @@
           "SHA256SUMS-prefix": "a6c31c77d3ebf45047410723e8743da2173565f7412db5f0a4fdbf9d909aa49d"
         },
         "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 44593417735 (artifact 14563659631) and 44593423588 (artifact 14564896588, base path /private), promoted without rebuilding; both manifests name Web CI run 44592674699 and carry tag_status proposed, so the release separately verifies that the v0.4.0 tag resolves to source_sha 7cfbc4d5.",
-        "note": "v0.4.0 reads and writes wuwaterm-manuscript-v4 and adds term grouping and per-occurrence actions (#45): a dense review (Core feature dense-128) returns up to 128 findings, a not_evaluated finding can carry a reason-v1 reason, and the review panel groups the occurrences of one term by form and candidate with per-occurrence replace and revise, a manual-segmentation banner, a jump helper and segment order and status with the truncation reason. It sends X-WuwaTerm-Review-Features: dense-128,reason-v1 and stays within Core's 64 KiB review body. The release prep (#46) moves the Core and Windows pins to contracts/backend-ref.txt 9a4f680f and contracts/windows-ref.txt eaceb8bb, adds a live-Core contract test that runs the BFF against a Core checkout with and without the feature header and once above 32 KiB, and deletes the v3-only Windows pin so both clients assert the same v4 fixtures. The BFF, the /v1 proxy, the database schema, dependencies and hosting configuration are unchanged since v0.3.1. v0.3.1 and its assets remain published under previous_release."
-      },
-      "previous_release": {
-        "version": "0.3.1",
-        "tag": "v0.3.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.3.1",
-        "published_at": "2026-11-16T04:13:58Z",
-        "source_commit": "6ddccae8aa2f89b56b662f9b756496be7d730ec7",
-        "source_tree": "f3763128634fcab8145f70ae6538e8a3711a43fe",
-        "builds": {
-          "root": {
-            "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": ""
-          },
-          "prefix": {
-            "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": "/private"
-          }
-        },
-        "assets": [
-          "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz",
-          "manifest-root.json",
-          "SHA256SUMS-root",
-          "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz",
-          "manifest-prefix.json",
-          "SHA256SUMS-prefix"
-        ],
-        "asset_sha256": {
-          "wuwaterm-web-v0.3.1-linux-x64-root.tar.gz": "0f10bb13af3112cc089a482b2c37766959c0b19f149d67205b546305c17e3c48",
-          "manifest-root.json": "ac7b21bb64f6c27a2ee667470a7b5e1f1faadd5674b266c04058a3dea3005fa5",
-          "SHA256SUMS-root": "13bedb31aca7fe94a7f675d4247a3f49d8929551dc74e4de18f61177f976fef2",
-          "wuwaterm-web-v0.3.1-linux-x64-prefix-71708eb255bc.tar.gz": "5bc01646045c51df6aacc2db8982dee6158d081cc50ed59bfc40e6c28b6c1b14",
-          "manifest-prefix.json": "c78dfa25ff357e8a24ed6660e4b7dba1ef35c069d589466f5d53d0994da48a31",
-          "SHA256SUMS-prefix": "14c2be65dadf8ec6a1fe72b915657c6d235a3be841859823cd409ff60eb489e4"
-        },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 43802468211 and 43802472098, promoted without rebuilding; the manifests name Web CI run 43801860994.",
-        "note": "v0.3.1 is a patch release on v0.3.0: the failure advice for a translation that fails no longer points to the review workbench, which only the experimental semantic workbench offers; it says to retry later or to split a long text into shorter parts and translate each in \"Sentence translation\". The BFF, the /v1 proxy, the manuscript formats, the database schema, dependencies and hosting configuration are unchanged since v0.3.0. Kept as history after v0.4.0; the release and its assets are still published. v0.3.0 and earlier remain on the release page."
+        "note": "v0.4.0 reads and writes wuwaterm-manuscript-v4 and adds term grouping and per-occurrence actions (#45): a dense review (Core feature dense-128) returns up to 128 findings, a not_evaluated finding can carry a reason-v1 reason, and the review panel groups the occurrences of one term by form and candidate with per-occurrence replace and revise, a manual-segmentation banner, a jump helper and segment order and status with the truncation reason. It sends X-WuwaTerm-Review-Features: dense-128,reason-v1 and stays within Core's 64 KiB review body. The release prep (#46) moves the Core and Windows pins to contracts/backend-ref.txt 9a4f680f and contracts/windows-ref.txt eaceb8bb, adds a live-Core contract test that runs the BFF against a Core checkout with and without the feature header and once above 32 KiB, and deletes the v3-only Windows pin so both clients assert the same v4 fixtures. The BFF, the /v1 proxy, the database schema, dependencies and hosting configuration are unchanged since v0.3.1. Kept as history after v0.4.1; the release and its assets are still published. v0.3.1 and earlier remain on the release page."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -430,16 +430,16 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility. The client writes wuwaterm-manuscript-v4 only when a review or a decision needs it and keeps the lower format otherwise, so Windows 0.5.1 keeps opening files that do not use the v4 limits."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/6ddccae8aa2f89b56b662f9b756496be7d730ec7/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260/docs/self-hosting.md"
       ],
-      "adoption_note": "Web v0.4.0 is not deployed to the public Sites site and no self-hosted instance is recorded for it. That site continues to run Sites version 31 on the application code of Web v0.3.1: it was deployed on 2026-11-16 by the owner-dispatched Sites session from Web 78384b7064637030f57bf325b56c1fee3f0f4d3c (package 0.3.0) on hosting commit 79b8216ddf4203d499ae7f0672d773393c40cef1, with native deployment succeeded, the homepage answering HTTP 200, and the public access setting and environment revision 29 unchanged (Linear MY-200 https://linear.app/my-denia/issue/MY-200#comment-07e97540-e6f2-45d0-84f2-c2d1b48be946). From 78384b7 to the v0.3.1 tag commit 6ddccae8aa2f89b56b662f9b756496be7d730ec7 only docs/self-hosting.md, package.json and package-lock.json change. It had replaced saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301)."
+      "adoption_note": "Neither Web v0.4.1 nor v0.4.0 is deployed to the public Sites site, and no self-hosted instance is recorded for either. That site continues to run Sites version 31 on the application code of Web v0.3.1: it was deployed on 2026-11-16 by the owner-dispatched Sites session from Web 78384b7064637030f57bf325b56c1fee3f0f4d3c (package 0.3.0) on hosting commit 79b8216ddf4203d499ae7f0672d773393c40cef1, with native deployment succeeded, the homepage answering HTTP 200, and the public access setting and environment revision 29 unchanged (Linear MY-200 https://linear.app/my-denia/issue/MY-200#comment-07e97540-e6f2-45d0-84f2-c2d1b48be946). From 78384b7 to the v0.3.1 tag commit 6ddccae8aa2f89b56b662f9b756496be7d730ec7 only docs/self-hosting.md, package.json and package-lock.json change. It had replaced saved version 30, deployed on 2026-11-13 from Web v0.2.0 (5aabe80bee3adda164e151de2da297a01860c301)."
     }
   ],
   "ci_pins": {
-    "core_tests_web": "7cfbc4d5f9f396688eb0fdf7f05394f78bb2d634",
-    "core_tests_windows": "eaceb8bbe847f4db14f227dea274261fa2dc5784",
+    "core_tests_web": "c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260",
+    "core_tests_windows": "4da26ba9f394475432ff0b2890ae24d21f7606b1",
     "web_tests_core": "9a4f680f3ec3909e23afc2394f2c7eccf00af6e3",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.4.0 tag commit, which carries manuscript v4; the Windows pin is the Windows v0.6.0 tag commit, which carries manuscript v4; the Core pin is a main commit that serves dense-128 and reason-v1 and is an ancestor of the Core v0.10.0 tag. contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json carry the same two client revisions."
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.4.1 tag commit, which carries manuscript v4; the Windows pin is the Windows v0.6.1 tag commit, which carries manuscript v4; the Core pin is a main commit that serves dense-128 and reason-v1 and is an ancestor of the Core v0.10.0 tag. contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json carry the same two client revisions."
   }
 }
