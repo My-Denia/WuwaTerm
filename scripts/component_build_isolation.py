@@ -2024,7 +2024,7 @@ def sync_registered_attempt(root: Path, kind: str, build_id: str, attempt: dict[
 def reconcile_attempt_stage(root: Path, kind: str, build_id: str, attempt: dict[str, Any]) -> None:
     """Discard only an exact-A attempt's completely bound uncommitted stage."""
     import product_manifest as manifest  # noqa: PLC0415
-    import component_runtime as runtime  # noqa: PLC0415
+    import component_journal_runtime as runtime  # noqa: PLC0415
     _fd9(root)
     attempts, staging = _attempt_directories(kind)
     directory_path = root / ".deployments" / staging
@@ -3325,11 +3325,11 @@ def _saved_source(root: Path, kind: str, attempt: dict[str, Any], *, executing: 
     """Verify the saved capsule and, for recovery, the running exact-A source."""
     try:
         import component_recovery as recovery  # noqa: PLC0415
-        import component_runtime as runtime  # noqa: PLC0415
+        import component_journal_runtime as runtime  # noqa: PLC0415
         import deployment_admission as admission  # noqa: PLC0415
         import package_recovery_source as capsule  # noqa: PLC0415
         code_root = Path(__file__).resolve().parents[1]
-        for module, name in ((recovery, "component_recovery.py"), (runtime, "component_runtime.py"),
+        for module, name in ((recovery, "component_recovery.py"), (runtime, "component_journal_runtime.py"),
                              (admission, "deployment_admission.py"), (capsule, "package_recovery_source.py")):
             if Path(module.__file__).resolve() != code_root / "scripts" / name:
                 raise IsolationError("producer imported foreign recovery code")
@@ -3422,7 +3422,7 @@ def request_cancel(root: Path, kind: str, build_id: str) -> dict[str, Any]:
         reader, writer, directory = producer.read_attempt, producer._write_attempt, "component-wheel-build-attempts"
     else:
         raise IsolationError("invalid producer kind")
-    import component_runtime as runtime  # noqa: PLC0415
+    import component_journal_runtime as runtime  # noqa: PLC0415
     path = root / ".deployments" / directory / (build_id + ".json")
     before = runtime._read_regular(path)
     attempt = reader(root, build_id + ".json")

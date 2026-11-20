@@ -471,17 +471,19 @@ def _component_conflicts(root: Path, *, allowed_probe_id: str | None = None,
     if _present(full_path):
         try:
             sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import component_full as full  # noqa: PLC0415
+            import component_handoff as handoff  # noqa: PLC0415
+            import component_journal_full as journal_full  # noqa: PLC0415
             import component_runtime as runtime  # noqa: PLC0415
-            if Path(full.__file__).resolve() != CODE_ROOT / "scripts/component_full.py":
+            if (Path(journal_full.__file__).resolve() != CODE_ROOT / "scripts/component_journal_full.py"
+                    or Path(handoff.__file__).resolve() != CODE_ROOT / "scripts/component_handoff.py"):
                 raise ValueError("foreign full transaction module")
             full_raw = runtime._read_regular(full_path)
-            full_journal = full.validate_journal(runtime._decode(full_raw))
+            full_journal = journal_full.validate_journal(runtime._decode(full_raw))
             if allowed_full_id is not None:
                 if full_journal["transaction_id"] != allowed_full_id:
                     raise ValueError("full transaction ID differs")
             elif runtime_recovery is not None:
-                full.verify_handoff(root, successor_kind="runtime", successor=runtime_recovery,
+                handoff.verify_handoff(root, successor_kind="runtime", successor=runtime_recovery,
                                     predecessor=full_journal, predecessor_raw=full_raw)
             elif (full_journal["status"] not in ("committed", "rolled_back")
                   or _present(directory / COMPONENT_RUNTIME)):
@@ -642,10 +644,10 @@ def admit_component_recovery(root: Path, *, transaction_id: str,
             raise AdmissionError("component recovery identity does not match the active transaction")
         _verify_recovery_extraction(root, source, code_root)
         if journal["schema_version"] in (4, 5):
-            import component_full as full  # noqa: PLC0415
-            if Path(full.__file__).resolve() != code_root / "scripts/component_full.py":
-                raise AdmissionError("component recovery imported a foreign full module")
-            full.verify_predecessor(root, successor_kind="runtime", successor=journal)
+            import component_handoff as handoff  # noqa: PLC0415
+            if Path(handoff.__file__).resolve() != code_root / "scripts/component_handoff.py":
+                raise AdmissionError("component recovery imported a foreign handoff module")
+            handoff.verify_predecessor(root, successor_kind="runtime", successor=journal)
 
         allowed_state = ((transaction_id, source_tool_sha256, None)
                          if journal["action"] == "update" and "telegram" in journal["selection"]
@@ -688,20 +690,22 @@ def admit_full_recovery(root: Path, *, transaction_id: str,
         raise AdmissionError("full recovery transaction is missing")
     try:
         sys.path.insert(0, str(code_root / "scripts"))
-        import component_full as full  # noqa: PLC0415
+        import component_handoff as handoff  # noqa: PLC0415
+        import component_journal_full as journal_full  # noqa: PLC0415
         import component_runtime as runtime  # noqa: PLC0415
         import component_recovery as recovery  # noqa: PLC0415
-        if Path(full.__file__).resolve() != code_root / "scripts/component_full.py":
+        if (Path(journal_full.__file__).resolve() != code_root / "scripts/component_journal_full.py"
+                or Path(handoff.__file__).resolve() != code_root / "scripts/component_handoff.py"):
             raise AdmissionError("full recovery imported a foreign source module")
         raw = runtime._read_regular(path)
-        journal = full.validate_journal(runtime._decode(raw))
+        journal = journal_full.validate_journal(runtime._decode(raw))
         source = journal["source"]
         if (journal["transaction_id"] != transaction_id
                 or journal["status"] not in ("active", "unresolved", "rolled_back", "committed")
                 or source["source_tool_sha256"] != source_tool_sha256):
             raise AdmissionError("full recovery identity differs")
         _verify_recovery_extraction(root, source, code_root)
-        full.verify_predecessor(root, successor_kind="full", successor=journal)
+        handoff.verify_predecessor(root, successor_kind="full", successor=journal)
         allowed_state = ((transaction_id, source_tool_sha256, None)
                          if journal["before"]["topology"]["telegram"] is not None
                          and journal["status"] in ("active", "unresolved") else None)
@@ -710,7 +714,7 @@ def admit_full_recovery(root: Path, *, transaction_id: str,
         if _present(runtime_path):
             predecessor_raw = runtime._read_regular(runtime_path)
             predecessor = runtime.validate_journal(runtime._decode(predecessor_raw))
-            full.verify_handoff(root, successor_kind="full", successor=journal,
+            handoff.verify_handoff(root, successor_kind="full", successor=journal,
                                 predecessor=predecessor, predecessor_raw=predecessor_raw)
         for name, pattern in ((".deploy_commit", runtime._HEX40), (".deploy_current", runtime._DEPLOYMENT_ID)):
             value = runtime._read_pointer(root, name, pattern)
@@ -800,8 +804,10 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
     try:
         import component_runtime as runtime  # noqa: PLC0415
         import component_recovery as recovery  # noqa: PLC0415
-        import component_full as full  # noqa: PLC0415
-        for module, filename in ((runtime, "component_runtime.py"), (recovery, "component_recovery.py")):
+        import component_handoff as handoff  # noqa: PLC0415
+        import component_journal_full as journal_full  # noqa: PLC0415
+        for module, filename in ((runtime, "component_runtime.py"), (recovery, "component_recovery.py"),
+                                 (journal_full, "component_journal_full.py"), (handoff, "component_handoff.py")):
             if Path(module.__file__).resolve() != code_root / "scripts" / filename:
                 raise AdmissionError("state probe imported a foreign source module")
         if code_root != root:
@@ -815,7 +821,7 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
         else:
             path = _deployments(root, required=True) / (COMPONENT_FULL if transaction_kind == "full" else COMPONENT_RUNTIME)
             raw = runtime._read_regular(path)
-            journal = (full.validate_journal(runtime._decode(raw)) if transaction_kind == "full" else
+            journal = (journal_full.validate_journal(runtime._decode(raw)) if transaction_kind == "full" else
                        runtime.validate_journal(runtime._decode(raw)))
             source = journal["source"]
             if (journal["transaction_id"] != transaction_id
@@ -829,7 +835,7 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
             recovery._verify_bootstrap(root, source)
             recovery._verify_capsule(root, source)
             if transaction_kind == "full":
-                full.verify_predecessor(root, successor_kind="full", successor=journal)
+                handoff.verify_predecessor(root, successor_kind="full", successor=journal)
             allowed = None if probe_id is None else (transaction_id, source_tool_sha256, probe_id)
             _component_conflicts(root, allowed_state=allowed,
                                  allowed_full_id=transaction_id if transaction_kind == "full" else None)
@@ -837,7 +843,7 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
                 previous_path = _deployments(root, required=True) / COMPONENT_RUNTIME
                 previous_raw = runtime._read_regular(previous_path)
                 previous = runtime.validate_journal(runtime._decode(previous_raw))
-                full.verify_handoff(root, successor_kind="full", successor=journal,
+                handoff.verify_handoff(root, successor_kind="full", successor=journal,
                                     predecessor=previous, predecessor_raw=previous_raw)
             for name, pattern in ((".deploy_commit", runtime._HEX40),
                                   (".deploy_current", runtime._DEPLOYMENT_ID)):
@@ -947,15 +953,17 @@ def admit_adoption_probe_context(root: Path, *, source: dict, image_id: str, rev
         if _present(current):
             if compose_path is None:
                 raise ValueError("terminal journal verification requires Compose")
-            import component_transaction  # noqa: PLC0415
-            if Path(component_transaction.__file__).resolve() != CODE_ROOT / "scripts/component_transaction.py":
+            import component_operations as operations  # noqa: PLC0415
+            import component_terminal as terminal  # noqa: PLC0415
+            if (Path(operations.__file__).resolve() != CODE_ROOT / "scripts/component_operations.py"
+                    or Path(terminal.__file__).resolve() != CODE_ROOT / "scripts/component_terminal.py"):
                 raise ValueError("foreign transaction module")
             if extracted_source:
                 raw = component_runtime._read_regular(current)
                 previous = component_runtime.validate_journal(component_runtime._decode(raw))
-                component_transaction._verify_terminal_record(root, previous, raw, compose_path)
+                operations._verify_terminal_record(root, previous, raw, compose_path)
             else:
-                verified = component_transaction.verify_terminal(root, compose_path=compose_path)
+                verified = terminal.verify_terminal(root, compose_path=compose_path)
                 if verified is None:
                     raise ValueError("terminal journal disappeared")
                 raw = verified[0]

@@ -22,6 +22,7 @@ from scripts import component_runtime as runtime
 from scripts import component_transaction as transaction
 from scripts import deployment_manifest as legacy_manifest
 from scripts import product_manifest as manifest
+import component_operations as operations
 from test_product_manifest import make_database
 from test_component_runtime import journal as sample_journal  # noqa: F401
 
@@ -32,6 +33,15 @@ SOURCE_FIXTURE = os.environ.get("WUWATERM_TRANSACTION_SOURCE_FIXTURE")
 COMPOSE = os.environ.get("WUWATERM_TRANSACTION_COMPOSE")
 IMAGE = os.environ.get("WUWATERM_TRANSACTION_IMAGE")
 EVIDENCE = os.environ.get("WUWATERM_TRANSACTION_EVIDENCE")
+
+
+def patch_transaction_operation(monkeypatch, transaction_module, name, value):
+    """Patch a shared operation at both its caller and its implementation."""
+    import component_operations as operations
+
+    monkeypatch.setattr(transaction_module, name, value)
+    if hasattr(operations, name):
+        monkeypatch.setattr(operations, name, value)
 
 
 def test_recorded_pointer_combinations_refuse_unknown_or_malformed_bytes(tmp_path: Path) -> None:
@@ -2314,12 +2324,12 @@ def adoption_leaf_fixture(tmp_path: Path, sample_journal: dict, monkeypatch: pyt
     actual = {"recipe": copy.deepcopy(snapshot), "container": journal["before"]["containers"]["telegram"],
               "path_settings": {"WUWATERM_DB_PATH": "/app/data/terms.db", "WUWATERM_STATE_DIR": "/app/state",
                                 "WUWATERM_SETTINGS_PATH": None, "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None}}
-    monkeypatch.setattr(transaction, "_observed", lambda *args: actual)
-    monkeypatch.setattr(transaction, "_image", lambda *args: {"Config": {"Labels": {
+    patch_transaction_operation(monkeypatch, transaction, "_observed", lambda *args: actual)
+    patch_transaction_operation(monkeypatch, transaction, "_image", lambda *args: {"Config": {"Labels": {
         "org.opencontainers.image.revision": component["image"]["revision"]}}})
-    monkeypatch.setattr(transaction, "_effective_environment", lambda *args: {})
+    patch_transaction_operation(monkeypatch, transaction, "_effective_environment", lambda *args: {})
     monkeypatch.setattr(transaction.observe, "_inspect", lambda *args: {"Config": {"Env": []}})
-    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": actual["container"]["id"]}])
+    patch_transaction_operation(monkeypatch, transaction, "_inventory", lambda *args: [{"Id": actual["container"]["id"]}])
     return journal, state
 
 
@@ -2390,12 +2400,12 @@ def test_schema4_runtime_update_keeps_strict_leaf_mapping(adoption_leaf_fixture:
     prior = {"kind": "component-runtime", "status": "committed", "transaction_id": previous["deployment_id"],
              "target": {"manifest": previous, "containers": journal["before"]["containers"]},
              "pointers": {"target": journal["pointers"]["old"]}}
-    monkeypatch.setattr(transaction, "_verify_saved_source", lambda *args: None)
-    monkeypatch.setattr(transaction, "_verify_old_topology", lambda *args, **kwargs: None)
-    monkeypatch.setattr(transaction, "_telegram_receipt", lambda *args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_saved_source", lambda *args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_old_topology", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_telegram_receipt", lambda *args: None)
     monkeypatch.setattr(transaction.recovery, "_load_packager", lambda *args: None)
     monkeypatch.setattr(transaction.recovery, "_verify_clean_source", lambda *args: None)
-    monkeypatch.setattr(transaction.runtime, "tool_bytes_identity", lambda *args: journal["source"]["tool_bytes_sha256"])
+    monkeypatch.setattr(operations.runtime, "tool_bytes_identity", lambda *args: journal["source"]["tool_bytes_sha256"])
     before = _leaf_snapshot(state)
     with pytest.raises(transaction.observe.ObservationError, match="symlink"):
         transaction._verify_initial_preimage(root, journal, Path("/unused"), prior, prior_raw)
@@ -2457,11 +2467,11 @@ def test_adoption_leaf_initial_terminal_and_recovery_routing(adoption_leaf_fixtu
     journal, state = adoption_leaf_fixture
     root = state.parent
     journal["pointers"]["old"][".deploy_commit"] = {"present": False, "bytes": None}
-    monkeypatch.setattr(transaction, "_verify_saved_source", lambda *args: None)
-    monkeypatch.setattr(transaction, "_verify_old_topology", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_saved_source", lambda *args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_old_topology", lambda *args, **kwargs: None)
     monkeypatch.setattr(transaction.recovery, "_load_packager", lambda *args: None)
     monkeypatch.setattr(transaction.recovery, "_verify_clean_source", lambda *args: None)
-    monkeypatch.setattr(transaction.runtime, "tool_bytes_identity", lambda *args: journal["source"]["tool_bytes_sha256"])
+    monkeypatch.setattr(operations.runtime, "tool_bytes_identity", lambda *args: journal["source"]["tool_bytes_sha256"])
     monkeypatch.setattr(transaction.admission, "require_lock", lambda *args: None)
     before = _leaf_snapshot(state)
     transaction._verify_initial_preimage(root, journal, Path("/unused"), None, None)
@@ -2603,8 +2613,8 @@ def test_unselected_telegram_preserves_cli_database_override(
                "database": {"binding": {"path": str(database)}}}
     # Inject only the Docker observation boundary; recipe comparison and
     # database resolution/binding validation execute unchanged.
-    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": expected["id"]}])
-    monkeypatch.setattr(transaction, "_observed", lambda *args: actual)
+    patch_transaction_operation(monkeypatch, transaction, "_inventory", lambda *args: [{"Id": expected["id"]}])
+    patch_transaction_operation(monkeypatch, transaction, "_observed", lambda *args: actual)
     if accepted:
         transaction._other_component(tmp_path, journal, b"x" * 32)
     else:
@@ -2717,20 +2727,20 @@ def test_telegram_lifecycle_checks_honor_command_db_precedence_over_env(
             return old_actual
         return target_actual
 
-    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": expected["id"]}] if operation == "prepare_pending" else [{"Id": expected["id"]}, {"Id": target_container["id"]}])
-    monkeypatch.setattr(transaction, "_observed", lambda cid, snap, key: actual if operation == "prepare_pending" else mock_observed(cid, snap, key))
-    monkeypatch.setattr(transaction, "_image", lambda *args: {"Config": {"Labels": {"org.opencontainers.image.revision": record["image"]["revision"]}}})
-    monkeypatch.setattr(transaction, "_effective_environment", lambda *args: {})
-    monkeypatch.setattr(transaction, "_env_map", lambda *args: {})
+    patch_transaction_operation(monkeypatch, transaction, "_inventory", lambda *args: [{"Id": expected["id"]}] if operation == "prepare_pending" else [{"Id": expected["id"]}, {"Id": target_container["id"]}])
+    patch_transaction_operation(monkeypatch, transaction, "_observed", lambda cid, snap, key: actual if operation == "prepare_pending" else mock_observed(cid, snap, key))
+    patch_transaction_operation(monkeypatch, transaction, "_image", lambda *args: {"Config": {"Labels": {"org.opencontainers.image.revision": record["image"]["revision"]}}})
+    patch_transaction_operation(monkeypatch, transaction, "_effective_environment", lambda *args: {})
+    patch_transaction_operation(monkeypatch, transaction, "_env_map", lambda *args: {})
     monkeypatch.setattr(transaction.observe, "_inspect", lambda *args: {"Config": {"Env": []}})
-    monkeypatch.setattr(transaction, "_pointer", lambda root, name: {"present": False, "bytes": None})
+    patch_transaction_operation(monkeypatch, transaction, "_pointer", lambda root, name: {"present": False, "bytes": None})
     monkeypatch.setattr(transaction.manifest, "verify_database_binding", lambda *args: stat)
     monkeypatch.setattr(transaction.manifest, "read_manifest", lambda *args: journal["target"]["manifest"])
-    monkeypatch.setattr(transaction, "_same_container_binding", lambda c1, c2: True)
-    monkeypatch.setattr(transaction, "_telegram_ready", lambda *args, **kwargs: None)
-    monkeypatch.setattr(transaction, "_verify_current_telegram_paths", lambda *args: None)
-    monkeypatch.setattr(transaction, "_other_api", lambda *args, **kwargs: None)
-    monkeypatch.setattr(transaction, "_docker", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_same_container_binding", lambda c1, c2: True)
+    patch_transaction_operation(monkeypatch, transaction, "_telegram_ready", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_current_telegram_paths", lambda *args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_other_api", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_docker", lambda *args, **kwargs: None)
 
     # With command precedence, binding path resolves to /app/data/correct.db -> str(correct_db), matching journal
     if operation == "prepare_pending":

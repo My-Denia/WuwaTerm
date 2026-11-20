@@ -76,6 +76,7 @@ def create_source(root: Path, *, dispatcher_probe: bool = False,
         marker = 'if __name__ == "__main__":\n'
         assert marker in text
         probe = (
+            "import json\nimport os\n"
             "CAPSULE_RECOVERY_PROTOCOL = 1\n"
             "if __name__ == '__main__' and '--capsule-source-tool' in sys.argv:\n"
             "    print(json.dumps({'fixture': 'source-A', 'code_root': str(CODE_ROOT), "

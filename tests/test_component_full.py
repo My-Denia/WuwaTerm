@@ -24,6 +24,15 @@ from test_component_runtime import journal as runtime_fixture
 from test_product_manifest import make_database
 
 
+def patch_transaction_operation(monkeypatch, transaction_module, name, value):
+    """Patch a shared operation at both its caller and its implementation."""
+    import component_operations as operations
+
+    monkeypatch.setattr(transaction_module, name, value)
+    if hasattr(operations, name):
+        monkeypatch.setattr(operations, name, value)
+
+
 @pytest.fixture
 def full_journal(tmp_path: Path) -> dict:
     sample = runtime_fixture.__wrapped__(tmp_path)
@@ -1188,7 +1197,7 @@ def test_schema5_progressed_state_follows_a_retained_reply_link(tmp_path: Path, 
     monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
     monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
     monkeypatch.setattr(full, "_write_journal", lambda *args, **kwargs: None)
-    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    patch_transaction_operation(monkeypatch, plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
     monkeypatch.setattr(plain_state, "canonical", canonical)
     before = (entry.lstat().st_ino, os.readlink(entry), entry.lstat().st_mtime_ns)
     full._verify_progressed_state(tmp_path, journal, compose_path=tmp_path / "compose")
@@ -1288,8 +1297,8 @@ def test_schema5_full_retained_reply_symlink_resolves_and_progresses_end_to_end(
     monkeypatch.setattr(full, "classify_database", lambda *args, **kwargs: ("old", None))
     monkeypatch.setattr(full, "_verify_backup", lambda *args, **kwargs: None)
 
-    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
-    monkeypatch.setattr(plain_transaction, "verify_artifact_component", lambda *args, **kwargs: None)
+    patch_transaction_operation(monkeypatch, plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    patch_transaction_operation(monkeypatch, plain_transaction, "verify_artifact_component", lambda *args, **kwargs: None)
 
     monkeypatch.setattr(plain_state, "_journal_snapshot", lambda *args: (journal, telegram))
     monkeypatch.setattr(plain_state, "_image", lambda *args: {"Config": {"User": ""}})
@@ -1377,7 +1386,7 @@ def _schema5_rollback_context(tmp_path: Path, full_journal: dict, monkeypatch: p
     monkeypatch.setattr(full, "_guard_readers", lambda *args, **kwargs: None)
     monkeypatch.setattr(full, "_state_plans", lambda *args, **kwargs: plans)
     monkeypatch.setattr(full, "_write_journal", write)
-    monkeypatch.setattr(plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
+    patch_transaction_operation(monkeypatch, plain_transaction, "_snapshot", lambda *args, **kwargs: recipe)
     monkeypatch.setattr(plain_state, "canonical", canonical)
     return journal, writes
 
@@ -1508,12 +1517,12 @@ def schema5_topology(tmp_path: Path, full_journal: dict,
                                 "WUWATERM_STATE_DIR": "/app/state",
                                 "WUWATERM_SETTINGS_PATH": None,
                                 "WUWATERM_CHANNEL_REPLY_INDEX_PATH": None}}
-    monkeypatch.setattr(transaction, "_observed", lambda *args: copy.deepcopy(actual))
-    monkeypatch.setattr(transaction, "_image", lambda *args: {"Config": {"Labels": {
+    patch_transaction_operation(monkeypatch, transaction, "_observed", lambda *args: copy.deepcopy(actual))
+    patch_transaction_operation(monkeypatch, transaction, "_image", lambda *args: {"Config": {"Labels": {
         "org.opencontainers.image.revision": component["image"]["revision"]}}})
-    monkeypatch.setattr(transaction, "_effective_environment", lambda *args: {})
+    patch_transaction_operation(monkeypatch, transaction, "_effective_environment", lambda *args: {})
     monkeypatch.setattr(transaction.observe, "_inspect", lambda *args: {"Config": {"Env": []}})
-    monkeypatch.setattr(transaction, "_inventory", lambda *args: [{"Id": record["id"]}])
+    patch_transaction_operation(monkeypatch, transaction, "_inventory", lambda *args: [{"Id": record["id"]}])
     return tmp_path, context
 
 
@@ -1586,7 +1595,7 @@ def test_terminal_retirement_follows_the_record_schema(
     """A FULL successor retires a schema-5 record through its own leaf checks."""
     monkeypatch.setattr(transaction.admission, "require_lock", lambda root: None)
     retired: list[bool] = []
-    monkeypatch.setattr(transaction, "_retire_telegram",
+    patch_transaction_operation(monkeypatch, transaction, "_retire_telegram",
                         lambda root, journal, *, for_full4=False: retired.append(for_full4) or False)
     journal = {"status": "committed", "selection": ["telegram"], "schema_version": schema}
     assert transaction._retire_committed(Path("/unused"), journal, for_full4=for_full4) is False

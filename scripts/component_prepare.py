@@ -23,29 +23,31 @@ import component_artifact as artifact  # noqa: E402
 import component_build as build  # noqa: E402
 import component_observe as observe  # noqa: E402
 import component_recovery as recovery  # noqa: E402
-import component_runtime as runtime  # noqa: E402
-import component_transaction as transaction  # noqa: E402
+import component_inspect as adoption  # noqa: E402
+import component_journal_runtime as runtime  # noqa: E402
+import component_operations as transaction  # noqa: E402
+import component_terminal as terminal_ops  # noqa: E402
 import component_wheel_build as wheel  # noqa: E402
 import deployment_admission as admission  # noqa: E402
 import package_recovery_source as capsule  # noqa: E402
 import product_manifest as manifest  # noqa: E402
 
+from component_state_plans import (  # noqa: E402
+    PrepareError as PrepareError,
+    RELOCATION_REFUSAL as RELOCATION_REFUSAL,
+    _STATE_KINDS as _STATE_KINDS,
+    _PLAN_KEYS as _PLAN_KEYS,
+    _PLAN_COMPARED as _PLAN_COMPARED,
+    _PLAN_CLASS as _PLAN_CLASS,
+    verify_state_plan_equivalence as verify_state_plan_equivalence,
+)
 
-class PrepareError(RuntimeError):
-    """A runtime update cannot be safely prepared from the given inputs."""
 
-
-RELOCATION_REFUSAL = ("state relocation is not supported in protocol-2 cutover; "
-                      "preserve the existing state mount and paths")
 _LEGACY_DB_DEFAULT = "/app/data/terms.db"
 _POLL_HEALTH_TARGET = "/run/wuwaterm-telegram"
 _POLL_HEALTH_OPTIONS = ("rw", "noexec", "nosuid", "nodev", "size=1048576", "mode=0700")
 _NUMERIC_USER = re.compile(r"([0-9]+):([0-9]+)\Z")
 _STATE_FIELDS = ("command", "entrypoint", "mounts", "env_files", "environment_overrides", "user", "working_dir")
-_STATE_KINDS = ("chat-settings", "channel-replies")
-_PLAN_KEYS = {"effective_path", "legacy_path", "migration", "mapped_target", "mapped_legacy"}
-_PLAN_COMPARED = ("effective_path", "legacy_path", "mapped_target")
-_PLAN_CLASS = {"none": "none", "validate-existing": "validate-existing", "copy-if-absent": "native-pending"}
 
 
 def _observation_limit(what: str) -> PrepareError:
@@ -144,42 +146,6 @@ def refuse_target_recipe_change(translated: dict[str, Any], requested: dict[str,
         raise PrepareError("Telegram target recipe changes are unsupported in protocol-2 cutover")
 
 
-def verify_state_plan_equivalence(old_plan: dict[str, Any], target_plan: dict[str, Any]) -> dict[str, str]:
-    """Require the old and translated state plans to name exactly the same state.
-
-    Both plans are native product plans already mapped to host paths. A path
-    outside every bind maps to ``None``; two such paths are not equivalent.
-    Returns the per-kind classification: none, validate-existing or
-    native-pending (the product itself copies at start; the transaction never does).
-    """
-    result = {}
-    for plan in (old_plan, target_plan):
-        if type(plan) is not dict or type(plan.get("kinds")) is not dict or set(plan["kinds"]) != set(_STATE_KINDS):
-            raise PrepareError("Telegram state plan is invalid")
-    for kind in _STATE_KINDS:
-        old, new = old_plan["kinds"][kind], target_plan["kinds"][kind]
-        for item in (old, new):
-            if type(item) is not dict or set(item) != _PLAN_KEYS or item["migration"] not in _PLAN_CLASS:
-                raise PrepareError("Telegram state plan is invalid")
-            if item["mapped_target"] is None:
-                raise PrepareError(f"{kind} state is outside every writable bind")
-        if old["migration"] != new["migration"]:
-            raise PrepareError(f"{kind} old and target state plans disagree on the migration action")
-        if any(old[key] != new[key] for key in _PLAN_COMPARED):
-            raise PrepareError(RELOCATION_REFUSAL)
-        if new["migration"] == "copy-if-absent":
-            # Both planners name the retained legacy endpoint, but only the
-            # copy case decides what the transaction may do with it, so only
-            # that case has to agree exactly.
-            for item in (old, new):
-                if item["mapped_legacy"] is None:
-                    raise PrepareError(f"{kind} legacy state is outside every bind")
-            if old["mapped_legacy"] != new["mapped_legacy"]:
-                raise PrepareError(RELOCATION_REFUSAL)
-        result[kind] = _PLAN_CLASS[new["migration"]]
-    return result
-
-
 def artifact_input(root: Path, name: str, receipt_path: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Verify one registered acquisition and return its recipe-free component facts.
 
@@ -276,7 +242,7 @@ def _references(recipe: Any) -> tuple[dict[str, Any], dict[str, tuple[Any, ...]]
     paths = recipe["compose_files"] + recipe["interpolation_env_files"]
     for path in paths:
         manifest._path(path, "Compose file reference")
-    return recipe, {path: runtime._compose_input(Path(path)) for path in paths}
+    return recipe, {path: adoption._compose_input(Path(path)) for path in paths}
 
 
 def _render_recipe(root: Path, recipe: dict[str, Any], image: dict[str, Any],
@@ -316,13 +282,13 @@ def _render_recipe(root: Path, recipe: dict[str, Any], image: dict[str, Any],
         if type(entry) is not dict or set(entry) - {"path", "required"} or entry.get("required", True) is not True:
             raise PrepareError("optional or unsupported env files cannot be replayed")
         path = manifest._path(entry.get("path"), "Compose env file")
-        identity = runtime._compose_input(Path(path))
+        identity = adoption._compose_input(Path(path))
         if path in references and references[path] != identity:
             raise PrepareError("Compose input changed during rendering")
         references[path] = identity
     resolved = render()
     if render("--no-env-resolution") != unresolved or any(
-        runtime._compose_input(Path(path)) != identity for path, identity in references.items()
+        adoption._compose_input(Path(path)) != identity for path, identity in references.items()
     ):
         raise PrepareError("Compose input changed during rendering")
     snapshot = _snapshot_from_compose(recipe, unresolved, resolved, image)
@@ -338,7 +304,7 @@ def _render_recipe(root: Path, recipe: dict[str, Any], image: dict[str, Any],
             raise PrepareError("Compose target environment is invalid")
     if transaction._effective_environment(snapshot, image, binary, root) != expected:
         raise PrepareError("Compose target environment cannot be reproduced from saved references")
-    if any(runtime._compose_input(Path(path)) != identity for path, identity in references.items()):
+    if any(adoption._compose_input(Path(path)) != identity for path, identity in references.items()):
         raise PrepareError("Compose input changed during rendering")
     return snapshot, references
 
@@ -454,8 +420,8 @@ def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> d
         root = admission._physical_root(root)
         admission.admit_component(root, operation="update", code_root=CODE_ROOT)
         compose_path = transaction._compose_binary(compose_path)
-        terminal = transaction.verify_terminal(root, compose_path=compose_path)
-        current = runtime.inspect_deployment(root)
+        terminal = terminal_ops.verify_terminal(root, compose_path=compose_path)
+        current = adoption.inspect_deployment(root)
         if terminal is None or current["binding"] != "recorded" or current["manifest"] is None:
             raise PrepareError("an adopted and reconciled deployment is required")
         previous = terminal[1]
@@ -566,9 +532,9 @@ def prepare_update(root: Path, request: dict[str, Any], compose_path: Path) -> d
                 path = command[1]
             if path is None or observe.resolve_bind_path(context["target_snapshot"], path, writable=False) != old["database"]["path"]:
                 raise PrepareError("target Telegram database binding differs")
-        if any(runtime._compose_input(Path(path)) != identity for path, identity in references.items()):
+        if any(adoption._compose_input(Path(path)) != identity for path, identity in references.items()):
             raise PrepareError("Compose input changed during update preparation")
-        final = transaction.verify_terminal(root, compose_path=compose_path)
+        final = terminal_ops.verify_terminal(root, compose_path=compose_path)
         if final is None or final[0] != terminal[0]:
             raise PrepareError("terminal deployment changed during preparation")
         return journal
