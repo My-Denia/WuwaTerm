@@ -12,21 +12,27 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.10.0`, a review and
-  translation release on top of `v0.9.2`: `review-v2` gives every mapped region
-  its own claim and allocation step, answers a numbering dot only in its own
-  sentence pairing, keeps an inflection from answering a competing official
-  form, refuses a shorter form enclosed by a longer official form the source
-  does not claim, treats a lowercase spelling of a capitalized official term as
-  an ordinary word and asserts no constraint from a derived name surface, with
-  the matcher basis label moving to `wuwaterm-cjk-matcher-v8`;
+  published tag. The current source version is `0.10.1`, a translation release
+  on top of `v0.10.0`: paragraph regrouping of a context-mode answer now reads a
+  per-line share ratio over the whole segment instead of the 7.5% running-share
+  bound and the six-line window, so a merge and a split at any distance and in
+  either order are refused, and a distant merge-plus-split answer is left for a
+  manual split instead of shifting its lines across paragraphs. The Web and
+  Windows contract pins move to Web `v0.4.1` and Windows `v0.6.1`, and the
+  self-host installer's recorded defaults move with the pins: they name Web
+  `v0.4.1` and keep Telegram `v0.4.0`. The latest published Core release is
+  `v0.10.0`, a review and translation release on top of `v0.9.2`: `review-v2`
+  gives every mapped region its own claim and allocation step, answers a
+  numbering dot only in its own sentence pairing, keeps an inflection from
+  answering a competing official form, refuses a shorter form enclosed by a
+  longer official form the source does not claim, treats a lowercase spelling of
+  a capitalized official term as an ordinary word and asserts no constraint from
+  a derived name surface, with the matcher basis label moving to
+  `wuwaterm-cjk-matcher-v8`;
   `POST /v1/reviews` accepts a 64 KiB body and `review-v2` callers may send
   `X-WuwaTerm-Review-Features: dense-128,reason-v1`; and regrouping a
   context-mode answer refuses a crossing paragraph break and a merge-plus-split
-  line layout. The Web and Windows contract pins move to Web `v0.4.0` and Windows
-  `v0.6.0`, the two clients of `wuwaterm-manuscript-v4`, and the self-host
-  installer's recorded defaults move with the pins to Web `v0.4.0` and Telegram
-  `v0.4.0`. The previous release, `v0.9.2`, is a maintenance release on top of
+  line layout. The previous release, `v0.9.2`, is a maintenance release on top of
   `v0.9.1`: an HTTP 400 whose `error` object carries
   `code: "unsupported_parameter"` and `param` equal to `thinking` or
   `reasoning_effort` now reports `unsupported_thinking` or
@@ -72,16 +78,17 @@ release. That boundary has not moved.
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
   `products.telegram` entry on its published release.
-  `products.web` records the published Web `v0.4.0`, because the installer
+  `products.web` records the published Web `v0.4.1`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.0`.
+  published Windows `v0.6.1`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` records and
-  prints `v0.4.0`, the Telegram release that pins Core `v0.10.0`. A Core tag can
-  only record a client release that already exists, so the `v0.10.0` tag, frozen
+  `docs/self-hosting.md` name the same published release: `main` and the
+  `v0.10.1` tag record and print `v0.4.0`, the Telegram release that pins Core
+  `v0.10.0`. A Core tag can only record a client release that already exists,
+  so the `v0.10.0` tag, frozen
   before Telegram `v0.4.0` was published, keeps `v0.3.1` in its `products.json`
   and `setup.sh`; that is what the `v0.9.2` tag records too, which pins Core
   `v0.9.1`. An install from the `v0.10.0` tag therefore names the newer release
@@ -93,13 +100,13 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` records and installs Web `v0.4.0`; the `v0.10.0` tag's
-  frozen snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.4.0` or runs from `main`. A clone of `v0.9.0`
+  they differ. `main` and the `v0.10.1` tag record and install Web `v0.4.1`; the
+  `v0.10.0` tag's frozen snapshot records `v0.3.1`, so an install from that tag
+  passes `WUWATERM_WEB_VERSION=v0.4.0` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.0), released independently.
+- Windows product: [v0.6.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.1), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -228,9 +235,9 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.0` pins Web `v0.4.0`
-  (`7cfbc4d5f9f396688eb0fdf7f05394f78bb2d634`) and Windows `v0.6.0`
-  (`eaceb8bbe847f4db14f227dea274261fa2dc5784`), the two consumers of the
+  release carries. `0.10.1` pins Web `v0.4.1`
+  (`c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260`) and Windows `v0.6.1`
+  (`4da26ba9f394475432ff0b2890ae24d21f7606b1`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends
   `X-WuwaTerm-Review-Features: dense-128,reason-v1` and stores the 128-finding
   page with its reasons. The `split_web_revision` / `split_windows_revision`
