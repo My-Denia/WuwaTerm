@@ -18,6 +18,15 @@ OLD_IMAGE = "sha256:" + "1" * 64
 TARGET_IMAGE = "sha256:" + "2" * 64
 
 
+def patch_transaction_operation(monkeypatch, transaction_module, name, value):
+    """Patch a shared operation at both its caller and its implementation."""
+    import component_operations as operations
+
+    monkeypatch.setattr(transaction_module, name, value)
+    if hasattr(operations, name):
+        monkeypatch.setattr(operations, name, value)
+
+
 @pytest.fixture
 def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     env_file = tmp_path / "operator.env"
@@ -56,9 +65,9 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
             "environment": environment}}}).encode())
 
     monkeypatch.setattr(transaction.admission, "require_lock", lambda *_: None)
-    monkeypatch.setattr(transaction, "_compose_binary", lambda path: path)
+    patch_transaction_operation(monkeypatch, transaction, "_compose_binary", lambda path: path)
     monkeypatch.setattr(transaction.subprocess, "run", compose)
-    monkeypatch.setattr(transaction, "_image", lambda image_id: images[image_id])
+    patch_transaction_operation(monkeypatch, transaction, "_image", lambda image_id: images[image_id])
     before = {"id": OLD_ID, "image_id": OLD_IMAGE, "running": False, "started_at": "old-start",
               "restart_count": 0, "project": "project", "service": "api", "name": "api",
               "transaction_label": None}
@@ -78,7 +87,7 @@ def deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
                     "HostConfig": {"NetworkMode": "host"}},
            TARGET_ID: {"Config": {"Env": [f"{k}={v}" for k, v in target_env.items()]}}}
     monkeypatch.setattr(transaction.observe, "_inspect", lambda identifier: raw[identifier])
-    monkeypatch.setattr(transaction, "_snapshot", lambda _root, component:
+    patch_transaction_operation(monkeypatch, transaction, "_snapshot", lambda _root, component:
                         old_snapshot if component["which"] == "old" else target_snapshot)
     return {"journal": journal, "old_snapshot": old_snapshot, "target_snapshot": target_snapshot,
             "old_env": old_env, "target_env": target_env, "raw": raw, "target": target}
@@ -107,7 +116,7 @@ def test_replacement_payload_uses_target_environment_on_each_caller_path(
         payloads.append(copy.deepcopy(body))
         raise StopAtCreate
 
-    monkeypatch.setattr(transaction, "_docker", docker)
+    patch_transaction_operation(monkeypatch, transaction, "_docker", docker)
     if route.startswith("full"):
         monkeypatch.setattr(full, "_all_readers_stopped", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(full, "_guard_readers", lambda *_args, **_kwargs: {
@@ -122,13 +131,13 @@ def test_replacement_payload_uses_target_environment_on_each_caller_path(
                      "_require_target_manifest_absent", "write_initial_journal", "_step", "_rename",
                      "_container_command", "_write_journal", "_recover_pending_telegram",
                      "_refresh_telegram_state"):
-            monkeypatch.setattr(transaction, name, lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(transaction, "_prepare_predecessor", lambda *_args: None)
-        monkeypatch.setattr(transaction, "_telegram_context", lambda *_args: {})
-        monkeypatch.setattr(transaction, "_probe_telegram_state", lambda *_args: [])
-        monkeypatch.setattr(transaction, "_actual", lambda *_args, **_kwargs:
+            patch_transaction_operation(monkeypatch, transaction, name, lambda *_args, **_kwargs: None)
+        patch_transaction_operation(monkeypatch, transaction, "_prepare_predecessor", lambda *_args: None)
+        patch_transaction_operation(monkeypatch, transaction, "_telegram_context", lambda *_args: {})
+        patch_transaction_operation(monkeypatch, transaction, "_probe_telegram_state", lambda *_args: [])
+        patch_transaction_operation(monkeypatch, transaction, "_actual", lambda *_args, **_kwargs:
                             ({"container": journal["before"]["containers"]["api"]}, None))
-        monkeypatch.setattr(transaction, "_actual_telegram", lambda *_args, **_kwargs:
+        patch_transaction_operation(monkeypatch, transaction, "_actual_telegram", lambda *_args, **_kwargs:
                             ({"container": journal["before"]["containers"]["telegram"]}, None))
         with pytest.raises(transaction.TransactionError) as exc:
             transaction.update(tmp_path, journal, compose_path=Path("/compose"))
@@ -158,13 +167,13 @@ def test_runtime_reconciliation_checks_each_container_against_its_own_environmen
         _, fingerprint = transaction.observe._environment(env, None, key)
         return {"container": records[identifier], "environment_fingerprint": fingerprint}
 
-    monkeypatch.setattr(transaction, "_observed", observed)
-    monkeypatch.setattr(transaction, "_recipe_matches", lambda *_args: None)
-    monkeypatch.setattr(transaction, "_inventory", lambda *_args: [
+    patch_transaction_operation(monkeypatch, transaction, "_observed", observed)
+    patch_transaction_operation(monkeypatch, transaction, "_recipe_matches", lambda *_args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_inventory", lambda *_args: [
         {"Id": OLD_ID}, {"Id": TARGET_ID, "Labels": {transaction.observe.TRANSACTION_LABEL: "transaction"}}])
-    monkeypatch.setattr(transaction, "_verify_data", lambda *_args: None)
-    monkeypatch.setattr(transaction, "_other_component", lambda *_args: None)
-    monkeypatch.setattr(transaction, "_check_pointers", lambda *_args, **_kwargs: None)
+    patch_transaction_operation(monkeypatch, transaction, "_verify_data", lambda *_args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_other_component", lambda *_args: None)
+    patch_transaction_operation(monkeypatch, transaction, "_check_pointers", lambda *_args, **_kwargs: None)
     if drift == "none":
         old, target = transaction._actual(tmp_path, journal, Path("/compose"))
         assert old["container"]["id"] == OLD_ID and target["container"]["id"] == TARGET_ID

@@ -27,7 +27,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(CODE_ROOT))
 sys.path.insert(0, str(CODE_ROOT / "scripts"))
 sys.path.insert(0, str(CODE_ROOT / "src"))
-import component_runtime as runtime  # noqa: E402
+import component_journal_runtime as runtime  # noqa: E402
 import component_recovery as recovery  # noqa: E402
 import component_build_isolation as isolation  # noqa: E402
 import deployment_admission as admission  # noqa: E402

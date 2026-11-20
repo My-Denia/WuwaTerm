@@ -198,3 +198,27 @@ unnamed temporary files and a working `/proc/self/fd`; an unsupported filesystem
 is refused before the record is published. Interrupted preparation can leave
 source-identity or transaction-named staging artifacts for a separate owner
 inventory; unknown files are never removed automatically.
+
+## Implementation boundaries
+
+`component_deployment.py` coordinates the command-line operations. The historical
+`component_runtime.py` entry remains the bridge used by the wrapper and by
+saved-source recovery. `component_inspect.py` reads deployment metadata,
+`component_adoption.py` adopts an existing topology, and
+`component_adopt_probe.py` owns durable legacy-version probes.
+
+`component_journal_runtime.py` and `component_journal_full.py` parse and validate
+their respective transaction records. `component_handoff.py` verifies the
+immutable predecessor and manages the durable cross-kind marker handoff.
+`component_terminal.py` selects the terminal verifier, with full-data terminal
+verification in `component_terminal_full.py`. `component_operations.py` holds
+the observations, binding checks, and container and pointer operations shared
+by both transaction types. State-probe records, state-entry paths, and state-plan
+comparison live in `component_state_journal.py`, `component_state_paths.py`,
+and `component_state_plans.py`. The runtime and full transaction modules retain
+their own forward and rollback phase ordering.
+
+The `component_recovery.py` bootstrap continues to verify and execute the
+source recorded by the transaction. The current `TOOL_PATHS` covers the modules
+needed by this source when it is saved. An older capsule continues to execute
+and verify its own saved source and fingerprint.

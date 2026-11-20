@@ -351,7 +351,7 @@ def _open_metadata(directory: int, name: str) -> int | None:
 
 def _published_transaction(root: Path, identifier: str) -> bool:
     """Report whether a published FULL journal already names this candidate."""
-    import component_runtime as runtime  # noqa: PLC0415
+    import component_journal_runtime as runtime  # noqa: PLC0415
 
     path = root / ".deployments" / _FULL_JOURNAL
     try:

@@ -18,13 +18,15 @@ import posixpath
 import re
 import socket
 import stat
+import sys
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import component_journal_runtime as runtime  # noqa: E402
+
 try:
-    from scripts import component_runtime as runtime
     from scripts import product_manifest as manifest
 except ModuleNotFoundError:  # isolated capsule scripts directory
-    import component_runtime as runtime
     import product_manifest as manifest
 
 SOCKET = "/run/docker.sock"

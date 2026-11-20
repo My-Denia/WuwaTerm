@@ -32,7 +32,7 @@ sys.path.insert(0, str(CODE_ROOT / "scripts"))
 import component_build as build  # noqa: E402
 import component_build_isolation as isolation  # noqa: E402
 import component_recovery as recovery  # noqa: E402
-import component_runtime as runtime  # noqa: E402
+import component_journal_runtime as runtime  # noqa: E402
 import package_recovery_source as capsule  # noqa: E402
 import product_manifest as manifest  # noqa: E402
 

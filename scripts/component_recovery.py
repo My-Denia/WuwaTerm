@@ -528,11 +528,34 @@ def _requested_compose(root: Path, source: dict[str, Any], requested: Path) -> P
     return saved
 
 
+def verify_compose_binary(path: Path) -> Path:
+    """Bind an explicitly selected standalone Compose executable to its receipt."""
+    try:
+        path = Path(path)
+        physical = path.is_absolute() and path.resolve(strict=True) == path
+    except OSError:
+        raise RecoveryError("Compose binary cannot be verified") from None
+    if not physical:
+        raise RecoveryError("Compose binary must be a physical absolute path")
+    try:
+        receipt = _read_regular(Path(str(path) + ".sha256")).decode("ascii").strip().split()
+    except (OSError, UnicodeError, RecoveryError):
+        raise RecoveryError("Compose binary cannot be verified") from None
+    if len(receipt) != 2 or receipt[1].lstrip("*") != path.name:
+        raise RecoveryError("Compose checksum receipt is invalid")
+    try:
+        digest = _hash(path)
+    except (OSError, RecoveryError):
+        raise RecoveryError("Compose binary cannot be verified") from None
+    if digest != receipt[0]:
+        raise RecoveryError("Compose checksum differs")
+    return path
+
+
 def _prepare_compose(root: Path, source: dict[str, Any], compose_path: Path) -> dict[str, Any]:
     # The explicit operator choice and its receipt are verified while normal
     # source admission is held. Recovery uses only the resulting saved bytes.
-    import component_transaction as transaction  # noqa: PLC0415
-    binary = transaction._compose_binary(compose_path)
+    binary = verify_compose_binary(compose_path)
     digest = _hash(binary)
     destination = root / ".deployments" / ("component-compose-" + digest)
     receipt = Path(str(destination) + ".sha256")
@@ -578,7 +601,7 @@ def _prepare_compose(root: Path, source: dict[str, Any], compose_path: Path) -> 
     result = {**source, "compose": {"path": str(destination.relative_to(root)), "sha256": digest}}
     _sync_reused_publication(destination, lambda: _verify_bound_compose(root, result))
     _sync_reused_publication(receipt, lambda: _verify_bound_compose(root, result))
-    transaction._compose_binary(binary)
+    verify_compose_binary(binary)
     if _hash(binary) != digest:
         raise RecoveryError("Compose executable changed during preservation")
     return result
@@ -599,7 +622,7 @@ def prepare_source(root: Path, commit: str, tree: str, *, compose_path: Path | N
     # never calls this function and never imports deployment-root modules.
     sys.path.insert(0, str(root / "scripts"))
     import deployment_admission as admission  # noqa: PLC0415
-    import component_runtime as runtime  # noqa: PLC0415
+    import component_journal_runtime as runtime  # noqa: PLC0415
     try:
         admission.admit_component(root, operation="prepare-source", code_root=root)
         files = _verify_clean_source(root, commit, tree)

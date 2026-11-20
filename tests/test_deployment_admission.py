@@ -134,11 +134,19 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
                  "scripts/deployment_manifest.py", "scripts/deployment_admission.py",
                  "scripts/full_update.py", "scripts/runtime_update.py",
                  "scripts/component_runtime.py", "scripts/component_build.py",
-                 "scripts/component_artifact.py", "scripts/install_probe.py",
+                 "scripts/component_deployment.py", "scripts/component_journal_runtime.py",
+                 "scripts/component_journal_full.py", "scripts/component_handoff.py", "scripts/component_inspect.py",
+                 "scripts/component_operations.py", "scripts/component_terminal.py",
+                 "scripts/component_terminal_full.py",
+                 "scripts/component_artifact.py", "scripts/component_adoption.py",
+                 "scripts/component_adopt_probe.py",
+                 "scripts/install_probe.py",
                  "scripts/component_build_isolation.py", "scripts/component_full.py", "scripts/component_full_db.py",
                  "scripts/component_prepare.py",
                  "scripts/component_recovery.py", "scripts/component_wheel_build.py",
-                 "scripts/component_state.py", "scripts/component_state_copy_v4.py", "scripts/component_state_endpoint.py",
+                 "scripts/component_state.py", "scripts/component_state_paths.py", "scripts/component_state_plans.py",
+                 "scripts/component_state_journal.py",
+                 "scripts/component_state_copy_v4.py", "scripts/component_state_endpoint.py",
                  "scripts/component_transaction.py",
                  "scripts/product_manifest.py", "scripts/package_recovery_source.py"):
         shutil.copy2(ROOT / name, root / name)
@@ -938,8 +946,8 @@ import json, pathlib, sys
 r = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(r / 'scripts'))
 import component_full as full
 import component_recovery as recovery
-import component_runtime as runtime
-import component_transaction as transaction
+import component_inspect as adoption
+import component_terminal as terminal
 import deployment_admission as admission
 recovery.ARTIFACT_RECOVERY_EXECUTION_READY = False
 previous = json.loads(sys.argv[3]); events = []; saved = []
@@ -950,12 +958,12 @@ except admission.AdmissionError as exc:
     assert 'runtime saved-source recovery is not ready' in str(exc)
 else:
     raise AssertionError('runtime admission unexpectedly succeeded')
-transaction.verify_terminal_for_full4 = lambda *args, **kwargs: (b'verified predecessor', previous)
+terminal.verify_terminal_for_full4 = lambda *args, **kwargs: (b'verified predecessor', previous)
 def retirement(*args, **kwargs):
     events.append('predecessor')
     return b'verified predecessor'
-transaction._prepare_predecessor = retirement
-runtime.inspect_deployment = lambda root: {'binding': 'recorded', 'manifest': previous['target']['manifest']}
+terminal._prepare_predecessor = retirement
+adoption.inspect_deployment = lambda root: {'binding': 'recorded', 'manifest': previous['target']['manifest']}
 original = recovery.prepare_source
 def capture(*args, **kwargs):
     source = original(*args, **kwargs)
