@@ -17,9 +17,12 @@ from wuwaterm.cjk_span import (
     MATCHER_REVISION,
     MAX_WORD_LEN,
     _EVERYDAY_STANDALONE_CHARS,
+    _SINGLE_NAME_HONORIFICS,
+    _SINGLE_NAME_PARTICLES,
     _WORDS,
     _SINGLE_NAME_COMPOUNDS,
     single_character_compound_at,
+    single_character_name_context_ok,
     single_character_name_mention_at,
     crosses_cjk_word_boundary,
 )
@@ -76,7 +79,16 @@ def test_lexicon_is_the_pinned_jieba_slice():
     for word in REQUIRED_WORDS:
         assert word in _WORDS
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v8", JIEBA_COMMIT, LEXICON_FILTER, sorted(_WORDS), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        [
+            "wuwaterm-cjk-matcher-v9",
+            JIEBA_COMMIT,
+            LEXICON_FILTER,
+            sorted(_WORDS),
+            sorted(_SINGLE_NAME_COMPOUNDS),
+            sorted(_EVERYDAY_STANDALONE_CHARS),
+            sorted(_SINGLE_NAME_HONORIFICS),
+            sorted(_SINGLE_NAME_PARTICLES),
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -198,8 +210,51 @@ def test_target_single_character_compound_qualification(text, name, compound):
         ("心加入队伍。", "心", True),
         ("和心加入队伍。", "心", True),
         ("心", "心", True),
+        # matcher v8: an honorific is grammar after a name, not a compound.
+        ("心大人来了。", "心", True),
+        ("椿大人，请。", "椿", True),
+        ("椿前辈登场。", "椿", True),
+        ("椿队长说话。", "椿", True),
+        # A one-character function word after the name keeps the mention.
+        ("椿却没有回应。", "椿", True),
+        ("椿等共鸣者。", "椿", True),
+        ("欢迎椿来到。", "椿", True),
+        # An unknown CJK continuation or a middle dot is a longer compound:
+        # the character inside it is not a standalone mention.
+        ("红椿蕊很强。", "椿", False),
+        ("红椿·蕾很强。", "椿", False),
+        ("椿的红椿蕊很强。", "椿", True),
+        # Punctuation, markup and whitespace are boundaries.
+        ("椿，我们走。", "椿", True),
+        ("<b>椿</b>登场。", "椿", True),
     ],
 )
 def test_single_character_name_mention_qualification(text, name, mention):
     start = text.index(name)
     assert single_character_name_mention_at(text, start, start + 1) is mention
+
+
+@pytest.mark.parametrize(
+    "text",
+    ("心·蕾", "释放「椿·蕾」", "红·椿", "红·椿绽放"),
+)
+def test_middle_dot_closes_both_boundaries(text):
+    # The middle dot is not a CJK character, so the punctuation branch would
+    # otherwise call it a boundary. Both helpers refuse it on either side,
+    # which is what keeps one half of an invented compound out of the name set.
+    character = "心" if "心" in text else "椿"
+    start = text.index(character)
+    assert single_character_name_mention_at(text, start, start + 1) is False
+    assert single_character_name_context_ok(text, start, start + 1) is False
+
+
+def test_honorific_and_boundary_rule_share_one_admission():
+    # The translator and review ask the same helper, so what one admits the
+    # other reports. 心大人 is a name in both, while 心很重要 and 心情 are the
+    # ordinary word in both.
+    from wuwaterm.cjk_span import single_character_name_context_ok
+
+    assert single_character_name_context_ok("心大人来了。", 0, 1) is True
+    assert single_character_name_context_ok("心很重要。", 0, 1) is False
+    assert single_character_name_mention_at("心情不错。", 0, 1) is False
+    assert single_character_name_mention_at("心大人来了。", 0, 1) is True

@@ -1592,6 +1592,32 @@ def test_skipped_single_character_name_is_still_offered_as_a_reference(
     assert ("椿", "椿", "Camellya", "resonator") in locked.references
 
 
+@pytest.mark.parametrize(
+    "text", ["心·蕾", "释放「椿·蕾」", "红·椿", "红·椿绽放"]
+)
+def test_middle_dot_compound_is_never_a_name(single_name_db, text):
+    # matcher v9 closes both boundaries at a middle dot. The deterministic path
+    # must not lock the character and the model path must not reference it:
+    # one half of 红·椿 or 椿·蕾 is not the standalone name.
+    if "心" in text:
+        with connect(single_name_db) as conn:
+            insert_records(
+                conn,
+                [TermRecord("resonator", "fixture", "5", "5", "心", "Hsin")],
+            )
+            conn.commit()
+    translator = SentenceTranslator(single_name_db)
+
+    locked = translator.lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+    with_references = translator._lock_terms_with_references(text, to_chinese=False)
+    assert with_references.locks == ()
+    assert with_references.references == ()
+    assert with_references.reference_spans == ()
+
+
 @pytest.mark.parametrize("text", ["香椿加入菜单。", "椿树很高。", "春天的风吹过。"])
 def test_ordinary_plant_words_are_not_offered_as_name_references(
     single_name_db, text
