@@ -3,6 +3,17 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.10.2
+
+### Internal boundaries
+
+- Separate component deployment, transaction journals and shared verification
+  responsibilities. Recovery continues to verify and execute the source saved
+  with the transaction (#285).
+- Separate terminology matching and preparation from sentence translation.
+  The builder and translation share matching; translation retains database
+  snapshots, model calls and restoration (#286).
+
 ## 0.10.1
 
 ### Translation
