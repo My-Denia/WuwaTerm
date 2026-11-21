@@ -452,6 +452,18 @@ async def post_chat_completion(
         if key in payload:
             raise ValueError(f"extra_body may not replace {key}")
         payload[key] = value
+    # The last point before money is spent, and the one place the decision is
+    # made. A request whose own budget is already spent must not start a POST:
+    # the deadline normally stops it by cancelling the task, but a layer that
+    # swallows cancellation, a retry shaped as a new call, or a fallback that
+    # runs after the cancel arrived would each reach here with the answer
+    # already sent. Refusing HERE is what makes "no paid work after the 504" a
+    # property of the transport rather than of the chain above it. No-op
+    # outside an HTTP request, and no-op for a request with no deadline.
+    if request_trace.deadline_expired():
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout"
+        )
     for hook in tuple(_PRE_SEND_HOOKS):
         hook(purpose)
     outcome = "request"

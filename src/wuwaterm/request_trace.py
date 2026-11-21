@@ -11,7 +11,9 @@ What is recorded is a small, fixed vocabulary of numbers and stage names:
 
 * ``stage`` — one of the names below, i.e. what the request was DOING when the
   record was written. The stage names are module constants; a caller cannot
-  put anything else in the field.
+  put anything else in the field. For a request that was cancelled at its
+  deadline this is the stage it DIED in, not the stage its unwinding restored
+  (see :attr:`RequestTrace.stage`).
 * ``slot_wait_ms`` — monotonic milliseconds spent awaiting the shared model
   concurrency slot (``SentenceTranslator._current_llm_slots``).
 * ``llm_post_ms`` — monotonic milliseconds spent inside the one HTTP POST path
@@ -29,13 +31,21 @@ own vocabulary. That is why this file has no way to accept text.
 
 The trace is created once, by the outermost middleware, and every stage below it
 reaches the same object through ``contextvars``. Stage marks MUTATE that object;
-they never rebind the variable. That is deliberate: Starlette's
-``BaseHTTPMiddleware`` runs the rest of the stack in a child task, and a child
-task inherits a COPY of the context. A mutation of a shared object is therefore
-visible upstream when the middleware reads it again (after a timeout, or for the
-completion record), while rebinding the variable inside the handler would not
-be. ``asyncio.to_thread`` — which the API uses for the dictionary stage — copies
-the context too, so the same object is reachable from that worker thread.
+they never rebind the variable. That is deliberate: a child task or a worker
+thread inherits a COPY of the context, so a mutation of the one shared object is
+visible everywhere the request reaches, while rebinding the variable inside the
+handler would not be. ``asyncio.to_thread`` — which the API uses for the
+dictionary stage — is one such copy.
+
+## The deadline guard
+
+The middleware that bounds a request also arms :func:`set_deadline` here, and
+the one place that spends money — ``llm_transport.post_chat_completion`` —
+refuses to start a POST once that budget has run out. Cancelling the handler is
+what normally stops a request. This guard is the part that cannot be swallowed:
+a request that has already been answered must never OCCUR A SECOND model
+charge, so the decision is recorded in the trace and re-read at the choke point
+rather than relied on to arrive through the cancellation chain.
 
 ## Not a request context
 
@@ -58,6 +68,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
 from contextlib import asynccontextmanager
 from time import monotonic as _monotonic
 from typing import AsyncIterator, Final
@@ -128,6 +139,8 @@ class RequestTrace:
         "_llm_post_started",
         "_llm_calls",
         "_direction",
+        "_deadline_at",
+        "_stop_stage",
     )
 
     def __init__(self) -> None:
@@ -140,12 +153,25 @@ class RequestTrace:
         self._llm_post_started: float | None = None
         self._llm_calls = 0
         self._direction = DIRECTION_UNKNOWN
+        self._deadline_at: float | None = None
+        self._stop_stage: str | None = None
 
     # -- what a record is written from -------------------------------------
 
     @property
     def stage(self) -> str:
-        return self._stage
+        """What the request was doing when it stopped, or is doing now.
+
+        For a request cancelled at its deadline these differ. A span that opens
+        a stage also restores the one it was in when it closes, which is what
+        nesting is for — so by the time the deadline layer writes its record,
+        the unwind has ALREADY put the enclosing stage back, and reporting that
+        would name ``prepare_terms`` for a request that spent its whole budget
+        queued for a model slot. The span that was cancelled therefore records
+        the stage in force at that moment (:meth:`_note_cancellation`), and it
+        wins here: a timeout record has to say where the time went.
+        """
+        return self._stop_stage if self._stop_stage is not None else self._stage
 
     @property
     def slot_wait_ms(self) -> float:
@@ -190,6 +216,15 @@ class RequestTrace:
         """
         return self._llm_calls > 0 or self._slot_wait_ms > 0.0
 
+    # -- the deadline guard ------------------------------------------------
+
+    def _arm_deadline(self, seconds: float) -> None:
+        self._deadline_at = _monotonic() + seconds
+
+    def _deadline_expired(self) -> bool:
+        at = self._deadline_at
+        return at is not None and _monotonic() >= at
+
     # -- stage marks -------------------------------------------------------
 
     def _set_stage(self, name: str) -> None:
@@ -210,6 +245,20 @@ class RequestTrace:
 
     def _replace_top_stage(self, name: str) -> None:
         self._stage = name if name in _STAGES else STAGE_INIT
+
+    def _note_cancellation(self) -> None:
+        """Remember the stage a cancellation interrupted, the first time it does.
+
+        Called from a span's ``finally``, which runs on the way out in either
+        direction and sees the exception still in flight there. Only a span that
+        was ACTIVE at the moment of cancellation has anything to record, and
+        only the innermost one is that span — an outer span sees the same
+        cancellation a moment later, when the inner one has already answered.
+        """
+        if self._stop_stage is not None:
+            return
+        if isinstance(sys.exc_info()[1], asyncio.CancelledError):
+            self._stop_stage = self._stage
 
     def _finish_slot_wait(self) -> None:
         started = self._slot_wait_started
@@ -290,8 +339,31 @@ async def llm_slot(semaphore: asyncio.Semaphore) -> AsyncIterator[None]:
     finally:
         # Runs before the stack unwinds in either direction: acquired and
         # finished, cancelled while queued, or raised inside the slot.
+        trace._note_cancellation()
         trace._finish_slot_wait()
         trace._pop_stage()
+
+
+def set_deadline(seconds: float) -> None:
+    """Arm the guard that keeps a request from starting work after its budget.
+
+    Called by the middleware that applies a budget, so the deadline is measured
+    from the moment that budget starts rather than from the start of the trace.
+    No-op outside a request.
+    """
+    trace = _active.get()
+    if trace is not None:
+        trace._arm_deadline(seconds)
+
+
+def deadline_expired() -> bool:
+    """Whether this request's own budget is already spent.
+
+    ``False`` outside a request and ``False`` for a request whose middleware
+    never armed a budget: both mean "nothing says this work may not start".
+    """
+    trace = _active.get()
+    return trace is not None and trace._deadline_expired()
 
 
 def begin_llm_post() -> None:
@@ -309,6 +381,7 @@ def end_llm_post() -> None:
     trace = _active.get()
     if trace is None:
         return
+    trace._note_cancellation()
     trace._finish_llm_post()
     trace._pop_stage()
 
