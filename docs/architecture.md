@@ -353,6 +353,25 @@ clock, importing nothing from this package at all, holding no dictionary, no
 pipeline and no transport. Adding a name to this list is still a deliberate act
 — the guard and this paragraph are what make it one.
 
+**The deployment-tool import direction.** The flat `scripts/` deployment tools
+are a second graph, and the same script checks it for cycles over real AST
+imports — a reverse edge written inside a function body counts, so keeping it
+lazy does not hide it. `deployment_admission.py` is the read-only layer every
+tool calls, so it necessarily calls tools back to verify them; what it must not
+become is a cycle. `component_handoff.py` therefore holds only the predecessor
+primitives, and `component_handoff_finish.py` — above both modules — owns the
+admission-dependent removal. Neither is in a cycle.
+
+The check walks strongly connected components rather than mutual pairs,
+because a pair test only sees cycles of two: the builder graph
+(`component_build` → `component_build_isolation` → `component_wheel_build`) and
+the transaction graph (`component_deployment` → `component_full` →
+`component_runtime`) are already three-module cycles. Both predate the rule,
+belong to other subsystems, and are recorded in `KNOWN_SCRIPTS_CYCLES`. Naming
+a component is what keeps the gate honest in both directions: anything this set
+does not name fails, and an entry whose cycle is gone fails until it is
+deleted.
+
 The application layer holds the shared command/API/web pipeline (prepare →
 direction → exact hit → trusted fuzzy hit → length gate → chunked
 LLM call with contextual term references) and knows nothing about Telegram or HTTP. Its adapter-shaped steps

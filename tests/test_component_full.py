@@ -1600,3 +1600,21 @@ def test_terminal_retirement_follows_the_record_schema(
     journal = {"status": "committed", "selection": ["telegram"], "schema_version": schema}
     assert transaction._retire_committed(Path("/unused"), journal, for_full4=for_full4) is False
     assert retired == [expected]
+
+
+def test_finish_handoff_keeps_its_published_entry_points() -> None:
+    """Retiring a predecessor moved above admission; the entry points did not.
+
+    ``component_handoff`` must stay free of ``deployment_admission`` so the
+    admission layer can call the primitives, and the durable removal lives in
+    ``component_handoff_finish``. The published names resolve to the same
+    functions, and the removal is no longer defined beside the primitives.
+    """
+    from scripts import component_handoff
+    from scripts import component_handoff_finish
+
+    assert component_handoff_finish.__file__.endswith("component_handoff_finish.py")
+    assert full.finish_handoff.__module__ == "component_handoff_finish"
+    assert full.verify_handoff.__module__ == "component_handoff"
+    assert full.verify_predecessor.__module__ == "component_handoff"
+    assert not hasattr(component_handoff, "finish_handoff")

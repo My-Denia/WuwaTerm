@@ -34,6 +34,7 @@ TOOL_PATHS = (
     "scripts/component_journal_runtime.py",
     "scripts/component_journal_full.py",
     "scripts/component_handoff.py",
+    "scripts/component_handoff_finish.py",
     "scripts/component_inspect.py",
     "scripts/component_operations.py",
     "scripts/component_terminal.py",

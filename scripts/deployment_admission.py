@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+from types import ModuleType
+from typing import NamedTuple
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 LEGACY_RUNTIME = ".runtime-transaction.json"
@@ -38,8 +41,60 @@ _MAX_DOCKER_RESPONSE = 8 * 1024 * 1024
 _DEPLOYMENT_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\Z")
 
 
+class _AttemptProducer(NamedTuple):
+    """The one tool module that owns an attempt directory's records."""
+
+    module: str
+    read: str
+    verify: str | None
+    terminal: str | None
+
+
+# Named once instead of re-derived at each admission branch. The record
+# parsers validate a whole record; a caller-supplied status string is never
+# trusted on its own.
+_ATTEMPT_PRODUCERS = {
+    BUILD_ATTEMPTS: _AttemptProducer("component_build", "_read_attempt",
+                                     "verify_registered_build", "verify_build_terminal"),
+    WHEEL_BUILD_ATTEMPTS: _AttemptProducer("component_wheel_build", "read_attempt",
+                                           "verify_registered_wheel_build",
+                                           "verify_wheel_build_terminal"),
+    ADOPT_PROBES: _AttemptProducer("component_runtime", "_read_adopt_probe", None, None),
+}
+
+
 class AdmissionError(RuntimeError):
     """The deployment state cannot safely admit this operation."""
+
+
+def _tool_modules(*names: str, message: str, root: Path = CODE_ROOT) -> tuple[ModuleType, ...]:
+    """Import deployment tools from exactly ``root/scripts`` and prove it.
+
+    Every tool called from this module has to come from the verified
+    checkout's own ``scripts`` directory. A module already bound in
+    ``sys.modules`` keeps its original object whatever ``sys.path`` says
+    afterwards, so the loaded file is compared with the expected one instead of
+    being assumed. One contract for every call site is also what keeps the
+    reverse edges of this read-only layer countable: each one is a named tool
+    with a proved source, not an ad-hoc import with a local guard.
+    """
+    directory = root / "scripts"
+    entry = str(directory)
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+    imported: list[ModuleType] = []
+    for name in names:
+        module = importlib.import_module(name)
+        actual = getattr(module, "__file__", None)
+        if type(actual) is not str or Path(actual).resolve() != directory / (name + ".py"):
+            raise AdmissionError(message)
+        imported.append(module)
+    return tuple(imported)
+
+
+def _tool_module(name: str, *, message: str, root: Path = CODE_ROOT) -> ModuleType:
+    """Import one deployment tool; see ``_tool_modules`` for the contract."""
+    return _tool_modules(name, message=message, root=root)[0]
 
 
 def state_root(code_root: Path) -> Path:
@@ -112,10 +167,8 @@ def _probe_statuses(root: Path) -> dict[str, str]:
     try:
         if not stat.S_ISDIR(directory.lstat().st_mode):
             raise AdmissionError("probe record directory is not a directory")
-        sys.path.insert(0, str(CODE_ROOT / "scripts"))
-        import component_runtime  # noqa: PLC0415
-        if Path(component_runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py":
-            raise AdmissionError("helper scan imported a foreign source module")
+        component_runtime = _tool_module("component_runtime",
+                                         message="helper scan imported a foreign source module")
         result = {}
         for entry in sorted(directory.iterdir()):
             record = component_runtime._read_adopt_probe(root, entry.name)
@@ -199,10 +252,8 @@ def _check_artifact_attempts(root: Path) -> None:
     if not _present(store / "attempts"):
         return
     try:
-        sys.path.insert(0, str(CODE_ROOT / "scripts"))
-        import component_artifact as artifact  # noqa: PLC0415
-        if Path(artifact.__file__).resolve() != CODE_ROOT / "scripts/component_artifact.py":
-            raise AdmissionError("artifact admission imported a foreign source module")
+        artifact = _tool_module("component_artifact",
+                                message="artifact admission imported a foreign source module")
         with artifact.artifact_lock(root) as locked:
             pending = sorted(attempt for attempt in os.listdir(locked / "attempts")
                              if artifact.read_attempt_state(locked, attempt)["state"] not in ("registered", "cancelled"))
@@ -287,10 +338,8 @@ def _attempts_clear(root: Path, *, allowed_probe_id: str | None = None,
     deployments = _deployments(root, required=False)
     if _present(deployments / ADOPT_PROBE_STAGING):
         try:
-            sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import component_runtime  # noqa: PLC0415
-            if Path(component_runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py":
-                raise AdmissionError("probe staging imported a foreign source module")
+            component_runtime = _tool_module(
+                "component_runtime", message="probe staging imported a foreign source module")
             if component_runtime.pending_adopt_probe_staging(root) is not None:
                 raise AdmissionError("interrupted probe staging requires recorded recovery")
         except AdmissionError:
@@ -332,27 +381,12 @@ def _attempts_clear(root: Path, *, allowed_probe_id: str | None = None,
             # caller-controlled status string.
             entries = list(directory.iterdir())
             if entries:
-                sys.path.insert(0, str(CODE_ROOT / "scripts"))
-                if name == BUILD_ATTEMPTS:
-                    import component_build  # noqa: PLC0415
-                    reader = component_build._read_attempt
-                    verifier = component_build.verify_registered_build
-                    module = component_build
-                    module_name = "component_build.py"
-                elif name == WHEEL_BUILD_ATTEMPTS:
-                    import component_wheel_build  # noqa: PLC0415
-                    reader = component_wheel_build.read_attempt
-                    verifier = component_wheel_build.verify_registered_wheel_build
-                    module = component_wheel_build
-                    module_name = "component_wheel_build.py"
-                else:
-                    import component_runtime  # noqa: PLC0415
-                    reader = component_runtime._read_adopt_probe
-                    verifier = None
-                    module = component_runtime
-                    module_name = "component_runtime.py"
-                if Path(module.__file__).resolve() != CODE_ROOT / "scripts" / module_name:
-                    raise AdmissionError("build admission imported a foreign source module")
+                producer_spec = _ATTEMPT_PRODUCERS[name]
+                module = _tool_module(producer_spec.module,
+                                      message="build admission imported a foreign source module")
+                reader = getattr(module, producer_spec.read)
+                verifier = (getattr(module, producer_spec.verify)
+                           if producer_spec.verify is not None else None)
                 for entry in entries:
                     record = reader(root, entry.name)
                     if record["status"] == "active":
@@ -379,9 +413,9 @@ def _attempts_clear(root: Path, *, allowed_probe_id: str | None = None,
                             raise AdmissionError("unknown registered build attempt")
                         verifier(root, record["receipt_sha256"])
                         if sync_registered and record.get("schema_version") == 2:
-                            import component_build_isolation as isolation  # noqa: PLC0415
-                            if Path(isolation.__file__).resolve() != CODE_ROOT / "scripts/component_build_isolation.py":
-                                raise AdmissionError("registration imported a foreign publication module")
+                            isolation = _tool_module(
+                                "component_build_isolation",
+                                message="registration imported a foreign publication module")
                             kind = "source" if name == BUILD_ATTEMPTS else "wheel"
                             isolation.sync_registered_attempt(root, kind, record["build_id"], record)
                     elif (record["status"] == "failed" and record.get("schema_version") == 1
@@ -389,8 +423,8 @@ def _attempts_clear(root: Path, *, allowed_probe_id: str | None = None,
                         raise AdmissionError("legacy failed builder lacks verified cleanup evidence")
                     elif (name in (BUILD_ATTEMPTS, WHEEL_BUILD_ATTEMPTS)
                           and record["status"] in ("failed", "retained_import") and record.get("schema_version") == 2):
-                        terminal = (getattr(module, "verify_build_terminal", None) if name == BUILD_ATTEMPTS else
-                                    getattr(module, "verify_wheel_build_terminal", None) if name == WHEEL_BUILD_ATTEMPTS else None)
+                        terminal = (getattr(module, producer_spec.terminal, None)
+                                    if producer_spec.terminal is not None else None)
                         if terminal is None or terminal(root, record["build_id"]) != record:
                             raise AdmissionError("terminal builder resources cannot be verified")
         except AdmissionError:
@@ -458,10 +492,7 @@ def _component_conflicts(root: Path, *, allowed_probe_id: str | None = None,
                     result[key] = value
                 return result
             json.loads(old_runtime.read_bytes(), object_pairs_hook=unique)
-            sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import runtime_update  # noqa: PLC0415
-            if Path(runtime_update.__file__).resolve() != CODE_ROOT / "scripts" / "runtime_update.py":
-                raise ValueError("foreign runtime module")
+            runtime_update = _tool_module("runtime_update", message="foreign runtime module")
             previous = runtime_update._load_journal(old_runtime)
         except Exception as exc:
             raise AdmissionError("legacy runtime journal is unknown") from exc
@@ -470,13 +501,9 @@ def _component_conflicts(root: Path, *, allowed_probe_id: str | None = None,
     full_path = directory / COMPONENT_FULL
     if _present(full_path):
         try:
-            sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import component_handoff as handoff  # noqa: PLC0415
-            import component_journal_full as journal_full  # noqa: PLC0415
-            import component_runtime as runtime  # noqa: PLC0415
-            if (Path(journal_full.__file__).resolve() != CODE_ROOT / "scripts/component_journal_full.py"
-                    or Path(handoff.__file__).resolve() != CODE_ROOT / "scripts/component_handoff.py"):
-                raise ValueError("foreign full transaction module")
+            handoff, journal_full, runtime = _tool_modules(
+                "component_handoff", "component_journal_full", "component_runtime",
+                message="foreign full transaction module")
             full_raw = runtime._read_regular(full_path)
             full_journal = journal_full.validate_journal(runtime._decode(full_raw))
             if allowed_full_id is not None:
@@ -503,12 +530,8 @@ def _require_execution_readiness(operation: str) -> None:
     if operation not in ("adopt", "update", "full-update"):
         return
     try:
-        sys.path.insert(0, str(CODE_ROOT / "scripts"))
-        import component_recovery as recovery  # noqa: PLC0415
-        import component_runtime as runtime  # noqa: PLC0415
-        if (Path(recovery.__file__).resolve() != CODE_ROOT / "scripts/component_recovery.py"
-                or Path(runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py"):
-            raise AdmissionError("component readiness imported a foreign source module")
+        recovery, runtime = _tool_modules("component_recovery", "component_runtime",
+                                         message="component readiness imported a foreign source module")
         full = operation == "full-update"
         protocol = getattr(runtime, "CAPSULE_FULL_RECOVERY_PROTOCOL" if full else "CAPSULE_RECOVERY_PROTOCOL", None)
         # Protocol 1 keeps its original flags; protocol 2 has its own. Any
@@ -543,10 +566,8 @@ def admit_component(root: Path, *, operation: str, code_root: Path,
     current = directory / COMPONENT_RUNTIME
     if _present(current):
         try:
-            sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import component_runtime  # noqa: PLC0415
-            if Path(component_runtime.__file__).resolve() != CODE_ROOT / "scripts" / "component_runtime.py":
-                raise ValueError("foreign component runtime module")
+            component_runtime = _tool_module("component_runtime",
+                                             message="foreign component runtime module")
             journal = component_runtime.load_journal(current)
         except Exception as exc:
             raise AdmissionError("component runtime journal is unknown") from exc
@@ -560,8 +581,8 @@ def admit_component(root: Path, *, operation: str, code_root: Path,
             value = pointer.read_text(encoding="ascii")
             if not value.endswith("\n") or not _DEPLOYMENT_ID.fullmatch(value[:-1]):
                 raise ValueError("invalid pointer")
-            sys.path.insert(0, str(CODE_ROOT / "scripts"))
-            import component_runtime  # noqa: PLC0415
+            component_runtime = _tool_module("component_runtime",
+                                             message="foreign component runtime module")
             # Syntax is not proof of a recorded binding. The inspector checks
             # the immutable manifest and both pointers without claiming live
             # service health.
@@ -573,11 +594,8 @@ def admit_component(root: Path, *, operation: str, code_root: Path,
 
 def _verify_recovery_extraction(root: Path, source: dict, code_root: Path) -> None:
     """Verify the whole executing A extraction against its saved capsule."""
-    import component_recovery as recovery  # noqa: PLC0415
-    import component_runtime as runtime  # noqa: PLC0415
-    for module, name in ((recovery, "component_recovery.py"), (runtime, "component_runtime.py")):
-        if Path(module.__file__).resolve() != code_root / "scripts" / name:
-            raise AdmissionError("recovery imported a foreign source module")
+    recovery, runtime = _tool_modules("component_recovery", "component_runtime", root=code_root,
+                                     message="recovery imported a foreign source module")
     recovery._validate_source(source)
     recovery._verify_bootstrap(root, source)
     recovery._load_packager(code_root / "scripts" / "package_recovery_source.py")
@@ -628,13 +646,9 @@ def admit_component_recovery(root: Path, *, transaction_id: str,
     path = directory / COMPONENT_RUNTIME
     if not _present(path):
         raise AdmissionError("component recovery transaction is missing")
-    sys.path.insert(0, str(code_root / "scripts"))
     try:
-        import component_recovery as recovery  # noqa: PLC0415
-        import component_runtime as runtime  # noqa: PLC0415
-        for module, name in ((recovery, "component_recovery.py"), (runtime, "component_runtime.py")):
-            if Path(module.__file__).resolve() != code_root / "scripts" / name:
-                raise AdmissionError("recovery imported a foreign source module")
+        recovery, runtime = _tool_modules("component_recovery", "component_runtime", root=code_root,
+                                         message="recovery imported a foreign source module")
         raw = runtime._read_regular(path)
         journal = runtime.validate_journal(runtime._decode(raw))
         source = journal["source"]
@@ -644,9 +658,8 @@ def admit_component_recovery(root: Path, *, transaction_id: str,
             raise AdmissionError("component recovery identity does not match the active transaction")
         _verify_recovery_extraction(root, source, code_root)
         if journal["schema_version"] in (4, 5):
-            import component_handoff as handoff  # noqa: PLC0415
-            if Path(handoff.__file__).resolve() != code_root / "scripts/component_handoff.py":
-                raise AdmissionError("component recovery imported a foreign handoff module")
+            handoff = _tool_module("component_handoff", root=code_root,
+                                   message="component recovery imported a foreign handoff module")
             handoff.verify_predecessor(root, successor_kind="runtime", successor=journal)
 
         allowed_state = ((transaction_id, source_tool_sha256, None)
@@ -689,14 +702,9 @@ def admit_full_recovery(root: Path, *, transaction_id: str,
     if not _present(path):
         raise AdmissionError("full recovery transaction is missing")
     try:
-        sys.path.insert(0, str(code_root / "scripts"))
-        import component_handoff as handoff  # noqa: PLC0415
-        import component_journal_full as journal_full  # noqa: PLC0415
-        import component_runtime as runtime  # noqa: PLC0415
-        import component_recovery as recovery  # noqa: PLC0415
-        if (Path(journal_full.__file__).resolve() != code_root / "scripts/component_journal_full.py"
-                or Path(handoff.__file__).resolve() != code_root / "scripts/component_handoff.py"):
-            raise AdmissionError("full recovery imported a foreign source module")
+        handoff, journal_full, runtime, recovery = _tool_modules(
+            "component_handoff", "component_journal_full", "component_runtime", "component_recovery",
+            root=code_root, message="full recovery imported a foreign source module")
         raw = runtime._read_regular(path)
         journal = journal_full.validate_journal(runtime._decode(raw))
         source = journal["source"]
@@ -749,21 +757,15 @@ def admit_builder_recovery(root: Path, *, kind: str, build_id: str,
         raise AdmissionError("builder recovery ID is invalid")
     require_lock(root)
     try:
-        sys.path.insert(0, str(code_root / "scripts"))
-        import component_recovery as recovery  # noqa: PLC0415
-        import component_runtime as runtime  # noqa: PLC0415
-        if Path(recovery.__file__).resolve() != code_root / "scripts/component_recovery.py":
-            raise AdmissionError("builder recovery imported a foreign source")
+        recovery, runtime = _tool_modules("component_recovery", "component_runtime", root=code_root,
+                                         message="builder recovery imported a foreign source")
         source = recovery._validate_source(source)
         _verify_recovery_extraction(root, source, code_root)
-        if kind == "source":
-            import component_build as producer  # noqa: PLC0415
-            name, filename, reader = BUILD_ATTEMPTS, "component_build.py", producer._read_attempt
-        else:
-            import component_wheel_build as producer  # noqa: PLC0415
-            name, filename, reader = WHEEL_BUILD_ATTEMPTS, "component_wheel_build.py", producer.read_attempt
-        if Path(producer.__file__).resolve() != code_root / "scripts" / filename:
-            raise AdmissionError("builder recovery imported a foreign producer")
+        name = BUILD_ATTEMPTS if kind == "source" else WHEEL_BUILD_ATTEMPTS
+        producer_spec = _ATTEMPT_PRODUCERS[name]
+        producer = _tool_module(producer_spec.module, root=code_root,
+                                message="builder recovery imported a foreign producer")
+        reader = getattr(producer, producer_spec.read)
         path = _deployments(root, required=True) / name / (build_id + ".json")
         raw = runtime._read_regular(path)
         record = reader(root, build_id + ".json")
@@ -800,16 +802,10 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
     if probe_id is not None and (type(probe_id) is not str or not _DEPLOYMENT_ID.fullmatch(probe_id)):
         raise AdmissionError("invalid state probe ID")
     require_lock(root)
-    sys.path.insert(0, str(code_root / "scripts"))
     try:
-        import component_runtime as runtime  # noqa: PLC0415
-        import component_recovery as recovery  # noqa: PLC0415
-        import component_handoff as handoff  # noqa: PLC0415
-        import component_journal_full as journal_full  # noqa: PLC0415
-        for module, filename in ((runtime, "component_runtime.py"), (recovery, "component_recovery.py"),
-                                 (journal_full, "component_journal_full.py"), (handoff, "component_handoff.py")):
-            if Path(module.__file__).resolve() != code_root / "scripts" / filename:
-                raise AdmissionError("state probe imported a foreign source module")
+        runtime, recovery, handoff, journal_full = _tool_modules(
+            "component_runtime", "component_recovery", "component_handoff", "component_journal_full",
+            root=code_root, message="state probe imported a foreign source module")
         if code_root != root:
             journal = (admit_full_recovery(root, transaction_id=transaction_id,
                                            source_tool_sha256=source_tool_sha256, code_root=code_root)
@@ -867,9 +863,8 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
                 raise AdmissionError("state probe does not match its transaction")
             refuse_inadmissible_state_probe(journal, probe, transaction_kind)
             if probe["schema_version"] == 4:
-                import component_state as state  # noqa: PLC0415
-                if Path(state.__file__).resolve() != code_root / "scripts/component_state.py":
-                    raise AdmissionError("state probe imported a foreign verifier")
+                state = _tool_module("component_state", root=code_root,
+                                     message="state probe imported a foreign verifier")
                 if probe["kind"] in ("state-plan", "state-legacy-plan"):
                     state.verify_plan_probe_binding(root, journal, probe)
                 elif probe["kind"] == "state-endpoint":
@@ -879,9 +874,8 @@ def admit_state_probe(root: Path, *, transaction_id: str, source_tool_sha256: st
                 else:
                     state.verify_canonical_probe_binding(root, journal, probe)
             elif probe["schema_version"] == 5:
-                import component_state as state  # noqa: PLC0415
-                if Path(state.__file__).resolve() != code_root / "scripts/component_state.py":
-                    raise AdmissionError("state probe imported a foreign verifier")
+                state = _tool_module("component_state", root=code_root,
+                                     message="state probe imported a foreign verifier")
                 state.verify_schema5_probe_binding(journal, probe)
         return journal
     except AdmissionError:
@@ -909,16 +903,9 @@ def admit_adoption_probe_context(root: Path, *, source: dict, image_id: str, rev
     require_lock(root)
     directory = _component_conflicts(root, allowed_probe_id=probe_id)
     try:
-        sys.path.insert(0, str(CODE_ROOT / "scripts"))
-        import component_runtime  # noqa: PLC0415
-        import component_recovery  # noqa: PLC0415
-        import component_observe  # noqa: PLC0415
-        if Path(component_runtime.__file__).resolve() != CODE_ROOT / "scripts/component_runtime.py":
-            raise ValueError("foreign runtime module")
-        if Path(component_recovery.__file__).resolve() != CODE_ROOT / "scripts/component_recovery.py":
-            raise ValueError("foreign recovery module")
-        if Path(component_observe.__file__).resolve() != CODE_ROOT / "scripts/component_observe.py":
-            raise ValueError("foreign observation module")
+        component_runtime = _tool_module("component_runtime", message="foreign runtime module")
+        component_recovery = _tool_module("component_recovery", message="foreign recovery module")
+        component_observe = _tool_module("component_observe", message="foreign observation module")
         source = component_recovery._validate_source(source)
         if "compose" in source and component_recovery._verify_bound_compose(root, source) != compose_path:
             raise ValueError("probe Compose executable differs from its saved identity")
@@ -953,11 +940,8 @@ def admit_adoption_probe_context(root: Path, *, source: dict, image_id: str, rev
         if _present(current):
             if compose_path is None:
                 raise ValueError("terminal journal verification requires Compose")
-            import component_operations as operations  # noqa: PLC0415
-            import component_terminal as terminal  # noqa: PLC0415
-            if (Path(operations.__file__).resolve() != CODE_ROOT / "scripts/component_operations.py"
-                    or Path(terminal.__file__).resolve() != CODE_ROOT / "scripts/component_terminal.py"):
-                raise ValueError("foreign transaction module")
+            operations, terminal = _tool_modules("component_operations", "component_terminal",
+                                                message="foreign transaction module")
             if extracted_source:
                 raw = component_runtime._read_regular(current)
                 previous = component_runtime.validate_journal(component_runtime._decode(raw))
@@ -988,8 +972,7 @@ def admit_adoption_probe_recovery(root: Path, *, probe_id: str, code_root: Path,
     if type(probe_id) is not str or not _DEPLOYMENT_ID.fullmatch(probe_id):
         raise AdmissionError("invalid adoption probe ID")
     try:
-        sys.path.insert(0, str(CODE_ROOT / "scripts"))
-        import component_runtime  # noqa: PLC0415
+        component_runtime = _tool_module("component_runtime", message="foreign runtime module")
         record = component_runtime._read_adopt_probe(root, probe_id + ".json")
         admitted, raw = admit_adoption_probe_context(
             root, source=record["source"], image_id=record["image_id"], revision=record["image_revision"],
