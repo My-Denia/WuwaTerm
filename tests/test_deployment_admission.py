@@ -1409,3 +1409,8 @@ def test_tool_module_refuses_a_module_bound_outside_the_checkout(tmp_path: Path,
 
     with pytest.raises(admission.AdmissionError, match="component runtime differs"):
         admission._tool_module("component_runtime", message="component runtime differs")
+
+
+def test_tool_module_refuses_undeclared_dynamic_tool():
+    with pytest.raises(admission.AdmissionError, match="undeclared tool"):
+        admission._tool_module("component_handoff_finish", message="undeclared tool")
