@@ -1039,8 +1039,8 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
         raise TransactionError("Compose executable differs from the recorded recovery source")
     _sync_recovered_journal(root, journal)
     if journal["schema_version"] in (4, 5):
-        import component_handoff as handoff  # noqa: PLC0415
-        handoff.finish_handoff(root, successor_kind="runtime", successor=journal)
+        import component_handoff_finish as handoff_finish  # noqa: PLC0415
+        handoff_finish.finish_handoff(root, successor_kind="runtime", successor=journal)
     if journal["status"] == "committed":
         raw = runtime._read_regular(root / ".deployments" / runtime.JOURNAL_NAME)
         _verify_terminal_record(root, journal, raw, compose_path)

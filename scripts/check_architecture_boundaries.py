@@ -16,7 +16,7 @@ Intended layers (must stay aligned with docs/architecture.md):
                    exclusion_metadata (strict builder-metadata parsers)
   presentation:    bot, channel, telegram_html, telegram_text
   local state:     settings, channel_reply_index, channel_reply_schema,
-                   channel_runtime, logging_utils
+                   channel_runtime, logging_utils, request_trace
   storage:         db  (lazy build_pinyin only inside write helpers)
   builder:         builder, data_source, build_pinyin
   bootstrap:       cli  (may wire runtime and builder entrypoints)
@@ -38,14 +38,24 @@ nested subpackages discovered via rglob):
    unclassified files, including future nested packages).
 8. The HTTP adapter package ``src/wuwaterm_api`` may import ONLY
    ``wuwaterm.application``, ``wuwaterm.models``,
-   ``wuwaterm.translation_policy`` and ``wuwaterm.logging_utils`` — never the
-   bot, channel, lookup, sentence, db, telegram_* or builder modules, never
-   the ``wuwaterm`` package root, and never the Telegram SDK. This is the
-   machine-checkable form of "the API cannot bypass the shared pipeline".
+   ``wuwaterm.translation_policy``, ``wuwaterm.logging_utils`` and
+   ``wuwaterm.request_trace`` — never the bot, channel, lookup, sentence, db,
+   telegram_* or builder modules, never the ``wuwaterm`` package root, and
+   never the Telegram SDK. This is the machine-checkable form of "the API
+   cannot bypass the shared pipeline". ``request_trace`` is on that list as an
+   instrument, not as a way in: it holds no dictionary, no pipeline and no
+   transport, imports nothing from this package at all, and is what the API
+   uses to time the stages the CORE runs (the model slot and the POST).
 9. Modules under ``src/wuwaterm`` must not import private ``_name`` symbols
    from sibling modules (relative ``from .mod import _x`` or absolute
    ``from wuwaterm.mod import _x``). Intentionally shared helpers are promoted
    to public names; local ``public as _alias`` rebindings remain allowed.
+10. The flat ``scripts/`` deployment tools are checked for import cycles over
+   real AST imports, including imports inside function bodies. Verification
+   primitives sit below the admission layer that calls them: a module in
+   ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
+   strongly connected component may appear — a two-module mutual import is one
+   cycle shape, not the only one.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -60,6 +70,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "wuwaterm"
+SCRIPTS = ROOT / "scripts"
 
 # The HTTP adapter is a separate shipped package. It is allowed to reach the
 # shared application layer and the protocol-neutral helpers, and nothing else
@@ -68,7 +79,13 @@ PACKAGE = ROOT / "src" / "wuwaterm"
 # sentence, db or bot directly it could grow a second, divergent pipeline.
 API_PACKAGE = ROOT / "src" / "wuwaterm_api"
 API_ALLOWED_WUWATERM_MODULES = frozenset(
-    {"application", "models", "translation_policy", "logging_utils"}
+    {
+        "application",
+        "models",
+        "translation_policy",
+        "logging_utils",
+        "request_trace",
+    }
 )
 
 DOMAIN_CORE = frozenset(
@@ -105,6 +122,7 @@ LOCAL_STATE = frozenset(
         "channel_reply_schema",
         "channel_runtime",
         "logging_utils",
+        "request_trace",
     }
 )
 STORAGE = frozenset({"db"})
@@ -142,6 +160,24 @@ TELEGRAM_SDK_PREFIXES = (
     "telegram",
     "telegram.ext",
 )
+
+# One-way edges inside the flat deployment tools. ``component_handoff`` holds
+# the predecessor primitives; ``deployment_admission`` calls them while it
+# admits a recovery, so the handoff module must never import admission back.
+# An AST walk over function bodies still sees that reverse edge, which is why
+# the rule cannot be satisfied by keeping the import lazy.
+SCRIPTS_ONE_WAY = {
+    "component_handoff": frozenset({"deployment_admission"}),
+}
+
+# Import cycles that already exist among the flat deployment tools. They
+# predate this rule and belong to other subsystems, so they are pinned instead
+# of enforced here: any cycle this set does not name is refused, and an entry
+# that no longer exists has to be deleted, so the record cannot go stale.
+KNOWN_SCRIPTS_CYCLES = frozenset({
+    frozenset({"component_build", "component_build_isolation", "component_wheel_build"}),
+    frozenset({"component_deployment", "component_full", "component_runtime"}),
+})
 
 
 def _module_key_for_path(path: Path) -> str | None:
@@ -464,6 +500,137 @@ def check_api_package() -> list[str]:
     return failures
 
 
+def _scripts_modules() -> dict[str, Path]:
+    """Map each flat ``scripts/`` module stem to its file."""
+    return {path.stem: path for path in sorted(SCRIPTS.glob("*.py"))}
+
+
+def _scripts_local_imports(path: Path, modules: dict[str, Path]) -> dict[str, int]:
+    """Return {local module stem: first importing line} for one tool module.
+
+    ``ast.walk`` descends into function and method bodies, so a lazily imported
+    reverse edge is reported exactly like a module-level one. Only sibling
+    ``scripts/`` modules count; standard-library and third-party imports are
+    not part of this graph, and package-relative imports cannot occur in a
+    flat tool directory.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for entry in node.names:
+                parts = entry.name.split(".")
+                stem = parts[1] if parts[0] == "scripts" and len(parts) > 1 else parts[0]
+                if stem in modules and stem != path.stem:
+                    found.setdefault(stem, node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            module = node.module or ""
+            if module == "scripts" or module.startswith("scripts."):
+                if module != "scripts":
+                    stem = module.split(".")[1]
+                    if stem in modules and stem != path.stem:
+                        found.setdefault(stem, node.lineno)
+                else:
+                    for entry in node.names:
+                        name = entry.name.split(".")[0]
+                        if name in modules and name != path.stem:
+                            found.setdefault(name, node.lineno)
+                continue
+            stem = module.split(".")[0]
+            if stem in modules and stem != path.stem:
+                found.setdefault(stem, node.lineno)
+    return found
+
+
+def _scripts_cycle_components(edges: dict[str, dict[str, int]]) -> list[frozenset[str]]:
+    """Return every strongly connected component of the tool graph that cycles.
+
+    Tarjan's algorithm over the ``scripts/`` graph. A single module is acyclic
+    by inspection (``_scripts_local_imports`` already drops a self-import), so
+    meaning starts at two members: every component reported here is a real
+    cycle of whatever length it has.
+    """
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[frozenset[str]] = []
+    counter = 0
+
+    def connect(node: str) -> None:
+        nonlocal counter
+        index[node] = low[node] = counter
+        counter += 1
+        stack.append(node)
+        on_stack.add(node)
+        for target in sorted(edges.get(node, {})):
+            if target not in index:
+                connect(target)
+                low[node] = min(low[node], low[target])
+            elif target in on_stack:
+                low[node] = min(low[node], index[target])
+        if low[node] == index[node]:
+            members: set[str] = set()
+            while True:
+                item = stack.pop()
+                on_stack.discard(item)
+                members.add(item)
+                if item == node:
+                    break
+            if len(members) > 1:
+                components.append(frozenset(members))
+
+    for node in sorted(edges):
+        if node not in index:
+            connect(node)
+    return components
+
+
+def check_scripts_import_cycles() -> list[str]:
+    """Fail closed on forbidden or new import cycles among deployment tools.
+
+    ``deployment_admission`` is the read-only layer every deployment tool
+    calls. It resolves a tool by name and proves the loaded source, so it can
+    call a tool back without depending on import order; what must not happen is
+    a *static* import cycle of any length. Comparing mutual pairs only would
+    still miss the three-module cycles the builder and transaction graphs
+    already have, so the walk uses strongly connected components.
+    """
+    modules = _scripts_modules()
+    edges = {name: _scripts_local_imports(path, modules) for name, path in modules.items()}
+    failures: list[str] = []
+    for importer in sorted(SCRIPTS_ONE_WAY):
+        forbidden = SCRIPTS_ONE_WAY[importer] & set(edges.get(importer, {}))
+        for target in sorted(forbidden):
+            failures.append(
+                f"scripts/{importer}.py:{edges[importer][target]}: {importer} must not "
+                f"import {target} (one-way edge: {target} imports {importer})"
+            )
+    cycles = _scripts_cycle_components(edges)
+    for component in sorted(cycles, key=sorted):
+        if component in KNOWN_SCRIPTS_CYCLES:
+            continue
+        inner = sorted(
+            f"{name} -> {target} at scripts/{name}.py:{line}"
+            for name in component
+            for target, line in edges[name].items()
+            if target in component
+        )
+        failures.append(
+            "scripts: new import cycle among " + ", ".join(sorted(component))
+            + " (" + "; ".join(inner) + ")"
+        )
+    for component in sorted(KNOWN_SCRIPTS_CYCLES, key=sorted):
+        if component not in cycles:
+            failures.append(
+                "scripts: recorded import cycle among " + ", ".join(sorted(component))
+                + " no longer exists; delete it from KNOWN_SCRIPTS_CYCLES"
+            )
+    return failures
+
+
 def _is_private_symbol_name(name: str) -> bool:
     return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
 
@@ -496,6 +663,7 @@ def check() -> list[str]:
     modules, collisions = _discover_modules()
     failures: list[str] = list(collisions)
     failures.extend(check_api_package())
+    failures.extend(check_scripts_import_cycles())
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:

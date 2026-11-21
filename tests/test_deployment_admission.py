@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -135,7 +136,8 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
                  "scripts/full_update.py", "scripts/runtime_update.py",
                  "scripts/component_runtime.py", "scripts/component_build.py",
                  "scripts/component_deployment.py", "scripts/component_journal_runtime.py",
-                 "scripts/component_journal_full.py", "scripts/component_handoff.py", "scripts/component_inspect.py",
+                 "scripts/component_journal_full.py", "scripts/component_handoff.py",
+                 "scripts/component_handoff_finish.py", "scripts/component_inspect.py",
                  "scripts/component_operations.py", "scripts/component_terminal.py",
                  "scripts/component_terminal_full.py",
                  "scripts/component_artifact.py", "scripts/component_adoption.py",
@@ -1382,3 +1384,28 @@ def test_artifact_recovery_flags_are_ready_by_default() -> None:
     assert component_recovery.ARTIFACT_RECOVERY_EXECUTION_READY is True
     assert component_recovery.ARTIFACT_FULL_RECOVERY_EXECUTION_READY is True
 
+
+
+def test_tool_module_contract_proves_the_imported_source():
+    """The single helper that replaced the per-site ``__file__`` guards.
+
+    Those guards asserted that the module object bound for a tool came from the
+    verified checkout's own ``scripts`` directory. That property is the whole
+    reason admission can call a helper at all, so it is pinned directly.
+    """
+    module = admission._tool_module("component_runtime", message="component runtime differs")
+
+    assert Path(module.__file__).resolve() == admission.CODE_ROOT / "scripts/component_runtime.py"
+
+
+def test_tool_module_refuses_a_module_bound_outside_the_checkout(tmp_path: Path, monkeypatch):
+    foreign = tmp_path / "component_runtime.py"
+    foreign.write_text("MARK = 'foreign'\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("component_runtime", foreign)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "component_runtime", module)
+
+    with pytest.raises(admission.AdmissionError, match="component runtime differs"):
+        admission._tool_module("component_runtime", message="component runtime differs")

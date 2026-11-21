@@ -311,8 +311,8 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
-| Presentation (HTTP) | `wuwaterm_api.*` | everything in `wuwaterm` except the four allowlisted modules below; the Telegram SDK |
-| Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Presentation (HTTP) | `wuwaterm_api.*` | everything in `wuwaterm` except the five allowlisted modules below; the Telegram SDK |
+| Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime`, `logging_utils`, `request_trace` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Storage | `db` | presentation / Telegram SDK; `build_pinyin` only inside write helpers (lazy) |
 | Builder | `builder`, `data_source`, `build_pinyin` | `bot`, `channel` |
 | Bootstrap | `cli` | may wire both runtime and builder entrypoints |
@@ -334,15 +334,43 @@ references or unchanged text, then merges visible segments in order with one
 placeholder namespace. `sentence` retains the database snapshots, model calls
 and restoration.
 
-**The API import allowlist.** `src/wuwaterm_api` may import exactly four
+**The API import allowlist.** `src/wuwaterm_api` may import exactly five
 modules from `wuwaterm`: `application`, `models`, `translation_policy`,
-`logging_utils`. Anything else — `bot`, `channel`, `lookup`, `sentence`, `db`,
-the markup helpers, the builder modules, the `wuwaterm` package root — fails
-`scripts/check_architecture_boundaries.py`. That list is the machine-checkable
-form of "the API cannot bypass the shared pipeline": an adapter that could
-reach `lookup` or `sentence` directly could grow a second, divergent pipeline
-without anyone noticing, which is exactly what a second surface is most likely
-to do.
+`logging_utils`, `request_trace`. Anything else — `bot`, `channel`, `lookup`,
+`sentence`, `db`, the markup helpers, the builder modules, the `wuwaterm`
+package root — fails `scripts/check_architecture_boundaries.py`. That list is
+the machine-checkable form of "the API cannot bypass the shared pipeline": an
+adapter that could reach `lookup` or `sentence` directly could grow a second,
+divergent pipeline without anyone noticing, which is exactly what a second
+surface is most likely to do.
+
+The fifth entry is an instrument, not a way in. `request_trace` holds the
+per-request stage timings the API has to begin and read, and the two stages it
+times (`llm_slot_wait`, `llm_post`) are opened by `sentence` and `llm_transport`
+CORE, which the adapter may not import. It therefore has to be reachable from
+both sides, and it is the smallest thing that can be: a `ContextVar` plus a
+clock, importing nothing from this package at all, holding no dictionary, no
+pipeline and no transport. Adding a name to this list is still a deliberate act
+— the guard and this paragraph are what make it one.
+
+**The deployment-tool import direction.** The flat `scripts/` deployment tools
+are a second graph, and the same script checks it for cycles over real AST
+imports — a reverse edge written inside a function body counts, so keeping it
+lazy does not hide it. `deployment_admission.py` is the read-only layer every
+tool calls, so it necessarily calls tools back to verify them; what it must not
+become is a cycle. `component_handoff.py` therefore holds only the predecessor
+primitives, and `component_handoff_finish.py` — above both modules — owns the
+admission-dependent removal. Neither is in a cycle.
+
+The check walks strongly connected components rather than mutual pairs,
+because a pair test only sees cycles of two: the builder graph
+(`component_build` → `component_build_isolation` → `component_wheel_build`) and
+the transaction graph (`component_deployment` → `component_full` →
+`component_runtime`) are already three-module cycles. Both predate the rule,
+belong to other subsystems, and are recorded in `KNOWN_SCRIPTS_CYCLES`. Naming
+a component is what keeps the gate honest in both directions: anything this set
+does not name fails, and an entry whose cycle is gone fails until it is
+deleted.
 
 The application layer holds the shared command/API/web pipeline (prepare →
 direction → exact hit → trusted fuzzy hit → length gate → chunked
@@ -375,10 +403,17 @@ Observed edges (static imports among shipped modules):
 - `wuwaterm_api` → `wuwaterm.application` (pipeline, translator factory,
   lookup entry points, error codes) from `app.py`, `errors.py`, `web/app.py`
   and `web/render.py`; `wuwaterm.logging_utils` (`redact_id`) from `app.py`;
-  and `wuwaterm.translation_policy` (`LLM_INPUT_CHAR_LIMIT`) from `web/app.py`,
-  which imports the shared input ceiling rather than restating it. Those three
-  modules are the whole of what the package imports from `wuwaterm` today; the
-  guard permits one more (`models`) and nothing beyond the four.
+  `wuwaterm.request_trace` (start/reset the per-request stage trace, render its
+  fields) from `app.py`; and `wuwaterm.translation_policy`
+  (`LLM_INPUT_CHAR_LIMIT`) from `web/app.py`, which imports the shared input
+  ceiling rather than restating it. Those four modules are the whole of what the
+  package imports from `wuwaterm` today; the guard permits one more (`models`)
+  and nothing beyond the five.
+- `sentence` → `request_trace` (open the model-slot stage and record the
+  direction), so the slot wait and the POST are timed by the layer that runs
+  them; `llm_transport` → `request_trace` for the POST stage. Both edges are
+  no-ops when no HTTP request is being traced, which is the case for the bot,
+  the channel adapter and the CLI.
 - `sentence` → `lookup`, `normalize`, `protected_text`, `term_matching`,
   `term_preparation`, `httpx`; only its old `translate_html`,
   `translate_html_async`, and `_restore_html` methods lazily import their
