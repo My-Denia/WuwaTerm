@@ -62,6 +62,26 @@ _ATTEMPT_PRODUCERS = {
     ADOPT_PROBES: _AttemptProducer("component_runtime", "_read_adopt_probe", None, None),
 }
 
+# Explicit manifest of deployment tools loaded dynamically via ``_tool_module``
+# and ``_tool_modules``. Verified against AST call sites, ``_ATTEMPT_PRODUCERS``,
+# ``scripts/``, ``TOOL_PATHS``, and higher-layer boundaries by
+# ``scripts/check_architecture_boundaries.py``.
+DECLARED_DYNAMIC_TOOL_DEPS = frozenset({
+    "component_artifact",
+    "component_build",
+    "component_build_isolation",
+    "component_handoff",
+    "component_journal_full",
+    "component_observe",
+    "component_operations",
+    "component_recovery",
+    "component_runtime",
+    "component_state",
+    "component_terminal",
+    "component_wheel_build",
+    "runtime_update",
+})
+
 
 class AdmissionError(RuntimeError):
     """The deployment state cannot safely admit this operation."""
@@ -84,6 +104,8 @@ def _tool_modules(*names: str, message: str, root: Path = CODE_ROOT) -> tuple[Mo
         sys.path.insert(0, entry)
     imported: list[ModuleType] = []
     for name in names:
+        if name not in DECLARED_DYNAMIC_TOOL_DEPS:
+            raise AdmissionError(message)
         module = importlib.import_module(name)
         actual = getattr(module, "__file__", None)
         if type(actual) is not str or Path(actual).resolve() != directory / (name + ".py"):

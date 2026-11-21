@@ -700,3 +700,243 @@ def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
     )
 
     assert cab.check_scripts_import_cycles() == []
+
+
+def test_pure_matching_modules_do_not_import_db_or_lookup():
+    from scripts import check_architecture_boundaries as cab
+
+    modules = cab._pkg_modules()
+    assert cab.PURE_MATCHING <= set(modules)
+    for name in sorted(cab.PURE_MATCHING):
+        events = cab._iter_import_events(modules[name])
+        local_imported = {imported for imported, _type_only, _lineno in events}
+        assert not (local_imported & cab.PURE_MATCHING_FORBIDDEN_STORAGE), name
+        assert not any(
+            ext == "sqlite3" or ext.startswith("sqlite3.")
+            for ext in local_imported
+        ), name
+
+
+def test_pure_matching_module_importing_db_or_lookup_is_rejected(
+    tmp_path: Path, monkeypatch
+):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    pkg.mkdir()
+    for name in cab.ALL_CLASSIFIED:
+        path = pkg / f"{name.replace('.', '/')}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n", encoding="utf-8")
+
+    (pkg / "term_matching.py").write_text(
+        "from .db import connect\n", encoding="utf-8"
+    )
+    (pkg / "term_preparation.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from .lookup import TermService\n",
+        encoding="utf-8",
+    )
+    (pkg / "segmentation.py").write_text(
+        "import sqlite3\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    failures = cab.check()
+    joined = "\n".join(failures)
+    assert "term_matching.py: pure matching module must not import storage" in joined, failures
+    assert "'db'" in joined, failures
+    assert "term_preparation.py: pure matching module must not import storage" in joined, failures
+    assert "'lookup'" in joined, failures
+    assert "segmentation.py: pure matching module must not import sqlite3" in joined, failures
+
+
+def test_shipped_deployment_admission_manifest_is_valid():
+    from scripts import check_architecture_boundaries as cab
+
+    assert cab.check_deployment_admission_manifest() == []
+
+
+def _write_minimal_admission_scripts(
+    tmp_path: Path,
+    *,
+    declared: tuple[str, ...] = ("component_runtime", "component_build"),
+    admission_body: str | None = None,
+    tool_paths: tuple[str, ...] = (
+        "scripts/deployment_admission.py",
+        "scripts/component_runtime.py",
+        "scripts/component_build.py",
+        "scripts/component_handoff_finish.py",
+    ),
+    extra_files: dict[str, str] | None = None,
+) -> Path:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    declared_repr = ", ".join(repr(item) for item in declared)
+    tool_paths_repr = ", ".join(repr(item) for item in tool_paths)
+    (scripts / "component_journal_runtime.py").write_text(
+        f"TOOL_PATHS = ({tool_paths_repr},)\n", encoding="utf-8"
+    )
+    (scripts / "component_runtime.py").write_text("x = 1\n", encoding="utf-8")
+    (scripts / "component_build.py").write_text("x = 1\n", encoding="utf-8")
+    (scripts / "component_handoff_finish.py").write_text(
+        "import deployment_admission\n", encoding="utf-8"
+    )
+    if admission_body is None:
+        admission_body = textwrap.dedent(
+            """\
+            _ATTEMPT_PRODUCERS = {
+                "builds": _AttemptProducer("component_build", "_read_attempt", None, None),
+            }
+            def _tool_modules(*names, message):
+                for name in names:
+                    importlib.import_module(name)
+            def _tool_module(name, *, message):
+                return _tool_modules(name, message=message)[0]
+            def use_tools(key):
+                producer_spec = _ATTEMPT_PRODUCERS[key]
+                _tool_module(producer_spec.module, message="m")
+                return _tool_module("component_runtime", message="m")
+            """
+        )
+    (scripts / "deployment_admission.py").write_text(
+        f"import importlib\nDECLARED_DYNAMIC_TOOL_DEPS = frozenset({{{declared_repr}}})\n"
+        + admission_body,
+        encoding="utf-8",
+    )
+    if extra_files:
+        for filename, content in extra_files.items():
+            (scripts / filename).write_text(content, encoding="utf-8")
+    return scripts
+
+
+def test_admission_manifest_accepts_minimal_valid_graph(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(tmp_path)
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    assert cab.check_deployment_admission_manifest() == []
+
+
+def test_admission_manifest_rejects_undeclared_tool_call(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime",),
+        admission_body=textwrap.dedent(
+            """\
+            def _tool_modules(*names, message):
+                for name in names:
+                    importlib.import_module(name)
+            def _tool_module(name, *, message):
+                return _tool_modules(name, message=message)[0]
+            def use_tools():
+                _tool_module("component_runtime", message="m")
+                _tool_module("foo", message="m")
+            """
+        ),
+        extra_files={"foo.py": "x = 1\n"},
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any(
+        "dynamic tool 'foo' is not listed in DECLARED_DYNAMIC_TOOL_DEPS" in f
+        for f in failures
+    ), failures
+
+
+def test_admission_manifest_rejects_non_discoverable_tool_call(
+    tmp_path: Path, monkeypatch
+):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime",),
+        admission_body=textwrap.dedent(
+            """\
+            def _tool_modules(*names, message):
+                for name in names:
+                    importlib.import_module(name)
+            def _tool_module(name, *, message):
+                return _tool_modules(name, message=message)[0]
+            def use_tools(dynamic_name):
+                _tool_module("component_runtime", message="m")
+                _tool_module(dynamic_name, message="m")
+            """
+        ),
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any("not statically discoverable" in f for f in failures), failures
+
+
+def test_admission_manifest_rejects_forbidden_higher_layer_dynamic_dep(
+    tmp_path: Path, monkeypatch
+):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime", "component_handoff_finish"),
+        admission_body=textwrap.dedent(
+            """\
+            def _tool_modules(*names, message):
+                for name in names:
+                    importlib.import_module(name)
+            def _tool_module(name, *, message):
+                return _tool_modules(name, message=message)[0]
+            def use_tools():
+                return _tool_modules("component_runtime", "component_handoff_finish", message="m")
+            """
+        ),
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any(
+        "forbidden higher-layer dynamic tool dependency 'component_handoff_finish'" in f
+        for f in failures
+    ), failures
+
+
+def test_admission_manifest_rejects_stale_entry(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime", "component_build", "stale_tool"),
+        tool_paths=(
+            "scripts/deployment_admission.py",
+            "scripts/component_runtime.py",
+            "scripts/component_build.py",
+            "scripts/stale_tool.py",
+        ),
+        extra_files={"stale_tool.py": "x = 1\n"},
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any(
+        "stale entry 'stale_tool' in DECLARED_DYNAMIC_TOOL_DEPS" in f
+        for f in failures
+    ), failures
+
+
+def test_admission_manifest_rejects_missing_tool_paths_entry(
+    tmp_path: Path, monkeypatch
+):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime", "component_build"),
+        tool_paths=("scripts/deployment_admission.py", "scripts/component_runtime.py"),
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any(
+        "declared dynamic tool 'component_build' is missing from component_journal_runtime.TOOL_PATHS"
+        in f
+        for f in failures
+    ), failures
