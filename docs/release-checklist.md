@@ -84,17 +84,17 @@ release. That boundary has not moved.
   `products.telegram` entry on its published release.
   `products.telegram` records the published Telegram `v0.4.1`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.4.2`, because the installer
+  `products.web` records the published Web `v0.4.3`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.2`.
+  published Windows `v0.6.3`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` and the
-  `v0.10.2` tag record and print `v0.4.1`, the Telegram release that pins Core
-  `v0.10.1`. A Core tag can
-  only record a client release that already exists, so the `v0.10.1` tag, frozen
+  `docs/self-hosting.md` name the same published release: `main`, the
+  `v0.10.2` tag and this `v0.10.3` tag record and print `v0.4.1`, the Telegram
+  release that pins Core `v0.10.1`. A Core tag can only record a client release
+  that already exists, so the `v0.10.1` tag, frozen
   before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
   and `setup.sh`, which pins Core `v0.10.0`. An install from the `v0.10.1` tag
   therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.4.1`) or runs
@@ -107,15 +107,15 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` records and installs Web `v0.4.2`; the `v0.10.1` and
-  `v0.10.2` tags' frozen snapshots record and install `v0.4.1`, so those tag
-  checkouts need no Web override; the `v0.10.0` tag's frozen
+  they differ. `main` and this `v0.10.3` tag record and install Web `v0.4.3`;
+  the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
+  so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.4.2` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.4.3` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.2), released independently.
+- Windows product: [v0.6.3](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.3), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -244,9 +244,9 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.1` and `0.10.2` pin Web `v0.4.1`
-  (`c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260`) and Windows `v0.6.1`
-  (`4da26ba9f394475432ff0b2890ae24d21f7606b1`), the two consumers of the
+  release carries. `0.10.3` pins Web `v0.4.3`
+  (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
+  (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends
   `X-WuwaTerm-Review-Features: dense-128,reason-v1` and stores the 128-finding
   page with its reasons. The `split_web_revision` / `split_windows_revision`
@@ -254,10 +254,10 @@ The 0.8.0 capability checks still apply to this release:
   `tests/test_ci_source_epoch.py` (lines 128-129) carry the same revisions,
   because `scripts/ci_source_epoch.py resolve` compares the source's pin blob
   to that config and fails the release preflight when the two disagree. A pin
-  move is one commit over all four files. `main` after `v0.10.2` moves them to
+  move is one commit over all four files. `main` after `v0.10.2` moved them to
   Web `v0.4.2` (`262d715527eeb7c64ee9c6d922b3c34d7722813b`) and Windows `v0.6.2`
-  (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), together with the installer's
-  default Web release.
+  (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`); this release moves them to the
+  two revisions above, together with the installer's default Web release.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.4.1 pins the published Core
   `v0.10.1` wheel and is deployed, so the 0.10.1 library reaches Telegram users

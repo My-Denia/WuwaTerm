@@ -115,11 +115,11 @@ The variable always names a published tag, never `latest`.
 The Web option also defaults to the release the checkout records: a clone of
 the Core v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and
 the v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web
-v0.4.2, and the v0.10.1 and v0.10.2 tags record Web v0.4.1, so a checkout of
+v0.4.3, and the v0.10.1 and v0.10.2 tags record Web v0.4.1, so a checkout of
 either tag passes the release it lacks explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.4.2 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.4.3 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
@@ -128,14 +128,14 @@ source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/releases) package this
-checkout records (v0.4.2 on `main`, v0.4.1 on the v0.10.1 and v0.10.2 tags,
+checkout records (v0.4.3 on `main`, v0.4.1 on the v0.10.1 and v0.10.2 tags,
 v0.3.1 in the v0.10.0, v0.9.1 and v0.9.2 tags, v0.2.0 on the v0.9.0 tag),
 verifies it against the release checksums, and needs the HTTPS origin your
 proxy serves (`--web-origin`).
 
 ### Windows client
 
-Download the portable package from [WuwaTerm-Windows v0.6.2](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
+Download the portable package from [WuwaTerm-Windows v0.6.3](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 
