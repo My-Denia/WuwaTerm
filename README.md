@@ -130,8 +130,8 @@ option installs the published
 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/releases) package this
 checkout records (v0.4.2 on `main`, v0.4.1 on the v0.10.1 and v0.10.2 tags,
 v0.3.1 in the v0.10.0, v0.9.1 and v0.9.2 tags, v0.2.0 on the v0.9.0 tag),
-verifies it against the
-release checksums, and needs the HTTPS origin your proxy serves (`--web-origin`).
+verifies it against the release checksums, and needs the HTTPS origin your
+proxy serves (`--web-origin`).
 
 ### Windows client
 
