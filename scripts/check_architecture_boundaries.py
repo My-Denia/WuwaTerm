@@ -56,6 +56,16 @@ nested subpackages discovered via rglob):
    ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
    strongly connected component may appear — a two-module mutual import is one
    cycle shape, not the only one.
+11. Pure matching modules (``term_matching``, ``term_preparation``,
+   ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``)
+   must not import storage ``db``, storage-coupled modules (``lookup``), or
+   ``sqlite3`` (including under ``TYPE_CHECKING``).
+12. Dynamic tool imports in ``scripts/deployment_admission.py`` via
+   ``_tool_module`` / ``_tool_modules`` must be statically discoverable and
+   listed in ``DECLARED_DYNAMIC_TOOL_DEPS``. Every declared tool must exist
+   in ``scripts/`` and ``component_journal_runtime.TOOL_PATHS`` (where
+   applicable), must not point to a forbidden higher layer (such as
+   ``component_handoff_finish``), and must not be stale.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -104,6 +114,20 @@ DOMAIN_CORE = frozenset(
     }
 )
 DOMAIN_LLM = frozenset({"sentence", "llm_transport", "semantic_review"})
+# Pure matching / text-structure modules inside DOMAIN_CORE that must remain
+# independent of storage (`db`), storage-coupled (`lookup`), and `sqlite3`.
+PURE_MATCHING = frozenset(
+    {
+        "term_matching",
+        "term_preparation",
+        "cjk_span",
+        "protected_text",
+        "segmentation",
+        "english_plural",
+    }
+)
+# Storage and storage-coupled domain modules forbidden to PURE_MATCHING.
+PURE_MATCHING_FORBIDDEN_STORAGE = frozenset({"db", "lookup"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
 # orchestration while sharing lower-level term and sentence primitives. This
@@ -177,6 +201,24 @@ KNOWN_SCRIPTS_CYCLES = frozenset({
     frozenset({"component_build", "component_build_isolation", "component_wheel_build"}),
     frozenset({"component_deployment", "component_full", "component_runtime"}),
 })
+
+# Higher-layer or self/boundary-checker modules that deployment_admission must
+# never dynamically load via _tool_module / _tool_modules (preserving the
+# one-way DAG even across dynamic loads).
+ADMISSION_FORBIDDEN_DYNAMIC_TOOLS = frozenset(
+    {
+        "component_handoff_finish",
+        "component_full",
+        "component_transaction",
+        "component_deployment",
+        "deployment_admission",
+        "check_architecture_boundaries",
+    }
+)
+
+# Legacy tool scripts loaded by deployment_admission that predate the
+# component TOOL_PATHS manifest in component_journal_runtime.
+ADMISSION_NON_TOOL_PATHS_TOOLS = frozenset({"runtime_update"})
 
 
 def _module_key_for_path(path: Path) -> str | None:
@@ -630,6 +672,497 @@ def check_scripts_import_cycles() -> list[str]:
     return failures
 
 
+def _extract_string_collection(node: ast.AST) -> tuple[list[str], bool]:
+    """Extract string literals from a set/tuple/list or frozenset(...) AST."""
+    inner: ast.AST = node
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"frozenset", "set", "tuple", "list"}
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        inner = node.args[0]
+    if not isinstance(inner, (ast.Set, ast.Tuple, ast.List)):
+        return [], False
+    items: list[str] = []
+    for element in inner.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            items.append(element.value)
+        else:
+            return [], False
+    return items, True
+
+
+def _module_level_assignment_value(
+    tree: ast.Module, name: str
+) -> tuple[ast.AST | None, int]:
+    """Return (rhs_node, assignment_count) for top-level ``name = ...``."""
+    found: ast.AST | None = None
+    count = 0
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    found = statement.value
+                    count += 1
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == name
+            and statement.value is not None
+        ):
+            found = statement.value
+            count += 1
+    return found, count
+
+
+def _extract_tool_paths(scripts_dir: Path) -> tuple[set[str] | None, list[str]]:
+    """Read ``TOOL_PATHS`` from ``component_journal_runtime.py`` via AST."""
+    failures: list[str] = []
+    journal_path = scripts_dir / "component_journal_runtime.py"
+    if not journal_path.is_file():
+        failures.append(
+            "scripts/component_journal_runtime.py is missing (cannot verify TOOL_PATHS)"
+        )
+        return None, failures
+    tree = ast.parse(
+        journal_path.read_text(encoding="utf-8"), filename=str(journal_path)
+    )
+    rhs, count = _module_level_assignment_value(tree, "TOOL_PATHS")
+    if count != 1 or rhs is None:
+        failures.append(
+            "scripts/component_journal_runtime.py: expected a single top-level TOOL_PATHS assignment"
+        )
+        return None, failures
+    items, ok = _extract_string_collection(rhs)
+    if not ok:
+        failures.append(
+            "scripts/component_journal_runtime.py: TOOL_PATHS must be a literal collection of strings"
+        )
+        return None, failures
+    return set(items), failures
+
+
+def _extract_attempt_producer_modules(tree: ast.Module) -> tuple[set[str], list[str]]:
+    """Extract statically declared module names from ``_ATTEMPT_PRODUCERS``."""
+    failures: list[str] = []
+    rhs, count = _module_level_assignment_value(tree, "_ATTEMPT_PRODUCERS")
+    if count == 0 or rhs is None:
+        return set(), failures
+    if count > 1 or not isinstance(rhs, ast.Dict):
+        failures.append(
+            "scripts/deployment_admission.py: _ATTEMPT_PRODUCERS must be a single dict literal"
+        )
+        return set(), failures
+    modules: set[str] = set()
+    for value in rhs.values:
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "_AttemptProducer"
+        ):
+            failures.append(
+                f"scripts/deployment_admission.py:{value.lineno}: _ATTEMPT_PRODUCERS values must be _AttemptProducer(...) calls"
+            )
+            continue
+        module_expr: ast.AST | None = value.args[0] if value.args else None
+        if module_expr is None:
+            for kw in value.keywords:
+                if kw.arg == "module":
+                    module_expr = kw.value
+                    break
+        if isinstance(module_expr, ast.Constant) and isinstance(module_expr.value, str):
+            modules.add(module_expr.value)
+        else:
+            failures.append(
+                f"scripts/deployment_admission.py:{value.lineno}: _AttemptProducer module must be a string literal"
+            )
+    return modules, failures
+
+
+def _is_attempt_producers_subscript(node: ast.AST | None) -> bool:
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "_ATTEMPT_PRODUCERS"
+    )
+
+
+def _is_attempt_producers_module_attr(node: ast.AST) -> bool:
+    """Match direct ``_ATTEMPT_PRODUCERS[<subscript>].module`` syntax only."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "module"
+        and _is_attempt_producers_subscript(node.value)
+    )
+
+
+def _collect_scope_aliases(
+    scope_node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    enclosing_importlib: set[str],
+    enclosing_import_module: set[str],
+    enclosing_tool_module: set[str],
+    enclosing_tool_modules: set[str],
+) -> tuple[set[str], set[str], set[str], set[str], list[tuple[str, int]]]:
+    """Collect aliases of ``importlib``, ``import_module``, and ``_tool_module*``."""
+    importlib_aliases = set(enclosing_importlib)
+    import_module_aliases = set(enclosing_import_module)
+    tool_module_aliases = set(enclosing_tool_module)
+    tool_modules_aliases = set(enclosing_tool_modules)
+    wildcard_errors: list[tuple[str, int]] = []
+
+    direct_nodes: list[ast.AST] = []
+
+    def gather_nodes(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            direct_nodes.append(stmt)
+            if isinstance(stmt, ast.Import):
+                for entry in stmt.names:
+                    if entry.name == "importlib":
+                        importlib_aliases.add(entry.asname or "importlib")
+                    elif entry.name.startswith("importlib.") and not entry.asname:
+                        importlib_aliases.add("importlib")
+            elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module == "importlib":
+                for entry in stmt.names:
+                    if entry.name == "*":
+                        wildcard_errors.append(("from importlib import *", stmt.lineno))
+                    elif entry.name == "import_module":
+                        import_module_aliases.add(entry.asname or "import_module")
+            for child_attr in ("body", "orelse", "finalbody"):
+                child = getattr(stmt, child_attr, None)
+                if isinstance(child, list):
+                    gather_nodes(child)
+            if isinstance(stmt, ast.Try):
+                for handler in stmt.handlers:
+                    gather_nodes(handler.body)
+            if isinstance(stmt, ast.Match):
+                for case in stmt.cases:
+                    gather_nodes(case.body)
+
+    gather_nodes(scope_node.body)
+
+    def bind_from_expr(target_name: str, expr: ast.AST) -> bool:
+        changed = False
+        if isinstance(expr, ast.Name):
+            if expr.id in importlib_aliases and target_name not in importlib_aliases:
+                importlib_aliases.add(target_name)
+                changed = True
+            if expr.id in import_module_aliases and target_name not in import_module_aliases:
+                import_module_aliases.add(target_name)
+                changed = True
+            if expr.id in tool_module_aliases and target_name not in tool_module_aliases:
+                tool_module_aliases.add(target_name)
+                changed = True
+            if expr.id in tool_modules_aliases and target_name not in tool_modules_aliases:
+                tool_modules_aliases.add(target_name)
+                changed = True
+        elif (
+            isinstance(expr, ast.Attribute)
+            and expr.attr == "import_module"
+            and isinstance(expr.value, ast.Name)
+            and expr.value.id in importlib_aliases
+            and target_name not in import_module_aliases
+        ):
+            import_module_aliases.add(target_name)
+            changed = True
+        elif (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "getattr"
+            and len(expr.args) >= 2
+            and isinstance(expr.args[0], ast.Name)
+            and expr.args[0].id in importlib_aliases
+            and isinstance(expr.args[1], ast.Constant)
+            and expr.args[1].value == "import_module"
+            and target_name not in import_module_aliases
+        ):
+            import_module_aliases.add(target_name)
+            changed = True
+        return changed
+
+    changed = True
+    while changed:
+        changed = False
+        for stmt in direct_nodes:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                changed |= bind_from_expr(stmt.targets[0].id, stmt.value)
+            elif (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                and stmt.value is not None
+            ):
+                changed |= bind_from_expr(stmt.target.id, stmt.value)
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.NamedExpr):
+                    changed |= bind_from_expr(sub.target.id, sub.value)
+
+    return (
+        importlib_aliases,
+        import_module_aliases,
+        tool_module_aliases,
+        tool_modules_aliases,
+        wildcard_errors,
+    )
+
+
+def _is_raw_import_module_call(
+    node: ast.Call, importlib_aliases: set[str], import_module_aliases: set[str]
+) -> bool:
+    if isinstance(node.func, ast.Name) and node.func.id in import_module_aliases:
+        return True
+    if (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in importlib_aliases
+    ):
+        return True
+    if (
+        isinstance(node.func, ast.Call)
+        and isinstance(node.func.func, ast.Name)
+        and node.func.func.id == "getattr"
+        and len(node.func.args) >= 2
+        and isinstance(node.func.args[0], ast.Name)
+        and node.func.args[0].id in importlib_aliases
+        and isinstance(node.func.args[1], ast.Constant)
+        and node.func.args[1].value == "import_module"
+    ):
+        return True
+    return False
+
+
+def _discover_admission_dynamic_calls(
+    tree: ast.Module, producer_modules: set[str]
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Discover all ``_tool_module`` / ``_tool_modules`` tool names via AST.
+
+    Only two syntactic argument shapes are admitted: a string literal or a
+    direct ``_ATTEMPT_PRODUCERS[<subscript>].module`` expression. No
+    intermediate variables or dataflow tracking are permitted.
+    """
+    discovered: list[tuple[str, int]] = []
+    failures: list[str] = []
+
+    def analyze_scope(
+        scope_node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+        func_name: str | None,
+        enclosing_importlib: set[str],
+        enclosing_import_module: set[str],
+        enclosing_tool_module: set[str],
+        enclosing_tool_modules: set[str],
+    ) -> None:
+        (
+            importlib_aliases,
+            import_module_aliases,
+            tool_module_aliases,
+            tool_modules_aliases,
+            wildcard_errors,
+        ) = _collect_scope_aliases(
+            scope_node,
+            enclosing_importlib,
+            enclosing_import_module,
+            enclosing_tool_module,
+            enclosing_tool_modules,
+        )
+        for text, lineno in wildcard_errors:
+            failures.append(
+                f"scripts/deployment_admission.py:{lineno}: wildcard {text!r} is forbidden"
+            )
+
+        def visit_node(node: ast.AST) -> None:
+            if node is not scope_node:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    analyze_scope(
+                        node,
+                        node.name,
+                        importlib_aliases,
+                        import_module_aliases,
+                        tool_module_aliases,
+                        tool_modules_aliases,
+                    )
+                    return
+                if isinstance(node, ast.ClassDef):
+                    analyze_scope(
+                        node,
+                        func_name,
+                        importlib_aliases,
+                        import_module_aliases,
+                        tool_module_aliases,
+                        tool_modules_aliases,
+                    )
+                    return
+            if isinstance(node, ast.Call):
+                if _is_raw_import_module_call(
+                    node, importlib_aliases, import_module_aliases
+                ):
+                    allowed_wrapper = (
+                        func_name == "_tool_modules"
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "importlib"
+                        and node.func.attr == "import_module"
+                        and len(node.args) == 1
+                        and not node.keywords
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id == "name"
+                    )
+                    if not allowed_wrapper:
+                        failures.append(
+                            f"scripts/deployment_admission.py:{node.lineno}: raw import_module call bypasses _tool_module/_tool_modules"
+                        )
+                elif isinstance(node.func, ast.Name) and (
+                    node.func.id in tool_module_aliases
+                    or node.func.id in tool_modules_aliases
+                ):
+                    is_single = node.func.id in tool_module_aliases
+                    is_wrapper = (
+                        func_name == "_tool_module"
+                        and node.func.id == "_tool_modules"
+                        and len(node.args) == 1
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id == "name"
+                    )
+                    if not is_wrapper:
+                        name_exprs: list[ast.AST] = list(node.args)
+                        if is_single:
+                            for kw in node.keywords:
+                                if kw.arg == "name":
+                                    name_exprs.append(kw.value)
+                        if not name_exprs:
+                            failures.append(
+                                f"scripts/deployment_admission.py:{node.lineno}: {node.func.id}() missing tool name argument"
+                            )
+                        for arg_expr in name_exprs:
+                            if isinstance(arg_expr, ast.Constant) and isinstance(
+                                arg_expr.value, str
+                            ):
+                                discovered.append((arg_expr.value, node.lineno))
+                            elif _is_attempt_producers_module_attr(arg_expr):
+                                if not producer_modules:
+                                    failures.append(
+                                        f"scripts/deployment_admission.py:{node.lineno}: _ATTEMPT_PRODUCERS has no declared producer modules"
+                                    )
+                                else:
+                                    for pmod in sorted(producer_modules):
+                                        discovered.append((pmod, node.lineno))
+                            else:
+                                failures.append(
+                                    f"scripts/deployment_admission.py:{node.lineno}: dynamic tool argument "
+                                    f"{ast.unparse(arg_expr)!r} in {node.func.id}() is not statically discoverable"
+                                )
+            for child in ast.iter_child_nodes(node):
+                visit_node(child)
+
+        visit_node(scope_node)
+
+    analyze_scope(
+        tree,
+        None,
+        set(),
+        set(),
+        {"_tool_module"},
+        {"_tool_modules"},
+    )
+    return discovered, failures
+
+
+def check_deployment_admission_manifest() -> list[str]:
+    """Verify ``DECLARED_DYNAMIC_TOOL_DEPS`` in ``scripts/deployment_admission.py``."""
+    admission_path = SCRIPTS / "deployment_admission.py"
+    if not admission_path.is_file():
+        return ["scripts/deployment_admission.py is missing"]
+
+    tree = ast.parse(
+        admission_path.read_text(encoding="utf-8"), filename=str(admission_path)
+    )
+    failures: list[str] = []
+
+    rhs, count = _module_level_assignment_value(tree, "DECLARED_DYNAMIC_TOOL_DEPS")
+    declared: set[str] | None = None
+    if count != 1 or rhs is None:
+        failures.append(
+            "scripts/deployment_admission.py: must define a single top-level DECLARED_DYNAMIC_TOOL_DEPS manifest"
+        )
+    else:
+        items, ok = _extract_string_collection(rhs)
+        if not ok:
+            failures.append(
+                "scripts/deployment_admission.py: DECLARED_DYNAMIC_TOOL_DEPS must be a literal collection of strings"
+            )
+        else:
+            if len(items) != len(set(items)):
+                failures.append(
+                    "scripts/deployment_admission.py: DECLARED_DYNAMIC_TOOL_DEPS contains duplicate entries"
+                )
+            declared = set(items)
+
+    producer_modules, producer_failures = _extract_attempt_producer_modules(tree)
+    failures.extend(producer_failures)
+
+    discovered_calls, call_failures = _discover_admission_dynamic_calls(
+        tree, producer_modules
+    )
+    failures.extend(call_failures)
+
+    if declared is None:
+        return failures
+
+    discovered_lines: dict[str, list[int]] = {}
+    for name, lineno in discovered_calls:
+        discovered_lines.setdefault(name, []).append(lineno)
+    discovered = set(discovered_lines)
+
+    for name in sorted(discovered - declared):
+        lines = ", ".join(str(ln) for ln in sorted(set(discovered_lines[name])))
+        failures.append(
+            f"scripts/deployment_admission.py:{lines}: dynamic tool {name!r} "
+            f"is not listed in DECLARED_DYNAMIC_TOOL_DEPS"
+        )
+
+    for name in sorted(declared - discovered):
+        failures.append(
+            f"scripts/deployment_admission.py: stale entry {name!r} in "
+            f"DECLARED_DYNAMIC_TOOL_DEPS is never loaded via _tool_module/_tool_modules"
+        )
+
+    modules = _scripts_modules()
+    edges = {
+        mod: _scripts_local_imports(mod_path, modules)
+        for mod, mod_path in modules.items()
+    }
+    for name in sorted(declared | discovered):
+        if name in ADMISSION_FORBIDDEN_DYNAMIC_TOOLS or (
+            name in edges and "component_handoff_finish" in edges[name]
+        ):
+            failures.append(
+                f"scripts/deployment_admission.py: forbidden higher-layer dynamic tool dependency {name!r}"
+            )
+
+    tool_paths, tool_path_failures = _extract_tool_paths(SCRIPTS)
+    failures.extend(tool_path_failures)
+
+    for name in sorted(declared):
+        if name not in modules:
+            failures.append(
+                f"scripts/deployment_admission.py: declared dynamic tool {name!r} "
+                f"does not exist in scripts/"
+            )
+        elif (
+            tool_paths is not None
+            and name not in ADMISSION_NON_TOOL_PATHS_TOOLS
+            and f"scripts/{name}.py" not in tool_paths
+        ):
+            failures.append(
+                f"scripts/deployment_admission.py: declared dynamic tool {name!r} "
+                f"is missing from component_journal_runtime.TOOL_PATHS"
+            )
+
+    return failures
+
+
 def _is_private_symbol_name(name: str) -> bool:
     return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
 
@@ -663,6 +1196,7 @@ def check() -> list[str]:
     failures: list[str] = list(collisions)
     failures.extend(check_api_package())
     failures.extend(check_scripts_import_cycles())
+    failures.extend(check_deployment_admission_manifest())
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:
@@ -717,6 +1251,23 @@ def check() -> list[str]:
             if bad_llm:
                 failures.append(
                     f"{rel}: domain core must not import domain+LLM {bad_llm}"
+                )
+
+        if name in PURE_MATCHING:
+            forbidden_storage = STORAGE | PURE_MATCHING_FORBIDDEN_STORAGE
+            bad_storage = sorted(local_all & forbidden_storage)
+            if bad_storage:
+                failures.append(
+                    f"{rel}: pure matching module must not import storage or "
+                    f"storage-coupled modules {bad_storage} (TYPE_CHECKING not exempt)"
+                )
+            bad_sqlite = sorted(
+                ext for ext in external_all if ext == "sqlite3" or ext.startswith("sqlite3.")
+            )
+            if bad_sqlite:
+                failures.append(
+                    f"{rel}: pure matching module must not import sqlite3 "
+                    f"{bad_sqlite} (TYPE_CHECKING not exempt)"
                 )
 
         if name in DOMAIN_LLM:
