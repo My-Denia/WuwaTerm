@@ -50,7 +50,8 @@ nested subpackages discovered via rglob):
    real AST imports, including imports inside function bodies. Verification
    primitives sit below the admission layer that calls them: a module in
    ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
-   mutual import pair may appear.
+   strongly connected component may appear — a two-module mutual import is one
+   cycle shape, not the only one.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -157,14 +158,13 @@ SCRIPTS_ONE_WAY = {
     "component_handoff": frozenset({"deployment_admission"}),
 }
 
-# Mutual imports that already exist outside the admission/handoff layer: the
-# builder isolation pair. They predate this rule and belong to a different
-# subsystem, so they are pinned rather than enforced here. A new pair is a new
-# cycle and is refused; an entry that no longer exists has to be deleted from
-# this set, so the record cannot go stale.
-KNOWN_SCRIPTS_MUTUAL_IMPORTS = frozenset({
-    frozenset({"component_build", "component_build_isolation"}),
-    frozenset({"component_build_isolation", "component_wheel_build"}),
+# Import cycles that already exist among the flat deployment tools. They
+# predate this rule and belong to other subsystems, so they are pinned instead
+# of enforced here: any cycle this set does not name is refused, and an entry
+# that no longer exists has to be deleted, so the record cannot go stale.
+KNOWN_SCRIPTS_CYCLES = frozenset({
+    frozenset({"component_build", "component_build_isolation", "component_wheel_build"}),
+    frozenset({"component_deployment", "component_full", "component_runtime"}),
 })
 
 
@@ -532,15 +532,59 @@ def _scripts_local_imports(path: Path, modules: dict[str, Path]) -> dict[str, in
     return found
 
 
+def _scripts_cycle_components(edges: dict[str, dict[str, int]]) -> list[frozenset[str]]:
+    """Return every strongly connected component of the tool graph that cycles.
+
+    Tarjan's algorithm over the ``scripts/`` graph. A single module is acyclic
+    by inspection (``_scripts_local_imports`` already drops a self-import), so
+    meaning starts at two members: every component reported here is a real
+    cycle of whatever length it has.
+    """
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[frozenset[str]] = []
+    counter = 0
+
+    def connect(node: str) -> None:
+        nonlocal counter
+        index[node] = low[node] = counter
+        counter += 1
+        stack.append(node)
+        on_stack.add(node)
+        for target in sorted(edges.get(node, {})):
+            if target not in index:
+                connect(target)
+                low[node] = min(low[node], low[target])
+            elif target in on_stack:
+                low[node] = min(low[node], index[target])
+        if low[node] == index[node]:
+            members: set[str] = set()
+            while True:
+                item = stack.pop()
+                on_stack.discard(item)
+                members.add(item)
+                if item == node:
+                    break
+            if len(members) > 1:
+                components.append(frozenset(members))
+
+    for node in sorted(edges):
+        if node not in index:
+            connect(node)
+    return components
+
+
 def check_scripts_import_cycles() -> list[str]:
-    """Fail closed on forbidden or new mutual imports among deployment tools.
+    """Fail closed on forbidden or new import cycles among deployment tools.
 
     ``deployment_admission`` is the read-only layer every deployment tool
     calls. It resolves a tool by name and proves the loaded source, so it can
     call a tool back without depending on import order; what must not happen is
-    a *static* import in both directions. A verification primitive that
-    reaches back into the layer calling it turns a verified dependency into an
-    import-order one, and no amount of laziness makes that safe again.
+    a *static* import cycle of any length. Comparing mutual pairs only would
+    still miss the three-module cycles the builder and transaction graphs
+    already have, so the walk uses strongly connected components.
     """
     modules = _scripts_modules()
     edges = {name: _scripts_local_imports(path, modules) for name, path in modules.items()}
@@ -552,26 +596,25 @@ def check_scripts_import_cycles() -> list[str]:
                 f"scripts/{importer}.py:{edges[importer][target]}: {importer} must not "
                 f"import {target} (one-way edge: {target} imports {importer})"
             )
-    mutual: set[frozenset[str]] = set()
-    for name in sorted(edges):
-        for target in sorted(edges[name]):
-            if name in edges.get(target, {}) and name < target:
-                mutual.add(frozenset({name, target}))
-    for pair in sorted(mutual, key=sorted):
-        if pair in KNOWN_SCRIPTS_MUTUAL_IMPORTS:
+    cycles = _scripts_cycle_components(edges)
+    for component in sorted(cycles, key=sorted):
+        if component in KNOWN_SCRIPTS_CYCLES:
             continue
-        first, second = sorted(pair)
-        failures.append(
-            f"scripts: new mutual import {first} <-> {second} "
-            f"({first} -> {second} at {edges[first][second]}, "
-            f"{second} -> {first} at {edges[second][first]})"
+        inner = sorted(
+            f"{name} -> {target} at scripts/{name}.py:{line}"
+            for name in component
+            for target, line in edges[name].items()
+            if target in component
         )
-    for pair in sorted(KNOWN_SCRIPTS_MUTUAL_IMPORTS, key=sorted):
-        if pair not in mutual:
+        failures.append(
+            "scripts: new import cycle among " + ", ".join(sorted(component))
+            + " (" + "; ".join(inner) + ")"
+        )
+    for component in sorted(KNOWN_SCRIPTS_CYCLES, key=sorted):
+        if component not in cycles:
             failures.append(
-                "scripts: recorded mutual import "
-                + " <-> ".join(sorted(pair))
-                + " no longer exists; delete it from KNOWN_SCRIPTS_MUTUAL_IMPORTS"
+                "scripts: recorded import cycle among " + ", ".join(sorted(component))
+                + " no longer exists; delete it from KNOWN_SCRIPTS_CYCLES"
             )
     return failures
 

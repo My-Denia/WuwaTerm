@@ -509,10 +509,24 @@ def test_api_package_type_only_imports_are_not_exempt(tmp_path: Path, monkeypatc
 
 
 def test_shipped_scripts_report_no_import_cycles():
-    """The deployment tools must not have grown a new mutual import."""
+    """The deployment tools must not have grown a new import cycle."""
     from scripts import check_architecture_boundaries as cab
 
     assert cab.check_scripts_import_cycles() == []
+
+
+def test_shipped_scripts_cycles_are_exactly_the_recorded_components():
+    """Two cycles exist and both are recorded; admission is in neither."""
+    from scripts import check_architecture_boundaries as cab
+
+    modules = cab._scripts_modules()
+    edges = {name: cab._scripts_local_imports(path, modules)
+             for name, path in modules.items()}
+    components = cab._scripts_cycle_components(edges)
+    assert set(components) == set(cab.KNOWN_SCRIPTS_CYCLES), components
+    assert all(len(component) > 1 for component in components), components
+    for name in ("component_handoff", "component_handoff_finish"):
+        assert not any(name in component for component in components), name
 
 
 def test_handoff_primitives_do_not_import_the_admission_layer():
@@ -541,12 +555,12 @@ def test_scripts_local_imports_sees_function_body_imports(tmp_path: Path, monkey
         encoding="utf-8",
     )
     monkeypatch.setattr(cab, "SCRIPTS", scripts)
-    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_CYCLES", frozenset())
 
     modules = cab._scripts_modules()
     assert cab._scripts_local_imports(scripts / "inner.py", modules) == {"outer": 2}
     failures = cab.check_scripts_import_cycles()
-    assert any("new mutual import inner <-> outer" in failure for failure in failures), failures
+    assert any("new import cycle among inner, outer" in failure for failure in failures), failures
 
 
 def test_forbidden_one_way_edge_is_refused_even_when_lazy(tmp_path: Path, monkeypatch):
@@ -564,7 +578,7 @@ def test_forbidden_one_way_edge_is_refused_even_when_lazy(tmp_path: Path, monkey
         encoding="utf-8",
     )
     monkeypatch.setattr(cab, "SCRIPTS", scripts)
-    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_CYCLES", frozenset())
 
     failures = cab.check_scripts_import_cycles()
     joined = "\n".join(failures)
@@ -580,13 +594,13 @@ def test_popular_shipped_scripts_use_the_scripts_module_form(tmp_path: Path, mon
     (scripts / "alpha.py").write_text("from scripts import beta\n", encoding="utf-8")
     (scripts / "beta.py").write_text("import alpha\n", encoding="utf-8")
     monkeypatch.setattr(cab, "SCRIPTS", scripts)
-    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_CYCLES", frozenset())
 
     failures = cab.check_scripts_import_cycles()
-    assert any("alpha <-> beta" in failure for failure in failures), failures
+    assert any("new import cycle among alpha, beta" in failure for failure in failures), failures
 
 
-def test_stale_mutual_import_record_is_reported(tmp_path: Path, monkeypatch):
+def test_stale_cycle_record_is_reported(tmp_path: Path, monkeypatch):
     """A fixed cycle must delete its record instead of leaving a dead entry."""
     from scripts import check_architecture_boundaries as cab
 
@@ -597,7 +611,7 @@ def test_stale_mutual_import_record_is_reported(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cab, "SCRIPTS", scripts)
     monkeypatch.setattr(
         cab,
-        "KNOWN_SCRIPTS_MUTUAL_IMPORTS",
+        "KNOWN_SCRIPTS_CYCLES",
         frozenset({frozenset({"one", "two"})}),
     )
 
@@ -644,3 +658,45 @@ def test_private_cross_module_import_is_rejected(tmp_path: Path, monkeypatch):
         for f in failures
     ), failures
     assert not any("_local_alias" in f or "public_helper" in f for f in failures), failures
+
+
+def test_three_node_import_cycle_is_refused(tmp_path: Path, monkeypatch):
+    """A pair check misses `a -> b -> c -> a`; the component walk does not."""
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "a.py").write_text("import b\n", encoding="utf-8")
+    (scripts / "b.py").write_text("import c\n", encoding="utf-8")
+    (scripts / "c.py").write_text("import a\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_CYCLES", frozenset())
+
+    components = cab._scripts_cycle_components(
+        {name: cab._scripts_local_imports(path, cab._scripts_modules())
+         for name, path in cab._scripts_modules().items()}
+    )
+    assert components == [frozenset({"a", "b", "c"})], components
+
+    failures = cab.check_scripts_import_cycles()
+    joined = "\n".join(failures)
+    assert "new import cycle among a, b, c" in joined, failures
+    assert "a -> b at scripts/a.py:1" in joined, failures
+    assert "c -> a at scripts/c.py:1" in joined, failures
+
+
+def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
+    """A recorded component passes, so the pin can describe a real cycle."""
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "a.py").write_text("import b\n", encoding="utf-8")
+    (scripts / "b.py").write_text("import c\n", encoding="utf-8")
+    (scripts / "c.py").write_text("import a\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(
+        cab, "KNOWN_SCRIPTS_CYCLES", frozenset({frozenset({"a", "b", "c"})})
+    )
+
+    assert cab.check_scripts_import_cycles() == []
