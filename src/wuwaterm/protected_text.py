@@ -69,6 +69,11 @@ class ProtectedText:
             f"{prefix}{index:04d}__" for index in range(len(self.structures))
         ))
 
+    @property
+    def placeholder_lengths(self) -> tuple[int, ...]:
+        """Widths of the structural placeholders in the model text."""
+        return tuple(map(len, self._placeholders))
+
     def for_model(self, segments: tuple[str, ...] | None = None) -> str:
         """Interleave visible text with generated opaque placeholders."""
         parts = self.visible_segments if segments is None else segments

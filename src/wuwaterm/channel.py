@@ -25,7 +25,7 @@ from .runtime_keys import (
     SERVICE_KEY,
     TRANSLATOR_KEY,
 )
-from .lookup import TermService
+from .lookup import TermService, preferred_exact_entry
 from .logging_utils import redact_id, safe_error_type, safe_text_len
 from .normalize import count_cjk, count_latin
 from .sentence import (
@@ -540,12 +540,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         service: TermService = context.application.bot_data[SERVICE_KEY]
-        lookup_result = service.lookup_exact(plain)
+        exact = preferred_exact_entry(service, plain)
         official = None
-        if lookup_result.exact and lookup_result.best:
-            official = (
-                lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
-            )
+        if exact is not None:
+            official = exact.zh if to_chinese else exact.en
         if not official and not _llm_configured():
             _channel_event(
                 runtime,

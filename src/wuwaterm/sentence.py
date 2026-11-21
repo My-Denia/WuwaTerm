@@ -42,22 +42,26 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     safe_llm_failure_diagnostic,
     structured_llm_error_text as _structured_llm_error_text,
 )
-from .lookup import TermService
+from .lookup import TermService, preferred_exact_entry
 from .lookup import derived_reference_only_sources as _derived_reference_only_sources
+from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
 from .review import WHITESPACE as _SEGMENT_WHITESPACE
 from .review import paragraph_ranges as _paragraph_ranges
 from .review import segment_core as _segment_core
 from .semantic_review_contract import PRECEDENT_WORDING
+from .skill_references import SkillReference, skill_references
 from .term_matching import (
     CASE_VARIANT_CATEGORIES as CASE_VARIANT_CATEGORIES,
+    ReferenceCandidates,
     admissible_nfkc_sources,
     case_variant_sources,
     exact_lockable_source_records,
     exact_lockable_sources as exact_lockable_sources,
     is_cjk_character,
     is_eligible_lockable,
+    model_reference_candidates,
     select_term_spans as select_term_spans,
 )
 from .term_preparation import (
@@ -67,6 +71,8 @@ from .term_preparation import (
     new_placeholder_prefix,
     prepare_protected_terms,
     prepare_term_segment,
+    references_need_scope_instruction,
+    validated_reference_ranges,
 )
 
 _safe_llm_failure_diagnostic = safe_llm_failure_diagnostic
@@ -95,6 +101,14 @@ SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
 
 _CJK_PUNCTUATION = "，。！？、；：（）《》【】“”‘’·…—"
 _CJK_NEIGHBOR_CLASS = rf"[\u3400-\u9fff{_CJK_PUNCTUATION}]"
+
+_SourceSnapshot = tuple[
+    tuple[tuple[str, tuple[str, str, str]], ...],
+    frozenset[str],
+    frozenset[str],
+    ReferenceCandidates,
+    tuple[SkillReference, ...],
+]
 
 
 @dataclass(frozen=True)
@@ -192,9 +206,13 @@ class SentenceTranslator:
         self._llm_client: httpx.AsyncClient | None = None
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
-        self._lockable_sources_cache: tuple[
-            tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-        ] = ((), frozenset(), frozenset())
+        self._lockable_sources_cache: _SourceSnapshot = (
+            (),
+            frozenset(),
+            frozenset(),
+            {},
+            (),
+        )
         self._source_categories_cache_key: tuple[object, ...] | None = None
         self._source_categories_cache: dict[str, str] = {}
 
@@ -323,6 +341,10 @@ class SentenceTranslator:
             nfkc_spelling_sources=nfkc_sources,
             placeholder_prefix=placeholder_prefix or new_placeholder_prefix(text),
             placeholder_offset=placeholder_offset,
+            reference_candidates=(
+                self._reference_candidates() if to_chinese is not None else None
+            ),
+            skill_refs=self._skill_references() if to_chinese is False else (),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
 
@@ -364,6 +386,10 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             allow_plural_inflection=allow_plural_inflection,
             placeholder_prefix=new_placeholder_prefix(protected.for_model()),
+            reference_candidates=(
+                self._reference_candidates() if to_chinese is not None else None
+            ),
+            skill_refs=self._skill_references() if to_chinese is False else (),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
 
@@ -406,9 +432,9 @@ class SentenceTranslator:
         prepared = self.prepare_text(text)
         if not prepared:
             return ""
-        exact = self.service.lookup_exact(prepared, limit=5)
-        if exact.exact and exact.best:
-            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
+        exact = self.preferred_exact_entry(prepared)
+        if exact is not None:
+            official = exact.zh if to_chinese else exact.en
             if official:
                 return official
         # C1: plural inflection is admitted only when the target is Chinese
@@ -474,9 +500,9 @@ class SentenceTranslator:
         )
         if not prepared:
             return ""
-        exact = self.service.lookup_exact(prepared, limit=5)
-        if exact.exact and exact.best:
-            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
+        exact = self.preferred_exact_entry(prepared)
+        if exact is not None:
+            official = exact.zh if to_chinese else exact.en
             if official:
                 return official
         if not llm_configured():
@@ -741,13 +767,21 @@ class SentenceTranslator:
         return f"{official}: {body}" if body else f"{official}:"
 
     def _exact_official(self, query: str) -> str | None:
-        result = self.service.lookup_exact(query, limit=5)
-        if not result.exact or not result.best:
+        entry = self.preferred_exact_entry(query)
+        if entry is None:
             return None
-        official = result.best.entry.en
+        official = entry.en
         if not official or "\n" in official:
             return None
         return official
+
+    def preferred_exact_entry(
+        self, query: str, *, service: TermService | None = None
+    ) -> TermEntry | None:
+        """Return the exact hit a fixed substitution may restore, if any."""
+        return preferred_exact_entry(
+            self.service if service is None else service, query
+        )
 
     def _eligible_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
         return self._eligible_rows(self._lockable_sources())
@@ -767,7 +801,9 @@ class SentenceTranslator:
     ) -> tuple[
         tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
     ]:
-        rows, nfkc_sources, _reference_only = self._lockable_snapshot()
+        rows, nfkc_sources, _reference_only, _candidates, _skills = (
+            self._lockable_snapshot()
+        )
         return self._eligible_rows(rows), nfkc_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
@@ -784,22 +820,21 @@ class SentenceTranslator:
             provenance,
         )
 
-    def _read_lockable_sources(
-        self,
-    ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-    ]:
+    def _read_lockable_sources(self) -> _SourceSnapshot:
         excluded = _free_text_exclusions(self.service.metadata())
         entries = self.service.entries()
-        sources = exact_lockable_source_records(entries)
+        pre_exclusion_sources = exact_lockable_source_records(entries)
+        sources = dict(pre_exclusion_sources)
         # Case variants come after every exact source, so an exact surface
         # always keeps its own record and wins equal-length overlaps. They are
         # computed before exclusions are removed, so an excluded surface still
         # blocks a variant equal to it and still counts for casefold ambiguity.
-        variants = case_variant_sources(sources, excluded)
+        variants = case_variant_sources(pre_exclusion_sources, excluded)
         # Same pre-exclusion snapshot: a spelling collision or exclusion still
         # counts even when one of the colliding surfaces is later removed.
-        nfkc_sources = admissible_nfkc_sources(sources, variants, excluded)
+        nfkc_sources = admissible_nfkc_sources(
+            pre_exclusion_sources, variants, excluded
+        )
         for surface in excluded:
             sources.pop(surface, None)
         for variant, official in variants:
@@ -808,6 +843,13 @@ class SentenceTranslator:
             tuple(sources.items()),
             nfkc_sources,
             _derived_reference_only_sources(entries),
+            model_reference_candidates(
+                entries,
+                sources,
+                excluded,
+                pre_exclusion_sources=pre_exclusion_sources,
+            ),
+            skill_references(entries, set(pre_exclusion_sources), excluded),
         )
 
     def _source_categories(self) -> dict[str, str]:
@@ -838,11 +880,15 @@ class SentenceTranslator:
         """Chinese surfaces that are references, never locks (derived names)."""
         return self._lockable_snapshot()[2]
 
-    def _lockable_snapshot(
-        self,
-    ) -> tuple[
-        tuple[tuple[str, tuple[str, str, str]], ...], frozenset[str], frozenset[str]
-    ]:
+    def _reference_candidates(self) -> ReferenceCandidates:
+        """Surface -> every official pair the model path may offer for it."""
+        return self._lockable_snapshot()[3]
+
+    def _skill_references(self) -> tuple[SkillReference, ...]:
+        """Bounded closed-class 2-char skill stems for zh->en references."""
+        return self._lockable_snapshot()[4]
+
+    def _lockable_snapshot(self) -> _SourceSnapshot:
         # Each source text (Chinese OR English form) maps to the official
         # (zh, en, category) record, retaining single-character name provenance.
         # The eligible lock pairs can be restored in either
@@ -899,6 +945,26 @@ _CONTEXTUAL_REFERENCE_INSTRUCTION = (
     "number and article the sentence needs: Resonators, Echoes, a Resonator, "
     "the Echo.\n"
 )
+# Appended only when references need scope: an admitted one-character name
+# mention, one surface carrying competing official pairs, a soft-cased derived
+# spelling, or a bounded local skill stem. Plain single-meaning requests keep
+# the exact prompt bytes they carried before this mechanism existed.
+_SCOPED_REFERENCE_INSTRUCTION = (
+    "Multiple official pairs for one source surface are alternatives: select "
+    "the meaning supported by this occurrence, never combine or enforce all "
+    "of them. A casing variant is only a hint, not proof of an official sense. "
+    "If occurrence ranges are listed, that reference applies only at those "
+    "ranges in the user message; a character embedded elsewhere in a longer "
+    "compound is not a name reference and does not establish an official "
+    "translation for the whole compound.\n"
+)
+_REFERENCE_RANGE_HEADER = (
+    "\nReference occurrence ranges (JSON; zero-based, end-exclusive):\n"
+)
+_REFERENCE_RANGE_TARGET_INSTRUCTION = (
+    "A range with a target applies only to the reference for that target; "
+    "other alternatives for the same source do not apply at that range.\n"
+)
 
 
 # translation-context-v1 (ADR 0019): added only when a request opts in, so a
@@ -906,7 +972,11 @@ _CONTEXTUAL_REFERENCE_INSTRUCTION = (
 _CONTEXT_RULES_INSTRUCTION = (
     "\nContext rules: keep every pronoun and elided subject pointing at the same "
     "person or thing as in the source text. Keep every negation and every "
-    "number, unit, date and version exactly as the source text states it. "
+    "number, numeric shorthand such as 3+1 or S0R1, unit, date and version "
+    "exactly as the source text states it. Resolve an omitted actor from the "
+    "complete clause and its context; in a rhetorical question do not make "
+    "the addressee the actor unless the source does. Translate every clause "
+    "and do not leave isolated source-language prose untranslated. "
     "Read-only context below only helps you understand the source text: do not "
     "translate, repeat or continue it, and return only the translation of the "
     "user message.\n"
@@ -1298,6 +1368,11 @@ async def _call_llm_async_with_client(
     references: Sequence[TermReference | tuple[str, str, str, str]] = (),
     context=None,
 ) -> str:
+    coerced_refs = tuple(_coerce_term_reference(item) for item in references)
+    scoped_ranges = validated_reference_ranges(
+        locked_text, coerced_refs, to_chinese=to_chinese
+    )
+    needs_scope = references_need_scope_instruction(coerced_refs) or bool(scoped_ranges)
     # locks are (placeholder, zh_official, en_official); show the model the
     # official term in the TARGET language so the locked placeholder maps to
     # the right side on restore.
@@ -1305,7 +1380,7 @@ async def _call_llm_async_with_client(
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     reference_lines = "\n".join(
         f"{ref.source} = {(ref.zh, ref.en)[official_index - 1]} ({ref.category})"
-        for ref in (_coerce_term_reference(item) for item in references)
+        for ref in coerced_refs
     )
     if to_chinese:
         placeholder_instruction = "Keep all placeholders exactly unchanged. "
@@ -1336,9 +1411,18 @@ async def _call_llm_async_with_client(
             system_content += _HTML_MODE_INSTRUCTION
     system_content += f"Locked terms:\n{lock_lines}"
     if reference_lines:
-        system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION + (
-            f"Dictionary term references:\n{reference_lines}"
-        )
+        system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION
+        if needs_scope:
+            system_content += _SCOPED_REFERENCE_INSTRUCTION
+        if any("target" in item for item in scoped_ranges):
+            system_content += _REFERENCE_RANGE_TARGET_INSTRUCTION
+        system_content += f"Dictionary term references:\n{reference_lines}"
+        if scoped_ranges:
+            system_content += (
+                _REFERENCE_RANGE_HEADER
+                + json.dumps(scoped_ranges, ensure_ascii=False)
+                + "\n"
+            )
     if context is not None:
         system_content += _context_instruction(context)
     messages = [
