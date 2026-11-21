@@ -12,11 +12,15 @@ deployed them. Security reports are read and handled best-effort — please read
 Fixes are made on `main` and ship in the next release. Only the latest published
 release line receives them; earlier tags are historical and get nothing.
 
-The latest published release is v0.6.0; 0.6.x is the currently supported line.
+The latest published release is v0.10.2; 0.10.x is the currently supported line.
 
 | Version | Supported |
 |---|---|
-| 0.6.x | Yes |
+| 0.10.x | Yes |
+| 0.9.x | No |
+| 0.8.x | No |
+| 0.7.x | No |
+| 0.6.x | No |
 | 0.5.x | No |
 | 0.4.x | No |
 | 0.3.x | No |
@@ -41,7 +45,7 @@ private path exists and is the one to use:
    public.
 
 Direct link:
-<https://github.com/My-Denia/wuwa-translate-bot/security/advisories/new>
+<https://github.com/My-Denia/WuwaTerm/security/advisories/new>
 
 There is no security mailbox and no other private channel — no address is
 published here, deliberately, because a published address is a thing to

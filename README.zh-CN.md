@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="最新发布" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
+  <a href="https://github.com/My-Denia/WuwaTerm/releases/latest"><img alt="最新发布" src="https://img.shields.io/github/v/release/My-Denia/WuwaTerm?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
+  <a href="https://github.com/My-Denia/WuwaTerm/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/WuwaTerm/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=30363d">
   <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=30363d"></a>
 </p>
@@ -123,11 +123,11 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ## 项目状态
 
-WuwaTerm 是个人业余项目，按尽力而为的方式维护。最新正式版本见 [Releases 页面](https://github.com/My-Denia/wuwa-translate-bot/releases)；`main` 分支会领先于正式版本，未发布的变更记录在 [CHANGELOG.md](CHANGELOG.md)。公测站不承诺固定可用性或响应时间。提问渠道与响应预期见 [SUPPORT.md](SUPPORT.md)。
+WuwaTerm 是个人业余项目，按尽力而为的方式维护。最新正式版本见 [Releases 页面](https://github.com/My-Denia/WuwaTerm/releases)；`main` 分支会领先于正式版本，未发布的变更记录在 [CHANGELOG.md](CHANGELOG.md)。公测站不承诺固定可用性或响应时间。提问渠道与响应预期见 [SUPPORT.md](SUPPORT.md)。
 
 ## 参与贡献
 
-- **查询结果不对**：请[提交问题报告（Bug report）](https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose)，写明查询内容、WuwaTerm 的返回和游戏内的写法。游戏数据本身有误的术语需要在上游修正（见 [SUPPORT.md](SUPPORT.md)）。
+- **查询结果不对**：请[提交问题报告（Bug report）](https://github.com/My-Denia/WuwaTerm/issues/new/choose)，写明查询内容、WuwaTerm 的返回和游戏内的写法。游戏数据本身有误的术语需要在上游修正（见 [SUPPORT.md](SUPPORT.md)）。
 - **想改代码或文档**：先读 [CONTRIBUTING.md](CONTRIBUTING.md)。本地校验只有一个入口：`python scripts/validate.py`。
 - **发现安全问题**：请按 [SECURITY.md](SECURITY.md) 的方式私下报告。
 

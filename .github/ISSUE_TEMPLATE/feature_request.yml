@@ -18,7 +18,7 @@ body:
           settled, so a change that crosses one will not be merged: no callback-URL registration for Telegram, no inline-query
           surface, no synonym layer over the dictionary, and no free-text
           listener beyond the single linked-channel one. See
-          [CONTRIBUTING.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/CONTRIBUTING.md#non-goals).
+          [CONTRIBUTING.md](https://github.com/My-Denia/WuwaTerm/blob/main/CONTRIBUTING.md#non-goals).
         - **There is one maintainer, working on this in spare time.** Most
           requests will not be built soon, and some will be declined so the
           project stays small enough to maintain. A clear "no" is a better

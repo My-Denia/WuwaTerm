@@ -10,10 +10,10 @@ body:
         up and behaves wrongly — that is the bug report.
 
         Worth reading first:
-        [self-hosting](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/self-hosting.md),
-        [support matrix](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/support-matrix.md),
-        [deployment](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/deployment.md),
-        [validation](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/validation.md).
+        [self-hosting](https://github.com/My-Denia/WuwaTerm/blob/main/docs/self-hosting.md),
+        [support matrix](https://github.com/My-Denia/WuwaTerm/blob/main/docs/support-matrix.md),
+        [deployment](https://github.com/My-Denia/WuwaTerm/blob/main/docs/deployment.md),
+        [validation](https://github.com/My-Denia/WuwaTerm/blob/main/docs/validation.md).
 
         The server suite is supported on Linux and is not supported on a Windows
         host. The desktop client is Windows: the packaged build bundles its own

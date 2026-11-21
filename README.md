@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
+  <a href="https://github.com/My-Denia/WuwaTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/My-Denia/WuwaTerm?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
+  <a href="https://github.com/My-Denia/WuwaTerm/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/WuwaTerm/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=30363d">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=30363d"></a>
 </p>
@@ -174,11 +174,11 @@ Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-D
 
 ## Project status
 
-WuwaTerm is a personal hobby project, maintained on a best-effort basis. The latest tagged release is on the [Releases page](https://github.com/My-Denia/wuwa-translate-bot/releases); `main` moves ahead of it, and [CHANGELOG.md](CHANGELOG.md) marks what is unreleased. The public beta promises no fixed availability or response time. Where to ask questions and what to expect is in [SUPPORT.md](SUPPORT.md).
+WuwaTerm is a personal hobby project, maintained on a best-effort basis. The latest tagged release is on the [Releases page](https://github.com/My-Denia/WuwaTerm/releases); `main` moves ahead of it, and [CHANGELOG.md](CHANGELOG.md) marks what is unreleased. The public beta promises no fixed availability or response time. Where to ask questions and what to expect is in [SUPPORT.md](SUPPORT.md).
 
 ## Contributing
 
-- **Getting a wrong result?** Open a [bug report](https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose) with your query, what WuwaTerm returned and what the game shows. A term that is wrong in the game data itself has to be fixed upstream ([SUPPORT.md](SUPPORT.md)).
+- **Getting a wrong result?** Open a [bug report](https://github.com/My-Denia/WuwaTerm/issues/new/choose) with your query, what WuwaTerm returned and what the game shows. A term that is wrong in the game data itself has to be fixed upstream ([SUPPORT.md](SUPPORT.md)).
 - **Want to change code or docs?** Read [CONTRIBUTING.md](CONTRIBUTING.md). Local validation has one entry point: `python scripts/validate.py`.
 - **Found a security problem?** Report it privately as described in [SECURITY.md](SECURITY.md).
 
