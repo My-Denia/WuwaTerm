@@ -506,3 +506,100 @@ def test_api_package_type_only_imports_are_not_exempt(tmp_path: Path, monkeypatc
     failures = cab.check_api_package()
 
     assert any("wuwaterm.bot" in f for f in failures), failures
+
+
+def test_shipped_scripts_report_no_import_cycles():
+    """The deployment tools must not have grown a new mutual import."""
+    from scripts import check_architecture_boundaries as cab
+
+    assert cab.check_scripts_import_cycles() == []
+
+
+def test_handoff_primitives_do_not_import_the_admission_layer():
+    """Verified predecessors are read below admission, never back into it."""
+    from scripts import check_architecture_boundaries as cab
+
+    modules = cab._scripts_modules()
+    handoff = cab._scripts_local_imports(modules["component_handoff"], modules)
+    assert "deployment_admission" not in handoff, handoff
+    # The entry point that needs both sits above them, not inside either.
+    finish = cab._scripts_local_imports(modules["component_handoff_finish"], modules)
+    assert {"deployment_admission", "component_handoff"} <= set(finish), finish
+
+
+def test_scripts_local_imports_sees_function_body_imports(tmp_path: Path, monkeypatch):
+    """A lazy reverse import is still an edge; only an AST walk finds it."""
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "outer.py").write_text("import inner\n", encoding="utf-8")
+    (scripts / "inner.py").write_text(
+        "def use_outer():\n"
+        "    import outer\n"
+        "    return outer\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+
+    modules = cab._scripts_modules()
+    assert cab._scripts_local_imports(scripts / "inner.py", modules) == {"outer": 2}
+    failures = cab.check_scripts_import_cycles()
+    assert any("new mutual import inner <-> outer" in failure for failure in failures), failures
+
+
+def test_forbidden_one_way_edge_is_refused_even_when_lazy(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "deployment_admission.py").write_text(
+        "import component_handoff\n", encoding="utf-8"
+    )
+    (scripts / "component_handoff.py").write_text(
+        "def finish():\n"
+        "    import deployment_admission\n"
+        "    return deployment_admission\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+
+    failures = cab.check_scripts_import_cycles()
+    joined = "\n".join(failures)
+    assert "component_handoff must not import deployment_admission" in joined, failures
+
+
+def test_popular_shipped_scripts_use_the_scripts_module_form(tmp_path: Path, monkeypatch):
+    """``from scripts import x`` counts as an edge in the flat tool graph."""
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "alpha.py").write_text("from scripts import beta\n", encoding="utf-8")
+    (scripts / "beta.py").write_text("import alpha\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(cab, "KNOWN_SCRIPTS_MUTUAL_IMPORTS", frozenset())
+
+    failures = cab.check_scripts_import_cycles()
+    assert any("alpha <-> beta" in failure for failure in failures), failures
+
+
+def test_stale_mutual_import_record_is_reported(tmp_path: Path, monkeypatch):
+    """A fixed cycle must delete its record instead of leaving a dead entry."""
+    from scripts import check_architecture_boundaries as cab
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "one.py").write_text("x = 1\n", encoding="utf-8")
+    (scripts / "two.py").write_text("import one\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    monkeypatch.setattr(
+        cab,
+        "KNOWN_SCRIPTS_MUTUAL_IMPORTS",
+        frozenset({frozenset({"one", "two"})}),
+    )
+
+    failures = cab.check_scripts_import_cycles()
+    assert any("no longer exists" in failure for failure in failures), failures

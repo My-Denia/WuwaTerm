@@ -37,8 +37,8 @@ from component_handoff import (  # noqa: E402
     verify_handoff as verify_handoff,
     verify_predecessor as verify_predecessor,
     _sync_handoff_markers as _sync_handoff_markers,
-    finish_handoff as finish_handoff,
 )
+from component_handoff_finish import finish_handoff as finish_handoff  # noqa: E402
 
 from component_journal_full import (  # noqa: E402
     JOURNAL_NAME as JOURNAL_NAME,

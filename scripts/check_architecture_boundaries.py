@@ -42,6 +42,11 @@ nested subpackages discovered via rglob):
    bot, channel, lookup, sentence, db, telegram_* or builder modules, never
    the ``wuwaterm`` package root, and never the Telegram SDK. This is the
    machine-checkable form of "the API cannot bypass the shared pipeline".
+9. The flat ``scripts/`` deployment tools are checked for import cycles over
+   real AST imports, including imports inside function bodies. Verification
+   primitives sit below the admission layer that calls them: a module in
+   ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
+   mutual import pair may appear.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -56,6 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "wuwaterm"
+SCRIPTS = ROOT / "scripts"
 
 # The HTTP adapter is a separate shipped package. It is allowed to reach the
 # shared application layer and the protocol-neutral helpers, and nothing else
@@ -137,6 +143,25 @@ TELEGRAM_SDK_PREFIXES = (
     "telegram",
     "telegram.ext",
 )
+
+# One-way edges inside the flat deployment tools. ``component_handoff`` holds
+# the predecessor primitives; ``deployment_admission`` calls them while it
+# admits a recovery, so the handoff module must never import admission back.
+# An AST walk over function bodies still sees that reverse edge, which is why
+# the rule cannot be satisfied by keeping the import lazy.
+SCRIPTS_ONE_WAY = {
+    "component_handoff": frozenset({"deployment_admission"}),
+}
+
+# Mutual imports that already exist outside the admission/handoff layer: the
+# builder isolation pair. They predate this rule and belong to a different
+# subsystem, so they are pinned rather than enforced here. A new pair is a new
+# cycle and is refused; an entry that no longer exists has to be deleted from
+# this set, so the record cannot go stale.
+KNOWN_SCRIPTS_MUTUAL_IMPORTS = frozenset({
+    frozenset({"component_build", "component_build_isolation"}),
+    frozenset({"component_build_isolation", "component_wheel_build"}),
+})
 
 
 def _module_key_for_path(path: Path) -> str | None:
@@ -459,10 +484,99 @@ def check_api_package() -> list[str]:
     return failures
 
 
+def _scripts_modules() -> dict[str, Path]:
+    """Map each flat ``scripts/`` module stem to its file."""
+    return {path.stem: path for path in sorted(SCRIPTS.glob("*.py"))}
+
+
+def _scripts_local_imports(path: Path, modules: dict[str, Path]) -> dict[str, int]:
+    """Return {local module stem: first importing line} for one tool module.
+
+    ``ast.walk`` descends into function and method bodies, so a lazily imported
+    reverse edge is reported exactly like a module-level one. Only sibling
+    ``scripts/`` modules count; standard-library and third-party imports are
+    not part of this graph, and package-relative imports cannot occur in a
+    flat tool directory.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for entry in node.names:
+                parts = entry.name.split(".")
+                stem = parts[1] if parts[0] == "scripts" and len(parts) > 1 else parts[0]
+                if stem in modules and stem != path.stem:
+                    found.setdefault(stem, node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            module = node.module or ""
+            if module == "scripts" or module.startswith("scripts."):
+                if module != "scripts":
+                    stem = module.split(".")[1]
+                    if stem in modules and stem != path.stem:
+                        found.setdefault(stem, node.lineno)
+                else:
+                    for entry in node.names:
+                        name = entry.name.split(".")[0]
+                        if name in modules and name != path.stem:
+                            found.setdefault(name, node.lineno)
+                continue
+            stem = module.split(".")[0]
+            if stem in modules and stem != path.stem:
+                found.setdefault(stem, node.lineno)
+    return found
+
+
+def check_scripts_import_cycles() -> list[str]:
+    """Fail closed on forbidden or new mutual imports among deployment tools.
+
+    ``deployment_admission`` is the read-only layer every deployment tool
+    calls. It resolves a tool by name and proves the loaded source, so it can
+    call a tool back without depending on import order; what must not happen is
+    a *static* import in both directions. A verification primitive that
+    reaches back into the layer calling it turns a verified dependency into an
+    import-order one, and no amount of laziness makes that safe again.
+    """
+    modules = _scripts_modules()
+    edges = {name: _scripts_local_imports(path, modules) for name, path in modules.items()}
+    failures: list[str] = []
+    for importer in sorted(SCRIPTS_ONE_WAY):
+        forbidden = SCRIPTS_ONE_WAY[importer] & set(edges.get(importer, {}))
+        for target in sorted(forbidden):
+            failures.append(
+                f"scripts/{importer}.py:{edges[importer][target]}: {importer} must not "
+                f"import {target} (one-way edge: {target} imports {importer})"
+            )
+    mutual: set[frozenset[str]] = set()
+    for name in sorted(edges):
+        for target in sorted(edges[name]):
+            if name in edges.get(target, {}) and name < target:
+                mutual.add(frozenset({name, target}))
+    for pair in sorted(mutual, key=sorted):
+        if pair in KNOWN_SCRIPTS_MUTUAL_IMPORTS:
+            continue
+        first, second = sorted(pair)
+        failures.append(
+            f"scripts: new mutual import {first} <-> {second} "
+            f"({first} -> {second} at {edges[first][second]}, "
+            f"{second} -> {first} at {edges[second][first]})"
+        )
+    for pair in sorted(KNOWN_SCRIPTS_MUTUAL_IMPORTS, key=sorted):
+        if pair not in mutual:
+            failures.append(
+                "scripts: recorded mutual import "
+                + " <-> ".join(sorted(pair))
+                + " no longer exists; delete it from KNOWN_SCRIPTS_MUTUAL_IMPORTS"
+            )
+    return failures
+
+
 def check() -> list[str]:
     modules, collisions = _discover_modules()
     failures: list[str] = list(collisions)
     failures.extend(check_api_package())
+    failures.extend(check_scripts_import_cycles())
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:
