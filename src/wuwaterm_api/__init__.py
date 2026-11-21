@@ -3,10 +3,13 @@
 A separate top-level package beside ``wuwaterm``: it is one more inbound
 adapter, not part of the Telegram bot. It may only reach the shared
 application layer (``wuwaterm.application``) plus the protocol-neutral
-helpers ``wuwaterm.models``, ``wuwaterm.translation_policy`` and
-``wuwaterm.logging_utils``. That narrow allowlist is enforced by
-``scripts/check_architecture_boundaries.py`` and is what guarantees the API
-cannot bypass the shared translation pipeline.
+helpers ``wuwaterm.models``, ``wuwaterm.translation_policy``,
+``wuwaterm.logging_utils`` and ``wuwaterm.request_trace``. That narrow
+allowlist is enforced by ``scripts/check_architecture_boundaries.py`` and is
+what guarantees the API cannot bypass the shared translation pipeline.
+(``request_trace`` is on it as an instrument rather than a way in: it holds
+no dictionary, pipeline or transport, and the stages it times are opened by
+the core.)
 """
 
 from __future__ import annotations

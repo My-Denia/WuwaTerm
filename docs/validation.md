@@ -195,7 +195,7 @@ distribution actually contains.
 
 `check_architecture_boundaries.py` guards forbidden import directions between
 presentation, domain, and builder modules, enforces the HTTP adapter's
-four-module import allowlist into `wuwaterm`, and keeps the flat `scripts/`
+five-module import allowlist into `wuwaterm`, and keeps the flat `scripts/`
 deployment tools free of new import cycles — including imports written inside
 function bodies, so a lazily imported reverse edge fails the same gate (see
 [Architecture](architecture.md)).
