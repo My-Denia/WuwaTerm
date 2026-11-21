@@ -11,12 +11,12 @@ contact_links:
     url: https://github.com/My-Denia/WuwaTerm-Windows/issues
     about: Desktop source, setup, builds, releases and feature requests.
   - name: Report a security vulnerability
-    url: https://github.com/My-Denia/wuwa-translate-bot/security/policy
+    url: https://github.com/My-Denia/WuwaTerm/security/policy
     about: >-
       Never open a public issue for a vulnerability. Use GitHub private
       vulnerability reporting, as the security policy describes.
   - name: Support and scope
-    url: https://github.com/My-Denia/wuwa-translate-bot/blob/main/SUPPORT.md
+    url: https://github.com/My-Denia/WuwaTerm/blob/main/SUPPORT.md
     about: >-
       Where to ask, what to include, and what this single-maintainer hobby
       project does not cover. The shared public beta is best-effort and has no

@@ -70,8 +70,8 @@ through a reviewed PR when the producer/consumer contract changes.
 ## Getting The Code
 
 ```bash
-git clone https://github.com/My-Denia/wuwa-translate-bot.git
-cd wuwa-translate-bot
+git clone https://github.com/My-Denia/WuwaTerm.git
+cd WuwaTerm
 ```
 
 Work on a branch and open a pull request against `main`.
@@ -178,7 +178,7 @@ CI own the full manuscript file interoperability checks.
 - **Evidence for the change.** Use existing or new tests for changed behaviour,
   or explain the build, manual check or other validation used. Prose-only
   changes do not require new tests.
-- **Behaviour, not wiring** ([issue #66](https://github.com/My-Denia/wuwa-translate-bot/issues/66)).
+- **Behaviour, not wiring** ([issue #66](https://github.com/My-Denia/WuwaTerm/issues/66)).
   When you add an assertion that a signal is connected, a callback was injected
   or a dependency was passed in, add a second assertion that actually triggers
   that slot or callback at least once, with its external dependencies (dialogs,
@@ -249,7 +249,7 @@ need their own authorization.
 Reporting is a contribution. The issue forms ask for the fields that make a
 report actionable — version, surface, environment, steps, expected versus
 actual, and logs with the secrets removed:
-<https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose>
+<https://github.com/My-Denia/WuwaTerm/issues/new/choose>
 
 ## Code Of Conduct
 

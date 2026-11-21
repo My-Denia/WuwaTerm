@@ -21,7 +21,7 @@ security.
 ## Where To Ask
 
 Everything starts here:
-<https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose>
+<https://github.com/My-Denia/WuwaTerm/issues/new/choose>
 
 | If | Use |
 |---|---|

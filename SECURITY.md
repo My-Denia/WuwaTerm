@@ -45,7 +45,7 @@ private path exists and is the one to use:
    public.
 
 Direct link:
-<https://github.com/My-Denia/wuwa-translate-bot/security/advisories/new>
+<https://github.com/My-Denia/WuwaTerm/security/advisories/new>
 
 There is no security mailbox and no other private channel — no address is
 published here, deliberately, because a published address is a thing to

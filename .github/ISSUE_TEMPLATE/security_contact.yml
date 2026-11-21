@@ -11,7 +11,7 @@ body:
         one case: the private path did not work for you.
 
         The private path is
-        [Report a vulnerability](https://github.com/My-Denia/wuwa-translate-bot/security/advisories/new)
+        [Report a vulnerability](https://github.com/My-Denia/WuwaTerm/security/advisories/new)
         on the repository's Security tab, and it is enabled. Use it if you can.
         Everything you write there is visible to the maintainer only.
 
@@ -21,7 +21,7 @@ body:
         maintainer will reply here with a way to continue privately, and the
         details go there.
 
-        See [SECURITY.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/SECURITY.md)
+        See [SECURITY.md](https://github.com/My-Denia/WuwaTerm/blob/main/SECURITY.md)
         for what is in scope and what to expect.
 
   - type: checkboxes
