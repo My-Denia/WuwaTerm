@@ -10,9 +10,18 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .cjk_span import crosses_cjk_word_boundary, single_character_name_context_ok
+from .cjk_span import (
+    crosses_cjk_word_boundary,
+    single_character_name_context_ok,
+    single_character_name_mention_at,
+)
+from .constants import CATEGORY_ORDER
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
+from .lookup import is_derived_name_entry
 from .models import TermEntry
+
+
+ReferenceCandidates = dict[str, tuple[tuple[str, str, str], ...]]
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,25 @@ class TermSpan:
 
 def is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
+
+
+def reference_span_admitted(
+    span: TermSpan, context_text: str, context_offset: int
+) -> bool:
+    """Apply review's one-character admission to an already selected span.
+
+    A one-character dictionary surface is eligible, but only the surrounding
+    text can say whether this occurrence names someone: 欢迎椿 does, the 椿
+    inside 红椿蕊 does not. Translation and review consult the same helper, so
+    whichever name reaches the model is also the name review reports.
+    """
+    return (
+        len(span.source) != 1
+        or not is_cjk_character(span.source)
+        or single_character_name_mention_at(
+            context_text, context_offset + span.start, context_offset + span.end
+        )
+    )
 
 
 def _is_ascii_word_char(char: str) -> bool:
@@ -417,10 +445,11 @@ def select_term_spans(
 def exact_lockable_source_records(
     entries: Iterable[TermEntry],
 ) -> dict[str, tuple[str, str, str]]:
-    # Entries arrive in lookup priority order, so the first record carrying a
-    # surface owns it.
+    # Preserve an established surface's primary when derived candidates share
+    # it. A derived row never displaces the row the dictionary already had;
+    # the model path exposes competing pairs separately.
     sources: dict[str, tuple[str, str, str]] = {}
-    for entry in entries:
+    for entry in sorted(entries, key=is_derived_name_entry):
         if "\n" in entry.zh or "\n" in entry.en:
             continue
         official = (entry.zh, entry.en, entry.category)
@@ -429,6 +458,91 @@ def exact_lockable_source_records(
         if entry.en:
             sources.setdefault(entry.en, official)
     return sources
+
+
+def model_reference_candidates(
+    entries: Iterable[TermEntry],
+    sources: dict[str, tuple[str, str, str]],
+    excluded: frozenset[str],
+    pre_exclusion_sources: dict[str, tuple[str, str, str]] | None = None,
+) -> ReferenceCandidates:
+    """Keep competing official pairs and soft casing of derived names.
+
+    Exact owners and both exclusion lists still win. Only derived names gain
+    additional spellings here; they never enter deterministic locking.
+
+    ``pre_exclusion_sources`` carries the pre-exclusion exact surface map so
+    excluding one cased surface in a shared casefold key continues to block
+    derived soft-spelling synthesis while keeping excluded surfaces out of
+    lockable sources and reference candidates.
+
+    A surface whose rows agree on ``(zh, en)`` has one meaning however many
+    tables carry it: 今汐 appears in several tables and yields one reference
+    line, keeping the highest ``CATEGORY_ORDER`` category. Different pairs
+    stay separate candidates so the model chooses by context instead of a hard
+    replacement.
+    """
+    ordered_entries = sorted(entries, key=is_derived_name_entry)
+    folded_sources = (
+        exact_lockable_source_records(ordered_entries)
+        if pre_exclusion_sources is None
+        else pre_exclusion_sources
+    )
+    # (zh, en) -> category; the pair is the meaning, the category is its rank.
+    groups: dict[str, dict[tuple[str, str], str]] = {}
+    folded_owners: dict[str, set[tuple[str, str]]] = {}
+    for mapping in (folded_sources, sources):
+        for surface, official in mapping.items():
+            folded_owners.setdefault(surface.casefold(), set()).add(
+                (official[0], official[1])
+            )
+
+    def add(surface: str, official: tuple[str, str, str]) -> None:
+        if surface in excluded or not is_eligible_lockable(surface, official):
+            return
+        pair = (official[0], official[1])
+        bucket = groups.setdefault(surface, {})
+        current = bucket.get(pair)
+        if current is None or CATEGORY_ORDER.get(
+            official[2], 999
+        ) < CATEGORY_ORDER.get(current, 999):
+            bucket[pair] = official[2]
+
+    for entry in ordered_entries:
+        official = (entry.zh, entry.en, entry.category)
+        for surface in (entry.zh, entry.en):
+            if surface in sources:
+                add(surface, official)
+    for entry in ordered_entries:
+        if not is_derived_name_entry(entry) or entry.en in excluded:
+            continue
+        if not _has_latin_letter(entry.en) or any(map(is_cjk_character, entry.en)):
+            continue
+        if len(folded_owners.get(entry.en.casefold(), ())) > 1:
+            continue
+        forms = [entry.en] + [
+            entry.en + suffix
+            for suffix in _plural_suffix_candidates(entry.en, (entry.zh, entry.en))
+        ]
+        for form in forms:
+            for spelling in (form.lower(), form.upper()):
+                if (
+                    spelling == form
+                    or spelling in sources
+                    or spelling in folded_sources
+                    or len(spelling) != len(form)
+                ):
+                    continue
+                # Include established meanings with the same original surface
+                # (Tuner the speaker and Tuner the material), not one winner.
+                for (zh, en), category in groups.get(
+                    entry.en, {(entry.zh, entry.en): entry.category}
+                ).items():
+                    add(spelling, (zh, en, category))
+    return {
+        surface: tuple((zh, en, category) for (zh, en), category in bucket.items())
+        for surface, bucket in groups.items()
+    }
 
 
 def exact_lockable_sources(

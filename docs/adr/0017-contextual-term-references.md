@@ -105,3 +105,36 @@ supplement covers seven surfaces (`香椿`, `臭椿`, `椿树`, `椿芽`, `春�
 guards free user text, not official lines. This is a narrower reference and
 reporting set with measured evidence, which the Consequences above name as the
 permitted response, not a per-word exception to forced substitution.
+
+## Candidate supplement: occurrence-scoped references (2026-11-22, `q7`)
+
+The `q7` candidate (`feat/q7-occurrence-term-admission`) retains the decisions
+above and builds occurrence-scoped references directly on the structured
+`TermReference`/`TermOccurrence` model. A surface with competing official pairs
+supplies alternatives to the model rather than a hard lock. Deterministic
+whole-input translation prefers an established dictionary row over a derived
+row (`lookup.preferred_exact_entry`), while dictionary lookup exposes every
+candidate. A derived reference remains guidance to the model; it does not
+create a human precedent or a verified review finding.
+
+Single-character CJK name references require a plausible right boundary as well
+as the existing ordinary-word and name-context checks. An unrecognized CJK
+continuation or a middle dot on either side does not establish a standalone
+name mention. Translation and `review-v2` share this admission rule, advancing
+`MATCHER_REVISION` to `wuwaterm-cjk-matcher-v9`.
+
+For Chinese-to-English requests only, `skill_references.py` derives
+two-character skill stems from official `BinData/skill/skilltype.json` rows 2,
+3, 5, 6, and 11 (`origin="scoped_skill_stem"`). Admission requires local action
+and independent game-context evidence within the same clause of the submitted
+segment, excludes spans inside known lexicon words or longer selected terms,
+and requires a unique local sense marker when a stem has several meanings.
+Read-only previous context never enters admission.
+
+Each occurrence-scoped reference supplies zero-based, end-exclusive
+`model_start`/`model_end` ranges in the actual model input after placeholder
+replacement, validated fail-closed before any HTTP call. Skill-stem ranges also
+carry their target string so two meanings of one stem keep distinct positions.
+Plain single-meaning requests keep their pre-admission prompt bytes unchanged.
+These rules describe the `q7` Draft PR candidate before owner-authorized
+Stage-1 evaluation has been run.

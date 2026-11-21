@@ -5,7 +5,7 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract,
-                   term_matching, term_preparation
+                   skill_references, term_matching, term_preparation
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    llm_transport (HTTP transport for chat completions),
                    semantic_review (semantic-review-v1 engine)
@@ -82,6 +82,7 @@ DOMAIN_CORE = frozenset(
         "english_plural",
         "segmentation",
         "semantic_review_contract",
+        "skill_references",
         "term_matching",
         "term_preparation",
     }

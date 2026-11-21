@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -96,6 +97,27 @@ def derived_reference_only_sources(entries: Iterable[TermEntry]) -> frozenset[st
         for surface in derived
         if (any(map(_is_cjk_character, surface)) or surface in version_titles)
         and normalize_text(surface) not in established_norms
+    )
+
+
+def preferred_exact_entry(service: TermService, query: str) -> TermEntry | None:
+    """Return the exact hit a fixed substitution may restore, if any.
+
+    An established row wins over a derived one, so a name the builder derived
+    never displaces the meaning the dictionary already paired. Remaining
+    candidates stay available to dictionary lookup; only deterministic
+    whole-input translation picks one.
+    """
+    result = service.lookup_exact(query, limit=sys.maxsize)
+    if not result.exact or result.best is None:
+        return None
+    return next(
+        (
+            candidate.entry
+            for candidate in result.candidates
+            if not is_derived_name_entry(candidate.entry)
+        ),
+        result.best.entry,
     )
 
 

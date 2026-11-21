@@ -306,7 +306,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -383,7 +383,8 @@ Observed edges (static imports among shipped modules):
   `term_preparation`, `httpx`; only its old `translate_html`,
   `translate_html_async`, and `_restore_html` methods lazily import their
   matching Telegram compatibility functions.
-- `term_preparation` → `term_matching`, `cjk_span`, `protected_text`;
+- `term_preparation` → `term_matching`, `cjk_span`, `protected_text`,
+  `skill_references`; `skill_references` → `cjk_span`, `models`;
   `builder` → `term_matching` for both free-text exclusion measurements.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).

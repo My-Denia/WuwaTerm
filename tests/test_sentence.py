@@ -1602,6 +1602,31 @@ def test_skipped_single_character_name_is_still_offered_as_a_reference(
     }
 
 
+@pytest.mark.parametrize(
+    "text", ["心·蕾", "释放「椿·蕾」", "红·椿", "红·椿绽放"]
+)
+def test_middle_dot_compound_is_never_a_name(single_name_db, text):
+    # matcher v9 closes both boundaries at a middle dot. The deterministic path
+    # must not lock the character and the model path must not reference it:
+    # one half of 红·椿 or 椿·蕾 is not the standalone name.
+    if "心" in text:
+        with connect(single_name_db) as conn:
+            insert_records(
+                conn,
+                [TermRecord("resonator", "fixture", "5", "5", "心", "Hsin")],
+            )
+            conn.commit()
+    translator = SentenceTranslator(single_name_db)
+
+    locked = translator.lock_terms(text)
+    assert locked.locks == ()
+    assert locked.locked_text == text
+
+    with_references = translator._lock_terms_with_references(text, to_chinese=False)
+    assert with_references.locks == ()
+    assert with_references.references == ()
+
+
 @pytest.mark.parametrize("text", ["香椿加入菜单。", "椿树很高。", "春天的风吹过。"])
 def test_ordinary_plant_words_are_not_offered_as_name_references(
     single_name_db, text
@@ -2257,6 +2282,127 @@ def test_exclusions_keep_case_variant_ambiguity_and_exact_blocking(case_variant_
     assert _locked_pairs(translator, "Corin is here.") == [("柯林", "Corin")]
     # Other resonators keep their variants.
     assert _locked_pairs(translator, "velmira joins.") == [("维米拉", "Velmira")]
+
+
+@pytest.mark.parametrize("other_en", ["vexil tube", "Vexil tube"])
+def test_exclusions_keep_derived_soft_spelling_casefold_ambiguity(
+    case_variant_db, other_en
+):
+    from wuwaterm.telegram_html import protect_telegram_html
+    from wuwaterm.term_matching import (
+        exact_lockable_source_records,
+        model_reference_candidates,
+    )
+
+    with connect(case_variant_db) as conn:
+        insert_records(
+            conn,
+            [
+                TermRecord(
+                    "item",
+                    "BinData/item/iteminfo.json",
+                    "tier-base:91",
+                    "tier-base:91",
+                    "青纹管",
+                    "Vexil Tube",
+                ),
+                TermRecord(
+                    "item", "fixture", "92", "92", "青纹软管", other_en
+                ),
+                TermRecord(
+                    "item",
+                    "BinData/item/iteminfo.json",
+                    "tier-base:93",
+                    "tier-base:93",
+                    "青纹盒",
+                    "Vexil Box",
+                ),
+            ],
+        )
+        conn.commit()
+    _set_exclusions(
+        case_variant_db,
+        _exclusion_value(sorted([(other_en, 12, 0), ("vexil box", 12, 0)])),
+    )
+    translator = SentenceTranslator(case_variant_db)
+    entries = translator.service.entries()
+    pre_sources = exact_lockable_source_records(entries)
+    post_sources = {
+        key: value
+        for key, value in pre_sources.items()
+        if key not in {other_en, "vexil box"}
+    }
+    excluded = frozenset({other_en, "vexil box"})
+    direct_explicit = model_reference_candidates(
+        entries, post_sources, excluded, pre_exclusion_sources=pre_sources
+    )
+    direct_default = model_reference_candidates(entries, post_sources, excluded)
+    assert direct_explicit == direct_default
+    for blocked in ("vexil tube", "vexil tubes", "VEXIL TUBE", "VEXIL TUBES"):
+        assert blocked not in direct_explicit
+    assert direct_explicit["Vexil Tube"] == (("青纹管", "Vexil Tube", "item"),)
+    assert "vexil box" not in direct_explicit
+    assert direct_explicit["vexil boxes"] == (("青纹盒", "Vexil Box", "item"),)
+    assert direct_explicit["VEXIL BOX"] == (("青纹盒", "Vexil Box", "item"),)
+    assert direct_explicit["VEXIL BOXES"] == (("青纹盒", "Vexil Box", "item"),)
+
+    rows, _nfkc, _ref_only, snap_candidates, _skills = (
+        translator._read_lockable_sources()
+    )
+    lockable_map = dict(rows)
+    assert other_en not in lockable_map
+    assert lockable_map["Vexil Tube"] == ("青纹管", "Vexil Tube", "item")
+    assert snap_candidates == translator._reference_candidates()
+    for blocked in ("vexil tube", "vexil tubes", "VEXIL TUBE", "VEXIL TUBES"):
+        assert blocked not in snap_candidates
+        assert blocked not in lockable_map
+    assert "vexil box" not in snap_candidates
+    assert snap_candidates["vexil boxes"] == (("青纹盒", "Vexil Box", "item"),)
+
+    locked = translator._lock_terms_with_references(
+        "Tidecore: vexil tube, vexil tubes, VEXIL TUBE, VEXIL TUBES.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in locked.locks] == [("潮核", "Tidecore")]
+    assert locked.references == ()
+
+    protected_locked = translator._lock_protected_terms_with_references(
+        protect_telegram_html(
+            "<b>Tidecore</b>: vexil tubes, VEXIL TUBE, VEXIL TUBES."
+        ).neutral,
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in protected_locked.locks] == [
+        ("潮核", "Tidecore")
+    ]
+    assert protected_locked.references == ()
+
+    exact_locked = translator._lock_terms_with_references(
+        "Tidecore: Vexil Tube, Vexil Tubes.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in exact_locked.locks] == [
+        ("潮核", "Tidecore"),
+        ("青纹管", "Vexil Tube"),
+        ("青纹管", "Vexil Tube"),
+    ]
+
+    control_locked = translator._lock_terms_with_references(
+        "Tidecore: vexil box, vexil boxes.",
+        to_chinese=True,
+        allow_plural_inflection=True,
+    )
+    assert [(zh, en) for _, zh, en in control_locked.locks] == [
+        ("潮核", "Tidecore")
+    ]
+    assert tuple(ref.as_tuple() for ref in control_locked.references) == (
+        ("vexil boxes", "青纹盒", "Vexil Box", "item"),
+    )
+    assert control_locked.references[0].origin == "derived_soft_casing"
+    assert control_locked.references[0].reason == "soft_casing"
 
 
 # Chinese-surface free-text lock exclusions (the zh metadata key). The
