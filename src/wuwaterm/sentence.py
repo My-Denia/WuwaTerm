@@ -44,7 +44,6 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     structured_llm_error_text as _structured_llm_error_text,
 )
 from .lookup import TermService, preferred_exact_entry
-from .lookup import derived_reference_only_sources as _derived_reference_only_sources
 from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
@@ -53,6 +52,9 @@ from .review import paragraph_ranges as _paragraph_ranges
 from .review import segment_core as _segment_core
 from .semantic_review_contract import PRECEDENT_WORDING
 from .skill_references import SkillReference, skill_references
+from .term_classification import (
+    derived_reference_only_sources as _derived_reference_only_sources,
+)
 from .term_matching import (
     CASE_VARIANT_CATEGORIES as CASE_VARIANT_CATEGORIES,
     ReferenceCandidates,

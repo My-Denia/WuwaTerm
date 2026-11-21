@@ -17,8 +17,8 @@ from .cjk_span import (
 )
 from .constants import CATEGORY_ORDER
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
-from .lookup import is_derived_name_entry
 from .models import TermEntry
+from .term_classification import is_derived_name_entry
 
 
 ReferenceCandidates = dict[str, tuple[tuple[str, str, str], ...]]

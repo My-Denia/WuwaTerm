@@ -5,7 +5,8 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract,
-                   skill_references, term_matching, term_preparation
+                   skill_references, term_classification, term_matching,
+                   term_preparation
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    llm_transport (HTTP transport for chat completions),
                    semantic_review (semantic-review-v1 engine)
@@ -56,6 +57,11 @@ nested subpackages discovered via rglob):
    ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
    strongly connected component may appear — a two-module mutual import is one
    cycle shape, not the only one.
+11. Pure terminology modules (``cjk_span``, ``english_plural``,
+   ``protected_text``, ``skill_references``, ``term_classification``,
+   ``term_matching``, ``term_preparation``) must not import ``db`` or
+   ``lookup`` (runtime or type-only), keeping matching and preparation
+   decoupled from storage.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -100,10 +106,25 @@ DOMAIN_CORE = frozenset(
         "segmentation",
         "semantic_review_contract",
         "skill_references",
+        "term_classification",
         "term_matching",
         "term_preparation",
     }
 )
+# Pure terminology helpers that must stay decoupled from SQLite storage (`db`)
+# and database-backed lookup (`lookup`).
+PURE_TERM_MODULES = frozenset(
+    {
+        "cjk_span",
+        "english_plural",
+        "protected_text",
+        "skill_references",
+        "term_classification",
+        "term_matching",
+        "term_preparation",
+    }
+)
+PURE_TERM_FORBIDDEN_IMPORTS = frozenset({"db", "lookup"})
 DOMAIN_LLM = frozenset({"sentence", "llm_transport", "semantic_review"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
@@ -718,6 +739,13 @@ def check() -> list[str]:
             if bad_llm:
                 failures.append(
                     f"{rel}: domain core must not import domain+LLM {bad_llm}"
+                )
+
+        if name in PURE_TERM_MODULES:
+            bad_storage = sorted(local_all & PURE_TERM_FORBIDDEN_IMPORTS)
+            if bad_storage:
+                failures.append(
+                    f"{rel}: pure terminology module must not import storage/lookup {bad_storage}"
                 )
 
         if name in DOMAIN_LLM:

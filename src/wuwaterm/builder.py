@@ -303,7 +303,7 @@ def iter_arikatsu_records(
     # hand-picked entries. The TextMap also carries the
     # ``Advertising_VersionTitle_<n>`` family, which names a release rather
     # than a glossary meaning; the builder imports it too and runtime treats
-    # those rows as contextual references (lookup.is_derived_name_entry), so
+    # those rows as contextual references (term_classification.is_derived_name_entry), so
     # a title never hard-replaces ordinary prose. Other advertising and UI
     # text is not a term source. BinData still supplies its own categories.
     core_title = re.compile(r"(?:Term\d+_Title|Advertising_VersionTitle_\d+)$")

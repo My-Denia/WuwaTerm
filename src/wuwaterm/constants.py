@@ -137,7 +137,7 @@ OFFICIAL_ANNOUNCEMENT_SOURCE_FILE = "official_announcement"
 # the same TextMap, which names a release rather than a glossary meaning; and
 # the base pair of a complete four-tier item family, whose source_id is
 # ITEM_TIER_BASE_SOURCE_PREFIX plus the Basic-tier row id. Runtime reads a
-# row's provenance from these markers (lookup.is_derived_name_entry).
+# row's provenance from these markers (term_classification.is_derived_name_entry).
 ARIKATSU_MULTITEXT_SOURCE_FILE = "Textmaps/multi_text/MultiText.json"
 AREA_TITLE_KEY_RE = re.compile(r"Area_\d+_Title")
 ADVERTISING_VERSION_TITLE_RE = re.compile(r"Advertising_VersionTitle_\d+")

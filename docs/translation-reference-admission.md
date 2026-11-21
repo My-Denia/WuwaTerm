@@ -30,7 +30,8 @@ additions. The derived row keeps its `tier-base:<smallest Basic row id>`
 provenance.
 
 An established record remains the deterministic whole-input primary when a
-derived record shares its surface (`lookup.preferred_exact_entry`). On the
+derived record shares its surface (`lookup.preferred_exact_entry`, backed by
+pure `term_classification.select_preferred_exact_entry`). On the
 model path, competing pairs are alternatives supplied together as
 `TermReference` items (`reason="ambiguous_alternative"`), never a forced
 replacement, and a surface with more than one distinct pair is never

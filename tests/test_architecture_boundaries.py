@@ -700,3 +700,59 @@ def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
     )
 
     assert cab.check_scripts_import_cycles() == []
+
+
+def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
+    """Matching and preparation stay decoupled from SQLite/lookup even transitively."""
+    from scripts import check_architecture_boundaries as cab
+
+    modules = cab._pkg_modules()
+    graph = {
+        name: {
+            imported
+            for imported, _type_only, _lineno in cab._iter_import_events(path)
+            if imported in modules
+        }
+        for name, path in modules.items()
+    }
+    for root in sorted(cab.PURE_TERM_MODULES):
+        seen: set[str] = set()
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for neighbor in graph.get(current, ()):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        assert not (seen & cab.PURE_TERM_FORBIDDEN_IMPORTS), (root, sorted(seen))
+
+
+def test_pure_term_module_importing_lookup_or_db_is_rejected(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    pkg.mkdir()
+    for name in cab.ALL_CLASSIFIED:
+        path = pkg / f"{name.replace('.', '/')}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n", encoding="utf-8")
+
+    (pkg / "term_matching.py").write_text(
+        "from .lookup import is_derived_name_entry\n",
+        encoding="utf-8",
+    )
+    (pkg / "skill_references.py").write_text(
+        "from .db import connect\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    failures = cab.check()
+    assert any(
+        "term_matching.py" in f and "storage/lookup" in f and "lookup" in f
+        for f in failures
+    ), failures
+    assert any(
+        "skill_references.py" in f and "storage/lookup" in f and "db" in f
+        for f in failures
+    ), failures
