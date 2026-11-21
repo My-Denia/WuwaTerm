@@ -5,6 +5,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_architecture_boundaries.py"
@@ -940,3 +942,133 @@ def test_admission_manifest_rejects_missing_tool_paths_entry(
         in f
         for f in failures
     ), failures
+
+
+@pytest.mark.parametrize(
+    "branch_order",
+    ["proven_then_unknown", "unknown_then_proven"],
+)
+def test_admission_manifest_rejects_mixed_branch_producer_var_regardless_of_order(
+    tmp_path: Path, monkeypatch, branch_order: str
+):
+    from scripts import check_architecture_boundaries as cab
+
+    if branch_order == "proven_then_unknown":
+        branches = (
+            "    if cond:\n"
+            "        producer_spec = _ATTEMPT_PRODUCERS[key]\n"
+            "    else:\n"
+            "        producer_spec = other_spec\n"
+        )
+    else:
+        branches = (
+            "    if cond:\n"
+            "        producer_spec = other_spec\n"
+            "    else:\n"
+            "        producer_spec = _ATTEMPT_PRODUCERS[key]\n"
+        )
+    admission_body = (
+        "_ATTEMPT_PRODUCERS = {\n"
+        '    "builds": _AttemptProducer("component_build", "_read_attempt", None, None),\n'
+        "}\n"
+        "def _tool_modules(*names, message):\n"
+        "    for name in names:\n"
+        "        importlib.import_module(name)\n"
+        "def _tool_module(name, *, message):\n"
+        "    return _tool_modules(name, message=message)[0]\n"
+        "def use_tools(cond, key, other_spec):\n"
+        + branches
+        + '    return _tool_module(producer_spec.module, message="m")\n'
+    )
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_build",),
+        admission_body=admission_body,
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any("not statically discoverable" in f for f in failures), failures
+
+
+@pytest.mark.parametrize(
+    "alias_snippet",
+    [
+        'import importlib as il\ndef bypass():\n    return il.import_module("component_runtime")\n',
+        'from importlib import import_module as im\ndef bypass():\n    return im("component_runtime")\n',
+        'def bypass():\n    loader = importlib.import_module\n    return loader("component_runtime")\n',
+    ],
+)
+def test_admission_manifest_rejects_import_module_aliases(
+    tmp_path: Path, monkeypatch, alias_snippet: str
+):
+    from scripts import check_architecture_boundaries as cab
+
+    admission_body = (
+        alias_snippet
+        + "def _tool_modules(*names, message):\n"
+        "    for name in names:\n"
+        "        importlib.import_module(name)\n"
+        "def _tool_module(name, *, message):\n"
+        "    return _tool_modules(name, message=message)[0]\n"
+        "def use_tools():\n"
+        '    return _tool_module("component_runtime", message="m")\n'
+    )
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_runtime",),
+        admission_body=admission_body,
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any("raw import_module call bypasses" in f for f in failures), failures
+
+
+@pytest.mark.parametrize(
+    "bad_use",
+    [
+        # Use before assignment inside the scope
+        (
+            "def use_tools(key):\n"
+            '    _tool_module(producer_spec.module, message="m")\n'
+            "    producer_spec = _ATTEMPT_PRODUCERS[key]\n"
+        ),
+        # Rebound by loop target / parameter
+        (
+            "def use_tools(key, producer_spec):\n"
+            "    if key:\n"
+            "        producer_spec = _ATTEMPT_PRODUCERS[key]\n"
+            '    return _tool_module(producer_spec.module, message="m")\n'
+        ),
+        (
+            "def use_tools(key, items):\n"
+            "    producer_spec = _ATTEMPT_PRODUCERS[key]\n"
+            "    for producer_spec in items:\n"
+            "        pass\n"
+            '    return _tool_module(producer_spec.module, message="m")\n'
+        ),
+    ],
+)
+def test_admission_manifest_rejects_unproven_or_use_before_assign_producer_var(
+    tmp_path: Path, monkeypatch, bad_use: str
+):
+    from scripts import check_architecture_boundaries as cab
+
+    admission_body = (
+        "_ATTEMPT_PRODUCERS = {\n"
+        '    "builds": _AttemptProducer("component_build", "_read_attempt", None, None),\n'
+        "}\n"
+        "def _tool_modules(*names, message):\n"
+        "    for name in names:\n"
+        "        importlib.import_module(name)\n"
+        "def _tool_module(name, *, message):\n"
+        "    return _tool_modules(name, message=message)[0]\n"
+        + bad_use
+    )
+    scripts = _write_minimal_admission_scripts(
+        tmp_path,
+        declared=("component_build",),
+        admission_body=admission_body,
+    )
+    monkeypatch.setattr(cab, "SCRIPTS", scripts)
+    failures = cab.check_deployment_admission_manifest()
+    assert any("not statically discoverable" in f for f in failures), failures
