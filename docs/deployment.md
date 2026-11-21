@@ -560,13 +560,19 @@ else here:
 | `slot_wait_ms` | milliseconds spent waiting for a **model concurrency slot** in this process |
 | `llm_post_ms` | milliseconds inside the **chat-completion POST**, retries included |
 | `llm_calls` | POST attempts started |
-| `direction` | `zh->en`, `en->zh`, or `-` when the direction was not settled yet |
+| `direction` | the pair: `zh->en`, `en->zh`, or `-` when it was not settled yet |
 
 The group is all-or-nothing and absent from a record for a request that never
 reached the model, which is what keeps the shape of every ordinary record as it
 was. A large `slot_wait_ms` with a small `llm_post_ms` is a queue in this
 process and points at `WUWATERM_API_LLM_MAX_CONCURRENCY`; the reverse is the
 provider being slow and costs this process nothing to wait for.
+
+`direction` here is the whole pair. The separate `translation ... direction=`
+line is a different field with a different vocabulary — there it is the target
+language alone (`en` or `zh`) — so read them as two spellings of one fact, not
+as two measurements: `zh->en` on the record and `direction=en` on the
+translation line say the same thing.
 
 When a request is refused at the time budget, the `request timed out` record
 carries the same split plus the stage it died in, and there `elapsed_ms` is the
