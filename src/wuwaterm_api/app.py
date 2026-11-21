@@ -99,6 +99,7 @@ from wuwaterm.request_trace import (
     STAGE_DONE,
     STAGE_POSTPROCESS,
     STAGE_PREPARE_TERMS,
+    UNKNOWN_VALUE,
     completion_fields,
     current as current_trace,
     direction_from_target,
@@ -1026,16 +1027,45 @@ class _ResponseExchange:
     that discovers after the fact that it must answer for a request it no longer
     owns can only do that while nothing was sent yet — and it has to KNOW which
     case it is in rather than assume.
+
+    ``started`` is set BEFORE the outer ``send`` is awaited, not after it
+    returns, and that ordering is the whole point of this class. An ASGI ``send``
+    is the point where the status line is committed to the socket; the await
+    around it can suspend afterwards (a drain, a TLS write, backpressure), and a
+    deadline firing in that window must not conclude that nothing was sent. Read
+    the other way round, this class reported ``[200, 504]`` to the server for a
+    response that had in fact already started — measured, not theorised.
     """
 
     def __init__(self, send: Send) -> None:
         self._send = send
         self.started = False
+        self.completed = False
+        self.status_code: int | None = None
 
     async def send(self, message: Message) -> None:
-        await self._send(message)
         if message["type"] == "http.response.start":
+            # Committed to the wire by the call below, whatever that call then
+            # does: from here on a second status line must never be written.
             self.started = True
+            self.status_code = int(message["status"])
+        elif message["type"] == "http.response.body" and not message.get(
+            "more_body", False
+        ):
+            self.completed = True
+        await self._send(message)
+
+    async def close_body(self) -> None:
+        """Finish a response whose body was abandoned at its deadline.
+
+        A no-op when the body already completed, so this is safe to call on
+        every timeout. ``suppress(Exception)`` at the call site is deliberate:
+        a server that has already dropped the connection raises here, and that
+        is not a second fault worth reporting — the timeout already was one.
+        """
+        if self.completed:
+            return
+        await self._send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 class RequestIdMiddleware:
@@ -1354,13 +1384,27 @@ class TimeoutMiddleware:
         # in-flight part of that POST included), or this process' own work.
         # That is the whole point of the record — a timeout is not actionable
         # until it says which of the three it was.
+        #
+        # ``sent_status`` is what the caller was actually given. It is ``-`` on
+        # the ordinary path, where the 504 below is the whole answer; a number
+        # means the status line went out first and the body died after it, in
+        # which case the 504 cannot be delivered and the body is closed empty
+        # instead of left dangling. Either way the record is the only place the
+        # timeout is reported.
         LOGGER.warning(
-            "request timed out route=%s request_id=%s%s",
+            "request timed out route=%s request_id=%s sent_status=%s%s",
             _route_label(request),
             _request_id(request),
+            exchange.status_code if exchange.started else UNKNOWN_VALUE,
             timing_fields(current_trace(), include_elapsed=True, include_stage=True),
         )
         if exchange.started:
+            # The status line is already on the wire, so the 504 cannot be sent:
+            # a second ``http.response.start`` corrupts the exchange for a
+            # server. What remains is to not leave the caller waiting for a body
+            # that will never come.
+            with contextlib.suppress(Exception):
+                await exchange.close_body()
             return
         await _send_error(
             exchange.send,

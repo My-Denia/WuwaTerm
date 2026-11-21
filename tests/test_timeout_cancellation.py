@@ -548,3 +548,79 @@ def test_a_timeout_before_the_response_starts_answers_exactly_once(
     assert bodies, messages
     assert bodies[-1].get("more_body", False) is False, bodies
     assert b'"code":"internal"' in bodies[-1]["body"].replace(b" ", b""), bodies
+
+
+def test_a_status_line_already_in_flight_is_never_preceded_by_another(monkeypatch):
+    """The exchange that already started must keep the ONLY status line it has.
+
+    An ASGI ``send`` commits the status line to the socket before it returns
+    from the await: a real server drains, writes a TLS record, or waits for
+    backpressure there, so the call can still be suspended when the deadline
+    fires. Recording "a response has started" only once that call RETURNED
+    therefore concluded that nothing had been sent, and the deadline layer wrote
+    a second ``http.response.start`` — the server was handed ``[200, 504]`` for
+    one request. Measured against a suspended ``send`` before the ordering was
+    fixed, which is what this test pins.
+
+    Asserted on the messages rather than the status code, because the defect is
+    invisible in a status code: a client reads whichever status line reached it
+    first and never learns the second was written.
+    """
+
+    async def handler(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        # Outlives the budget, so the deadline arrives while the exchange above
+        # is in flight.
+        await asyncio.sleep(30)
+
+    committed: list[str] = []
+    released = asyncio.Event()
+
+    async def suspended_send(message):
+        if message["type"] == "http.response.start":
+            # The await that made the old ordering wrong: the status line is on
+            # the wire, and this call suspends anyway.
+            committed.append(f"{message['type']}:{message['status']}")
+            released.set()
+            await asyncio.sleep(1.0)
+            return
+        committed.append(message["type"])
+
+    from wuwaterm_api.app import TimeoutMiddleware
+
+    app = TimeoutMiddleware(handler, timeout_seconds=0.1)
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "path": "/",
+        "raw_path": b"/",
+        "root_path": "",
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("api.test", 80),
+        "client": ("127.0.0.1", 12345),
+        "headers": [(b"host", b"api.test")],
+    }
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def scenario():
+        await app(scope, receive, suspended_send)
+        # Past the point the suspended send would have returned, so a status
+        # line written after it cannot hide behind the wait.
+        await asyncio.sleep(0.2)
+
+    with captured_records() as recorder:
+        run(scenario())
+
+    starts = [entry for entry in committed if entry.startswith("http.response.start")]
+    assert starts == ["http.response.start:200"], committed
+    # One record, and it says what the caller actually got rather than claiming
+    # a 504 it could not deliver.
+    [record] = timeout_records(recorder)
+    assert record["sent_status"] == "200", record
+    # The body was completed rather than left dangling: a client reading the
+    # response must not be left waiting for something that will never come.
+    assert committed[-1] == "http.response.body", committed
