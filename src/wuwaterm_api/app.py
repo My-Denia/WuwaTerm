@@ -93,6 +93,19 @@ from wuwaterm.application import (
     translate_request_async,
 )
 from wuwaterm.logging_utils import redact_id
+from wuwaterm.request_trace import (
+    STAGE_DONE,
+    STAGE_POSTPROCESS,
+    STAGE_PREPARE_TERMS,
+    completion_fields,
+    current as current_trace,
+    direction_from_target,
+    reset as reset_trace,
+    set_direction,
+    set_stage,
+    start as start_trace,
+    timing_fields,
+)
 from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 
 from . import API_VERSION, TERM_QUERY_MAX_LENGTH
@@ -977,16 +990,27 @@ def _log_request_completed(
     complete JSON document, so the difference is transmission time, and what
     the number is useful for — which stage of the pipeline the request spent
     its time in — is on this side of it either way.
+
+    A request that reached the model gains one trailing group of fields —
+    ``slot_wait_ms``, ``llm_post_ms``, ``llm_calls``, ``direction`` — which
+    splits that duration into the three waits that have different owners: this
+    process' concurrency slot, the provider's response, and everything else.
+    The group is all-or-nothing and is absent from every record for a request
+    that never got that far, so the shape of an ordinary record is unchanged.
+    Every value in it is a number this process measured or a token from a fixed
+    vocabulary (see :mod:`wuwaterm.request_trace`), so it adds no exposure: a
+    caller cannot put anything into it.
     """
     LOGGER.info(
         "request complete request_id=%s method=%s route=%s status=%s "
-        "duration_ms=%.1f device=%s",
+        "duration_ms=%.1f device=%s%s",
         request_id,
         _method_label(request),
         _route_label(request),
         status_code,
         elapsed_seconds * 1000.0,
         _log_principal(request),
+        completion_fields(current_trace()),
     )
 
 
@@ -1013,11 +1037,19 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     ``Exception`` handler runs OUTSIDE every user middleware: an unhandled
     failure passes straight through this method, and the request most worth
     having a record of would otherwise be the one that produces none.
+
+    This method also BEGINS the request trace, which is the one place that can:
+    it is the outermost layer, so everything below it — including a request
+    refused before it was routed — is inside the trace it starts. Below it,
+    stage marks mutate that object (see :mod:`wuwaterm.request_trace` for why a
+    mutation rather than a rebinding), and the ``finally`` resets the variable
+    so nothing survives into a context this request owned.
     """
 
     async def dispatch(self, request: Request, call_next):
         request_id = _new_request_id()
         request.state.request_id = request_id
+        start_trace()
         started = time.perf_counter()
         # What the caller gets when the exception escapes to the handler
         # outside this middleware; overwritten as soon as a response exists.
@@ -1025,6 +1057,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
             status_code = response.status_code
+            set_stage(STAGE_DONE)
             response.headers[REQUEST_ID_HEADER] = request_id
             response.headers.update(_status_response_headers(request))
             return response
@@ -1073,6 +1106,12 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                         request_id,
                         exc_info=True,
                     )
+            finally:
+                # The trace belongs to THIS request. Dropping the reference
+                # here keeps every mark below a no-op for anything that runs
+                # afterwards in the same context, which is what makes the
+                # bot/CLI/embedding paths pay nothing for this module.
+                reset_trace()
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
@@ -1163,10 +1202,22 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
         try:
             return await asyncio.wait_for(call_next(request), self.timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
+            # The total was already on the record; what it could not say is
+            # WHERE the time went, which is what the request trace keeps. The
+            # cancelled handler leaves its last stage mark behind, so this line
+            # names the stage the request died in and how much of its budget
+            # each owner had taken: a slot it was still queued for
+            # (``llm_slot_wait``), a POST the provider had not answered
+            # (``llm_post``, with the in-flight part of that POST included), or
+            # this process' own work. That is the whole point of the record — a
+            # timeout is not actionable until it says which of the three it was.
             LOGGER.warning(
-                "request timed out route=%s request_id=%s",
+                "request timed out route=%s request_id=%s%s",
                 _route_label(request),
                 _request_id(request),
+                timing_fields(
+                    current_trace(), include_elapsed=True, include_stage=True
+                ),
             )
             return _error_response(
                 ApiError(
@@ -1852,6 +1903,7 @@ def _register_routes(app: FastAPI) -> None:
         # must not spend an LLM budget slot or a model round trip.
         await _require_active_device(request, device)
 
+        set_stage(STAGE_PREPARE_TERMS)
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
@@ -1867,6 +1919,7 @@ def _register_routes(app: FastAPI) -> None:
             # the request time budget) while it runs.
             offload=asyncio.to_thread,
         )
+        set_stage(STAGE_POSTPROCESS)
         LOGGER.info(
             "translation device=%s kind=%s direction=%s context=%s request_id=%s",
             redact_id(device.device_id),
@@ -2127,6 +2180,10 @@ def _register_routes(app: FastAPI) -> None:
             context_before=before,
             precedents=_precedents(body.precedents),
         )
+        # Known before the model call and worth recording before it: a request
+        # refused at the time budget never returns the direction it was given.
+        set_direction(direction_from_target(body.direction))
+        set_stage(STAGE_PREPARE_TERMS)
         outcome = await semantic_review_async(
             request.app.state.term_service,
             request.app.state.translator,
@@ -2135,6 +2192,7 @@ def _register_routes(app: FastAPI) -> None:
             before_llm_call=_device_llm_guard(request, device),
             offload=asyncio.to_thread,
         )
+        set_stage(STAGE_POSTPROCESS)
         # Lengths, counts and status only: neither text is ever logged.
         LOGGER.info(
             "semantic review device=%s source_len=%s target_len=%s status=%s"

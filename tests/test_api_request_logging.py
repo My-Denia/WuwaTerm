@@ -163,6 +163,14 @@ EXPECTED_FIELDS = {
     "device",
 }
 
+# The one optional group a record can gain, and only for a request that reached
+# the model: the split of `duration_ms` into the waits that have different
+# owners (see wuwaterm.request_trace). It is all-or-nothing — a record with one
+# of these and not the others is a field added by accident — and the check below
+# still refuses ANY key outside these two sets, so a new field cannot appear
+# quietly just because the record grew an optional suffix.
+STAGE_FIELDS = {"slot_wait_ms", "llm_post_ms", "llm_calls", "direction"}
+
 DIAGNOSTIC_PREFIX = "llm translation diagnostic "
 DIAGNOSTIC_FIELDS = {
     "request_id", "reason", "detail", "expected_count", "actual_count"
@@ -465,7 +473,9 @@ def fields(message: str) -> dict[str, str]:
         assert separator, f"{token!r} is not a field in {message!r}"
         assert key not in parsed, f"duplicate field {key!r} in {message!r}"
         parsed[key] = value
-    assert set(parsed) == EXPECTED_FIELDS, parsed
+    stage = set(parsed) & STAGE_FIELDS
+    assert stage in (set(), STAGE_FIELDS), parsed
+    assert set(parsed) - STAGE_FIELDS == EXPECTED_FIELDS, parsed
     return parsed
 
 
