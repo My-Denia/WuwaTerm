@@ -42,6 +42,10 @@ nested subpackages discovered via rglob):
    bot, channel, lookup, sentence, db, telegram_* or builder modules, never
    the ``wuwaterm`` package root, and never the Telegram SDK. This is the
    machine-checkable form of "the API cannot bypass the shared pipeline".
+9. Modules under ``src/wuwaterm`` must not import private ``_name`` symbols
+   from sibling modules (relative ``from .mod import _x`` or absolute
+   ``from wuwaterm.mod import _x``). Intentionally shared helpers are promoted
+   to public names; local ``public as _alias`` rebindings remain allowed.
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -459,6 +463,34 @@ def check_api_package() -> list[str]:
     return failures
 
 
+def _is_private_symbol_name(name: str) -> bool:
+    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+
+
+def _iter_private_cross_module_imports(path: Path) -> list[tuple[str, str, int]]:
+    """Return (target_module, symbol, lineno) for private `_name` imports."""
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    found: list[tuple[str, str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = node.module or ""
+        if node.level:
+            target = _resolve_relative_import(path, node.level, node.module) or "wuwaterm"
+        elif module == "wuwaterm":
+            target = "wuwaterm"
+        elif module.startswith("wuwaterm."):
+            target = module[len("wuwaterm.") :]
+        else:
+            continue
+        for entry in node.names:
+            symbol = entry.name.split(".", 1)[0]
+            if symbol != "*" and _is_private_symbol_name(symbol):
+                found.append((target, symbol, node.lineno))
+    return found
+
+
 def check() -> list[str]:
     modules, collisions = _discover_modules()
     failures: list[str] = list(collisions)
@@ -564,6 +596,12 @@ def check() -> list[str]:
             failures.append(
                 f"{rel}: only db/builder may import build_pinyin "
                 f"(found import of build_pinyin)"
+            )
+
+        for target, symbol, lineno in _iter_private_cross_module_imports(path):
+            failures.append(
+                f"{rel}:{lineno}: must not import private symbol {symbol!r} "
+                f"from {target}"
             )
 
     # Explicit: presentation files must never mention build_pinyin import.

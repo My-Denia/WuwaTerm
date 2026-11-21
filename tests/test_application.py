@@ -76,8 +76,8 @@ def enable_mock_llm(monkeypatch, calls, response_factory) -> None:
         calls.append((locked_text, locks))
         # Stand in for the model applying the supplied dictionary references;
         # hard-locked placeholders stay byte-identical for restore.
-        for source, zh, en, _category in references:
-            locked_text = locked_text.replace(source, zh if to_chinese else en)
+        for ref in references:
+            locked_text = locked_text.replace(ref.source, ref.zh if to_chinese else ref.en)
         return response_factory(locked_text, locks)
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)

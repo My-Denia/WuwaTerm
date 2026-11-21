@@ -331,9 +331,9 @@ def placeholder_for(locks, official, references=(), *, to_chinese=True):
     for placeholder, _source, en in locks:
         if en == official:
             return placeholder
-    for _source, zh, en, _category in references:
-        if en == official:
-            return zh if to_chinese else en
+    for ref in references:
+        if ref.en == official:
+            return ref.zh if to_chinese else ref.en
     raise AssertionError(f"missing official term {official}")
 
 

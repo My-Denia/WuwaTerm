@@ -16,7 +16,7 @@ from .models import TermEntry
 
 
 @dataclass(frozen=True)
-class _TermSpan:
+class TermSpan:
     start: int
     end: int
     source: str
@@ -24,7 +24,7 @@ class _TermSpan:
     order: int
 
 
-def _is_cjk_character(char: str) -> bool:
+def is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
 
 
@@ -51,7 +51,7 @@ def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> b
     return True
 
 
-def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
+def is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
     return (
         (
             len(source) >= 2
@@ -59,7 +59,7 @@ def _is_eligible_lockable(source: str, official: tuple[str, str, str]) -> bool:
                 len(source) == 1
                 and source == official[0]
                 and official[2] == "resonator"
-                and _is_cjk_character(source)
+                and is_cjk_character(source)
             )
         )
         and bool(official[0])
@@ -79,7 +79,7 @@ def _nfkc_spelling(source: str) -> str:
     return unicodedata.normalize("NFKC", source)
 
 
-def _admissible_nfkc_sources(
+def admissible_nfkc_sources(
     sources: dict[str, tuple[str, str, str]],
     variants: list[tuple[str, tuple[str, str, str]]],
     excluded: frozenset[str],
@@ -136,7 +136,7 @@ def _has_latin_letter(text: str) -> bool:
     )
 
 
-def _case_variant_sources(
+def case_variant_sources(
     sources: dict[str, tuple[str, str, str]],
     excluded: frozenset[str] = frozenset(),
 ) -> list[tuple[str, tuple[str, str, str]]]:
@@ -153,9 +153,9 @@ def _case_variant_sources(
     """
     records_by_key: dict[str, set[tuple[str, str]]] = {}
     for source, official in sources.items():
-        if not _is_eligible_lockable(source, official):
+        if not is_eligible_lockable(source, official):
             continue
-        if not _has_latin_letter(source) or any(map(_is_cjk_character, source)):
+        if not _has_latin_letter(source) or any(map(is_cjk_character, source)):
             continue
         records_by_key.setdefault(source.casefold(), set()).add(
             (official[0], official[1])
@@ -256,7 +256,7 @@ def select_term_spans(
     *,
     allow_plural_inflection: bool = False,
     nfkc_spelling_sources: frozenset[str] = frozenset(),
-) -> list[_TermSpan]:
+) -> list[TermSpan]:
     """Return the term spans ``text`` locks, ordered by start position.
 
     ``context_text`` is the surrounding visible text that ``text`` starts at
@@ -279,7 +279,7 @@ def select_term_spans(
     excluded; the builder measurement, protected text and every other caller
     stay exact.
     """
-    spans: list[_TermSpan] = []
+    spans: list[TermSpan] = []
     for order, (source, official) in enumerate(lockable):
         start = text.find(source)
         while start != -1:
@@ -288,7 +288,7 @@ def select_term_spans(
                 context_text, context_offset, start, end, source, official
             ):
                 spans.append(
-                    _TermSpan(
+                    TermSpan(
                         start=start,
                         end=end,
                         source=source,
@@ -318,7 +318,7 @@ def select_term_spans(
                     context_text, context_offset, start, end, spelling, official
                 ):
                     spans.append(
-                        _TermSpan(
+                        TermSpan(
                             start=start,
                             end=end,
                             source=source,
@@ -380,7 +380,7 @@ def select_term_spans(
                         )
                     ):
                         spans.append(
-                            _TermSpan(
+                            TermSpan(
                                 start=start,
                                 end=end,
                                 source=inflected,
@@ -394,7 +394,7 @@ def select_term_spans(
     # intentionally prioritizes the longest single term, not maximum total
     # coverage. Equal-length overlaps follow dictionary iteration order,
     # then start position, then source text.
-    selected: list[_TermSpan] = []
+    selected: list[TermSpan] = []
     occupied: list[tuple[int, int]] = []
     for span in sorted(
         spans,
@@ -414,7 +414,7 @@ def select_term_spans(
     return selected
 
 
-def _exact_lockable_sources(
+def exact_lockable_source_records(
     entries: Iterable[TermEntry],
 ) -> dict[str, tuple[str, str, str]]:
     # Entries arrive in lookup priority order, so the first record carrying a
@@ -441,6 +441,6 @@ def exact_lockable_sources(
     """
     return tuple(
         (source, (official[0], official[1]))
-        for source, official in _exact_lockable_sources(entries).items()
-        if _is_eligible_lockable(source, official)
+        for source, official in exact_lockable_source_records(entries).items()
+        if is_eligible_lockable(source, official)
     )
