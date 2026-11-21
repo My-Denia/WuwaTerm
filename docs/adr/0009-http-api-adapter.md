@@ -107,6 +107,20 @@ Middleware, outermost first: a server-generated request id (an inbound
 credential into the logs or a response body), a body size and arrival-time
 cap, and a request time budget.
 
+The three are plain ASGI rather than `BaseHTTPMiddleware`, and that is a
+correctness property rather than a style choice. `BaseHTTPMiddleware` runs the
+rest of the stack in a child task and streams its response back, so a deadline
+wrapping it could end the exchange while the child kept running: the client got
+its `504` immediately and the handler underneath went on to wait for a model
+concurrency slot and then spend a paid model call whose answer nobody would
+receive. The budget is now a cancel scope around the app call in the same task,
+so the slot wait, the in-flight `httpx` POST and the segment loop above it are
+all cancelled, and the `504` is written only after that call has unwound — a
+client that retries on the `504` cannot find the previous attempt still holding
+the concurrency slot. `llm_transport.post_chat_completion` additionally refuses
+to start a POST once the request's own budget is spent, so no retry or fallback
+can spend it after the answer was sent.
+
 ### The API is not chat delivery
 
 [ADR 0003](0003-long-polling-not-webhook.md) decided that chat updates arrive

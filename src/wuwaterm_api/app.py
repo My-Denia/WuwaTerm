@@ -29,14 +29,16 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote
 
+import anyio
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from wuwaterm.application import (
     ERROR_FORBIDDEN,
@@ -101,6 +103,7 @@ from wuwaterm.request_trace import (
     current as current_trace,
     direction_from_target,
     reset as reset_trace,
+    set_deadline,
     set_direction,
     set_stage,
     start as start_trace,
@@ -1014,7 +1017,28 @@ def _log_request_completed(
     )
 
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
+class _ResponseExchange:
+    """Relay messages downstream while recording what was actually sent.
+
+    A layer that wants to answer on the caller's behalf needs to know whether
+    the exchange below it has already started speaking. Sending a SECOND
+    ``http.response.start`` corrupts the exchange for an ASGI server, so a layer
+    that discovers after the fact that it must answer for a request it no longer
+    owns can only do that while nothing was sent yet — and it has to KNOW which
+    case it is in rather than assume.
+    """
+
+    def __init__(self, send: Send) -> None:
+        self._send = send
+        self.started = False
+
+    async def send(self, message: Message) -> None:
+        await self._send(message)
+        if message["type"] == "http.response.start":
+            self.started = True
+
+
+class RequestIdMiddleware:
     """Mint the correlation id, and record how the request ended.
 
     A caller-supplied ``X-Request-Id`` used to be accepted when it matched a
@@ -1030,37 +1054,61 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     two reasons. This is the outermost layer, so a request refused by the body
     cap or the time budget — before anything is routed — is recorded exactly
     like one that reached a handler; and the id being recorded is the same
-    object this method minted, so a client's report and the server's record
+    object this layer minted, so a client's report and the server's record
     cannot drift apart through a second lookup.
 
     The record is emitted from ``finally`` because the application's own
     ``Exception`` handler runs OUTSIDE every user middleware: an unhandled
-    failure passes straight through this method, and the request most worth
+    failure passes straight through this layer, and the request most worth
     having a record of would otherwise be the one that produces none.
 
-    This method also BEGINS the request trace, which is the one place that can:
+    This layer also BEGINS the request trace, which is the one place that can:
     it is the outermost layer, so everything below it — including a request
     refused before it was routed — is inside the trace it starts. Below it,
     stage marks mutate that object (see :mod:`wuwaterm.request_trace` for why a
     mutation rather than a rebinding), and the ``finally`` resets the variable
     so nothing survives into a context this request owned.
+
+    Plain ASGI rather than ``BaseHTTPMiddleware``. The latter runs the rest of
+    the stack in a child task and hands the response back through a stream, so
+    a deadline above it can end the exchange while that task keeps running —
+    which is exactly the leak this stack was rebuilt to close. A plain wrapper
+    also means the header is written where the status line is, instead of a
+    second ``http.response.start`` being synthesised.
     """
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
         request_id = _new_request_id()
         request.state.request_id = request_id
+        cache_headers = _status_response_headers(request)
         start_trace()
         started = time.perf_counter()
         # What the caller gets when the exception escapes to the handler
         # outside this middleware; overwritten as soon as a response exists.
         status_code = 500
+
+        async def sending(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+                headers = MutableHeaders(raw=list(message.get("headers") or []))
+                headers[REQUEST_ID_HEADER] = request_id
+                for name, value in cache_headers.items():
+                    headers[name] = value
+                message = {**message, "headers": headers.raw}
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status_code = response.status_code
+            await self.app(scope, receive, sending)
             set_stage(STAGE_DONE)
-            response.headers[REQUEST_ID_HEADER] = request_id
-            response.headers.update(_status_response_headers(request))
-            return response
         except (ClientDisconnect, asyncio.CancelledError):
             # The caller went away, or the work was cancelled out from under
             # this task at shutdown. Either way nothing was sent, so the seeded
@@ -1115,11 +1163,12 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
-    """Render the stable envelope from middleware.
+    """Render the stable envelope for an answer a layer writes itself.
 
-    Middleware sits OUTSIDE the exception-handler middleware, so a raised
-    ApiError would surface as a bare 500 here; middleware returns the response
-    itself instead.
+    A layer that synthesises a response cannot raise: the application's
+    exception handlers sit INSIDE the routing app, which either never ran or has
+    already unwound. It therefore builds the same document the handlers build
+    and sends it itself.
     """
     return JSONResponse(
         status_code=exc.status_code,
@@ -1127,57 +1176,86 @@ def _error_response(exc: ApiError, request: Request) -> JSONResponse:
     )
 
 
-class BodyLimitMiddleware(BaseHTTPMiddleware):
+async def _send_error(send: Send, exc: ApiError, request: Request) -> None:
+    """Send the stable envelope as the whole response, from a layer.
+
+    ``_error_response`` builds it; this delivers it. Kept separate because the
+    response object is also what a test asserts on, and because sending two
+    things at one call site invites sending two on a path that must send one.
+    """
+    await _error_response(exc, request)(request.scope, request.receive, send)
+
+
+class BodyLimitMiddleware:
     """Bound both the size and the arrival time of a request body.
 
     Size alone is not enough: a caller can stay under the cap and still hold a
     request open by trickling bytes. The read therefore carries its own
-    deadline, because the body arrives before the handler timeout can apply to
-    it.
+    deadline, because the body arrives before the handler deadline can apply to
+    it. That deadline is this layer's own: it bounds the READ, and it is lifted
+    as soon as the body is complete, so a handler that takes its time is not
+    charged to it.
+
+    Plain ASGI so that it can answer for the read without ending the exchange
+    it has not started: a rejection here is written straight to the caller's
+    ``send`` and the app below is never called at all, which is both cheaper
+    and the only correct thing to do once the body has been refused.
     """
 
-    def __init__(self, app, max_body_bytes: int, read_timeout_seconds: float):
-        super().__init__(app)
+    def __init__(self, app: ASGIApp, max_body_bytes: int, read_timeout_seconds: float):
+        self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_timeout_seconds = read_timeout_seconds
 
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
                 declared_length = int(declared)
             except ValueError:
-                return _error_response(
+                await _send_error(
+                    send,
                     ApiError(ERROR_INVALID_REQUEST, "content-length is not a number"),
                     request,
                 )
+                return
             if declared_length < 0:
-                return _error_response(
+                await _send_error(
+                    send,
                     ApiError(ERROR_INVALID_REQUEST, "content-length is negative"),
                     request,
                 )
+                return
             if declared_length > self.max_body_bytes:
-                return _error_response(ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
+                await _send_error(send, ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
+                return
         # A caller can omit content-length or use chunked encoding, so the
         # header is a hint, not the enforcement point. Read incrementally and
         # abort at the cap, so an unauthenticated caller can never make this
         # process hold more than max_body_bytes of request payload.
         received = bytearray()
         try:
-            async with asyncio.timeout(self.read_timeout_seconds):
+            with anyio.fail_after(self.read_timeout_seconds):
                 async for chunk in request.stream():
                     received.extend(chunk)
                     if len(received) > self.max_body_bytes:
-                        return _error_response(
-                            ApiError(ERROR_PAYLOAD_TOO_LARGE), request
+                        await _send_error(
+                            send, ApiError(ERROR_PAYLOAD_TOO_LARGE), request
                         )
-        except (asyncio.TimeoutError, TimeoutError):
+                        return
+        except TimeoutError:
             LOGGER.warning(
                 "request body read timed out route=%s request_id=%s",
                 _route_label(request),
                 _request_id(request),
             )
-            return _error_response(
+            await _send_error(
+                send,
                 ApiError(
                     ERROR_INTERNAL,
                     "request body did not arrive within the server time budget",
@@ -1185,48 +1263,114 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
                 ),
                 request,
             )
-        # Hand the bytes we consumed back to the cached request so the route
-        # still sees its own body.
-        request._body = bytes(received)
-        return await call_next(request)
+            return
+
+        # Hand the bytes we consumed back to the app below, so the route still
+        # sees its own body.
+        await self.app(scope, _replay(receive, bytes(received)), send)
 
 
-class TimeoutMiddleware(BaseHTTPMiddleware):
-    """Bound the wall-clock cost of a single request."""
+def _replay(receive: Receive, body: bytes) -> Receive:
+    """A ``receive`` that serves a body this layer already read, once.
 
-    def __init__(self, app, timeout_seconds: float):
-        super().__init__(app)
+    The bytes have arrived and been bounded; letting the app below go back to
+    the wire would read the same stream a second time and would also defeat the
+    point of the deadline above it — the trickle this layer refused was refused
+    on THIS read. After the body there is nothing left to serve, so further
+    reads go to the real channel and a disconnect is still observed normally.
+    """
+    served = False
+
+    async def replay() -> Message:
+        nonlocal served
+        if not served:
+            served = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay
+
+
+class TimeoutMiddleware:
+    """Bound the wall-clock cost of a single request, and cancel what it owns.
+
+    This layer is the reason the stack is plain ASGI. ``BaseHTTPMiddleware``
+    runs the rest of the stack in a CHILD task and streams the response back, so
+    an outer deadline ended the exchange while the child kept running: the 504
+    was returned in milliseconds, and the handler went on waiting for a model
+    slot and then spending a paid model call nobody would ever receive. Measured
+    on the previous implementation, a request whose budget had expired still
+    finished its whole handler, and ``asyncio.wait_for`` returned only once it
+    had.
+
+    Here the deadline is a cancel scope around ``await self.app(...)`` in the
+    SAME task, which is what makes cancellation actually arrive: the semaphore
+    waiter, the in-flight HTTPX POST and the pipeline above it are all in that
+    task and below it. The exchange is ended only after that call has unwound,
+    so the slot is released and the response socket is closed BEFORE the 504 is
+    written — a client that retries once it has the 504 cannot find the previous
+    attempt still holding the concurrency slot, and no retry or fallback below
+    this layer can start a paid POST afterwards.
+
+    Two outcomes, and the second is the one worth stating:
+
+    * the status line has not gone out — answer 504 on the caller's behalf, as
+      before;
+    * the status line HAS gone out — the exchange cannot be repaired by writing
+      a second status line, so it is left untouched and the record carries the
+      timeout instead. This needs an outstanding body (a streamed response),
+      which no route in this service produces today; the check exists so that a
+      future one cannot corrupt the protocol.
+    """
+
+    def __init__(self, app: ASGIApp, timeout_seconds: float):
+        self.app = app
         self.timeout_seconds = timeout_seconds
 
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        # The guard the transport reads: from here on, no model POST for THIS
+        # request may start once the budget is spent, whatever happens to the
+        # cancellation chain in between.
+        set_deadline(self.timeout_seconds)
+        exchange = _ResponseExchange(send)
         try:
-            return await asyncio.wait_for(call_next(request), self.timeout_seconds)
-        except (asyncio.TimeoutError, TimeoutError):
-            # The total was already on the record; what it could not say is
-            # WHERE the time went, which is what the request trace keeps. The
-            # cancelled handler leaves its last stage mark behind, so this line
-            # names the stage the request died in and how much of its budget
-            # each owner had taken: a slot it was still queued for
-            # (``llm_slot_wait``), a POST the provider had not answered
-            # (``llm_post``, with the in-flight part of that POST included), or
-            # this process' own work. That is the whole point of the record — a
-            # timeout is not actionable until it says which of the three it was.
-            LOGGER.warning(
-                "request timed out route=%s request_id=%s%s",
-                _route_label(request),
-                _request_id(request),
-                timing_fields(
-                    current_trace(), include_elapsed=True, include_stage=True
-                ),
-            )
-            return _error_response(
-                ApiError(
-                    ERROR_INTERNAL,
-                    "request exceeded the server time budget",
-                    status_code=504,
-                ),
-                request,
-            )
+            with anyio.fail_after(self.timeout_seconds):
+                await self.app(scope, receive, exchange.send)
+            return
+        except TimeoutError:
+            pass
+
+        # The total was already on the record; what it could not say is
+        # WHERE the time went, which is what the request trace keeps. The
+        # cancelled handler leaves its last stage mark behind, so this line
+        # names the stage the request died in and how much of its budget each
+        # owner had taken: a slot it was still queued for (``llm_slot_wait``),
+        # a POST the provider had not answered (``llm_post``, with the
+        # in-flight part of that POST included), or this process' own work.
+        # That is the whole point of the record — a timeout is not actionable
+        # until it says which of the three it was.
+        LOGGER.warning(
+            "request timed out route=%s request_id=%s%s",
+            _route_label(request),
+            _request_id(request),
+            timing_fields(current_trace(), include_elapsed=True, include_stage=True),
+        )
+        if exchange.started:
+            return
+        await _send_error(
+            exchange.send,
+            ApiError(
+                ERROR_INTERNAL,
+                "request exceeded the server time budget",
+                status_code=504,
+            ),
+            request,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1718,6 +1862,12 @@ def create_app(
     # failure produced by an inner middleware carries it. The body read and the
     # handler each carry the same time budget, applied where each of them
     # actually runs.
+    #
+    # The order is also the cancellation order. Each of these is plain ASGI, so
+    # the deadline below wraps the body read and the handler in the SAME task
+    # and cancelling it reaches them; keeping them here, in this order, is what
+    # makes the 504 mean the work has actually stopped rather than merely been
+    # given up on.
     app.add_middleware(
         TimeoutMiddleware, timeout_seconds=resolved.request_timeout_seconds
     )
