@@ -16,7 +16,7 @@ Intended layers (must stay aligned with docs/architecture.md):
                    exclusion_metadata (strict builder-metadata parsers)
   presentation:    bot, channel, telegram_html, telegram_text
   local state:     settings, channel_reply_index, channel_reply_schema,
-                   channel_runtime, logging_utils
+                   channel_runtime, logging_utils, request_trace
   storage:         db  (lazy build_pinyin only inside write helpers)
   builder:         builder, data_source, build_pinyin
   bootstrap:       cli  (may wire runtime and builder entrypoints)
@@ -38,10 +38,14 @@ nested subpackages discovered via rglob):
    unclassified files, including future nested packages).
 8. The HTTP adapter package ``src/wuwaterm_api`` may import ONLY
    ``wuwaterm.application``, ``wuwaterm.models``,
-   ``wuwaterm.translation_policy`` and ``wuwaterm.logging_utils`` — never the
-   bot, channel, lookup, sentence, db, telegram_* or builder modules, never
-   the ``wuwaterm`` package root, and never the Telegram SDK. This is the
-   machine-checkable form of "the API cannot bypass the shared pipeline".
+   ``wuwaterm.translation_policy``, ``wuwaterm.logging_utils`` and
+   ``wuwaterm.request_trace`` — never the bot, channel, lookup, sentence, db,
+   telegram_* or builder modules, never the ``wuwaterm`` package root, and
+   never the Telegram SDK. This is the machine-checkable form of "the API
+   cannot bypass the shared pipeline". ``request_trace`` is on that list as an
+   instrument, not as a way in: it holds no dictionary, no pipeline and no
+   transport, imports nothing from this package at all, and is what the API
+   uses to time the stages the CORE runs (the model slot and the POST).
 
 Companion gates (not duplicated here):
 - tests/test_runtime_imports.py — runtime import without pypinyin
@@ -64,7 +68,13 @@ PACKAGE = ROOT / "src" / "wuwaterm"
 # sentence, db or bot directly it could grow a second, divergent pipeline.
 API_PACKAGE = ROOT / "src" / "wuwaterm_api"
 API_ALLOWED_WUWATERM_MODULES = frozenset(
-    {"application", "models", "translation_policy", "logging_utils"}
+    {
+        "application",
+        "models",
+        "translation_policy",
+        "logging_utils",
+        "request_trace",
+    }
 )
 
 DOMAIN_CORE = frozenset(
@@ -100,6 +110,7 @@ LOCAL_STATE = frozenset(
         "channel_reply_schema",
         "channel_runtime",
         "logging_utils",
+        "request_trace",
     }
 )
 STORAGE = frozenset({"db"})

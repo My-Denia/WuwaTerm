@@ -543,6 +543,52 @@ request produces the completion record, including the unauthenticated
 volume. Raising the level above `INFO` drops all of them — that is the trade
 that setting is for, and correlation goes with them.
 
+### Where The Time Went
+
+`duration_ms` answers "how long", not "waiting for what". For a request that
+reached the model, the completion record carries one trailing group of fields
+that splits the same interval into the three waits with different owners —
+this process' model concurrency slot, the provider's response, and everything
+else here:
+
+```text
+... duration_ms=4180.7 device=id:<8 hex> slot_wait_ms=3920.4 llm_post_ms=241.8 llm_calls=1 direction=en->zh
+```
+
+| Field | Meaning |
+|---|---|
+| `slot_wait_ms` | milliseconds spent waiting for a **model concurrency slot** in this process |
+| `llm_post_ms` | milliseconds inside the **chat-completion POST**, retries included |
+| `llm_calls` | POST attempts started |
+| `direction` | `zh->en`, `en->zh`, or `-` when the direction was not settled yet |
+
+The group is all-or-nothing and absent from a record for a request that never
+reached the model, which is what keeps the shape of every ordinary record as it
+was. A large `slot_wait_ms` with a small `llm_post_ms` is a queue in this
+process and points at `WUWATERM_API_LLM_MAX_CONCURRENCY`; the reverse is the
+provider being slow and costs this process nothing to wait for.
+
+When a request is refused at the time budget, the `request timed out` record
+carries the same split plus the stage it died in, and there `elapsed_ms` is the
+whole request:
+
+```text
+WARNING wuwaterm_api request timed out route=/v1/translations request_id=<32 hex> elapsed_ms=90041.7 stage=llm_post slot_wait_ms=14.2 llm_post_ms=89980.9 llm_calls=1 direction=en->zh
+```
+
+`stage` is what the request was doing: `llm_slot_wait` (queued for a slot),
+`llm_slot_held` (has the slot, before the POST), `llm_post` (waiting for the
+provider), `prepare_terms` (dictionary work), `postprocess`, `done`, or `init`.
+`slot_wait_ms` and `llm_post_ms` include the part of a wait still in progress,
+so a request that died IN the provider wait reports it rather than zero. Read
+this line before concluding anything about upstream latency or about a rate
+limit: `llm_slot_wait` at the budget means requests are queuing behind this
+process' own concurrency limit, not that the provider slowed down.
+Every value is a number this process measured or a token from that fixed
+vocabulary; none of them can carry submitted or translated text, and the
+completion record is the only place these fields appear apart from this
+timeout warning.
+
 `request_id` is minted by the service and reaches the caller two ways, neither
 of which covers quite everything:
 

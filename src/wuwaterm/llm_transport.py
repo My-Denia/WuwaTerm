@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from . import request_trace
+
 LOGGER = logging.getLogger(__name__)
 
 # Bilingual user-facing notices: Chinese line first, then English (single "\n").
@@ -437,6 +439,10 @@ async def post_chat_completion(
     outcome = "request"
     status_code: int | None = None
     started = time.monotonic()
+    # One stage mark per attempt, so a request timed out inside this window
+    # reports ``llm_post`` (with the elapsed part of the POST included) rather
+    # than whatever it was doing before. No-op outside an HTTP request.
+    request_trace.begin_llm_post()
     try:
         post_options: dict[str, Any] = {}
         if timeout_seconds is not None:
@@ -487,6 +493,7 @@ async def post_chat_completion(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_api_response"
         ) from exc
     finally:
+        request_trace.end_llm_post()
         elapsed_ms = int((time.monotonic() - started) * 1000)
         LOGGER.info(
             "llm call purpose=%s outcome=%s status=%s elapsed_ms=%s",

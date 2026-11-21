@@ -30,6 +30,7 @@ from .exclusion_metadata import (
     parse_free_text_zh_lock_exclusions,
 )
 from . import llm_transport
+from . import request_trace
 from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_transport.X)
     BUDGET_EXHAUSTED_NOTICE,
     TRANSLATION_UNAVAILABLE_NOTICE,
@@ -597,7 +598,15 @@ class SentenceTranslator:
         before_llm_call=None,
         context=None,
     ) -> str:
-        async with self._current_llm_slots():
+        # Recorded before the queue, not after it: a request refused at the time
+        # budget while still waiting for a slot should still say which pair it
+        # was translating. No-op outside an HTTP request (bot, channel, CLI).
+        request_trace.set_direction(
+            request_trace.DIRECTION_EN_TO_ZH
+            if to_chinese
+            else request_trace.DIRECTION_ZH_TO_EN
+        )
+        async with request_trace.llm_slot(self._current_llm_slots()):
             kwargs: dict[str, object] = {}
             supported = inspect.signature(_call_llm_async).parameters
             client = (
@@ -647,7 +656,7 @@ class SentenceTranslator:
         request only.
         """
 
-        async with self._current_llm_slots():
+        async with request_trace.llm_slot(self._current_llm_slots()):
             client = await self._current_llm_client()
             if before_llm_call is not None:
                 guarded = before_llm_call()
