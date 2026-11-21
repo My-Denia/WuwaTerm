@@ -13,7 +13,7 @@ from typing import Literal
 
 from .cjk_span import single_character_name_mention_at
 from .protected_text import ProtectedText
-from .term_matching import _is_cjk_character, _TermSpan, select_term_spans
+from .term_matching import TermSpan, is_cjk_character, select_term_spans
 
 
 # Names can be ordinary words in English; the model needs context to choose.
@@ -21,25 +21,56 @@ from .term_matching import _is_cjk_character, _TermSpan, select_term_spans
 CONTEXTUAL_REFERENCE_CATEGORIES = frozenset({"resonator", "speaker"})
 
 Lockable = tuple[tuple[str, tuple[str, str]], ...]
-Reference = tuple[str, str, str, str]
 Lock = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class TermOccurrence:
+    """One matched occurrence of a dictionary term inside a visible segment."""
+
+    start: int
+    end: int
+    matched_text: str
+    segment_index: int = 0
+
+
+@dataclass(frozen=True)
+class TermReference:
+    """Structured dictionary reference handed to the LLM as contextual guidance."""
+
+    source: str
+    zh: str
+    en: str
+    category: str
+    occurrences: tuple[TermOccurrence, ...] = ()
+    origin: str = "dictionary"
+    reason: str = ""
+
+    def dedupe_key(self) -> tuple[str, str, str, str]:
+        return (self.source, self.zh, self.en, self.category)
+
+    def as_tuple(self) -> tuple[str, str, str, str]:
+        return (self.source, self.zh, self.en, self.category)
+
+
+Reference = TermReference
 
 
 @dataclass(frozen=True)
 class PreparedTerms:
     locked_text: str
     locks: tuple[Lock, ...]
-    references: tuple[Reference, ...]
+    references: tuple[TermReference, ...]
 
 
-def _new_placeholder_prefix(source_text: str) -> str:
+def new_placeholder_prefix(source_text: str) -> str:
     while True:
         prefix = f"__WUWA_TERM_{secrets.token_hex(8)}_"
         if prefix not in source_text:
             return prefix
 
 
-def _is_contextual_reference(category: str, *, to_chinese: bool) -> bool:
+def is_contextual_reference(category: str, *, to_chinese: bool) -> bool:
     """Return whether a category reaches the model as a reference.
 
     English needs number and articles, so every category is a reference in
@@ -52,7 +83,7 @@ def _is_contextual_reference(category: str, *, to_chinese: bool) -> bool:
 
 
 def _span_decision(
-    span: _TermSpan,
+    span: TermSpan,
     categories: dict[str, str],
     reference_only: frozenset[str],
     to_chinese: bool | None,
@@ -62,37 +93,76 @@ def _span_decision(
     category = categories.get(span.source) or categories.get(en) or categories.get(zh) or ""
     if span.source in reference_only:
         return ("keep" if to_chinese is None else "reference"), category
-    if to_chinese is not None and category and _is_contextual_reference(
+    if to_chinese is not None and category and is_contextual_reference(
         category, to_chinese=to_chinese
     ):
         return "reference", category
     return "lock", category
 
 
-def _additional_name_references(
+def _append_reference_occurrence(
+    references: list[TermReference],
+    index_by_key: dict[tuple[str, str, str, str], int],
+    *,
+    source: str,
+    zh: str,
+    en: str,
+    category: str,
+    occurrence: TermOccurrence,
+    origin: str = "dictionary",
+    reason: str = "",
+) -> None:
+    key = (source, zh, en, category)
+    existing_index = index_by_key.get(key)
+    if existing_index is None:
+        index_by_key[key] = len(references)
+        references.append(
+            TermReference(
+                source=source,
+                zh=zh,
+                en=en,
+                category=category,
+                occurrences=(occurrence,),
+                origin=origin,
+                reason=reason,
+            )
+        )
+        return
+    existing = references[existing_index]
+    references[existing_index] = TermReference(
+        source=existing.source,
+        zh=existing.zh,
+        en=existing.en,
+        category=existing.category,
+        occurrences=existing.occurrences + (occurrence,),
+        origin=existing.origin,
+        reason=existing.reason,
+    )
+
+
+def _collect_additional_name_references(
     text: str,
     context_text: str,
     context_offset: int,
     lockable: Lockable,
     categories: dict[str, str],
-    selected: list[_TermSpan],
-    seen: set[Reference],
-) -> list[Reference]:
+    selected: list[TermSpan],
+    references: list[TermReference],
+    index_by_key: dict[tuple[str, str, str, str], int],
+    *,
+    segment_index: int = 0,
+) -> None:
     """Find single-character name mentions too loosely situated to lock.
 
     For example, 椿 can reach the model as a name in 欢迎椿, but not when it is
     covered by an ordinary word such as 香椿. A mention is guidance, not a
     forced substitution, and the selected spans keep their precedence.
     """
-    references: list[Reference] = []
     for source, official in lockable:
-        if len(source) != 1 or not _is_cjk_character(source):
+        if len(source) != 1 or not is_cjk_character(source):
             continue
         category = categories.get(source, "")
         if category not in CONTEXTUAL_REFERENCE_CATEGORIES:
-            continue
-        reference = (source, official[0], official[1], category)
-        if reference in seen:
             continue
         start = text.find(source)
         while start != -1:
@@ -102,11 +172,23 @@ def _additional_name_references(
                     context_text, context_offset + start, context_offset + end
                 )
             ):
-                seen.add(reference)
-                references.append(reference)
-                break
+                _append_reference_occurrence(
+                    references,
+                    index_by_key,
+                    source=source,
+                    zh=official[0],
+                    en=official[1],
+                    category=category,
+                    occurrence=TermOccurrence(
+                        start=start,
+                        end=end,
+                        matched_text=text[start:end],
+                        segment_index=segment_index,
+                    ),
+                    origin="dictionary",
+                    reason="single_char_name_mention",
+                )
             start = text.find(source, start + 1)
-    return references
 
 
 def prepare_term_segment(
@@ -122,6 +204,7 @@ def prepare_term_segment(
     nfkc_spelling_sources: frozenset[str],
     placeholder_prefix: str,
     placeholder_offset: int = 0,
+    segment_index: int = 0,
 ) -> PreparedTerms:
     """Prepare one visible segment; offsets refer to its full visible context."""
     selected = select_term_spans(
@@ -134,8 +217,8 @@ def prepare_term_segment(
     )
     parts: list[str] = []
     locks: list[Lock] = []
-    references: list[Reference] = []
-    seen: set[Reference] = set()
+    references: list[TermReference] = []
+    index_by_key: dict[tuple[str, str, str, str], int] = {}
     index = 0
     for span in selected:
         parts.append(text[index : span.start])
@@ -147,15 +230,37 @@ def prepare_term_segment(
             locks.append((placeholder, zh, en))
         else:
             parts.append(text[span.start : span.end])
-            reference = (span.source, zh, en, category)
-            if decision == "reference" and reference not in seen:
-                seen.add(reference)
-                references.append(reference)
+            if decision == "reference":
+                reason = "reference_only" if span.source in reference_only else "contextual"
+                _append_reference_occurrence(
+                    references,
+                    index_by_key,
+                    source=span.source,
+                    zh=zh,
+                    en=en,
+                    category=category,
+                    occurrence=TermOccurrence(
+                        start=span.start,
+                        end=span.end,
+                        matched_text=text[span.start : span.end],
+                        segment_index=segment_index,
+                    ),
+                    origin="dictionary",
+                    reason=reason,
+                )
         index = span.end
     if to_chinese is not None:
-        references.extend(_additional_name_references(
-            text, context_text, context_offset, lockable, categories, selected, seen
-        ))
+        _collect_additional_name_references(
+            text,
+            context_text,
+            context_offset,
+            lockable,
+            categories,
+            selected,
+            references,
+            index_by_key,
+            segment_index=segment_index,
+        )
     parts.append(text[index:])
     return PreparedTerms("".join(parts), tuple(locks), tuple(references))
 
@@ -186,9 +291,9 @@ def prepare_protected_terms(
     context_text = "".join(context_parts)
     locked_segments: list[str] = []
     locks: list[Lock] = []
-    references: list[Reference] = []
-    seen: set[Reference] = set()
-    for segment, offset in zip(segments, offsets, strict=True):
+    references: list[TermReference] = []
+    index_by_key: dict[tuple[str, str, str, str], int] = {}
+    for segment_index, (segment, offset) in enumerate(zip(segments, offsets, strict=True)):
         # Protected segments are not normalized like prepared plain text.
         prepared = prepare_term_segment(
             segment,
@@ -202,13 +307,27 @@ def prepare_protected_terms(
             nfkc_spelling_sources=frozenset(),
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=len(locks),
+            segment_index=segment_index,
         )
         locked_segments.append(prepared.locked_text)
         locks.extend(prepared.locks)
         for reference in prepared.references:
-            if reference not in seen:
-                seen.add(reference)
+            key = reference.dedupe_key()
+            existing_index = index_by_key.get(key)
+            if existing_index is None:
+                index_by_key[key] = len(references)
                 references.append(reference)
+            else:
+                existing = references[existing_index]
+                references[existing_index] = TermReference(
+                    source=existing.source,
+                    zh=existing.zh,
+                    en=existing.en,
+                    category=existing.category,
+                    occurrences=existing.occurrences + reference.occurrences,
+                    origin=existing.origin,
+                    reason=existing.reason,
+                )
     return PreparedTerms(
         protected.for_model(tuple(locked_segments)), tuple(locks), tuple(references)
     )

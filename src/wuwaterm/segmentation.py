@@ -13,7 +13,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .review import WHITESPACE, _core, _paragraph_ranges, _sentence_ranges_v2
+from .review import (
+    WHITESPACE,
+    paragraph_ranges as _paragraph_ranges,
+    segment_core as _core,
+    sentence_ranges_v2 as _sentence_ranges_v2,
+)
 
 SEGMENT_LIMIT = 1800
 HARD_CUT_WINDOW = 200

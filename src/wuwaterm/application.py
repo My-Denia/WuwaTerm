@@ -81,8 +81,8 @@ from .sentence import (
     LLMTranslationError,
     SentenceTranslator,
     TRANSLATION_UNAVAILABLE_NOTICE as TRANSLATION_UNAVAILABLE_NOTICE,
-    _safe_llm_failure_diagnostic,
-    _llm_configured,
+    llm_configured as _llm_configured,
+    safe_llm_failure_diagnostic,
 )
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
 
@@ -295,7 +295,7 @@ _FUZZY_LENGTH_GATED_REASONS = frozenset({"pinyin-prefix", "pinyin-substring"})
 _FUZZY_MIN_GATED_QUERY_LEN = 4
 
 
-def _fuzzy_dictionary_answer(
+def fuzzy_dictionary_answer(
     service: TermService, prepared: str, *, to_chinese: bool
 ) -> str | None:
     if not _is_ascii_fuzzy_query(prepared):
@@ -420,7 +420,7 @@ def _dictionary_stage(
                     kind=KIND_EXACT, text=official, to_chinese=to_chinese
                 ),
             )
-    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
+    fuzzy_answer = fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
     if fuzzy_answer:
         return _DictionaryStage(
             prepared,
@@ -449,7 +449,7 @@ def _llm_failure_outcome(
     except Exception:
         raw_reason = None
     business_reason = _safe_business_reason(raw_reason)
-    diagnostic = _safe_llm_failure_diagnostic(exc)
+    diagnostic = safe_llm_failure_diagnostic(exc)
     reason = diagnostic.reason
     # The pipeline swallows the exception by contract (callers get an outcome).
     # Keep the safe diagnostic on the outcome so an HTTP adapter can correlate
@@ -727,6 +727,9 @@ def build_translator(
         llm_max_concurrency=max_concurrency,
         en_zh_protocol=en_zh_protocol,
     )
+
+
+_fuzzy_dictionary_answer = fuzzy_dictionary_answer
 
 
 def llm_configured() -> bool:

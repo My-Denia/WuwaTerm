@@ -506,3 +506,44 @@ def test_api_package_type_only_imports_are_not_exempt(tmp_path: Path, monkeypatc
     failures = cab.check_api_package()
 
     assert any("wuwaterm.bot" in f for f in failures), failures
+
+
+def test_private_cross_module_import_is_rejected(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    pkg.mkdir()
+    for name in cab.ALL_CLASSIFIED:
+        path = pkg / f"{name.replace('.', '/')}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n", encoding="utf-8")
+
+    (pkg / "term_matching.py").write_text(
+        "def public_helper():\n    return 1\n"
+        "def _private_helper():\n    return 2\n",
+        encoding="utf-8",
+    )
+    (pkg / "term_preparation.py").write_text(
+        "from .term_matching import _private_helper\n",
+        encoding="utf-8",
+    )
+    (pkg / "sentence.py").write_text(
+        "from wuwaterm.term_matching import _private_helper\n"
+        "from .term_matching import public_helper as _local_alias\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    failures = cab.check()
+
+    assert any(
+        "term_preparation.py:1: must not import private symbol '_private_helper' from term_matching"
+        in f
+        for f in failures
+    ), failures
+    assert any(
+        "sentence.py:1: must not import private symbol '_private_helper' from term_matching"
+        in f
+        for f in failures
+    ), failures
+    assert not any("_local_alias" in f or "public_helper" in f for f in failures), failures

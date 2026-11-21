@@ -155,7 +155,7 @@ class LLMTranslationError(RuntimeError):
         self.reason = reason
 
 
-def _safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
+def safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
     """Project an exception onto a safe diagnostic tied to its legacy reason."""
 
     try:
@@ -180,7 +180,10 @@ def _safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
         return base
 
 
-def _require_nonblank_llm_output(content: str) -> str:
+_safe_llm_failure_diagnostic = safe_llm_failure_diagnostic
+
+
+def require_nonblank_llm_output(content: str) -> str:
     if not isinstance(content, str):
         raise LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE,
@@ -197,6 +200,9 @@ def _require_nonblank_llm_output(content: str) -> str:
     return normalized
 
 
+_require_nonblank_llm_output = require_nonblank_llm_output
+
+
 def _declares_truncation(choice: dict) -> bool:
     """True when the choice says the provider stopped at a length cap."""
     finish_reason = choice.get("finish_reason")
@@ -205,7 +211,7 @@ def _declares_truncation(choice: dict) -> bool:
     return type(finish_reason) is str and finish_reason in _TRUNCATED_FINISH_REASONS
 
 
-def _extract_llm_content(data: Any) -> str:
+def extract_llm_content(data: Any) -> str:
     if not isinstance(data, dict):
         raise ValueError("LLM response is not an object")
     choices = data["choices"]
@@ -230,16 +236,19 @@ def _extract_llm_content(data: Any) -> str:
             reason="invalid_response",
             detail="truncated_output",
         )
-    return _require_nonblank_llm_output(content)
+    return require_nonblank_llm_output(content)
 
 
-def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
+_extract_llm_content = extract_llm_content
+
+
+def llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
     if response.status_code >= 500:
         return LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="upstream"
         )
     if response.status_code == 429:
-        reason = "budget" if _has_structured_budget_signal(response) else "rate_limit"
+        reason = "budget" if has_structured_budget_signal(response) else "rate_limit"
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason=reason)
     parameter = _unsupported_reasoning_parameter(response)
     if parameter is not None:
@@ -258,9 +267,12 @@ def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
             reason="http",
             detail=f"unsupported_{parameter}",
         )
-    if _has_structured_budget_signal(response):
+    if has_structured_budget_signal(response):
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason="budget")
     return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="http")
+
+
+_llm_error_from_response = llm_error_from_response
 
 
 def _unsupported_reasoning_parameter(response: httpx.Response) -> str | None:
@@ -282,8 +294,8 @@ def _unsupported_reasoning_parameter(response: httpx.Response) -> str | None:
     return None
 
 
-def _has_structured_budget_signal(response: httpx.Response) -> bool:
-    text = _structured_llm_error_text(response)
+def has_structured_budget_signal(response: httpx.Response) -> bool:
+    text = structured_llm_error_text(response)
     if not text:
         return False
     # Do not match generic "exceeded": context-length errors commonly use that
@@ -303,7 +315,10 @@ def _has_structured_budget_signal(response: httpx.Response) -> bool:
     )
 
 
-def _structured_llm_error_text(response: httpx.Response) -> str:
+_has_structured_budget_signal = has_structured_budget_signal
+
+
+def structured_llm_error_text(response: httpx.Response) -> str:
     try:
         data = response.json()
     except ValueError:
@@ -326,6 +341,9 @@ def _structured_llm_error_text(response: httpx.Response) -> str:
     else:
         collect(data)
     return " ".join(parts).casefold()
+
+
+_structured_llm_error_text = structured_llm_error_text
 
 
 def resolve_llm_config(model_env: str | None = None) -> tuple[str, str, str]:
@@ -459,10 +477,10 @@ async def post_chat_completion(
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             outcome = "http_error"
-            raise _llm_error_from_response(exc.response) from exc
+            raise llm_error_from_response(exc.response) from exc
         outcome = "invalid_api_response"
         data = response.json()
-        content = _extract_llm_content(data)
+        content = extract_llm_content(data)
         outcome = "ok"
         return content
     except LLMTranslationError:

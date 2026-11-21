@@ -741,7 +741,7 @@ def _scan_sentence_ranges_v2(
     return ranges
 
 
-def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
+def sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
     """V2 sentence ranges, keeping decimal punctuation inside a sentence.
 
     These are the segmentation-v1 boundaries, and that rule alone: a list
@@ -749,6 +749,9 @@ def _sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
     says so and other repositories consume it.
     """
     return _scan_sentence_ranges_v2(text, _is_sentence_end_v2)
+
+
+_sentence_ranges_v2 = sentence_ranges_v2
 
 
 def _review_sentence_ranges_v2(text: str) -> list[tuple[int, int]]:
@@ -767,7 +770,7 @@ WHITESPACE: frozenset[str] = frozenset(
 )
 
 
-def _core(text: str, start: int, end: int) -> tuple[int, int]:
+def segment_core(text: str, start: int, end: int) -> tuple[int, int]:
     """Core of [start, end): WS trimmed; an all-WS region has core (start, start)."""
     a = start
     while a < end and text[a] in WHITESPACE:
@@ -780,7 +783,10 @@ def _core(text: str, start: int, end: int) -> tuple[int, int]:
     return a, b
 
 
-def _paragraph_ranges(text: str) -> list[tuple[int, int]]:
+_core = segment_core
+
+
+def paragraph_ranges(text: str) -> list[tuple[int, int]]:
     """Paragraph regions; empty when the text has no non-WS scalar."""
     length = len(text)
     cuts: list[int] = []
@@ -800,10 +806,13 @@ def _paragraph_ranges(text: str) -> list[tuple[int, int]]:
         if newlines >= 2 and i > 0 and j < length:
             cuts.append(j)
         i = j
-    if _core(text, 0, length)[0] == _core(text, 0, length)[1]:
+    if segment_core(text, 0, length)[0] == segment_core(text, 0, length)[1]:
         return []
     bounds = [0, *cuts, length]
     return list(zip(bounds, bounds[1:], strict=False))
+
+
+_paragraph_ranges = paragraph_ranges
 
 
 def _coerce_alignment_span(name: str, item: object, text: str) -> ReviewSpan:
