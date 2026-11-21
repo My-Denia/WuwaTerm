@@ -35,38 +35,41 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     TRANSLATION_UNAVAILABLE_NOTICE,
     LLMFailureDiagnostic,
     LLMTranslationError,
-    _extract_llm_content,
-    _has_structured_budget_signal,
-    _llm_error_from_response,
-    _require_nonblank_llm_output,
-    _safe_llm_failure_diagnostic,
-    _structured_llm_error_text,
+    extract_llm_content as _extract_llm_content,
+    has_structured_budget_signal as _has_structured_budget_signal,
+    llm_error_from_response as _llm_error_from_response,
+    require_nonblank_llm_output as _require_nonblank_llm_output,
+    safe_llm_failure_diagnostic,
+    structured_llm_error_text as _structured_llm_error_text,
 )
 from .lookup import TermService
 from .lookup import derived_reference_only_sources as _derived_reference_only_sources
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
 from .review import WHITESPACE as _SEGMENT_WHITESPACE
-from .review import _core as _segment_core
-from .review import _paragraph_ranges
+from .review import paragraph_ranges as _paragraph_ranges
+from .review import segment_core as _segment_core
 from .semantic_review_contract import PRECEDENT_WORDING
 from .term_matching import (
     CASE_VARIANT_CATEGORIES as CASE_VARIANT_CATEGORIES,
-    _admissible_nfkc_sources,
-    _case_variant_sources,
-    _exact_lockable_sources,
-    _is_cjk_character,
-    _is_eligible_lockable,
+    admissible_nfkc_sources,
+    case_variant_sources,
+    exact_lockable_source_records,
     exact_lockable_sources as exact_lockable_sources,
+    is_cjk_character,
+    is_eligible_lockable,
     select_term_spans as select_term_spans,
 )
 from .term_preparation import (
     CONTEXTUAL_REFERENCE_CATEGORIES as CONTEXTUAL_REFERENCE_CATEGORIES,
-    _is_contextual_reference as _is_contextual_reference,
-    _new_placeholder_prefix,
+    TermOccurrence as TermOccurrence,
+    TermReference as TermReference,
+    new_placeholder_prefix,
     prepare_protected_terms,
     prepare_term_segment,
 )
+
+_safe_llm_failure_diagnostic = safe_llm_failure_diagnostic
 
 
 LOGGER = logging.getLogger(__name__)
@@ -98,12 +101,12 @@ _CJK_NEIGHBOR_CLASS = rf"[\u3400-\u9fff{_CJK_PUNCTUATION}]"
 class LockedSentence:
     locked_text: str
     locks: tuple[tuple[str, str, str], ...]
-    # Model-facing dictionary references: (source surface, zh, en, category).
+    # Model-facing dictionary references: structured TermReference items.
     # A reference stays visible source text, never a placeholder, so the model
     # can judge the word by its own context and inflect it naturally. The
     # default keeps every existing LockedSentence call site and every
     # deterministic restore bit-identical.
-    references: tuple[tuple[str, str, str, str], ...] = ()
+    references: tuple[TermReference, ...] = ()
 
     def restore(self, translated: str, *, to_en: bool = True) -> str:
         result = translated
@@ -124,13 +127,13 @@ class LockedSentence:
                 )
             if not to_en and zh:
                 # Collapse stray ASCII spaces adjacent to restored Chinese terms and CJK text.
-                if _is_cjk_character(zh[0]) or zh[0] in _CJK_PUNCTUATION:
+                if is_cjk_character(zh[0]) or zh[0] in _CJK_PUNCTUATION:
                     result = re.sub(
                         rf"({_CJK_NEIGHBOR_CLASS}) " + re.escape(placeholder),
                         r"\1" + placeholder,
                         result,
                     )
-                if _is_cjk_character(zh[-1]) or zh[-1] in _CJK_PUNCTUATION:
+                if is_cjk_character(zh[-1]) or zh[-1] in _CJK_PUNCTUATION:
                     result = re.sub(
                         re.escape(placeholder) + rf" ({_CJK_NEIGHBOR_CLASS})",
                         placeholder + r"\1",
@@ -318,7 +321,7 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=nfkc_sources,
-            placeholder_prefix=placeholder_prefix or _new_placeholder_prefix(text),
+            placeholder_prefix=placeholder_prefix or new_placeholder_prefix(text),
             placeholder_offset=placeholder_offset,
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
@@ -360,7 +363,7 @@ class SentenceTranslator:
             reference_only=self._reference_only_sources(),
             to_chinese=to_chinese,
             allow_plural_inflection=allow_plural_inflection,
-            placeholder_prefix=_new_placeholder_prefix(protected.for_model()),
+            placeholder_prefix=new_placeholder_prefix(protected.for_model()),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
 
@@ -411,7 +414,7 @@ class SentenceTranslator:
         # C1: plural inflection is admitted only when the target is Chinese
         # (Chinese has no plural marking, so restoring the official zh term
         # is well-formed); zh->en and en->en keep exact-surface matching.
-        if not _llm_configured():
+        if not llm_configured():
             locked = self._lock_terms(
                 prepared,
                 allow_plural_inflection=to_chinese,
@@ -442,7 +445,7 @@ class SentenceTranslator:
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
-            diagnostic = _safe_llm_failure_diagnostic(exc)
+            diagnostic = safe_llm_failure_diagnostic(exc)
             LOGGER.warning(
                 "llm translation failed reason=%s",
                 diagnostic.reason,
@@ -476,7 +479,7 @@ class SentenceTranslator:
             official = exact.best.entry.zh if to_chinese else exact.best.entry.en
             if official:
                 return official
-        if not _llm_configured():
+        if not llm_configured():
             locked = self._lock_terms(
                 prepared,
                 allow_plural_inflection=to_chinese,
@@ -517,7 +520,7 @@ class SentenceTranslator:
                 raise
             # Swallowed here by contract (caller gets the notice text), so
             # this is the only place the failure reason can reach the logs.
-            diagnostic = _safe_llm_failure_diagnostic(exc)
+            diagnostic = safe_llm_failure_diagnostic(exc)
             LOGGER.warning(
                 "llm translation failed reason=%s",
                 diagnostic.reason,
@@ -593,7 +596,7 @@ class SentenceTranslator:
         locks: tuple[tuple[str, str, str], ...],
         html_mode: bool = False,
         to_chinese: bool = False,
-        references: tuple[tuple[str, str, str, str], ...] = (),
+        references: Sequence[TermReference] = (),
         before_llm_call=None,
         context=None,
     ) -> str:
@@ -670,7 +673,7 @@ class SentenceTranslator:
         locks: tuple[tuple[str, str, str], ...],
         html_mode: bool = False,
         to_chinese: bool = False,
-        references: tuple[tuple[str, str, str, str], ...] = (),
+        references: Sequence[TermReference] = (),
     ) -> str:
         kwargs: dict[str, object] = {}
         supported = inspect.signature(_call_llm).parameters
@@ -756,7 +759,7 @@ class SentenceTranslator:
         return tuple(
             (source, (official[0], official[1]))
             for source, official in rows
-            if _is_eligible_lockable(source, official)
+            if is_eligible_lockable(source, official)
         )
 
     def _eligible_lockable_snapshot(
@@ -788,15 +791,15 @@ class SentenceTranslator:
     ]:
         excluded = _free_text_exclusions(self.service.metadata())
         entries = self.service.entries()
-        sources = _exact_lockable_sources(entries)
+        sources = exact_lockable_source_records(entries)
         # Case variants come after every exact source, so an exact surface
         # always keeps its own record and wins equal-length overlaps. They are
         # computed before exclusions are removed, so an excluded surface still
         # blocks a variant equal to it and still counts for casefold ambiguity.
-        variants = _case_variant_sources(sources, excluded)
+        variants = case_variant_sources(sources, excluded)
         # Same pre-exclusion snapshot: a spelling collision or exclusion still
         # counts even when one of the colliding surfaces is later removed.
-        nfkc_sources = _admissible_nfkc_sources(sources, variants, excluded)
+        nfkc_sources = admissible_nfkc_sources(sources, variants, excluded)
         for surface in excluded:
             sources.pop(surface, None)
         for variant, official in variants:
@@ -863,8 +866,11 @@ class SentenceTranslator:
         return self._read_lockable_sources()
 
 
-def _llm_configured() -> bool:
+def llm_configured() -> bool:
     return llm_transport.llm_configured()
+
+
+_llm_configured = llm_configured
 
 
 _HTML_MODE_INSTRUCTION = (
@@ -1177,7 +1183,7 @@ def _call_llm(
     to_chinese: bool = False,
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     en_zh_protocol: bool = False,
-    references: tuple[tuple[str, str, str, str], ...] = (),
+    references: Sequence[TermReference] = (),
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
     # Tests and embedders replace the async transport with a callable that may
@@ -1209,7 +1215,7 @@ async def _call_llm_async(
     transport: httpx.AsyncBaseTransport | None = None,
     client: httpx.AsyncClient | None = None,
     en_zh_protocol: bool = False,
-    references: tuple[tuple[str, str, str, str], ...] = (),
+    references: Sequence[TermReference] = (),
     context=None,
 ) -> str:
     if client is not None:
@@ -1274,6 +1280,14 @@ def _translation_thinking_body(mode: str) -> dict:
     return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
 
 
+def _coerce_term_reference(
+    ref: TermReference | tuple[str, str, str, str],
+) -> TermReference:
+    if isinstance(ref, TermReference):
+        return ref
+    return TermReference(*ref)
+
+
 async def _call_llm_async_with_client(
     client: httpx.AsyncClient,
     locked_text: str,
@@ -1281,7 +1295,7 @@ async def _call_llm_async_with_client(
     html_mode: bool = False,
     to_chinese: bool = False,
     en_zh_protocol: bool = False,
-    references: tuple[tuple[str, str, str, str], ...] = (),
+    references: Sequence[TermReference | tuple[str, str, str, str]] = (),
     context=None,
 ) -> str:
     # locks are (placeholder, zh_official, en_official); show the model the
@@ -1290,8 +1304,8 @@ async def _call_llm_async_with_client(
     official_index = 1 if to_chinese else 2
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     reference_lines = "\n".join(
-        f"{source} = {(zh, en)[official_index - 1]} ({category})"
-        for source, zh, en, category in references
+        f"{ref.source} = {(ref.zh, ref.en)[official_index - 1]} ({ref.category})"
+        for ref in (_coerce_term_reference(item) for item in references)
     )
     if to_chinese:
         placeholder_instruction = "Keep all placeholders exactly unchanged. "

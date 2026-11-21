@@ -32,7 +32,7 @@ from .sentence import (
     LLMTranslationError,
     TRANSLATION_UNAVAILABLE_NOTICE,
     SentenceTranslator,
-    _llm_configured,
+    llm_configured as _llm_configured,
 )
 from .settings import ChatSettings
 from .telegram_html import strip_telegram_html, validate_telegram_html

@@ -752,7 +752,9 @@ def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
 
     zh_source = names_lock("今天去刷能源核心。", to_chinese=False)
     assert zh_source.locks == ()
-    assert zh_source.references == (("能源核心", "能源核心", "Energy Core", "item"),)
+    assert [ref.as_tuple() for ref in zh_source.references] == [
+        ("能源核心", "能源核心", "Energy Core", "item")
+    ]
 
 
 def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
@@ -762,11 +764,11 @@ def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
     # the model weighs it, nothing hard-locks it to 调谐器. A tier name locks.
     tuner = ("Tuner", "调音师", "Tuner", "speaker")
     speaker = names_lock("Tuner: Hold that note.", to_chinese=True)
-    assert (speaker.locks, speaker.references) == ((), (tuner,))
+    assert (speaker.locks, tuple(ref.as_tuple() for ref in speaker.references)) == ((), (tuner,))
 
     item = names_lock("Use a Basic Tuner first, then the Tuner.", to_chinese=True)
     assert [(zh, en) for _, zh, en in item.locks] == [("初级调谐器", "Basic Tuner")]
-    assert item.references == (tuner,)
+    assert tuple(ref.as_tuple() for ref in item.references) == (tuner,)
 
     ordinary = names_lock("Bring a guitar tuner.", to_chinese=True)
     assert (ordinary.locks, ordinary.references) == ((), ())
@@ -778,7 +780,9 @@ def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):
     # reference, never a lock; en->zh locks only the capitalized name.
     school = names_lock("我们学校的教学楼很旧。", to_chinese=False)
     assert school.locks == ()
-    assert school.references == (("教学楼", "教学楼", "Academia Hall", "location"),)
+    assert tuple(ref.as_tuple() for ref in school.references) == (
+        ("教学楼", "教学楼", "Academia Hall", "location"),
+    )
 
     name = names_lock("Meet me at Academia Hall.", to_chinese=True)
     assert [(zh, en) for _, zh, en in name.locks] == [("教学楼", "Academia Hall")]
