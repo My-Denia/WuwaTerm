@@ -79,12 +79,12 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "abd9e4574f69488cb5b51e9088efb8671d0f6696",
-        "tree": "5c6a536cedc8e6e48f489e2b1935fc30342a1f1d",
+        "commit": "d3916e692f86f48d684f26c922549acc53667a25",
+        "tree": "6a89c30782aa6e9d5a713c68d1da30193b0133ca",
         "status": "success",
-        "status_note": "Docs-only commit #289 on top of the 0.10.2 release source 1d4bcdc: it corrects SECURITY.md's supported version lines, the Web package version in docs/support-matrix.md, and links that still named the old wuwa-translate-bot repository. CI passed on this commit (validated source, every pytest and uv job, both client contract jobs, the package build, the docker boundary and both analyze jobs)."
+        "status_note": "main after #296, the fix that ends a request at its deadline instead of only answering for it (MY-476). CI passed on this commit (run 44955398925: validated source, every pytest and uv job, both client contract jobs, the package build and the docker boundary); the analyze jobs passed in CodeQL run 44955398120 and the locked-dependencies audit in run 44955398440."
       },
-      "source_version": "0.10.3",
+      "source_version": "0.10.2",
       "release": {
         "version": "0.10.2",
         "tag": "v0.10.2",
