@@ -550,7 +550,7 @@ def test_a_timeout_before_the_response_starts_answers_exactly_once(
     assert b'"code":"internal"' in bodies[-1]["body"].replace(b" ", b""), bodies
 
 
-def test_a_status_line_already_in_flight_is_never_preceded_by_another(monkeypatch):
+def test_a_status_line_already_in_flight_is_never_preceded_by_another():
     """The exchange that already started must keep the ONLY status line it has.
 
     An ASGI ``send`` commits the status line to the socket before it returns
