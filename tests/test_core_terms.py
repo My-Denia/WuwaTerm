@@ -211,7 +211,9 @@ def test_map_mark_registers_a_location_term_and_locks(core_term_db: Path):
     translator = SentenceTranslator(core_term_db)
     source = translator.prepare_text(f"前方有{MAPMARK_ZH}，先启动它。")
     locked = translator._lock_terms_with_references(source, to_chinese=False)
-    assert (MAPMARK_ZH, MAPMARK_ZH, MAPMARK_EN, "location") in locked.references
+    assert (MAPMARK_ZH, MAPMARK_ZH, MAPMARK_EN, "location") in {
+        ref.as_tuple() for ref in locked.references
+    }
 
 
 def test_chat_charm_references_into_english_and_locks_into_chinese(
@@ -223,7 +225,9 @@ def test_chat_charm_references_into_english_and_locks_into_chinese(
     # applies, so the surfaces are matched against real user text.
     zh_source = translator.prepare_text(f"新版本上架了{BRAND_ZH}，可以在外观里查看。")
     zh_locked = translator._lock_terms_with_references(zh_source, to_chinese=False)
-    assert (BRAND_ZH, BRAND_ZH, BRAND_EN, "core_term") in zh_locked.references
+    assert (BRAND_ZH, BRAND_ZH, BRAND_EN, "core_term") in {
+        ref.as_tuple() for ref in zh_locked.references
+    }
 
     en_source = translator.prepare_text(f"Claim the new {BRAND_EN} from the event.")
     en_locked = translator._lock_terms_with_references(en_source, to_chinese=True)
@@ -297,10 +301,11 @@ def test_wavesline_and_announcement_ui_core_terms_register_and_reference(
         translator.prepare_text("打开飞讯查看飞讯外观、月影溯环与布是偶。"),
         to_chinese=False,
     )
-    assert ("飞讯", "飞讯", "WavesLine", "core_term") in bare.references
-    assert ("飞讯外观", "飞讯外观", "WavesLine Looks", "core_term") in bare.references
-    assert ("月影溯环", "月影溯环", "Moonlit Ring", "item") in bare.references
-    assert ("布是偶", "布是偶", "Not Even Close", "item") in bare.references
+    bare_tuples = {ref.as_tuple() for ref in bare.references}
+    assert ("飞讯", "飞讯", "WavesLine", "core_term") in bare_tuples
+    assert ("飞讯外观", "飞讯外观", "WavesLine Looks", "core_term") in bare_tuples
+    assert ("月影溯环", "月影溯环", "Moonlit Ring", "item") in bare_tuples
+    assert ("布是偶", "布是偶", "Not Even Close", "item") in bare_tuples
 
 
 def test_version_title_registers_one_row_and_keeps_mirror_and_bare_name_out(
@@ -346,7 +351,9 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
     zh_locked = translator._lock_terms_with_references(
         zh_source, to_chinese=False, allow_nfkc_spelling=True
     )
-    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in zh_locked.references
+    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in {
+        ref.as_tuple() for ref in zh_locked.references
+    }
     bare = translator._lock_terms_with_references(
         translator.prepare_text(f"「{BARE_VERSION_ZH}」即将开启！"),
         to_chinese=False,
@@ -372,7 +379,9 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
     raw_locked = translator._lock_protected_terms_with_references(
         raw_html.neutral, to_chinese=False
     )
-    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in raw_locked.references
+    assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in {
+        ref.as_tuple() for ref in raw_locked.references
+    }
 
     ascii_html = protect_telegram_html(
         "<b>全新3.7版本「镜锁妄世,心照红尘」即将开启！</b>"

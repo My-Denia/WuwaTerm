@@ -42,7 +42,7 @@ from .application import (
 # exactly one definition (in the application layer) and this import is the
 # whole of bot.py's relationship with it. Keeping the name reachable here is
 # what lets existing callers and tests keep importing it from wuwaterm.bot.
-from .application import _fuzzy_dictionary_answer  # noqa: F401
+from .application import fuzzy_dictionary_answer as _fuzzy_dictionary_answer  # noqa: F401
 from .channel import channel_post_handler, send_with_flood_retry
 from .channel_reply_index import ChannelReplyIndex
 from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_payload
@@ -54,7 +54,7 @@ from .sentence import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMTranslationError,
     SentenceTranslator,
-    _llm_configured,
+    llm_configured as _llm_configured,
 )
 from .runtime_keys import (
     ADMIN_CACHE_KEY,

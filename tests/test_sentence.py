@@ -511,7 +511,9 @@ def test_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_db):
         # sees the visible word and can translate it by context.
         assert "__TERM_0__" in locked_text
         assert locks == ()
-        assert references == (("声骸", "声骸", "Echo", "core_term"),)
+        assert tuple(ref.as_tuple() for ref in references) == (
+            ("声骸", "声骸", "Echo", "core_term"),
+        )
         return "literal __TERM_0__ plus Echo"
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
@@ -529,7 +531,9 @@ def test_literal_new_placeholder_like_text_is_preserved(monkeypatch, sample_db):
     def fake_call(locked_text, locks, html_mode=False, to_chinese=False, references=()):
         assert literal in locked_text
         assert locks == ()
-        assert references == (("声骸", "声骸", "Echo", "core_term"),)
+        assert tuple(ref.as_tuple() for ref in references) == (
+            ("声骸", "声骸", "Echo", "core_term"),
+        )
         return f"{literal} plus Echo"
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
@@ -555,7 +559,9 @@ def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_d
         assert html_mode is True
         assert "__TERM_0__" in locked_text
         assert locks == ()
-        assert references == (("声骸", "声骸", "Echo", "core_term"),)
+        assert tuple(ref.as_tuple() for ref in references) == (
+            ("声骸", "声骸", "Echo", "core_term"),
+        )
         return locked_text
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -630,8 +636,8 @@ def test_html_translation_protects_structure_and_only_locks_visible_text(
         # Stand in for the model: apply the dictionary references it was
         # given and leave hard-locked placeholders byte-for-byte intact.
         translated = locked_text
-        for source, zh, en, _category in references:
-            translated = translated.replace(source, zh if to_chinese else en)
+        for ref in references:
+            translated = translated.replace(ref.source, ref.zh if to_chinese else ref.en)
         return translated
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -650,7 +656,7 @@ def test_html_translation_protects_structure_and_only_locks_visible_text(
     assert "&amp;" not in locked_text
     assert "https://example.com" not in locked_text
     model_terms = {lock[2] for lock in seen["locks"]} | {
-        reference[2] for reference in seen["references"]
+        reference.en for reference in seen["references"]
     }
     assert model_terms == expected_en_forms
 
@@ -1535,7 +1541,9 @@ def test_translate_english_sentence_locks_and_restores_chinese(monkeypatch, samp
         # reads a resonator name as a reference it may translate by context.
         assert to_chinese is True
         assert "Echo" not in locked_text
-        assert ("Jinhsi", "今汐", "Jinhsi", "resonator") in references
+        assert ("Jinhsi", "今汐", "Jinhsi", "resonator") in {
+            ref.as_tuple() for ref in references
+        }
         by_en = {en: placeholder for placeholder, _zh, en in locks}
         return f"今汐装备了{by_en['Echo']}"
 
@@ -1589,7 +1597,9 @@ def test_skipped_single_character_name_is_still_offered_as_a_reference(
     )
     assert locked.locks == ()
     assert locked.locked_text == text
-    assert ("椿", "椿", "Camellya", "resonator") in locked.references
+    assert ("椿", "椿", "Camellya", "resonator") in {
+        ref.as_tuple() for ref in locked.references
+    }
 
 
 @pytest.mark.parametrize("text", ["香椿加入菜单。", "椿树很高。", "春天的风吹过。"])
@@ -1622,7 +1632,9 @@ def test_everyday_heart_is_not_offered_as_a_name_reference(single_name_db):
     # rule rather than a ban on the character.
     locked = translator._lock_terms_with_references("心加入队伍。", to_chinese=False)
     assert locked.locks == ()
-    assert ("心", "心", "Hsin", "resonator") in locked.references
+    assert ("心", "心", "Hsin", "resonator") in {
+        ref.as_tuple() for ref in locked.references
+    }
 
 
 def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_reference(
@@ -1644,8 +1656,9 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     text_speaker_only = "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」。"
     locked = translator._lock_terms_with_references(text_speaker_only, to_chinese=False)
     assert locked.locks == ()
-    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked.references
-    assert ("心", "心", "Hsin", "resonator") not in locked.references
+    locked_tuples = {ref.as_tuple() for ref in locked.references}
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_tuples
+    assert ("心", "心", "Hsin", "resonator") not in locked_tuples
 
     # 2. Subsequent independent uncovered name mention still gets naked reference.
     text_with_subsequent_name = (
@@ -1654,8 +1667,9 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     locked_subsequent = translator._lock_terms_with_references(
         text_with_subsequent_name, to_chinese=False
     )
-    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_subsequent.references
-    assert ("心", "心", "Hsin", "resonator") in locked_subsequent.references
+    subsequent_tuples = {ref.as_tuple() for ref in locked_subsequent.references}
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in subsequent_tuples
+    assert ("心", "心", "Hsin", "resonator") in subsequent_tuples
 
     # 3. Version title / ordinary compound without name mention triggers no reference.
     text_title_only = "全新3.7版本「心照红尘」即将开启！"
@@ -1670,8 +1684,9 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
         "的更新维护。5星共鸣者「心」可通过角色活动唤取获得。"
     )
     locked_a3 = translator._lock_terms_with_references(text_a3_head, to_chinese=False)
-    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_a3.references
-    assert ("心", "心", "Hsin", "resonator") not in locked_a3.references
+    a3_tuples = {ref.as_tuple() for ref in locked_a3.references}
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in a3_tuples
+    assert ("心", "心", "Hsin", "resonator") not in a3_tuples
 
     # 5. Protected text / markup keeps coordinate mapping intact without naked injection.
     from wuwaterm.telegram_html import protect_telegram_html
@@ -1682,8 +1697,9 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     locked_protected = translator._lock_protected_terms_with_references(
         protected.neutral, to_chinese=False
     )
-    assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_protected.references
-    assert ("心", "心", "Hsin", "resonator") not in locked_protected.references
+    protected_tuples = {ref.as_tuple() for ref in locked_protected.references}
+    assert ("「心」", "「心」", '"Hsin"', "speaker") in protected_tuples
+    assert ("心", "心", "Hsin", "resonator") not in protected_tuples
 
 
 def test_single_character_speaker_and_english_name_boundaries(single_name_db):
@@ -1751,15 +1767,15 @@ def test_html_single_character_visible_adjacency(
     # The model applies the supplied dictionary references to Chinese source
     # terms; identity output isolates dictionary locking from upstream work.
     def fake_call(locked_text, locks, references=(), **kwargs):
-        for source, _zh, en, _category in references:
-            locked_text = locked_text.replace(source, en)
+        for ref in references:
+            locked_text = locked_text.replace(ref.source, ref.en)
         for placeholder, _zh, en in locks:
             locked_text = locked_text.replace(placeholder, en)
         return locked_text
 
     async def fake_async_call(locked_text, locks, references=(), **kwargs):
-        for source, _zh, en, _category in references:
-            locked_text = locked_text.replace(source, en)
+        for ref in references:
+            locked_text = locked_text.replace(ref.source, ref.en)
         for placeholder, _zh, en in locks:
             locked_text = locked_text.replace(placeholder, en)
         return locked_text
@@ -2740,8 +2756,8 @@ def test_plural_html_translation_default_off_unchanged(monkeypatch, plural_db):
     def fake_call(locked_text, locks, html_mode=False, to_chinese=False, references=()):
         assert to_chinese is False
         assert locks == ()
-        for source, _zh, en, _category in references:
-            locked_text = locked_text.replace(source, en)
+        for ref in references:
+            locked_text = locked_text.replace(ref.source, ref.en)
         return locked_text
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
@@ -2907,7 +2923,7 @@ def test_canonical_spelling_dedupes_same_official_but_not_a_collision(nfkc_surfa
     translator = SentenceTranslator(nfkc_surface_db)
     source = translator.prepare_text("获得回声（常见）道具")
     referenced = translator._lock_terms_with_references(source, to_chinese=False)
-    assert referenced.references == (
+    assert tuple(ref.as_tuple() for ref in referenced.references) == (
         ("回声(常见)", "回声（常见）", "回声(常见)", "term"),
     )
 
@@ -2975,7 +2991,9 @@ def test_protected_text_skips_the_candidate_but_keeps_raw_exact(nfkc_surface_db)
     raw = translator._lock_protected_terms_with_references(
         protect_telegram_html("<b>微光（稀有）</b>").neutral, to_chinese=False
     )
-    assert ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term") in raw.references
+    assert ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term") in {
+        ref.as_tuple() for ref in raw.references
+    }
 
 
 def test_prepare_outputs_keep_their_existing_whitespace_and_paragraphs(nfkc_surface_db):
@@ -3362,7 +3380,7 @@ def test_canonical_candidate_keeps_bounds_identity_and_longest_selection(
     referenced = translator._lock_terms_with_references(
         prepared, to_chinese=False, allow_nfkc_spelling=True
     )
-    assert referenced.references == (
+    assert tuple(ref.as_tuple() for ref in referenced.references) == (
         ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term"),
     )
 
@@ -3494,9 +3512,12 @@ def test_canonical_locking_leaves_lookup_decor_and_title_contracts(
     # both directions and it gains no candidate alias.
     assert "飞讯摆件" not in translator._nfkc_spelling_sources()
     decor_zh_source = translator.prepare_text("新版本上架了飞讯摆件。")
-    assert translator._lock_terms_with_references(
-        decor_zh_source, to_chinese=False
-    ).references == (("飞讯摆件", "飞讯摆件", "WavesLine Decor", "core_term"),)
+    assert tuple(
+        ref.as_tuple()
+        for ref in translator._lock_terms_with_references(
+            decor_zh_source, to_chinese=False
+        ).references
+    ) == (("飞讯摆件", "飞讯摆件", "WavesLine Decor", "core_term"),)
     decor_en_source = translator.prepare_text("Claim the new WavesLine Decor.")
     decor_locked = translator._lock_terms_with_references(
         decor_en_source,
