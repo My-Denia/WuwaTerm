@@ -789,128 +789,13 @@ def _is_attempt_producers_subscript(node: ast.AST | None) -> bool:
     )
 
 
-def _store_target_names(node: ast.AST) -> set[str]:
-    """Return every bare variable name bound in Store/Del context inside ``node``."""
-    return {
-        sub.id
-        for sub in ast.walk(node)
-        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del))
-    }
-
-
-def _collect_scope_bindings(
-    scope_node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef,
-) -> tuple[set[str], set[str]]:
-    """Collect (proven_producer_vars, unproven_vars) for one scope.
-
-    Does not descend into nested function or class bodies. A variable is
-    only safe for ``_tool_module(var.module)`` if every binding in the scope
-    comes from ``_ATTEMPT_PRODUCERS[...]`` and none comes from any other
-    assignment, parameter, loop, context manager, exception handler, import,
-    delete, or global/nonlocal declaration.
-    """
-    proven_bound: set[str] = set()
-    unproven: set[str] = set()
-
-    if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        args = scope_node.args
-        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-            unproven.add(arg.arg)
-        if args.vararg is not None:
-            unproven.add(args.vararg.arg)
-        if args.kwarg is not None:
-            unproven.add(args.kwarg.arg)
-
-    def walk_expr_named_exprs(expr: ast.AST) -> None:
-        for sub in ast.walk(expr):
-            if isinstance(sub, ast.NamedExpr):
-                if _is_attempt_producers_subscript(sub.value):
-                    proven_bound.add(sub.target.id)
-                else:
-                    unproven.add(sub.target.id)
-
-    def walk_stmts(stmts: list[ast.stmt]) -> None:
-        for stmt in stmts:
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                unproven.add(stmt.name)
-                continue
-            if isinstance(stmt, ast.Assign):
-                walk_expr_named_exprs(stmt.value)
-                if (
-                    len(stmt.targets) == 1
-                    and isinstance(stmt.targets[0], ast.Name)
-                    and _is_attempt_producers_subscript(stmt.value)
-                ):
-                    proven_bound.add(stmt.targets[0].id)
-                else:
-                    for target in stmt.targets:
-                        unproven.update(_store_target_names(target))
-            elif isinstance(stmt, ast.AnnAssign):
-                if stmt.value is not None:
-                    walk_expr_named_exprs(stmt.value)
-                    if (
-                        isinstance(stmt.target, ast.Name)
-                        and _is_attempt_producers_subscript(stmt.value)
-                    ):
-                        proven_bound.add(stmt.target.id)
-                    else:
-                        unproven.update(_store_target_names(stmt.target))
-            elif isinstance(stmt, ast.AugAssign):
-                walk_expr_named_exprs(stmt.value)
-                unproven.update(_store_target_names(stmt.target))
-            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
-                walk_expr_named_exprs(stmt.iter)
-                unproven.update(_store_target_names(stmt.target))
-            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                for item in stmt.items:
-                    walk_expr_named_exprs(item.context_expr)
-                    if item.optional_vars is not None:
-                        unproven.update(_store_target_names(item.optional_vars))
-            elif isinstance(stmt, ast.Delete):
-                for target in stmt.targets:
-                    unproven.update(_store_target_names(target))
-            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                for entry in stmt.names:
-                    bound = entry.asname or entry.name.split(".", 1)[0]
-                    if bound != "*":
-                        unproven.add(bound)
-            elif isinstance(stmt, (ast.Global, ast.Nonlocal)):
-                unproven.update(stmt.names)
-            elif isinstance(stmt, ast.Match):
-                walk_expr_named_exprs(stmt.subject)
-                for case in stmt.cases:
-                    for pat in ast.walk(case.pattern):
-                        if isinstance(pat, (ast.MatchAs, ast.MatchStar)) and pat.name:
-                            unproven.add(pat.name)
-                        elif isinstance(pat, ast.MatchMapping) and pat.rest:
-                            unproven.add(pat.rest)
-                    if case.guard is not None:
-                        walk_expr_named_exprs(case.guard)
-                    walk_stmts(case.body)
-                continue
-            else:
-                for field_name, field_value in ast.iter_fields(stmt):
-                    if field_name in {"body", "orelse", "finalbody", "handlers"}:
-                        continue
-                    if isinstance(field_value, ast.AST):
-                        walk_expr_named_exprs(field_value)
-                    elif isinstance(field_value, list):
-                        for item in field_value:
-                            if isinstance(item, ast.AST):
-                                walk_expr_named_exprs(item)
-
-            for child_attr in ("body", "orelse", "finalbody"):
-                child = getattr(stmt, child_attr, None)
-                if isinstance(child, list):
-                    walk_stmts(child)
-            if isinstance(stmt, ast.Try):
-                for handler in stmt.handlers:
-                    if handler.name:
-                        unproven.add(handler.name)
-                    walk_stmts(handler.body)
-
-    walk_stmts(scope_node.body)
-    return proven_bound - unproven, unproven
+def _is_attempt_producers_module_attr(node: ast.AST) -> bool:
+    """Match direct ``_ATTEMPT_PRODUCERS[<subscript>].module`` syntax only."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "module"
+        and _is_attempt_producers_subscript(node.value)
+    )
 
 
 def _collect_scope_aliases(
@@ -1052,32 +937,63 @@ def _is_raw_import_module_call(
 def _discover_admission_dynamic_calls(
     tree: ast.Module, producer_modules: set[str]
 ) -> tuple[list[tuple[str, int]], list[str]]:
-    """Discover all ``_tool_module`` / ``_tool_modules`` tool names via AST."""
+    """Discover all ``_tool_module`` / ``_tool_modules`` tool names via AST.
+
+    Only two syntactic argument shapes are admitted: a string literal or a
+    direct ``_ATTEMPT_PRODUCERS[<subscript>].module`` expression. No
+    intermediate variables or dataflow tracking are permitted.
+    """
     discovered: list[tuple[str, int]] = []
     failures: list[str] = []
 
-    def check_expr_calls(
-        expr: ast.AST,
+    def analyze_scope(
+        scope_node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
         func_name: str | None,
-        proven_vars: set[str],
-        assigned: set[str],
-        importlib_aliases: set[str],
-        import_module_aliases: set[str],
-        tool_module_aliases: set[str],
-        tool_modules_aliases: set[str],
+        enclosing_importlib: set[str],
+        enclosing_import_module: set[str],
+        enclosing_tool_module: set[str],
+        enclosing_tool_modules: set[str],
     ) -> None:
-        # Visit AST nodes inside expressions (skipping nested def/class if any).
-        def visit_expr(node: ast.AST) -> None:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                return
-            if isinstance(node, ast.NamedExpr):
-                visit_expr(node.value)
-                if (
-                    node.target.id in proven_vars
-                    and _is_attempt_producers_subscript(node.value)
-                ):
-                    assigned.add(node.target.id)
-                return
+        (
+            importlib_aliases,
+            import_module_aliases,
+            tool_module_aliases,
+            tool_modules_aliases,
+            wildcard_errors,
+        ) = _collect_scope_aliases(
+            scope_node,
+            enclosing_importlib,
+            enclosing_import_module,
+            enclosing_tool_module,
+            enclosing_tool_modules,
+        )
+        for text, lineno in wildcard_errors:
+            failures.append(
+                f"scripts/deployment_admission.py:{lineno}: wildcard {text!r} is forbidden"
+            )
+
+        def visit_node(node: ast.AST) -> None:
+            if node is not scope_node:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    analyze_scope(
+                        node,
+                        node.name,
+                        importlib_aliases,
+                        import_module_aliases,
+                        tool_module_aliases,
+                        tool_modules_aliases,
+                    )
+                    return
+                if isinstance(node, ast.ClassDef):
+                    analyze_scope(
+                        node,
+                        func_name,
+                        importlib_aliases,
+                        import_module_aliases,
+                        tool_module_aliases,
+                        tool_modules_aliases,
+                    )
+                    return
             if isinstance(node, ast.Call):
                 if _is_raw_import_module_call(
                     node, importlib_aliases, import_module_aliases
@@ -1124,13 +1040,7 @@ def _discover_admission_dynamic_calls(
                                 arg_expr.value, str
                             ):
                                 discovered.append((arg_expr.value, node.lineno))
-                            elif (
-                                isinstance(arg_expr, ast.Attribute)
-                                and arg_expr.attr == "module"
-                                and isinstance(arg_expr.value, ast.Name)
-                                and arg_expr.value.id in proven_vars
-                                and arg_expr.value.id in assigned
-                            ):
+                            elif _is_attempt_producers_module_attr(arg_expr):
                                 if not producer_modules:
                                     failures.append(
                                         f"scripts/deployment_admission.py:{node.lineno}: _ATTEMPT_PRODUCERS has no declared producer modules"
@@ -1144,150 +1054,9 @@ def _discover_admission_dynamic_calls(
                                     f"{ast.unparse(arg_expr)!r} in {node.func.id}() is not statically discoverable"
                                 )
             for child in ast.iter_child_nodes(node):
-                visit_expr(child)
+                visit_node(child)
 
-        visit_expr(expr)
-
-    def analyze_scope(
-        scope_node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
-        func_name: str | None,
-        enclosing_importlib: set[str],
-        enclosing_import_module: set[str],
-        enclosing_tool_module: set[str],
-        enclosing_tool_modules: set[str],
-    ) -> None:
-        (
-            importlib_aliases,
-            import_module_aliases,
-            tool_module_aliases,
-            tool_modules_aliases,
-            wildcard_errors,
-        ) = _collect_scope_aliases(
-            scope_node,
-            enclosing_importlib,
-            enclosing_import_module,
-            enclosing_tool_module,
-            enclosing_tool_modules,
-        )
-        for text, lineno in wildcard_errors:
-            failures.append(
-                f"scripts/deployment_admission.py:{lineno}: wildcard {text!r} is forbidden"
-            )
-        if isinstance(scope_node, ast.ClassDef):
-            proven_vars: set[str] = set()
-        else:
-            proven_vars, _unproven = _collect_scope_bindings(scope_node)
-
-        def walk_block(stmts: list[ast.stmt], assigned_in: set[str]) -> set[str]:
-            assigned = set(assigned_in)
-            for stmt in stmts:
-                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    analyze_scope(
-                        stmt,
-                        stmt.name,
-                        importlib_aliases,
-                        import_module_aliases,
-                        tool_module_aliases,
-                        tool_modules_aliases,
-                    )
-                    continue
-                if isinstance(stmt, ast.ClassDef):
-                    analyze_scope(
-                        stmt,
-                        func_name,
-                        importlib_aliases,
-                        import_module_aliases,
-                        tool_module_aliases,
-                        tool_modules_aliases,
-                    )
-                    continue
-
-                # Check non-child-block expressions in this statement.
-                for field_name, field_value in ast.iter_fields(stmt):
-                    if field_name in {"body", "orelse", "finalbody", "handlers", "cases"}:
-                        continue
-                    if isinstance(field_value, ast.AST):
-                        check_expr_calls(
-                            field_value,
-                            func_name,
-                            proven_vars,
-                            assigned,
-                            importlib_aliases,
-                            import_module_aliases,
-                            tool_module_aliases,
-                            tool_modules_aliases,
-                        )
-                    elif isinstance(field_value, list):
-                        for item in field_value:
-                            if isinstance(item, ast.AST):
-                                check_expr_calls(
-                                    item,
-                                    func_name,
-                                    proven_vars,
-                                    assigned,
-                                    importlib_aliases,
-                                    import_module_aliases,
-                                    tool_module_aliases,
-                                    tool_modules_aliases,
-                                )
-
-                if isinstance(stmt, ast.Assign):
-                    if (
-                        len(stmt.targets) == 1
-                        and isinstance(stmt.targets[0], ast.Name)
-                        and stmt.targets[0].id in proven_vars
-                        and _is_attempt_producers_subscript(stmt.value)
-                    ):
-                        assigned.add(stmt.targets[0].id)
-                elif isinstance(stmt, ast.AnnAssign):
-                    if (
-                        isinstance(stmt.target, ast.Name)
-                        and stmt.target.id in proven_vars
-                        and stmt.value is not None
-                        and _is_attempt_producers_subscript(stmt.value)
-                    ):
-                        assigned.add(stmt.target.id)
-                elif isinstance(stmt, ast.If):
-                    body_out = walk_block(stmt.body, assigned)
-                    else_out = walk_block(stmt.orelse, assigned)
-                    assigned = body_out & else_out
-                elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-                    walk_block(stmt.body, assigned)
-                    walk_block(stmt.orelse, assigned)
-                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                    assigned = walk_block(stmt.body, assigned)
-                elif isinstance(stmt, ast.Try):
-                    body_out = walk_block(stmt.body, assigned)
-                    else_out = walk_block(stmt.orelse, body_out) if stmt.orelse else body_out
-                    for handler in stmt.handlers:
-                        walk_block(handler.body, assigned)
-                    if stmt.finalbody:
-                        assigned = walk_block(stmt.finalbody, assigned)
-                    elif not stmt.handlers:
-                        assigned = else_out
-                elif isinstance(stmt, ast.Match):
-                    branch_outs: list[set[str]] = []
-                    for case in stmt.cases:
-                        if case.guard is not None:
-                            check_expr_calls(
-                                case.guard,
-                                func_name,
-                                proven_vars,
-                                assigned,
-                                importlib_aliases,
-                                import_module_aliases,
-                                tool_module_aliases,
-                                tool_modules_aliases,
-                            )
-                        branch_outs.append(walk_block(case.body, assigned))
-                    if branch_outs and any(
-                        isinstance(c.pattern, ast.MatchAs) and c.pattern.pattern is None
-                        for c in stmt.cases
-                    ):
-                        assigned = set.intersection(*branch_outs)
-            return assigned
-
-        walk_block(scope_node.body, set())
+        visit_node(scope_node)
 
     analyze_scope(
         tree,
