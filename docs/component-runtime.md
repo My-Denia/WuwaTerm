@@ -209,8 +209,13 @@ saved-source recovery. `component_inspect.py` reads deployment metadata,
 
 `component_journal_runtime.py` and `component_journal_full.py` parse and validate
 their respective transaction records. `component_handoff.py` verifies the
-immutable predecessor and manages the durable cross-kind marker handoff.
-`component_terminal.py` selects the terminal verifier, with full-data terminal
+immutable predecessor and syncs the durable cross-kind markers;
+`component_handoff_finish.py` retires a verified predecessor after admission.
+Those two are deliberately split: the primitives must stay below
+`deployment_admission.py`, which calls them while admitting a recovery, so
+putting the admission-dependent removal in `component_handoff.py` would make
+the pair a cycle. `component_terminal.py` selects the terminal verifier, with
+full-data terminal
 verification in `component_terminal_full.py`. `component_operations.py` holds
 the observations, binding checks, and container and pointer operations shared
 by both transaction types. State-probe records, state-entry paths, and state-plan

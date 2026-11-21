@@ -344,6 +344,16 @@ reach `lookup` or `sentence` directly could grow a second, divergent pipeline
 without anyone noticing, which is exactly what a second surface is most likely
 to do.
 
+**The deployment-tool import direction.** The flat `scripts/` deployment tools
+are a second graph, and the same script checks it for cycles over real AST
+imports — a reverse edge written inside a function body counts, so keeping it
+lazy does not hide it. `deployment_admission.py` is the read-only layer every
+tool calls, so it necessarily calls tools back to verify them; what it must not
+become is a cycle. `component_handoff.py` therefore holds only the predecessor
+primitives, and `component_handoff_finish.py` — above both modules — owns the
+admission-dependent removal. Two builder-isolation pairs predate the rule and
+are pinned in `KNOWN_SCRIPTS_MUTUAL_IMPORTS` instead of being enforced here.
+
 The application layer holds the shared command/API/web pipeline (prepare →
 direction → exact hit → trusted fuzzy hit → length gate → chunked
 LLM call with contextual term references) and knows nothing about Telegram or HTTP. Its adapter-shaped steps
