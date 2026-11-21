@@ -84,7 +84,7 @@ release. That boundary has not moved.
   `products.telegram` entry on its published release.
   `products.telegram` records the published Telegram `v0.4.1`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.4.1`, because the installer
+  `products.web` records the published Web `v0.4.2`, because the installer
   takes its default Web release from that entry; `products.windows` records the
   published Windows `v0.6.2`.
 - The Telegram release a checkout of this tag prints comes from
@@ -107,10 +107,11 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` and the `v0.10.1` and `v0.10.2` tags record and install
-  Web `v0.4.1`, so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
+  they differ. `main` records and installs Web `v0.4.2`; the `v0.10.1` and
+  `v0.10.2` tags' frozen snapshots record and install `v0.4.1`, so those tag
+  checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.4.1` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.4.2` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
@@ -253,7 +254,10 @@ The 0.8.0 capability checks still apply to this release:
   `tests/test_ci_source_epoch.py` (lines 128-129) carry the same revisions,
   because `scripts/ci_source_epoch.py resolve` compares the source's pin blob
   to that config and fails the release preflight when the two disagree. A pin
-  move is one commit over all four files.
+  move is one commit over all four files. `main` after `v0.10.2` moves them to
+  Web `v0.4.2` (`262d715527eeb7c64ee9c6d922b3c34d7722813b`) and Windows `v0.6.2`
+  (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), together with the installer's
+  default Web release.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.4.1 pins the published Core
   `v0.10.1` wheel and is deployed, so the 0.10.1 library reaches Telegram users
