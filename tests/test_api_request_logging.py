@@ -607,12 +607,9 @@ def test_a_caller_that_goes_away_is_not_recorded_as_a_server_fault(
     what a shutdown mid-request raises. Both must still propagate afterwards —
     this changes the record, not the request.
     """
-    from starlette.requests import Request
-
     from wuwaterm_api.app import CLIENT_GONE_STATUS, RequestIdMiddleware
 
     app, _ = build_app(tmp_path, sample_db)
-    middleware = RequestIdMiddleware(app)
     scope = {
         "type": "http",
         "method": "POST",
@@ -622,13 +619,21 @@ def test_a_caller_that_goes_away_is_not_recorded_as_a_server_fault(
         "app": app,
     }
 
-    async def hung_up(_request):
+    async def hung_up(_scope, _receive, _send):
         raise gone()
+
+    middleware = RequestIdMiddleware(hung_up)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
 
     async def scenario():
         with captured_records() as captured:
             with pytest.raises(gone):
-                await middleware.dispatch(Request(scope), hung_up)
+                await middleware(scope, receive, send)
         return captured
 
     captured = run(scenario())

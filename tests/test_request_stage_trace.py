@@ -48,7 +48,7 @@ API_KEY = "sk-stage-trace-test-key"
 BASE_FIELDS = {"request_id", "method", "route", "status", "duration_ms", "device"}
 STAGE_FIELDS = {"slot_wait_ms", "llm_post_ms", "llm_calls", "direction"}
 TIMEOUT_FIELDS = (
-    {"route", "request_id", "elapsed_ms", "stage"}
+    {"route", "request_id", "elapsed_ms", "stage", "sent_status"}
     | {"slot_wait_ms", "llm_post_ms", "llm_calls", "direction"}
 )
 

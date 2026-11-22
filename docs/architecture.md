@@ -306,7 +306,8 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence`; pure terminology modules (`cjk_span`, `english_plural`, `protected_text`, `skill_references`, `term_classification`, `term_matching`, `term_preparation`) must not import `db` or `lookup` |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `term_matching`, `term_preparation`, `cjk_span`, `protected_text`, `segmentation`, `english_plural`, `skill_references`, `term_classification` | `db`, `lookup`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -371,6 +372,17 @@ belong to other subsystems, and are recorded in `KNOWN_SCRIPTS_CYCLES`. Naming
 a component is what keeps the gate honest in both directions: anything this set
 does not name fails, and an entry whose cycle is gone fails until it is
 deleted.
+
+Because `deployment_admission.py` loads verified tools dynamically via
+`_tool_module` / `_tool_modules` (including `_ATTEMPT_PRODUCERS`), those
+dynamic edges are pinned by `DECLARED_DYNAMIC_TOOL_DEPS` in
+`scripts/deployment_admission.py`. `scripts/check_architecture_boundaries.py`
+parses `_tool_module` / `_tool_modules` and `_ATTEMPT_PRODUCERS` via AST and
+rejects any undeclared or non-discoverable dynamic load, any stale manifest
+entry, any declared tool missing from `scripts/` or
+`component_journal_runtime.TOOL_PATHS` (outside the legacy `runtime_update`
+exception), and any dynamic dependency on higher-layer modules such as
+`component_handoff_finish`.
 
 The application layer holds the shared command/API/web pipeline (prepare →
 direction → exact hit → trusted fuzzy hit → length gate → chunked
@@ -443,6 +455,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
 | `sentence` → `telegram_html` | Transitional | Three lazy legacy forwarding methods remain until the Telegram product cutover; the neutral translation path has no presentation dependency |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
+| `segmentation` imports pure text helpers from `review` | Indirect coupling | `segmentation` imports only `WHITESPACE`, `segment_core`, `paragraph_ranges`, `sentence_ranges_v2` from `review`, which separately imports `lookup` → `db`; direct imports of `db`, `lookup`, and `sqlite3` from pure matching modules are forbidden |
 | Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |
 
 ## Request flows

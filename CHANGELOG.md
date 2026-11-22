@@ -3,6 +3,67 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.10.3 - 2026-11-21
+
+### API
+
+- A request now ends at its own deadline instead of only answering for it. The
+  three middleware are plain ASGI wrappers, so `anyio.fail_after` wraps the
+  rest of the stack in the same task and a 504 means the semaphore waiter, the
+  in-flight POST and the segment loop above it have unwound; the budget is
+  re-read where money is spent, so a layer that swallows the cancellation
+  still starts no POST. A span that opens a stage restores the enclosing one
+  when it closes, so the timeout record names the stage in force at the
+  deadline, and it carries `sent_status` when the status line was already out
+  and no 504 could be sent (#296, MY-476). The 45 s model call, the 90 s
+  request budget, the 2 concurrency slots, the thinking policy and the 504
+  envelope are unchanged.
+- A translation request records where its time went (#293): `request_trace.py`
+  holds one mutable object per request with the monotonic start, the stage in
+  force, accumulated slot wait, POST time and POST attempts, so "request timed
+  out" and "request complete" report `stage`, `slot_wait_ms`, `llm_post_ms`,
+  `llm_calls` and `direction` instead of one total. Every helper is a no-op
+  without an active trace, so the bot, the channel adapter and the CLI are
+  unaffected.
+
+### Terms and review
+
+- The term reference is a domain model rather than a tuple of the pieces its
+  consumers wanted (#291). `term_preparation` produces `TermReference`, and the
+  application, bot, channel, review and sentence layers read it; the
+  architecture check refuses an import of a private `_name` symbol from
+  another module, so a layer cannot reach past a module's published surface.
+
+### Internal boundaries
+
+- Handoff primitives sit below deployment admission (#292): the durable
+  removal lives in `component_handoff_finish`, `component_handoff` no longer
+  mentions admission, and `component_full` and `component_transaction` call the
+  same published `finish_handoff` instead of the pair calling each other from
+  inside their functions. Deployment admission resolves each tool's module
+  through one verified-root resolver instead of repeating the source check at
+  twenty call sites, two of which had no proof at all. The architecture check
+  walks imports inside function bodies and refuses a new mutual import pair or
+  a `component_handoff -> deployment_admission` edge; the two
+  builder-isolation pairs that predate the rule stay pinned.
+- Matching's storage boundary is enforced, and admission's dynamic tool
+  manifest is one syntactic allowlist with scope-wide producer binding and
+  `import_module` alias checks (#295).
+
+### Documentation
+
+- `SECURITY.md`'s supported version lines and the Web package version in
+  `docs/support-matrix.md` are corrected, and links that still named the old
+  `wuwa-translate-bot` repository now name this one (#289).
+
+### Client defaults
+
+- The installer's default Web release moves to `v0.4.3` (#290 and this release
+  prep), and the Core CI client pins move to Web `v0.4.3` (`ba8d01b2`) and
+  Windows `v0.6.3` (`d0bd6c4b`). Telegram stays at its published `v0.4.1`,
+  which pins Core `v0.10.1`. `contracts/products.json` records all three
+  published releases and their assets.
+
 ## 0.10.2
 
 ### Internal boundaries
