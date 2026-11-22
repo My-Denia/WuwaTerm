@@ -288,6 +288,11 @@ def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypa
     assert seen[0][1].before is None
     assert seen[1][1].before.source == "甲" * 400
     assert seen[1][1].before.target == "T1"
+    # Two cores, two calls: the second core is two paragraphs and the mock
+    # answers it as one line, but this replacement transport predates the extra
+    # instruction a paragraph-count repair needs to carry, so the repair is
+    # skipped rather than sent without its one reason for existing.
+    assert len(seen) == 2
 
 
 # --------------------------------------------------------------------------

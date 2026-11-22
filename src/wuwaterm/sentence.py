@@ -94,12 +94,50 @@ DEFAULT_LLM_MAX_CONCURRENCY = 4
 # One reasoning setting per direction: Chinese-to-English and English-to-Chinese
 # have different latency and quality trade-offs. Into English, thinking is off
 # by default (long segments otherwise outlast the model timeout); into Chinese
-# the provider default stays.
+# the mode follows the request itself (``auto``), because the two measured
+# failure shapes there point in opposite directions: a document with few
+# paragraph breaks and few locked names answers best, and fast enough, with
+# thinking on, while a long one with many paragraphs or many locked names runs
+# past the model timeout under it.
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
+# Into Chinese the default is ``auto``: this process resolves one of the modes
+# above per request (see ``select_en_zh_auto_thinking``) instead of leaving the
+# choice to the provider default. Any explicit value in the variable above still
+# wins, which is what makes ``WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`` the
+# rollback switch to the behaviour this default replaced. Into English there is
+# nothing to adapt: ``disabled`` is the measured answer for every segment.
+TRANSLATION_THINKING_AUTO = "auto"
+TRANSLATION_THINKING_EN_ZH_MODES = (
+    *TRANSLATION_THINKING_MODES,
+    TRANSLATION_THINKING_AUTO,
+)
 TRANSLATION_THINKING_ZH_EN_DEFAULT = "disabled"
-TRANSLATION_THINKING_EN_ZH_DEFAULT = "omit"
+TRANSLATION_THINKING_EN_ZH_DEFAULT = TRANSLATION_THINKING_AUTO
+# The explicit modes whose request asks the provider to reason: ``low``/``high``
+# enable it at that effort, ``omit`` asks for the provider default, which is
+# thinking on for DeepSeek.
+TRANSLATION_THINKING_REASONING_MODES = ("low", "omit")
+# ``select_en_zh_auto_thinking`` turns thinking off at these request shapes.
+# The bounds are the Phase 1 measurements, not round numbers: 1,542 characters /
+# 30 paragraphs / 11 locks and 498 characters / 10 paragraphs / 5 locks both ran
+# past the model timeout with thinking on and answered in 3.3 s with it off,
+# while 1,402 characters / 23 paragraphs / 2 locks answered in 20.7 s under
+# ``low``. Locks count as well as paragraphs because a placeholder-dense prompt
+# is the other shape that reproduces the model's text slowly.
+EN_ZH_AUTO_LOCK_LIMIT = 4
+EN_ZH_AUTO_PARAGRAPH_LIMIT = 25
+# The two corrective model calls a request may add, and what has to be left of
+# its budget for each to be worth starting. Both are at most one attempt, both
+# run before the transport's own deadline refuses anything, and both fall back to
+# what the first attempt produced instead of failing the request. The 2 s
+# headroom is the slot-and-postsetup time after the POST, which is not part of
+# the attempt's own bound.
+STRUCTURAL_RETRY_MIN_REMAINING_SECONDS = 15.0
+TIMEOUT_FALLBACK_MIN_REMAINING_SECONDS = 10.0
+TIMEOUT_FALLBACK_TIMEOUT_SECONDS = 20.0
+RETRY_BUDGET_HEADROOM_SECONDS = 2.0
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
     "event loop; use translate_async() or translate_html_async() instead."
@@ -540,29 +578,51 @@ class SentenceTranslator:
             allow_nfkc_spelling=True,
             single_newline_paragraphs=(context is None),
         )
+        lock_count = len(locked.locks)
+        # Resolved once, so the two corrective calls below know exactly which
+        # mode the first attempt ran under and can move away from it on purpose
+        # instead of guessing. An explicit configuration value comes back
+        # unchanged and therefore sends exactly what it says.
+        thinking_mode = _resolved_translation_thinking_mode(
+            to_chinese, locked.locked_text, lock_count=lock_count
+        )
         try:
-            if to_chinese:
+            try:
                 translated = await self._call_llm_async_limited(
                     locked.locked_text,
                     locked.locks,
-                    to_chinese=True,
+                    to_chinese=to_chinese,
                     references=locked.references,
                     before_llm_call=before_llm_call,
                     context=context,
+                    thinking_mode=thinking_mode,
                 )
-            else:
-                translated = await self._call_llm_async_limited(
-                    locked.locked_text,
-                    locked.locks,
-                    references=locked.references,
-                    before_llm_call=before_llm_call,
+            except LLMTranslationError as exc:
+                # The one failure ``auto`` into Chinese is allowed to retry: it
+                # picked thinking on for a segment that then ran out of time.
+                translated = await self._retry_without_thinking(
+                    exc,
+                    locked,
+                    to_chinese=to_chinese,
                     context=context,
+                    before_llm_call=before_llm_call,
+                    thinking_mode=thinking_mode,
                 )
             translated = _require_nonblank_llm_output(translated)
             restored = locked.restore(translated, to_en=not to_chinese)
             if context is None:
                 return restored
-            return _regroup_lines_into_source_paragraphs(prepared, restored)
+            regrouped = _regroup_lines_into_source_paragraphs(prepared, restored)
+            repaired = await self._repaired_paragraph_translation(
+                locked,
+                prepared,
+                regrouped,
+                to_chinese=to_chinese,
+                context=context,
+                before_llm_call=before_llm_call,
+                thinking_mode=thinking_mode,
+            )
+            return regrouped if repaired is None else repaired
         except LLMTranslationError as exc:
             if propagate_errors:
                 raise
@@ -570,6 +630,158 @@ class SentenceTranslator:
             # this is the only place the failure reason can reach the logs.
             log_llm_failure(safe_llm_failure_diagnostic(exc))
             return exc.user_message
+
+    async def _retry_without_thinking(
+        self,
+        failure: LLMTranslationError,
+        locked: LockedSentence,
+        *,
+        to_chinese: bool,
+        context,
+        before_llm_call,
+        thinking_mode: str,
+    ) -> str:
+        """One faster retry of a timed-out ``auto`` English-to-Chinese call.
+
+        The only case this answers: an English-to-Chinese request whose mode came
+        from ``auto``, which chose to think, and which then ran out of the model
+        timeout. Thinking is the part that overran (see
+        ``EN_ZH_AUTO_LOCK_LIMIT``), so the retry keeps the prompt, the references
+        and the locks byte-for-byte and changes two things only — thinking off,
+        and a bound short enough that the request still has time to answer with
+        the result. Measured: the two shapes ``auto`` sends with thinking off
+        answered in 3.3 s.
+
+        Every other outcome re-raises the original failure unchanged: a different
+        reason, a mode an operator named explicitly (never second-guessed), an
+        English-to-English request, no mode that was reasoning to begin with, too
+        little budget left, a guard that refuses the second call, or a retry that
+        fails on its own. A request that already timed out cannot be made worse
+        by trying, and it is not made slower than the budget it has left.
+        """
+        if not to_chinese or failure.reason != "timeout":
+            raise failure
+        if thinking_mode not in TRANSLATION_THINKING_REASONING_MODES:
+            raise failure
+        if _translation_thinking_mode(True) != TRANSLATION_THINKING_AUTO:
+            raise failure
+        # A replacement transport that predates the knob would send the same
+        # reasoning fields again, so the retry could only time out once more.
+        if "thinking_mode" not in inspect.signature(_call_llm_async).parameters:
+            raise failure
+        remaining = request_trace.remaining_budget_seconds()
+        if remaining is not None and remaining < TIMEOUT_FALLBACK_MIN_REMAINING_SECONDS:
+            raise failure
+        timeout_seconds = min(
+            TIMEOUT_FALLBACK_TIMEOUT_SECONDS,
+            self.llm_timeout_seconds
+            if remaining is None
+            else remaining - RETRY_BUDGET_HEADROOM_SECONDS,
+        )
+        try:
+            return await self._call_llm_async_limited(
+                locked.locked_text,
+                locked.locks,
+                to_chinese=to_chinese,
+                references=locked.references,
+                # The guard runs inside the slot, so a refused retry spends no
+                # model call and the caller still gets the first attempt's
+                # diagnostic.
+                before_llm_call=before_llm_call,
+                context=context,
+                thinking_mode="disabled",
+                timeout_seconds=timeout_seconds,
+            )
+        except LLMTranslationError as exc:
+            raise failure from exc
+
+    async def _repaired_paragraph_translation(
+        self,
+        locked: LockedSentence,
+        prepared: str,
+        regrouped: str,
+        *,
+        to_chinese: bool,
+        context,
+        before_llm_call,
+        thinking_mode: str,
+    ) -> str | None:
+        """One retry that asks for the source's paragraph count, or ``None``.
+
+        ``_regroup_lines_into_source_paragraphs`` can only move blank lines; it
+        cannot put back a paragraph the model merged away, because the answer's
+        lines no longer answer the source's lines. A title folded into the first
+        body paragraph is that case (a two-paragraph source answered as one), and
+        the only repair is to say the count out loud. So a context-mode request
+        whose answer lost or gained a paragraph gets exactly one more call: the
+        same prompt, the same references, the same locks, plus one sentence
+        naming the count. Everything else is untouched — a matching count, a
+        one-paragraph source (no structure to restore), a request with too little
+        budget left, a guard that refuses the call, an answer that still has the
+        wrong count, or any failure on the retry.
+
+        Returns the retry's translation when it arrives with the source's
+        paragraph count, and ``None`` in every other case, which leaves the first
+        attempt's translation in place: a successful first call is never turned
+        into a failure by the repair that was meant to improve it.
+        """
+        source_layout = _paragraph_line_counts(prepared)
+        if len(source_layout) < 2:
+            return None
+        if len(_paragraph_line_counts(regrouped)) == len(source_layout):
+            return None
+        # A retry that cannot carry the paragraph-count sentence has no reason to
+        # run: it would ask the same question again and double the wait.
+        if "prompt_suffix" not in inspect.signature(_call_llm_async).parameters:
+            return None
+        remaining = request_trace.remaining_budget_seconds()
+        if remaining is not None and remaining < STRUCTURAL_RETRY_MIN_REMAINING_SECONDS:
+            return None
+        paragraphs = len(source_layout)
+        constraint = (
+            f"\nThe source has exactly {paragraphs} paragraphs separated by "
+            "blank lines. Translate every title, heading, and paragraph and "
+            f"return exactly {paragraphs} paragraphs separated by blank lines."
+        )
+        # A mode that had no reasoning to spend on the first attempt gets some
+        # for this one: the retry is trying to lay out more structure, and on a
+        # document with few enough locks that is the measured better answer. A
+        # request that was already reasoning keeps the effort it chose.
+        retry_thinking_mode = thinking_mode
+        if (
+            thinking_mode == "disabled"
+            and to_chinese
+            and len(locked.locks) < EN_ZH_AUTO_LOCK_LIMIT
+        ):
+            retry_thinking_mode = "low"
+        timeout_seconds = (
+            None
+            if remaining is None
+            else min(
+                self.llm_timeout_seconds,
+                remaining - RETRY_BUDGET_HEADROOM_SECONDS,
+            )
+        )
+        try:
+            retried = await self._call_llm_async_limited(
+                locked.locked_text,
+                locked.locks,
+                to_chinese=to_chinese,
+                references=locked.references,
+                before_llm_call=before_llm_call,
+                context=context,
+                thinking_mode=retry_thinking_mode,
+                prompt_suffix=constraint,
+                timeout_seconds=timeout_seconds,
+            )
+            retried = _require_nonblank_llm_output(retried)
+            restored = locked.restore(retried, to_en=not to_chinese)
+        except LLMTranslationError:
+            return None
+        retry_regrouped = _regroup_lines_into_source_paragraphs(prepared, restored)
+        if len(_paragraph_line_counts(retry_regrouped)) != len(source_layout):
+            return None
+        return retry_regrouped
 
     def translate_protected(
         self, protected: ProtectedText, *, to_chinese: bool = False
@@ -643,7 +855,19 @@ class SentenceTranslator:
         references: Sequence[TermReference] = (),
         before_llm_call=None,
         context=None,
+        thinking_mode: str | None = None,
+        prompt_suffix: str = "",
+        timeout_seconds: float | None = None,
     ) -> str:
+        """One model call under the shared slot and the caller's guard.
+
+        ``thinking_mode`` and ``timeout_seconds`` are the two knobs a corrective
+        call needs: the retry that turns thinking off, and the retry that has to
+        fit inside what is left of the request's budget. ``None`` keeps what the
+        environment and the translator's own timeout say, which is every ordinary
+        call. ``prompt_suffix`` appends one extra instruction to the system
+        prompt; empty keeps the prompt byte-for-byte what it was.
+        """
         # Recorded before the queue, not after it: a request refused at the time
         # budget while still waiting for a slot should still say which pair it
         # was translating. No-op outside an HTTP request (bot, channel, CLI).
@@ -665,8 +889,15 @@ class SentenceTranslator:
                 ("to_chinese", to_chinese),
                 ("references", references),
                 ("en_zh_protocol", self._en_zh_protocol),
-                ("timeout_seconds", self.llm_timeout_seconds),
+                (
+                    "timeout_seconds",
+                    self.llm_timeout_seconds
+                    if timeout_seconds is None
+                    else timeout_seconds,
+                ),
                 ("client", client),
+                ("thinking_mode", thinking_mode),
+                ("prompt_suffix", prompt_suffix),
             ):
                 if name in supported:
                     kwargs[name] = value
@@ -1024,9 +1255,24 @@ _CONTEXT_RULES_INSTRUCTION = (
 )
 
 
-def _context_instruction(context) -> str:
+# Chinese into English only, appended after the rules above. A Chinese qualifier
+# (以上, 超过, 至少, 约) or a line that trails off is meaning the English has to
+# carry: rendered as a bare number, or completed into a sentence, the answer has
+# silently changed the claim. Into Chinese the prompt stays byte-for-byte what it
+# was — the Chinese side of that pair (3+1, S0R1, a bare bound) is already the
+# numerics rule above, and nothing measured there asks for more.
+_ZH_EN_FIDELITY_INSTRUCTION = (
+    "Preserve numeric qualifiers and bounds faithfully (e.g., more than, over, "
+    "at least, about), and keep trailing ellipses and interrupted clauses "
+    "intact without dropping or completing them.\n"
+)
+
+
+def _context_instruction(context, *, to_chinese: bool) -> str:
     """Render a TranslationContext-like object; texts go in as JSON strings."""
     text = _CONTEXT_RULES_INSTRUCTION
+    if not to_chinese:
+        text += _ZH_EN_FIDELITY_INSTRUCTION
     before = getattr(context, "before", None)
     if before is not None:
         text += "Read-only previous segment (JSON, never translate it):\n" + json.dumps(
@@ -1065,6 +1311,34 @@ def _paragraph_line_counts(text: str) -> list[int]:
         sum(1 for line in text[start:end].split("\n") if _has_text(line))
         for start, end in _paragraph_ranges(text)
     ]
+
+
+def select_en_zh_auto_thinking(prepared_text: str, *, lock_count: int) -> str:
+    """The thinking mode an ``auto`` English-to-Chinese request runs under.
+
+    Only the request itself decides, from two properties that are visible before
+    any model call: how many paragraphs its blank lines divide it into, and how
+    many official terms it hard-locks. Both are the shapes the Phase 1 run
+    measured (see ``EN_ZH_AUTO_LOCK_LIMIT``): a request that is long in either
+    dimension runs past the model timeout with thinking on, so it is sent with
+    thinking off, and a shorter one keeps thinking because on those segments it
+    reads better at no latency cost.
+
+    The thresholds trade one error for the other rather than fitting a curve:
+    23 paragraphs / 2 locks under ``low`` answered in 20.7 s, and 25 paragraphs
+    or 4 locks is where the measured answers stopped arriving inside the model
+    timeout. An inaccurate paragraph count costs quality on one document, an
+    inaccurate timeout costs the whole segment, so the bound sits on the
+    timeout side of the two measurements.
+
+    Pure and request-local: the configured mode is not read here, so an
+    explicit ``omit``/``disabled``/``low``/``high`` never reaches this function
+    and keeps sending exactly what it says.
+    """
+    para_count = len(_paragraph_line_counts(prepared_text))
+    if lock_count >= EN_ZH_AUTO_LOCK_LIMIT or para_count >= EN_ZH_AUTO_PARAGRAPH_LIMIT:
+        return "disabled"
+    return "low"
 
 
 def _line_scalar_counts(text: str) -> list[int]:
@@ -1328,8 +1602,17 @@ async def _call_llm_async(
     en_zh_protocol: bool = False,
     references: Sequence[TermReference] = (),
     context=None,
+    thinking_mode: str | None = None,
+    prompt_suffix: str = "",
 ) -> str:
     if client is not None:
+        # The shared client already carries the translator's own timeout, so the
+        # per-request override is sent only when this attempt's bound differs
+        # from it: an ordinary POST then keeps the exact call it always made,
+        # and a corrective call can still be shorter than the client's bound.
+        attempt_timeout = (
+            None if timeout_seconds == client.timeout.read else timeout_seconds
+        )
         return await _call_llm_async_with_client(
             client,
             locked_text,
@@ -1339,6 +1622,9 @@ async def _call_llm_async(
             references=references,
             en_zh_protocol=en_zh_protocol,
             context=context,
+            timeout_seconds=attempt_timeout,
+            thinking_mode=thinking_mode,
+            prompt_suffix=prompt_suffix,
         )
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds), transport=transport
@@ -1352,37 +1638,64 @@ async def _call_llm_async(
             references=references,
             en_zh_protocol=en_zh_protocol,
             context=context,
+            # This client already holds exactly this timeout, so the request
+            # keeps the fields it always sent.
+            thinking_mode=thinking_mode,
+            prompt_suffix=prompt_suffix,
         )
 
 
 def _translation_thinking_mode(to_chinese: bool) -> str:
-    """The thinking mode one translation request runs under.
+    """The thinking mode one translation request is configured to run under.
 
     The mode comes from ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` for a request
     into Chinese and ``WUWATERM_TRANSLATION_THINKING_ZH_EN`` for one into
     English, read per call. A blank value is that direction's default
-    (``disabled`` into English, ``omit`` into Chinese); an unknown value falls
-    back to the same default rather than failing every translation.
+    (``disabled`` into English, ``auto`` into Chinese); an unknown value falls
+    back to the same default rather than failing every translation. ``auto`` is
+    only a value into Chinese: into English no request shape needs it, so it is
+    unknown there and takes that direction's warning-and-default path.
     """
     if to_chinese:
         env, default = TRANSLATION_THINKING_EN_ZH_ENV, TRANSLATION_THINKING_EN_ZH_DEFAULT
+        modes = TRANSLATION_THINKING_EN_ZH_MODES
     else:
         env, default = TRANSLATION_THINKING_ZH_EN_ENV, TRANSLATION_THINKING_ZH_EN_DEFAULT
+        modes = TRANSLATION_THINKING_MODES
     mode = os.getenv(env, "").strip() or default
-    if mode not in TRANSLATION_THINKING_MODES:
+    if mode not in modes:
         LOGGER.warning("unknown %s; using %s", env, default)
         mode = default
     return mode
 
 
+def _resolved_translation_thinking_mode(
+    to_chinese: bool, prepared_text: str, *, lock_count: int
+) -> str:
+    """The mode one request actually sends, ``auto`` resolved if it says so.
+
+    One place for every caller — plain, HTML, protected, sync and async — so the
+    mode a request ran under is the same wherever it is read. An explicit
+    configuration value is returned untouched, which is what keeps an operator's
+    ``omit``/``disabled``/``low``/``high`` an exact instruction rather than a
+    hint.
+    """
+    mode = _translation_thinking_mode(to_chinese)
+    if mode != TRANSLATION_THINKING_AUTO:
+        return mode
+    return select_en_zh_auto_thinking(prepared_text, lock_count=lock_count)
+
+
 def _translation_thinking_body(mode: str) -> dict:
     """Provider reasoning fields for a translation request under ``mode``.
 
-    ``omit`` (the default into Chinese) sends neither field, so the provider
-    default decides (high-effort thinking on DeepSeek, which can run past the
-    translation timeout on a long segment); ``disabled`` (the default into
-    English) switches thinking off, and ``low``/``high`` turn it on at that
-    ``reasoning_effort``.
+    ``mode`` is always a resolved mode, never ``auto``: that token is resolved
+    per request by :func:`_resolved_translation_thinking_mode`, which is what
+    keeps a ``disabled``/``low`` retry below expressible as one exact body.
+    ``omit`` sends neither field, so the provider default decides (high-effort
+    thinking on DeepSeek, which can run past the translation timeout on a long
+    segment); ``disabled`` switches thinking off, and ``low``/``high`` turn it on
+    at that ``reasoning_effort``.
     """
     if mode == "disabled":
         return {"thinking": {"type": "disabled"}}
@@ -1427,7 +1740,18 @@ async def _call_llm_async_with_client(
     en_zh_protocol: bool = False,
     references: Sequence[TermReference | tuple[str, str, str, str]] = (),
     context=None,
+    timeout_seconds: float | None = None,
+    thinking_mode: str | None = None,
+    prompt_suffix: str = "",
 ) -> str:
+    """One translation POST, with the prompt this request's references need.
+
+    The three optional arguments belong to a corrective call and are all
+    ``None``/empty on the ordinary path, which is what keeps an ordinary request
+    byte-for-byte what it was: ``timeout_seconds`` bounds this attempt alone,
+    ``thinking_mode`` replaces the mode the environment would resolve, and
+    ``prompt_suffix`` is one instruction appended after the prompt.
+    """
     coerced_refs = tuple(_coerce_term_reference(item) for item in references)
     global_refs, scoped_refs = partition_references_for_prompt(
         locked_text, coerced_refs
@@ -1517,15 +1841,29 @@ async def _call_llm_async_with_client(
                 prefix + _SCOPED_REFERENCE_HEADER + "\n".join(scoped_lines)
             )
     if context is not None:
-        system_content += _context_instruction(context)
+        system_content += _context_instruction(context, to_chinese=to_chinese)
+    if prompt_suffix:
+        system_content += prompt_suffix
     messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": locked_text},
     ]
+    # ``auto`` is resolved here, at the one place every caller — plain, HTML,
+    # protected, sync, async — passes through, so a request's mode cannot differ
+    # between the body it sends and the mode the caller believed it ran under.
+    mode = (
+        _resolved_translation_thinking_mode(
+            to_chinese, locked_text, lock_count=len(locks)
+        )
+        if thinking_mode is None
+        else thinking_mode
+    )
     # Only add the keyword when there is a field to send, so ``omit`` is the
     # exact call (and request) this function made before the setting existed.
-    extra_body = _translation_thinking_body(_translation_thinking_mode(to_chinese))
-    options = {"extra_body": extra_body} if extra_body else {}
+    extra_body = _translation_thinking_body(mode)
+    options: dict = {"extra_body": extra_body} if extra_body else {}
+    if timeout_seconds is not None:
+        options["timeout_seconds"] = timeout_seconds
     return await llm_transport.post_chat_completion(
         client, messages, purpose="translation", **options
     )

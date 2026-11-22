@@ -1,8 +1,11 @@
 # q8 Translation Quality Candidate Plan & Frozen Offline Scope
 
 - Status: **Draft candidate, offline verification only (0 live LLM calls in this
-  PR).** Stage 1 Run #1 has been executed and read (`515 -> 521`, 6 POSTs); no
-  Stage 2 budget has been spent.
+  PR).** Stage 1 Run #1 has been executed and read (`515 -> 521`, 6 POSTs).
+  Phase 1 then ran the `en->zh` latency probe and closed at `540 -> 545` against
+  the cumulative cap of `569`; those 5 POSTs and their per-document timings are
+  the calibration basis for the `q8r1` design in Section 6. No budget is spent
+  by this PR.
 - Branch: `feat/q8-quality-candidate`
 - Development base: `main` (`0c6fa4b`, Core `v0.10.3`, including PR #299's
   `contracts/products.json` and `docs/products.md`, which this branch leaves
@@ -250,3 +253,103 @@ authorized run.
   diagnostic becomes readable.
 - No merge. This branch is opened as a Draft and stays a Draft until a Stage 1
   run earns the next step.
+
+## 6. `q8r1` — General `en->zh` Fast-And-Reliable Strategy (Offline Only)
+
+Phase 1 measured 5 `en->zh` segments against the cumulative ledger (`540 -> 545`
+of `569`) and separated one failure shape into two causes that pull in opposite
+directions:
+
+| Shape | Measured |
+| --- | --- |
+| `D-012`: 1,402 chars / 23 paragraphs / 2 locks | answered in `20.7 s` under `low`, `#p12` correct |
+| `D-009`: 1,542 chars / 30 paragraphs / 11 locks | ran past the model timeout under thinking, `3.3 s` with it off |
+| Plan B `[11-20]`: 498 chars / 10 paragraphs / 5 locks | ran past the model timeout under thinking, `3.3 s` with it off |
+| `D-010` | the model merged the title paragraph into the first body paragraph (`2 -> 1`) |
+
+So no single mode is the right answer for every request: thinking improves
+quality on a document that answers inside the timeout, and costs the whole
+segment on one that does not. `q8r1` therefore adapts per request instead of
+picking one mode for the direction, and keeps the two corrections bounded.
+
+### 6.1 Layer 1 — the request picks the mode (`auto`)
+
+`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`, and `auto` is the new default
+into Chinese. `select_en_zh_auto_thinking(prepared_text, lock_count=...)` is pure
+and request-local:
+
+- `lock_count >= 4` **or** `para_count >= 25` → `disabled`;
+- otherwise → `low`.
+
+Both bounds sit on the timeout side of the measurement above: 23 paragraphs with
+2 locks answered in 20.7 s under `low`, while 30 paragraphs / 11 locks and 10
+paragraphs / 5 locks did not answer at all. Locks count beside paragraphs because
+a placeholder-dense prompt is the other shape that reproduces text slowly. An
+explicit `omit`, `disabled`, `low` or `high` never reaches the helper, so
+`WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` stays the rollback to the previous
+provider-default request, and `auto` into English stays an unknown value (there is
+no request shape there to adapt).
+
+### 6.2 Layer 2 — at most one paragraph-count repair
+
+`_regroup_lines_into_source_paragraphs` only moves blank lines; it cannot restore
+a paragraph the model merged away, because the answer's lines no longer answer
+the source's lines. A context-mode request whose answer has a different paragraph
+count from its source (`len >= 2` on both sides, so a one-paragraph segment has
+nothing to restore) therefore gets exactly one more call with the same prompt,
+references and locks plus:
+
+> The source has exactly N paragraphs separated by blank lines. Translate every
+> title, heading, and paragraph and return exactly N paragraphs separated by
+> blank lines.
+
+The retry starts only with at least `15 s` of request budget left
+(`request_trace.remaining_budget_seconds()`), is bounded by
+`min(llm_timeout, remaining - 2 s)`, runs the caller's `before_llm_call` guard so
+admission accounting and caps see it, and steps `disabled -> low` when the first
+attempt had no reasoning and the document carries fewer than 4 locks. Anything
+else — a matching count, too little budget, a refused guard, an error, or an
+answer that still has the wrong count — returns the first attempt's translation.
+A successful first call is never degraded into an `llm_unavailable` by the repair
+meant to improve it.
+
+### 6.3 Layer 3 — at most one fast fallback on an `auto` timeout
+
+Only an `en->zh` request whose configured mode is `auto`, that resolved to a
+mode which asks for reasoning (`low` or `omit`), and that then raised
+`LLMTranslationError(reason="timeout")` gets one shorter retry with thinking off:
+the prompt is unchanged, the bound is `min(20 s, remaining - 2 s)` (or
+`min(20 s, llm_timeout)` outside a request), it needs at least `10 s` left, and
+it runs the same guard. An explicit `omit`/`low`/`high`/`disabled`, a `zh->en`
+timeout, any other reason, a too-small budget, a refused guard, or a failed
+retry re-raises the original timeout unchanged. `45 s` and `90 s` are both
+untouched.
+
+### 6.4 `zh->en` additive fidelity clause
+
+A Chinese qualifier (`以上`, `超过`, `至少`, `约`) or a line that trails off is
+meaning the English has to carry: rendered as a bare number, or completed into a
+sentence, the answer has changed the claim. `zh->en` context requests therefore
+append one sentence after the existing context rules:
+
+> Preserve numeric qualifiers and bounds faithfully (e.g., more than, over, at
+> least, about), and keep trailing ellipses and interrupted clauses intact
+> without dropping or completing them.
+
+Every existing rule is kept verbatim, and the `en->zh` prompt stays
+byte-identical (the Chinese side of that pair is already the numerics rule).
+
+### 6.5 Offline verification
+
+| Check | Result |
+| --- | --- |
+| `auto` on the measured shapes | `D-009` 11 locks/30p → `disabled`, Plan B 5/10 → `disabled`, `D-012` 2/23 → `low`, `D-010` 0/2 → `low`, `ordinary` 2/6 → `low` |
+| explicit modes | `omit`/`disabled`/`low`/`high` bypass `auto` on the same shape and send exactly what they say |
+| `en->zh` first call | byte-identical prompt, one POST, `extra_body` exactly what the resolved mode sends |
+| paragraph repair | a `2 -> 1` answer is retried once with the count sentence, then accepted when it matches; every failure path returns the first answer |
+| budget | `< 15 s` left skips the repair, `< 10 s` left skips the fallback, and both bounds shrink to the remaining budget |
+| `zh->en` clause | present into English, absent into Chinese, and `en->zh` `_CONTEXT_RULES_INSTRUCTION` unchanged |
+| `scripts/validate.py` (6 steps) | green on this HEAD |
+
+`H2` stays `held-out used`. No live call is made by this PR, and the Draft stays
+a Draft.

@@ -47,6 +47,12 @@ a request that has already been answered must never OCCUR A SECOND model
 charge, so the decision is recorded in the trace and re-read at the choke point
 rather than relied on to arrive through the cancellation chain.
 
+:func:`remaining_budget_seconds` is the read-only companion of that guard. A
+layer that is deciding whether to spend one more model call asks how much of
+the request's budget is left, not only whether it is gone; the answer is
+derived from the same armed deadline, so the two can never disagree about
+whether a budget exists.
+
 ## Not a request context
 
 Every helper here is a no-op when no trace is active: ``current()`` is ``None``,
@@ -225,6 +231,12 @@ class RequestTrace:
         at = self._deadline_at
         return at is not None and _monotonic() >= at
 
+    def _remaining_budget_seconds(self) -> float | None:
+        at = self._deadline_at
+        if at is None:
+            return None
+        return max(0.0, at - _monotonic())
+
     # -- stage marks -------------------------------------------------------
 
     def _set_stage(self, name: str) -> None:
@@ -364,6 +376,24 @@ def deadline_expired() -> bool:
     """
     trace = _active.get()
     return trace is not None and trace._deadline_expired()
+
+
+def remaining_budget_seconds() -> float | None:
+    """Seconds left of this request's budget, or ``None`` when there is none.
+
+    A layer that is about to spend a second model call needs the same answer
+    the guard gives, one step earlier: not "may anything start" (the guard's
+    question) but "is there still enough of the request's own budget for this
+    attempt to have a chance". ``None`` is the honest answer outside a request
+    and for a request whose middleware never armed a budget — both mean no
+    budget is known, which is not the same as a budget of zero. An armed
+    deadline that has already passed reports ``0.0`` rather than a negative
+    number, so callers compare against a positive bound.
+    """
+    trace = _active.get()
+    if trace is None:
+        return None
+    return trace._remaining_budget_seconds()
 
 
 def begin_llm_post() -> None:

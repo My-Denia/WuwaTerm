@@ -103,18 +103,25 @@ Optional LLM environment variables:
   in-flight LLM calls.
 - `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into
   English) and `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese),
-  default `disabled` into English and `omit` into Chinese; one of `omit`,
-  `disabled`, `low`, `high`. `omit` sends neither field, so the provider
-  default applies, which on DeepSeek is high-effort thinking and can outlast
+  default `disabled` into English and `auto` into Chinese; `disabled`, `low`,
+  `high` and `omit` are accepted in both directions and `auto` only into
+  Chinese. `omit` sends neither field, so the provider default applies, which on
+  DeepSeek is high-effort thinking and can outlast
   `WUWATERM_LLM_TIMEOUT_SECONDS` on a long segment. `disabled` sends
-  `thinking: {"type": "disabled"}`. Measured: it removed the long-segment
-  timeouts, which occur only into English, so it is the default into English;
-  into Chinese there is no timeout problem and it lowered translation quality,
-  so that direction stays `omit`. Known regression with `disabled` into
-  English: a character-mechanic name that contains a one-character resonator
-  name may be rendered with the resonator name; set
-  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous
-  behaviour. `low` and `high` turn thinking on at that `reasoning_effort`.
+  `thinking: {"type": "disabled"}`. `low` and `high` turn thinking on at that
+  `reasoning_effort`. Measured into English: `disabled` removed the long-segment
+  timeouts, which occur only into English, and it is the default there. Into
+  Chinese `auto` picks one of the modes for each request from its own shape: a
+  request with 25 or more paragraphs or 4 or more locked official terms is sent
+  `disabled`, anything shorter as `low`. That split follows the measurement —
+  long or lock-dense documents ran past the model timeout with thinking on and
+  answered in about 3 s with it off, while a 23-paragraph document answered in
+  20.7 s under `low`. Any explicit value replaces `auto` for that direction, so
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or `=disabled` pins one mode and
+  restores the request this default replaced. Known regression with `disabled`
+  into English: a character-mechanic name that contains a one-character
+  resonator name may be rendered with the resonator name; set
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.
   Translation requests only; a blank value is that direction's default and an
   unknown value logs a warning naming the variable and uses that default. Read
   on every request.
@@ -142,6 +149,16 @@ fields automatically, or infer support from the model name. The existing
 user-facing unavailable notice and HTTP 503 `llm_unavailable` envelope stay the
 same; the specific detail is available in server diagnostics. Ordinary HTTP
 errors retain their existing classification.
+
+An endpoint that rejects those fields is therefore the case for an explicit
+`omit` in each direction it serves: `auto` into Chinese resolves to `low` for a
+short request and sends the fields, so a strict provider needs
+`WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` rather than the default. The two
+corrective calls described under
+[translation strategy](#llm-configuration) — one paragraph-count repair and one
+fast fallback on an `auto` timeout — are the only retries in the translation
+path, each at most one attempt, and a request rejected by the provider is still
+one POST because neither applies to an HTTP failure.
 
 ## Configuration Validation
 

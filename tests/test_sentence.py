@@ -3716,3 +3716,483 @@ def test_canonical_locking_leaves_lookup_decor_and_title_contracts(
     assert translator.translate("Claim the new WavesLine Decor.", to_chinese=True) == (
         "Claim the new 飞讯摆件."
     )
+
+
+# --------------------------------------------------------------------------
+# q8r1: the request shape that picks a mode, and the two corrective calls
+# --------------------------------------------------------------------------
+
+EN_ZH_THINKING = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
+ZH_EN_THINKING = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
+THINKING_DISABLED = {"thinking": {"type": "disabled"}}
+THINKING_LOW = {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}
+SMALL_SOURCE = "The title line.\n\nFirst body line.\nSecond body line."
+# Two paragraphs answered as one: the title was folded into the first body line,
+# so the answer's lines no longer answer the source's lines and no regrouping of
+# them can restore the layout (the shape a dropped title paragraph produces).
+MERGED_ANSWER = "标题行 第一行 合并了\n第二行"
+REPAIRED_ANSWER = "标题行\n\n第一行\n第二行"
+
+
+def _thinking_llm(monkeypatch, sample_db, script, *, thinking_en_zh=None):
+    """A mock model that answers ``script[i]`` on POST ``i`` and records each POST.
+
+    A script entry that is an exception is raised instead of answered, which is
+    how a provider timeout is staged. ``read_timeout`` is the read bound the
+    request itself carried, so a corrective call's own bound is observable, and
+    ``reasoning`` is the reasoning fields the body actually sent.
+    """
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.delenv(ZH_EN_THINKING, raising=False)
+    if thinking_en_zh is None:
+        monkeypatch.delenv(EN_ZH_THINKING, raising=False)
+    else:
+        monkeypatch.setenv(EN_ZH_THINKING, thinking_en_zh)
+    posts: list[dict] = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        posts.append(
+            {
+                "system": body["messages"][0]["content"],
+                "user": body["messages"][-1]["content"],
+                "reasoning": {
+                    key: body[key]
+                    for key in ("thinking", "reasoning_effort")
+                    if key in body
+                },
+                "read_timeout": request.extensions["timeout"]["read"],
+            }
+        )
+        answer = script[min(len(posts) - 1, len(script) - 1)]
+        if isinstance(answer, Exception):
+            raise answer
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": answer}}]}
+        )
+
+    return (
+        SentenceTranslator(sample_db, llm_transport=httpx.MockTransport(handler)),
+        posts,
+    )
+
+
+def _translate_context(translator, text, *, to_chinese):
+    from wuwaterm.application import TranslationContext
+
+    async def run():
+        try:
+            return await translator.translate_async(
+                text,
+                to_chinese=to_chinese,
+                propagate_errors=True,
+                context=TranslationContext(),
+            )
+        finally:
+            await translator.aclose()
+
+    return asyncio.run(run())
+
+
+def _translate_plain(translator, text, *, to_chinese):
+    async def run():
+        try:
+            return await translator.translate_async(
+                text, to_chinese=to_chinese, propagate_errors=True
+            )
+        finally:
+            await translator.aclose()
+
+    return asyncio.run(run())
+
+
+def _paragraph_count(text: str) -> int:
+    from wuwaterm.sentence import _paragraph_line_counts
+
+    return len(_paragraph_line_counts(text))
+
+
+def test_a_dropped_paragraph_is_repaired_by_one_retry_that_names_the_count(
+    monkeypatch, sample_db
+):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [MERGED_ANSWER, REPAIRED_ANSWER]
+    )
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert out == REPAIRED_ANSWER
+    assert len(posts) == 2
+    # The first call is byte-identical to the ordinary prompt: the constraint
+    # exists only on the retry.
+    assert "paragraphs separated by blank lines" not in posts[0]["system"]
+    assert posts[1]["system"].startswith(posts[0]["system"])
+    assert posts[1]["system"][len(posts[0]["system"]) :] == (
+        "\nThe source has exactly 2 paragraphs separated by blank lines. "
+        "Translate every title, heading, and paragraph and return exactly 2 "
+        "paragraphs separated by blank lines."
+    )
+    # Same text, same locks, same references: only the layout instruction is new.
+    assert posts[1]["user"] == posts[0]["user"]
+    # The source is short and lock-free, so `auto` already chose `low` and the
+    # retry keeps it.
+    assert posts[0]["reasoning"] == posts[1]["reasoning"] == THINKING_LOW
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_posts"),
+    [
+        (REPAIRED_ANSWER, 1),  # already the source's paragraph count
+        (MERGED_ANSWER, 2),  # the repaired shape
+    ],
+)
+def test_a_matching_paragraph_count_costs_no_second_call(
+    monkeypatch, sample_db, answer, expected_posts
+):
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [answer])
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert len(posts) == expected_posts
+    assert out == answer
+
+
+def test_a_plain_request_never_repairs_its_paragraph_count(monkeypatch, sample_db):
+    """Without a context a request does not keep the source's paragraphs at all."""
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [MERGED_ANSWER])
+
+    out = _translate_plain(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert out == MERGED_ANSWER
+    assert len(posts) == 1
+
+
+def test_a_single_paragraph_source_has_no_layout_to_repair(monkeypatch, sample_db):
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [MERGED_ANSWER])
+
+    out = _translate_context(translator, "One paragraph only.", to_chinese=True)
+
+    assert out == MERGED_ANSWER
+    assert len(posts) == 1
+
+
+def test_a_retry_that_still_has_the_wrong_count_leaves_the_first_answer(
+    monkeypatch, sample_db
+):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [MERGED_ANSWER, "还是\n两行而已"]
+    )
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    # A valid first answer is never degraded by the repair that did not help.
+    assert out == MERGED_ANSWER
+    assert len(posts) == 2
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        [MERGED_ANSWER, httpx.ReadTimeout("slow")],
+        [MERGED_ANSWER, LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="upstream")],
+        [MERGED_ANSWER, "标题行\n标题行"],
+    ],
+)
+def test_a_failed_repair_keeps_the_first_attempt(monkeypatch, sample_db, script):
+    translator, posts = _thinking_llm(monkeypatch, sample_db, script)
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert out == MERGED_ANSWER
+    assert len(posts) == 2
+
+
+def test_a_low_remaining_budget_skips_the_repair(monkeypatch, sample_db):
+    from wuwaterm import request_trace
+
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [MERGED_ANSWER])
+
+    async def run():
+        request_trace.start()
+        try:
+            request_trace.set_deadline(12.0)
+            return await translator.translate_async(
+                SMALL_SOURCE,
+                to_chinese=True,
+                propagate_errors=True,
+                context=_empty_context(),
+            )
+        finally:
+            request_trace.reset()
+            await translator.aclose()
+
+    assert asyncio.run(run()) == MERGED_ANSWER
+    assert len(posts) == 1
+
+
+def _empty_context():
+    from wuwaterm.application import TranslationContext
+
+    return TranslationContext()
+
+
+def test_the_admission_guard_runs_before_the_repair_call(monkeypatch, sample_db):
+    """A guard that refuses the second call leaves the first answer in place."""
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [MERGED_ANSWER, REPAIRED_ANSWER]
+    )
+    calls: list[int] = []
+
+    def guard():
+        calls.append(1)
+        if len(calls) > 1:
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="budget"
+            )
+
+    async def run():
+        try:
+            return await translator.translate_async(
+                SMALL_SOURCE,
+                to_chinese=True,
+                propagate_errors=True,
+                context=_empty_context(),
+                before_llm_call=guard,
+            )
+        finally:
+            await translator.aclose()
+
+    assert asyncio.run(run()) == MERGED_ANSWER
+    assert len(calls) == 2  # once per POST, so the gates see both
+    assert len(posts) == 1  # the refused POST never happened
+
+
+def test_the_repair_steps_thinking_up_when_the_first_attempt_had_none(
+    monkeypatch, sample_db
+):
+    """`auto` sends a long, lock-free document with thinking off; the retry thinks."""
+    source = "\n\n".join(f"Line {index}." for index in range(25))
+    merged = "\n\n".join(f"译文{index}。" for index in range(24))
+    repaired = "\n\n".join(f"第{index}行。" for index in range(25))
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [merged, repaired])
+
+    out = _translate_context(translator, source, to_chinese=True)
+
+    assert _paragraph_count(out) == 25
+    assert _paragraph_count(source) == 25
+    assert posts[0]["reasoning"] == THINKING_DISABLED
+    assert posts[1]["reasoning"] == THINKING_LOW
+    assert len(posts) == 2
+
+
+def test_an_auto_timeout_falls_back_to_one_shorter_call_without_thinking(
+    monkeypatch, sample_db
+):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+    )
+
+    out = _translate_plain(translator, "A short English line.", to_chinese=True)
+
+    assert out == "译文"
+    assert [post["reasoning"] for post in posts] == [THINKING_LOW, THINKING_DISABLED]
+    # The fallback is bounded well inside the translator's own timeout.
+    assert posts[0]["read_timeout"] == DEFAULT_LLM_TIMEOUT_SECONDS
+    assert posts[1]["read_timeout"] == 20.0
+
+
+@pytest.mark.parametrize("mode", ["omit", "low", "high", "disabled"])
+def test_an_explicit_en_zh_mode_never_falls_back(monkeypatch, sample_db, mode):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow")], thinking_en_zh=mode
+    )
+
+    with pytest.raises(LLMTranslationError) as caught:
+        _translate_plain(translator, "A short English line.", to_chinese=True)
+
+    assert caught.value.reason == "timeout"
+    assert len(posts) == 1
+
+
+def test_a_chinese_to_english_timeout_never_falls_back(monkeypatch, sample_db):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow")]
+    )
+
+    with pytest.raises(LLMTranslationError) as caught:
+        _translate_plain(translator, "需要翻译的一句中文。", to_chinese=False)
+
+    assert caught.value.reason == "timeout"
+    assert len(posts) == 1
+
+
+def test_the_fallback_fits_inside_what_is_left_of_the_budget(monkeypatch, sample_db):
+    from wuwaterm import request_trace
+
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+    )
+
+    async def run():
+        request_trace.start()
+        try:
+            request_trace.set_deadline(19.0)
+            return await translator.translate_async(
+                "A short English line.", to_chinese=True, propagate_errors=True
+            )
+        finally:
+            request_trace.reset()
+            await translator.aclose()
+
+    assert asyncio.run(run()) == "译文"
+    assert len(posts) == 2
+    # min(20 s, remaining - 2 s) and not the full 20 s, because the request has
+    # only 19 s of its own budget to spend.
+    assert 15.0 <= posts[1]["read_timeout"] < 17.5
+
+
+def test_a_too_small_remaining_budget_skips_the_fallback(monkeypatch, sample_db):
+    from wuwaterm import request_trace
+
+    translator, posts = _thinking_llm(monkeypatch, sample_db, [httpx.ReadTimeout("slow")])
+
+    async def run():
+        request_trace.start()
+        try:
+            request_trace.set_deadline(8.0)
+            return await translator.translate_async(
+                "A short English line.", to_chinese=True, propagate_errors=True
+            )
+        finally:
+            request_trace.reset()
+            await translator.aclose()
+
+    with pytest.raises(LLMTranslationError) as caught:
+        asyncio.run(run())
+    assert caught.value.reason == "timeout"
+    assert len(posts) == 1
+
+
+def test_a_fallback_that_fails_keeps_the_original_timeout_diagnostic(
+    monkeypatch, sample_db
+):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), httpx.ReadTimeout("slow")]
+    )
+
+    with pytest.raises(LLMTranslationError) as caught:
+        _translate_plain(translator, "A short English line.", to_chinese=True)
+
+    assert caught.value.reason == "timeout"
+    assert caught.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert len(posts) == 2
+
+
+def test_the_admission_guard_runs_before_the_fallback(monkeypatch, sample_db):
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+    )
+    calls: list[int] = []
+
+    def guard():
+        calls.append(1)
+        if len(calls) > 1:
+            raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="budget")
+
+    async def run():
+        try:
+            return await translator.translate_async(
+                "A short English line.",
+                to_chinese=True,
+                propagate_errors=True,
+                before_llm_call=guard,
+            )
+        finally:
+            await translator.aclose()
+
+    with pytest.raises(LLMTranslationError) as caught:
+        asyncio.run(run())
+    assert caught.value.reason == "timeout"
+    assert len(calls) == 2
+    assert len(posts) == 1
+
+
+def test_the_english_fidelity_clause_exists_only_into_english(
+    monkeypatch, sample_db
+):
+    """Every existing context rule is kept, and the clause is `zh->en` only."""
+    from wuwaterm.sentence import (
+        _CONTEXT_RULES_INSTRUCTION,
+        _context_instruction,
+    )
+
+    clause = (
+        "Preserve numeric qualifiers and bounds faithfully (e.g., more than, "
+        "over, at least, about), and keep trailing ellipses and interrupted "
+        "clauses intact without dropping or completing them."
+    )
+    into_english = _context_instruction(_empty_context(), to_chinese=False)
+    into_chinese = _context_instruction(_empty_context(), to_chinese=True)
+
+    assert into_english == _CONTEXT_RULES_INSTRUCTION + clause + "\n"
+    assert into_chinese == _CONTEXT_RULES_INSTRUCTION  # byte-identical
+    assert clause not in into_chinese
+    assert into_english.endswith(clause + "\n")
+    for rule in (
+        "keep every pronoun and elided subject pointing at the same",
+        "Keep every negation and every",
+        "Resolve an omitted actor from the",
+        "Translate every clause",
+        "Read-only context below only helps you understand the source text",
+    ):
+        assert rule in into_english and rule in into_chinese
+
+
+@pytest.mark.parametrize(("to_chinese", "present"), [(False, True), (True, False)])
+def test_the_fidelity_clause_reaches_the_request_it_belongs_to(
+    monkeypatch, sample_db, to_chinese, present
+):
+    translator, posts = _thinking_llm(monkeypatch, sample_db, ["An answer."])
+
+    _translate_context(translator, "需要翻译的一句中文。", to_chinese=to_chinese)
+
+    clause = "Preserve numeric qualifiers and bounds faithfully"
+    assert (clause in posts[0]["system"]) is present
+
+
+def test_a_replacement_transport_that_predates_the_knobs_gets_no_extra_call(
+    monkeypatch, sample_db
+):
+    """Neither corrective call is worth making if the transport cannot carry it.
+
+    A retry that cannot turn thinking off, or that cannot carry the
+    paragraph-count sentence, would ask the same question that already failed or
+    already lost the paragraph. Both are skipped, so such a transport sees the
+    exact calls it saw before this change.
+    """
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    seen: list[str] = []
+
+    async def legacy_call(
+        locked_text, locks, html_mode=False, to_chinese=False,
+        timeout_seconds=30.0, transport=None, references=(), context=None,
+    ):
+        seen.append(locked_text)
+        if len(seen) == 1 and to_chinese and "A short English line." in locked_text:
+            raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout")
+        return MERGED_ANSWER
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", legacy_call)
+    translator = SentenceTranslator(sample_db)
+
+    with pytest.raises(LLMTranslationError):
+        _translate_plain(translator, "A short English line.", to_chinese=True)
+    assert len(seen) == 1
+
+    translator = SentenceTranslator(sample_db)
+    assert _translate_context(translator, SMALL_SOURCE, to_chinese=True) == MERGED_ANSWER
+    assert len(seen) == 2
