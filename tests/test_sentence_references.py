@@ -177,97 +177,232 @@ def test_one_character_name_scopes_its_occurrences(tmp_path):
     assert locked.locked_text == "欢迎椿来到。"
 
 
-def test_mixed_valid_mention_and_embedded_compound_scopes_only_the_valid_mention(tmp_path):
+def test_mixed_valid_mention_and_embedded_compound_selectively_locks_only_valid_mention(
+    tmp_path,
+):
     translator = _service(tmp_path, (_record("椿", "Camellya"),))
 
     locked = _lock(translator, "椿的红椿蕊很强。", to_chinese=False)
 
-    assert len(locked.references) == 1
-    ref = locked.references[0]
-    assert ref.as_tuple() == ("椿", "椿", "Camellya", "resonator")
-    assert ref.occurrences == (
-        TermOccurrence(
-            start=0, end=1, matched_text="椿", segment_index=0, model_start=0, model_end=1
-        ),
-    )
-    assert validated_reference_ranges(
-        locked.locked_text, locked.references, to_chinese=False
-    ) == [{"source": "椿", "ranges": [[0, 1]]}]
+    # Admitted 椿 is selectively locked in place; unadmitted 红椿蕊 stays plain
+    # text and 椿 = Camellya is completely absent from the system prompt.
+    assert locked.references == ()
+    assert [(zh, en) for _, zh, en in locked.locks] == [("椿", "Camellya")]
+    assert locked.locked_text.endswith("的红椿蕊很强。")
+    assert locked.restore(locked.locked_text, to_en=True) == "Camellya的红椿蕊很强。"
     prompt = _system_prompt(
         locked_text=locked.locked_text,
         locks=locked.locks,
         references=locked.references,
     )
-    assert "Scoped term references:\n" in prompt
-    assert "椿 = Camellya (resonator) — ONLY at: 「椿」的红椿蕊很强 | NOT at: 椿的红「椿」蕊很强。" in prompt
+    assert "椿" not in prompt
+    assert f"{locked.locks[0][0]} = Camellya" in prompt
+    assert "Dictionary term references:\n" not in prompt
+    assert "Scoped term references:\n" not in prompt
 
 
-def test_single_char_heart_separates_only_at_from_ordinary_not_at_paragraphs(tmp_path):
+def test_single_char_heart_mixed_with_ordinary_paragraphs_locks_only_admitted_mention(
+    tmp_path,
+):
     translator = _service(tmp_path, (_record("心", "Hsin"),))
     source = "心很重要。\n\n她的心很痛。\n\n心加入队伍。"
-    locked = _lock(translator, source, to_chinese=False)
+    locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(source),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    assert locked.references == ()
+    assert [(zh, en) for _, zh, en in locked.locks] == [("心", "Hsin")]
+    assert locked.locked_text.startswith("心很重要。\n\n她的心很痛。\n\n__WUWA_TERM_")
+    assert locked.restore(locked.locked_text, to_en=True) == (
+        "心很重要。\n\n她的心很痛。\n\nHsin加入队伍。"
+    )
     prompt = _system_prompt(
         locked_text=locked.locked_text,
         locks=locked.locks,
         references=locked.references,
     )
+    assert "心" not in prompt
+    assert f"{locked.locks[0][0]} = Hsin" in prompt
     assert "Dictionary term references:\n" not in prompt
-    assert (
-        "Scoped term references:\n"
-        "心 = Hsin (resonator) — ONLY at: 「心」加入队伍。 | NOT at: 「心」很重要。; 她的「心」很痛。"
-    ) in prompt
+    assert "Scoped term references:\n" not in prompt
+
+
+def test_mixed_single_char_locking_realigns_remaining_scoped_skill_coordinates(tmp_path):
+    # D-003 shape: mixed 心 (admitted + unadmitted) coexists with a scoped skill
+    # stem 变奏. Locking 心 must shift 变奏's model_start/model_end coordinates so
+    # validated_reference_ranges and Scoped term references stay exact.
+    translator = _service(
+        tmp_path,
+        (
+            _record("心", "Hsin", category="resonator", table="res"),
+            TermRecord(
+                category="core_term",
+                source_file="BinData/skill/skilltype.json",
+                source_id="5",
+                text_key="SkillType_5_TypeName",
+                zh="变奏技能",
+                en="Intro Skill",
+            ),
+        ),
+    )
+    source = "心很重要。\n\n心加入队伍，切换角色触发变奏入场。舞曲的变奏。"
+    locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(source),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    assert [(zh, en) for _, zh, en in locked.locks] == [("心", "Hsin")]
+    assert [ref.source for ref in locked.references] == ["变奏"]
+    skill_ref = locked.references[0]
+    occ = skill_ref.occurrences[0]
+    assert occ.model_start is not None and occ.model_end is not None
+    assert locked.locked_text[occ.model_start : occ.model_end] == "变奏"
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+    assert "心 = Hsin" not in prompt
+    assert f"{locked.locks[0][0]} = Hsin" in prompt
+    assert "Scoped term references:\n变奏 = Intro Skill (core_term) — ONLY at:" in prompt
+    assert "| NOT at:" in prompt
 
 
 def test_many_admitted_occurrences_compress_only_when_zero_raw_other_occurrences(tmp_path):
+    from wuwaterm.term_preparation import TermReference
+
     translator = _service(tmp_path, (_record("椿", "Camellya"),))
     all_valid = "欢迎椿，找椿，看椿，带椿，选椿。"
     locked = _lock(translator, all_valid, to_chinese=False)
+    # Unmixed (raw_other_count == 0): stays a contextual reference (0 locks)
+    # and compresses to "(all occurrences in this text)".
+    assert locked.locks == ()
     assert format_scoped_reference_lines(
         locked.locked_text, locked.references, to_chinese=False
     ) == ("椿 = Camellya (resonator) — (all occurrences in this text)",)
 
-    # Whenever any unadmitted occurrence exists (raw_other_count > 0), never
-    # compress to "(all occurrences in this text)"; keep ONLY at / NOT at.
+    # Mixed single-char (raw_other_count > 0): selectively locks all 5 admitted
+    # mentions and leaves 红椿蕊 untouched with zero prompt reference leakage.
     mixed_many = "欢迎椿，找椿，看椿，带椿，选椿。红椿蕊很强。"
     locked_mixed = _lock(translator, mixed_many, to_chinese=False)
-    mixed_lines = format_scoped_reference_lines(
-        locked_mixed.locked_text, locked_mixed.references, to_chinese=False
+    assert len(locked_mixed.locks) == 5
+    assert locked_mixed.references == ()
+    assert locked_mixed.restore(locked_mixed.locked_text, to_en=True) == (
+        "欢迎Camellya,找Camellya,看Camellya,带Camellya,选Camellya。红椿蕊很强。"
     )
-    assert len(mixed_lines) == 1
-    assert "(all occurrences in this text)" not in mixed_lines[0]
-    assert "ONLY at:" in mixed_lines[0]
-    assert "| NOT at: 椿,选椿。红「椿」蕊很强。" in mixed_lines[0]
 
-
-def test_long_term_covered_occurrence_prevents_all_occurrences_compression(tmp_path):
-    # Finding #3 regression: 5 standalone 心 + 1 「心」 covered by global speaker
-    # 「心」 = "Hsin". Even though 「心」 is excluded from NOT at:, raw_other_count
-    # is 1, so 心 must keep ONLY at: instead of compressing to
-    # "(all occurrences in this text)" and must NOT add 「心」 to NOT at:.
-    translator = _service(
-        tmp_path,
-        (
-            _record("「心」", '"Hsin"', category="speaker", table="sp"),
-            _record("心", "Hsin", category="resonator", table="res"),
+    # Direct compression guard on format_scoped_reference_lines when a scoped
+    # reference has >4 admitted occurrences plus 1 unadmitted occurrence.
+    skill_text = "打变奏，打变奏，打变奏，打变奏，打变奏。舞曲的变奏。"
+    positions = []
+    pos = skill_text.find("变奏")
+    while pos != -1:
+        positions.append(pos)
+        pos = skill_text.find("变奏", pos + 1)
+    skill_ref = TermReference(
+        "变奏",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=tuple(
+            TermOccurrence(p, p + 2, "变奏", 0, p, p + 2) for p in positions[:-1]
         ),
+        origin="scoped_skill_stem",
+        reason="local_skill_action",
     )
-    source = "「心」出现了。心加入，心离开，心登场，心使用，心说。"
-    locked = _lock(translator, source, to_chinese=False)
+    [skill_line] = format_scoped_reference_lines(
+        skill_text, (skill_ref,), to_chinese=False
+    )
+    assert "(all occurrences in this text)" not in skill_line
+    assert "ONLY at:" in skill_line
+    assert "| NOT at:" in skill_line
+
+
+def test_long_term_covered_occurrence_prevents_all_occurrences_compression():
+    # Finding #3 regression on format_scoped_reference_lines: 5 admitted 变奏
+    # skill stems + 1 变奏 covered by global 变奏技能 = Intro Skill. Even though
+    # 变奏技能 is excluded from NOT at:, raw_other_count is 1, so 变奏 must keep
+    # ONLY at: instead of compressing to "(all occurrences in this text)" and
+    # must NOT add 变奏技能 to NOT at:.
+    from wuwaterm.term_preparation import TermReference
+
+    text = "先用变奏技能。切人变奏1，切人变奏2，切人变奏3，切人变奏4，切人变奏5。"
+    global_pos = text.index("变奏技能")
+    global_ref = TermReference(
+        "变奏技能",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=(
+            TermOccurrence(
+                global_pos, global_pos + 4, "变奏技能", 0, global_pos, global_pos + 4
+            ),
+        ),
+        origin="dictionary",
+        reason="contextual",
+    )
+    stem_positions = []
+    pos = text.find("变奏", global_pos + 4)
+    while pos != -1:
+        stem_positions.append(pos)
+        pos = text.find("变奏", pos + 1)
+    assert len(stem_positions) == 5
+    scoped_ref = TermReference(
+        "变奏",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=tuple(
+            TermOccurrence(p, p + 2, "变奏", 0, p, p + 2) for p in stem_positions
+        ),
+        origin="scoped_skill_stem",
+        reason="local_skill_action",
+    )
     scoped_lines = format_scoped_reference_lines(
-        locked.locked_text, locked.references, to_chinese=False
+        text, (global_ref, scoped_ref), to_chinese=False
     )
     assert len(scoped_lines) == 1
     line = scoped_lines[0]
-    assert line.startswith("心 = Hsin (resonator) — ONLY at: ")
+    assert line.startswith("变奏 = Intro Skill (core_term) — ONLY at: ")
     assert "(all occurrences in this text)" not in line
     assert "NOT at:" not in line
-    prompt = _system_prompt(
-        locked_text=locked.locked_text,
-        locks=locked.locks,
-        references=locked.references,
+
+
+def test_single_newline_non_context_text_uses_line_level_derived_context_gate(tmp_path):
+    translator = _service(
+        tmp_path,
+        (
+            _record("共鸣者", "Resonator", category="core_term"),
+            TermRecord(
+                category="location",
+                source_file="Textmaps/multi_text/MultiText.json",
+                source_id="Area_41043_Title",
+                text_key="Area_41043_Title",
+                zh="教学楼",
+                en="Academia Hall",
+            ),
+            TermRecord(
+                category="location",
+                source_file="Textmaps/multi_text/MultiText.json",
+                source_id="Area_41037_Title",
+                text_key="Area_41037_Title",
+                zh="拉贝尔学部",
+                en="Rabelle College",
+            ),
+        ),
     )
-    assert 'Dictionary term references:\n「心」 = "Hsin" (speaker)' in prompt
-    assert f"Scoped term references:\n{line}" in prompt
+    # prepare_text() collapses \n\n to single \n on non-context requests;
+    # line 1 (with 共鸣者) must still gate independently from line 2 (ordinary).
+    non_context = translator.prepare_text("共鸣者前往拉贝尔学部。\n\n我们学校的教学楼很旧。")
+    assert "\n\n" not in non_context and "\n" in non_context
+    locked = translator._lock_terms_with_references(
+        non_context, to_chinese=False, allow_nfkc_spelling=True
+    )
+    sources = [ref.source for ref in locked.references]
+    assert "共鸣者" in sources
+    assert "拉贝尔学部" in sources
+    assert "教学楼" not in sources
 
 
 def test_paragraph_gated_derived_ref_with_unadmitted_occurrence_routes_to_scoped(

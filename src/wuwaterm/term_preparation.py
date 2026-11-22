@@ -529,14 +529,31 @@ def format_scoped_reference_lines(
 
 
 def _paragraph_spans(text: str) -> tuple[tuple[int, int], ...]:
-    """Return ``(start, end)`` ranges of paragraphs separated by blank lines."""
+    """Return ``(start, end)`` ranges of paragraphs separated by blank lines.
+
+    When ``text`` contains no blank-line paragraph breaks (``\\n\\n``) but does
+    contain single newlines (``\\n`` — as produced by non-context
+    ``prepare_text()``), each non-empty line is treated as its own paragraph so
+    derived-term context gating behaves consistently across context and
+    non-context paths.
+    """
     spans: list[tuple[int, int]] = []
-    pos = 0
-    for match in _PARAGRAPH_SPLIT_RE.finditer(text):
-        spans.append((pos, match.start()))
-        pos = match.end()
-    spans.append((pos, len(text)))
-    return tuple(spans)
+    if _PARAGRAPH_SPLIT_RE.search(text) is not None:
+        pos = 0
+        for match in _PARAGRAPH_SPLIT_RE.finditer(text):
+            spans.append((pos, match.start()))
+            pos = match.end()
+        spans.append((pos, len(text)))
+        return tuple(spans)
+    if "\n" in text:
+        pos = 0
+        for line in text.split("\n"):
+            end = pos + len(line)
+            if line.strip():
+                spans.append((pos, end))
+            pos = end + 1
+        return tuple(spans) if spans else ((0, len(text)),)
+    return ((0, len(text)),)
 
 
 def _paragraph_index(spans: Sequence[tuple[int, int]], offset: int) -> int:
@@ -797,6 +814,116 @@ def _collect_scoped_skill_references(
         )
 
 
+def _lock_mixed_single_char_names(
+    locked_text: str,
+    locks: list[Lock],
+    references: list[TermReference],
+    *,
+    placeholder_prefix: str,
+    placeholder_offset: int = 0,
+) -> tuple[str, tuple[Lock, ...], tuple[TermReference, ...]]:
+    """Selectively lock admitted single-char CJK names when mixed with unadmitted ones.
+
+    On ``zh->en``, when an admitted single-character resonator/speaker name
+    coexists in ``locked_text`` with at least one unadmitted raw occurrence of
+    the same character (``raw_other_count > 0`` — ordinary prose such as
+    ``心很重要``, a novel compound such as ``红椿蕊``, or a longer term such as
+    ``「心」``), keeping ``心 = Hsin`` in the system prompt triggers negative
+    priming under ``thinking: disabled``. Replacing only the admitted spans
+    with opaque placeholders (whose ``Locked terms:`` lines expose only the
+    English target, never the Chinese source character) and removing the
+    reference eliminates leakage while leaving unmixed names
+    (``raw_other_count == 0``) as contextual references.
+    """
+    pairs_by_source: dict[str, set[tuple[str, str]]] = {}
+    for ref in references:
+        pairs_by_source.setdefault(ref.source, set()).add((ref.zh, ref.en))
+
+    spans_to_lock: list[tuple[int, int, str, str]] = []
+    removed_indices: set[int] = set()
+    for idx, ref in enumerate(references):
+        if (
+            ref.reason != "single_char_name_mention"
+            or ref.category not in CONTEXTUAL_REFERENCE_CATEGORIES
+            or len(ref.source) != 1
+            or not is_cjk_character(ref.source)
+            or len(pairs_by_source.get(ref.source, ())) != 1
+            or not _has_valid_model_occurrences(ref)
+        ):
+            continue
+        admitted_spans = sorted(
+            {
+                (occ.model_start, occ.model_end)
+                for occ in ref.occurrences
+                if type(occ.model_start) is int and type(occ.model_end) is int
+            }
+        )
+        admitted_set = set(admitted_spans)
+        raw_other_count = sum(
+            1
+            for span in _raw_surface_spans(locked_text, ref.source)
+            if span not in admitted_set
+        )
+        if raw_other_count == 0:
+            continue
+        removed_indices.add(idx)
+        for start, end in admitted_spans:
+            spans_to_lock.append((start, end, ref.zh, ref.en))
+
+    if not spans_to_lock:
+        return locked_text, tuple(locks), tuple(references)
+
+    spans_to_lock.sort(key=lambda item: (item[0], item[1]))
+    new_parts: list[str] = []
+    new_locks: list[Lock] = list(locks)
+    deltas: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end, zh, en in spans_to_lock:
+        if start < cursor:
+            continue
+        new_parts.append(locked_text[cursor:start])
+        placeholder = f"{placeholder_prefix}{placeholder_offset + len(new_locks):04d}__"
+        new_parts.append(placeholder)
+        new_locks.append((placeholder, zh, en))
+        deltas.append((end, len(placeholder) - (end - start)))
+        cursor = end
+    new_parts.append(locked_text[cursor:])
+    updated_text = "".join(new_parts)
+
+    updated_refs: list[TermReference] = []
+    for idx, ref in enumerate(references):
+        if idx in removed_indices:
+            continue
+        shifted_occs: list[TermOccurrence] = []
+        for occ in ref.occurrences:
+            if type(occ.model_start) is int and type(occ.model_end) is int:
+                shift = sum(delta for edge, delta in deltas if edge <= occ.model_start)
+                shifted_occs.append(
+                    TermOccurrence(
+                        start=occ.start,
+                        end=occ.end,
+                        matched_text=occ.matched_text,
+                        segment_index=occ.segment_index,
+                        model_start=occ.model_start + shift,
+                        model_end=occ.model_end + shift,
+                    )
+                )
+            else:
+                shifted_occs.append(occ)
+        updated_refs.append(
+            TermReference(
+                source=ref.source,
+                zh=ref.zh,
+                en=ref.en,
+                category=ref.category,
+                occurrences=tuple(shifted_occs),
+                origin=ref.origin,
+                reason=ref.reason,
+            )
+        )
+    return updated_text, tuple(new_locks), tuple(updated_refs)
+
+
 def prepare_term_segment(
     text: str,
     *,
@@ -817,6 +944,7 @@ def prepare_term_segment(
     official_context_paragraphs: frozenset[int] | None = None,
     paragraph_spans: tuple[tuple[int, int], ...] | None = None,
     skill_refs: tuple[SkillReference, ...] = (),
+    defer_mixed_single_char_locking: bool = False,
 ) -> PreparedTerms:
     """Prepare one visible segment; offsets refer to its full visible context."""
     candidates = reference_candidates if (to_chinese is not None and reference_candidates) else {}
@@ -1015,7 +1143,17 @@ def prepare_term_segment(
             segment_index=segment_index,
         )
     parts.append(text[index:])
-    return PreparedTerms("".join(parts), tuple(locks), tuple(references))
+    assembled_text = "".join(parts)
+    if to_chinese is False and not defer_mixed_single_char_locking:
+        final_text, final_locks, final_refs = _lock_mixed_single_char_names(
+            assembled_text,
+            locks,
+            references,
+            placeholder_prefix=placeholder_prefix,
+            placeholder_offset=placeholder_offset,
+        )
+        return PreparedTerms(final_text, final_locks, final_refs)
+    return PreparedTerms(assembled_text, tuple(locks), tuple(references))
 
 
 def prepare_protected_terms(
@@ -1098,6 +1236,7 @@ def prepare_protected_terms(
             official_context_paragraphs=official_paragraphs,
             paragraph_spans=para_spans,
             skill_refs=skill_refs,
+            defer_mixed_single_char_locking=True,
         )
         locked_segments.append(prepared.locked_text)
         locks.extend(prepared.locks)
@@ -1133,6 +1272,14 @@ def prepare_protected_terms(
         if segment_index < len(protected.structures):
             model_offset += placeholder_lengths[segment_index]
 
-    return PreparedTerms(
-        protected.for_model(tuple(locked_segments)), tuple(locks), tuple(references)
-    )
+    assembled = protected.for_model(tuple(locked_segments))
+    if to_chinese is False:
+        final_text, final_locks, final_refs = _lock_mixed_single_char_names(
+            assembled,
+            locks,
+            references,
+            placeholder_prefix=placeholder_prefix,
+            placeholder_offset=0,
+        )
+        return PreparedTerms(final_text, final_locks, final_refs)
+    return PreparedTerms(assembled, tuple(locks), tuple(references))

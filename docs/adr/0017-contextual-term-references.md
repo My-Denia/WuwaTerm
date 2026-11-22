@@ -172,3 +172,35 @@ two general presentation and admission flaws without any per-word exception:
 Both mechanisms strictly preserve ADR 0017's core principle: dictionary terms
 remain contextual guidance to the model, never hard-coded word exceptions or
 forced mechanical replacements.
+
+### Step B1b refinement: selective in-place locking for mixed single-character proper names (2026-11-22)
+
+The 4-POST `ordinary` Fail-Fast live probe (`469 -> 473`) confirmed that
+paragraph-level derived gating fixed `C-derived-ordinary` (`两栋教学楼` moved
+from `two Academia Hall buildings` on `0.10.2` to `two classroom buildings` on
+`q7`) and preserved `sealed tubes` -> `密音筒` on `ordinary-en-zh`. However,
+under `zh->en thinking: disabled`, whenever `心 = Hsin` or `椿 = Camellya`
+appeared anywhere in the system prompt — even inside `Scoped term references:`
+with explicit `ONLY at:` / `NOT at:` local snippets — `deepseek-flash` suffered
+negative-priming leakage and still rendered `心很重要` as `Hsin is very
+important` and `红椿蕊` as `Red Camellya Stamens`.
+
+Step B1b resolves this generally without per-word rules or relaxing ADR 0017
+for common nouns:
+
+- On `zh->en`, when an admitted single-character CJK proper name
+  (`resonator`/`speaker`, `reason == "single_char_name_mention"`) coexists in
+  `locked_text` with at least one unadmitted raw occurrence of the same
+  character (`raw_other_count > 0`), only the admitted spans passed by
+  `cjk_span.py` v9 are locked in place with opaque placeholders
+  (`__WUWA_TERM_...__ = Hsin` / `Camellya`) and the `TermReference` is removed
+  from the prompt's reference tables.
+- Because `Locked terms:` displays only the target English proper name and
+  never the Chinese source character, unadmitted occurrences (`心很重要`,
+  `她的心很痛`, `红椿蕊`, `香椿拌豆腐`) receive zero source-character priming in
+  the system prompt.
+- English proper names of resonators/speakers take neither plural inflection
+  nor articles, so selective locking preserves ADR 0017's plural/article
+  flexibility for every common noun (`Resonators`, `Echoes`), multi-character
+  term, unmixed single-character name (`raw_other_count == 0`, e.g. `R1-A5`),
+  and `scoped_skill_stem` (`变奏 = Intro Skill`).

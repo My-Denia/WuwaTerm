@@ -1685,7 +1685,9 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     assert ("「心」", "「心」", '"Hsin"', "speaker") in locked_tuples
     assert ("心", "心", "Hsin", "resonator") not in locked_tuples
 
-    # 2. Subsequent independent uncovered name mention still gets naked reference.
+    # 2. Subsequent independent uncovered name mention in a mixed text
+    # (other raw occurrences of 心 exist in 心照红尘 and 「心」) is selectively
+    # locked in place rather than injected as a naked 心 = Hsin reference.
     text_with_subsequent_name = (
         "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，心加入队伍。"
     )
@@ -1694,7 +1696,11 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     )
     subsequent_tuples = {ref.as_tuple() for ref in locked_subsequent.references}
     assert ("「心」", "「心」", '"Hsin"', "speaker") in subsequent_tuples
-    assert ("心", "心", "Hsin", "resonator") in subsequent_tuples
+    assert ("心", "心", "Hsin", "resonator") not in subsequent_tuples
+    assert [(zh, en) for _, zh, en in locked_subsequent.locks] == [("心", "Hsin")]
+    assert locked_subsequent.restore(locked_subsequent.locked_text, to_en=True) == (
+        "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，Hsin加入队伍。"
+    )
 
     # 3. Version title / ordinary compound without name mention triggers no reference.
     text_title_only = "全新3.7版本「心照红尘」即将开启！"

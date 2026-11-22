@@ -162,11 +162,12 @@ _SINGLE_NAME_HONORIFICS = (
 )
 
 # One-character function words that can follow a name inside a clause: 椿却没有
-# 回应, 椿等共鸣者, 欢迎椿来到. They are particles, adverbs and prepositions, not
-# evidence that the character is part of a longer noun compound; the ordinary
-# compound check above still runs first, so 心情 and 椿树 stay excluded.
+# 回应, 椿等共鸣者, 欢迎椿来到, 椿有极其优秀的. They are particles, adverbs,
+# prepositions and light verbs, not evidence that the character is part of a
+# longer noun compound; the ordinary compound check above still runs first, so
+# 心情, 椿树 and 香椿 stay excluded.
 _SINGLE_NAME_PARTICLES = frozenset(
-    "的和与在是也会要能都却只又还已曾将正就才更很不没把被对向给跟同比让说问看等们呢吗吧啊"
+    "的和与在是也会要能都有却只又还已曾将正就才更很不没把被对向给跟同比让说问看等们呢吗吧啊"
 )
 
 

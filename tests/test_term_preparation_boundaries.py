@@ -358,20 +358,22 @@ def test_paragraph_level_context_gate_and_enclosing_global_skip():
         nfkc_spelling_sources=frozenset(),
         placeholder_prefix="__P_",
     )
-    # 教学楼 is emitted ONLY for paragraph 0 (with 共鸣者), not paragraph 1.
+    # 教学楼 is emitted ONLY for paragraph 0 (with 共鸣者), not paragraph 1;
+    # because paragraph 1 has an unadmitted 教学楼, 教学楼 routes to Scoped term
+    # references with ONLY at / NOT at. Meanwhile 心 is mixed (admitted 心加入队伍
+    # + unadmitted 心很重要 & 「心」), so 心加入队伍 is selectively locked in place
+    # and removed from references so 心 = Hsin never reaches the system prompt.
     hall_ref = next(ref for ref in prepared.references if ref.source == "教学楼")
     assert len(hall_ref.occurrences) == 1
     assert text[hall_ref.occurrences[0].start : hall_ref.occurrences[0].end] == "教学楼"
     assert hall_ref.occurrences[0].start < text.index("\n\n")
+    assert [(zh, en) for _, zh, en in prepared.locks] == [("心", "Hsin")]
+    assert not any(ref.source == "心" for ref in prepared.references)
+    assert "「心」出现了，__P_0000__加入队伍，心很重要。" in prepared.locked_text
 
-    # Enclosing global reference 「心」 is NOT listed under NOT at: for scoped 心,
-    # while ordinary 心很重要 IS listed under NOT at:. And 教学楼 has an
-    # unadmitted occurrence in paragraph 1, so it is also routed to Scoped
-    # term references with ONLY at / NOT at instead of global references.
     scoped_lines = format_scoped_reference_lines(
         prepared.locked_text, prepared.references, to_chinese=False
     )
     assert scoped_lines == (
         "教学楼 = Academia Hall (location) — ONLY at: 共鸣者在「教学楼」集合。 | NOT at: 我们学校的「教学楼」很旧。",
-        "心 = Hsin (resonator) — ONLY at: 心」出现了，「心」加入队伍，心 | NOT at: 心加入队伍，「心」很重要。",
     )

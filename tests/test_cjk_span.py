@@ -220,6 +220,9 @@ def test_target_single_character_compound_qualification(text, name, compound):
         ("椿却没有回应。", "椿", True),
         ("椿等共鸣者。", "椿", True),
         ("欢迎椿来到。", "椿", True),
+        ("椿有极其优秀的。", "椿", True),
+        ("香椿有香味。", "椿", False),
+        ("心有不甘。", "心", False),
         # An unknown CJK continuation or a middle dot is a longer compound:
         # the character inside it is not a standalone mention.
         ("红椿蕊很强。", "椿", False),
