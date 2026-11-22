@@ -393,16 +393,31 @@ def test_single_newline_non_context_text_uses_line_level_derived_context_gate(tm
         ),
     )
     # prepare_text() collapses \n\n to single \n on non-context requests;
-    # line 1 (with 共鸣者) must still gate independently from line 2 (ordinary).
+    # line 1 (with 共鸣者) must still gate independently from line 2 (ordinary)
+    # when single_newline_paragraphs=True (non-context path), while context
+    # mode (single_newline_paragraphs=False) keeps single \n in one paragraph.
     non_context = translator.prepare_text("共鸣者前往拉贝尔学部。\n\n我们学校的教学楼很旧。")
     assert "\n\n" not in non_context and "\n" in non_context
     locked = translator._lock_terms_with_references(
-        non_context, to_chinese=False, allow_nfkc_spelling=True
+        non_context,
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+        single_newline_paragraphs=True,
     )
     sources = [ref.source for ref in locked.references]
     assert "共鸣者" in sources
     assert "拉贝尔学部" in sources
     assert "教学楼" not in sources
+
+    # Under translation-context-v1 (single_newline_paragraphs=False), an
+    # intra-paragraph single \n does NOT split the paragraph.
+    intra_para = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs("共鸣者前往\n教学楼。"),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+        single_newline_paragraphs=False,
+    )
+    assert "教学楼" in [ref.source for ref in intra_para.references]
 
 
 def test_paragraph_gated_derived_ref_with_unadmitted_occurrence_routes_to_scoped(

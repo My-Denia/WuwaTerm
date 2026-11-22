@@ -528,14 +528,19 @@ def format_scoped_reference_lines(
     return tuple(lines)
 
 
-def _paragraph_spans(text: str) -> tuple[tuple[int, int], ...]:
+def _paragraph_spans(
+    text: str,
+    *,
+    single_newline_paragraphs: bool = False,
+) -> tuple[tuple[int, int], ...]:
     """Return ``(start, end)`` ranges of paragraphs separated by blank lines.
 
-    When ``text`` contains no blank-line paragraph breaks (``\\n\\n``) but does
-    contain single newlines (``\\n`` — as produced by non-context
-    ``prepare_text()``), each non-empty line is treated as its own paragraph so
-    derived-term context gating behaves consistently across context and
-    non-context paths.
+    Under ``translation-context-v1`` (``single_newline_paragraphs=False``, the
+    default), only blank lines (``\\n\\n``) split paragraphs and a single ``\\n``
+    remains an intra-paragraph line break. Only non-context folded-newline
+    paths (``context is None``, where ``prepare_text()`` collapsed blank lines
+    to single ``\\n``) opt into ``single_newline_paragraphs=True`` to split
+    non-empty lines when no blank line is present.
     """
     spans: list[tuple[int, int]] = []
     if _PARAGRAPH_SPLIT_RE.search(text) is not None:
@@ -545,7 +550,7 @@ def _paragraph_spans(text: str) -> tuple[tuple[int, int], ...]:
             pos = match.end()
         spans.append((pos, len(text)))
         return tuple(spans)
-    if "\n" in text:
+    if single_newline_paragraphs and "\n" in text:
         pos = 0
         for line in text.split("\n"):
             end = pos + len(line)
@@ -943,6 +948,7 @@ def prepare_term_segment(
     context_gated_reference_only: frozenset[str] = frozenset(),
     official_context_paragraphs: frozenset[int] | None = None,
     paragraph_spans: tuple[tuple[int, int], ...] | None = None,
+    single_newline_paragraphs: bool = False,
     skill_refs: tuple[SkillReference, ...] = (),
     defer_mixed_single_char_locking: bool = False,
 ) -> PreparedTerms:
@@ -990,7 +996,10 @@ def prepare_term_segment(
         para_spans = (
             paragraph_spans
             if paragraph_spans is not None
-            else _paragraph_spans(context_text)
+            else _paragraph_spans(
+                context_text,
+                single_newline_paragraphs=single_newline_paragraphs,
+            )
         )
         if official_context_paragraphs is not None:
             official_paragraphs = official_context_paragraphs

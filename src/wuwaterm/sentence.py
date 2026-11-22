@@ -292,6 +292,7 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool = False,
         placeholder_prefix: str | None = None,
         placeholder_offset: int = 0,
+        single_newline_paragraphs: bool = False,
     ) -> LockedSentence:
         """Lock the same spans, but hand contextual ones to the model as text.
 
@@ -314,6 +315,7 @@ class SentenceTranslator:
             allow_nfkc_spelling=allow_nfkc_spelling,
             placeholder_prefix=placeholder_prefix,
             placeholder_offset=placeholder_offset,
+            single_newline_paragraphs=single_newline_paragraphs,
         )
 
     def _lock_terms_selected(
@@ -327,6 +329,7 @@ class SentenceTranslator:
         allow_nfkc_spelling: bool,
         placeholder_prefix: str | None,
         placeholder_offset: int,
+        single_newline_paragraphs: bool = False,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
         if lockable is None:
@@ -357,6 +360,7 @@ class SentenceTranslator:
                 if to_chinese is not None
                 else frozenset()
             ),
+            single_newline_paragraphs=single_newline_paragraphs,
             skill_refs=self._skill_references() if to_chinese is False else (),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
@@ -473,6 +477,7 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             allow_plural_inflection=to_chinese,
             allow_nfkc_spelling=True,
+            single_newline_paragraphs=True,
         )
         try:
             if to_chinese:
@@ -535,6 +540,7 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             allow_plural_inflection=to_chinese,
             allow_nfkc_spelling=True,
+            single_newline_paragraphs=(context is None),
         )
         try:
             if to_chinese:

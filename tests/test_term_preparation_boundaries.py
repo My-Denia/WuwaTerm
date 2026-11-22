@@ -377,3 +377,82 @@ def test_paragraph_level_context_gate_and_enclosing_global_skip():
     assert scoped_lines == (
         "教学楼 = Academia Hall (location) — ONLY at: 共鸣者在「教学楼」集合。 | NOT at: 我们学校的「教学楼」很旧。",
     )
+
+
+def test_context_mode_keeps_intra_paragraph_single_newline_as_one_paragraph(
+    monkeypatch, tmp_path
+):
+    """Under translation-context-v1, single \\n stays within one paragraph.
+
+    ``共鸣者前往\\n教学楼。`` must keep ``教学楼 = Academia Hall`` in context mode
+    (only ``\\n\\n`` separates paragraphs), whereas non-context mode (where
+    ``prepare_text()`` folds blank lines to single ``\\n``) gates per non-empty
+    line so an unrelated line does not inherit an official term from another.
+    """
+    from wuwaterm.application import TranslationContext
+    from wuwaterm.db import connect, initialize, insert_records
+    from wuwaterm.models import TermRecord
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "fixture")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "fixture")
+
+    db_path = tmp_path / "context-newline.db"
+    with connect(db_path) as conn:
+        initialize(conn)
+        insert_records(
+            conn,
+            [
+                TermRecord("core_term", "fixture", "1", "1", "共鸣者", "Resonator"),
+                TermRecord(
+                    "location",
+                    "Textmaps/multi_text/MultiText.json",
+                    "Area_41043_Title",
+                    "Area_41043_Title",
+                    "教学楼",
+                    "Academia Hall",
+                ),
+            ],
+        )
+        conn.commit()
+
+    prompts: list[str] = []
+
+    def echo(request):
+        body = json.loads(request.content)
+        prompts.append(body["messages"][0]["content"])
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": body["messages"][-1]["content"]}}]},
+        )
+
+    translator = SentenceTranslator(db_path, llm_transport=httpx.MockTransport(echo))
+
+    async def run():
+        try:
+            # translation-context-v1: single \n is intra-paragraph -> 教学楼 kept.
+            await translator.translate_async(
+                "共鸣者前往\n教学楼。",
+                to_chinese=False,
+                context=TranslationContext(),
+            )
+            # translation-context-v1: blank line \n\n splits paragraphs -> 教学楼 dropped.
+            await translator.translate_async(
+                "共鸣者前往。\n\n我们学校的教学楼很旧。",
+                to_chinese=False,
+                context=TranslationContext(),
+            )
+            # Non-context (context=None): folded single \n gates per line -> 教学楼 dropped.
+            await translator.translate_async(
+                "共鸣者前往。\n\n我们学校的教学楼很旧。",
+                to_chinese=False,
+                context=None,
+            )
+        finally:
+            await translator.aclose()
+
+    asyncio.run(run())
+    assert len(prompts) == 3
+    assert "教学楼 = Academia Hall (location)" in prompts[0]
+    assert "教学楼 = Academia Hall" not in prompts[1]
+    assert "教学楼 = Academia Hall" not in prompts[2]
