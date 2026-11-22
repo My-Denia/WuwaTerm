@@ -5,7 +5,8 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract,
-                   term_matching, term_preparation
+                   skill_references, term_classification, term_matching,
+                   term_preparation
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    llm_transport (HTTP transport for chat completions),
                    semantic_review (semantic-review-v1 engine)
@@ -57,9 +58,10 @@ nested subpackages discovered via rglob):
    strongly connected component may appear — a two-module mutual import is one
    cycle shape, not the only one.
 11. Pure matching modules (``term_matching``, ``term_preparation``,
-   ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``)
-   must not import storage ``db``, storage-coupled modules (``lookup``), or
-   ``sqlite3`` (including under ``TYPE_CHECKING``).
+   ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``,
+   ``skill_references``, ``term_classification``) must not import storage
+   ``db``, storage-coupled modules (``lookup``), or ``sqlite3`` (including
+   under ``TYPE_CHECKING``).
 12. Dynamic tool imports in ``scripts/deployment_admission.py`` via
    ``_tool_module`` / ``_tool_modules`` must be statically discoverable and
    listed in ``DECLARED_DYNAMIC_TOOL_DEPS``. Every declared tool must exist
@@ -109,6 +111,8 @@ DOMAIN_CORE = frozenset(
         "english_plural",
         "segmentation",
         "semantic_review_contract",
+        "skill_references",
+        "term_classification",
         "term_matching",
         "term_preparation",
     }
@@ -124,6 +128,8 @@ PURE_MATCHING = frozenset(
         "protected_text",
         "segmentation",
         "english_plural",
+        "skill_references",
+        "term_classification",
     }
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.

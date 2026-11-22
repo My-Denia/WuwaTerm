@@ -107,6 +107,16 @@ ordinary word; and a derived name surface asserts no constraint. The same
 input gave a different report under v7, so stored resolution contexts and
 saved manuscript-v3 segment results carrying v7 go stale by the existing
 freshness rule and are re-reviewed.
+
+wuwaterm-cjk-matcher-v9 also requires a plausible right word boundary for a
+single-character source name. An unrecognized CJK continuation or a middle-dot
+compound (红椿·蕾, 心·蕾, 红·椿) is not evidence of a standalone name. A
+following known word, an honorific, a one-character particle, or the existing
+name grammar still admits 欢迎椿来到, 椿却没有回应, 椿大人 and 心大人,
+whereas 红椿蕊 and 红椿·蕾 do not yield the character inside them. Both
+translation reference admission and review-v2 consult the same helper, and the
+honorific and particle sets join the MATCHER_REVISION payload so stored v8
+resolution contexts go stale and are re-reviewed.
 """
 
 from __future__ import annotations
@@ -136,6 +146,30 @@ _SINGLE_NAME_COMPOUNDS = frozenset({"香椿", "臭椿", "椿芽", "春椿", "椿
 # admission question.
 _EVERYDAY_STANDALONE_CHARS = frozenset({"心"})
 
+# Honorifics a speaker or narrator can put after a one-character name. They are
+# grammar, not part of the name: 心大人 addresses the resonator Hsin exactly as
+# 椿大人 addresses Camellya, while 心很重要 and 心情 remain ordinary words.
+_SINGLE_NAME_HONORIFICS = (
+    "大人",
+    "小姐",
+    "先生",
+    "女士",
+    "前辈",
+    "阁下",
+    "老师",
+    "队长",
+    "长官",
+)
+
+# One-character function words that can follow a name inside a clause: 椿却没有
+# 回应, 椿等共鸣者, 欢迎椿来到, 椿有极其优秀的. They are particles, adverbs,
+# prepositions and light verbs, not evidence that the character is part of a
+# longer noun compound; the ordinary compound check above still runs first, so
+# 心情, 椿树 and 香椿 stay excluded.
+_SINGLE_NAME_PARTICLES = frozenset(
+    "的和与在是也会要能都有却只又还已曾将正就才更很不没把被对向给跟同比让说问看等们呢吗吧啊"
+)
+
 
 def _is_cjk_character(char: str) -> bool:
     return "\u3400" <= char <= "\u9fff"
@@ -147,13 +181,23 @@ def single_character_name_context_ok(text: str, start: int, end: int) -> bool:
     Only newly eligible one-character surfaces use this conservative rule.
     Unlisted contexts (for example 欢迎椿) may remain unlocked; multi-character
     names retain the existing matching policy.
+
+    A middle dot on either side closes the question before any other rule: it
+    is not a CJK character, so without this check the ordinary punctuation
+    branch would count it as a boundary and admit 红·椿, 心·蕾 or the 椿 of
+    「椿·蕾」 as a standalone name.
     """
+    if (start > 0 and text[start - 1] == "·") or (
+        end < len(text) and text[end] == "·"
+    ):
+        return False
     if start and _is_cjk_character(text[start - 1]):
         if text[start - 1] not in "和与让给由是用有":
             return False
     return (
         end == len(text)
         or not _is_cjk_character(text[end])
+        or text.startswith(_SINGLE_NAME_HONORIFICS, end)
         or text.startswith(("的", "和", "与", "在", "是", "也", "会", "要", "能",
                             "加入", "离开", "登场", "使用", "说"), end)
     )
@@ -180,24 +224,65 @@ def single_character_compound_at(text: str, start: int, end: int) -> bool:
     return False
 
 
+def span_inside_known_word(text: str, start: int, end: int) -> bool:
+    """Whether a longer ordinary lexicon word covers text[start:end].
+
+    Returns True only when a listed word spans [start, end) and extends past
+    at least one edge (e.g. 变奏 inside 变奏曲). The span's own exact text is
+    not a veto.
+    """
+    if not (0 <= start < end <= len(text)):
+        return False
+    for left in range(max(0, start - MAX_WORD_LEN + 1), start + 1):
+        for right in range(end, min(len(text), left + MAX_WORD_LEN) + 1):
+            if (left < start or right > end) and text[left:right] in _WORDS:
+                return True
+    return False
+
+
 def single_character_name_mention_at(text: str, start: int, end: int) -> bool:
     """Whether a one-character official name at this span is a name mention.
 
-    Both callers ask the same question: sentence.py before it offers the
+    Both callers ask the same question: term preparation before it offers the
     character to the model as a reference, review.py before it turns the
     mention into a finding. An ordinary word covering the character (香椿,
     臭椿, 椿芽, 春椿, 椿木, 椿皮, 椿树) makes it that word, not a name. A
     character that is also an everyday standalone noun (心) additionally needs
     the narrow name context the sentence lock has always required, so 心很重要
-    and 她的心很痛 are neither references nor findings. This is not a general
-    Chinese word segmenter or a sentence-meaning check.
+    and 她的心很痛 are neither references nor findings.
+
+    A plausible right boundary is required as well. The lexicon cannot list
+    every novel mechanic name, so an unrecognized CJK continuation, or a
+    middle-dot compound (红椿·蕾), means the character is a component of a
+    longer word rather than a standalone mention (红椿蕊). A known two-to-eight
+    character word, an honorific, a one-character particle, punctuation, HTML
+    markup or whitespace is a boundary; 欢迎椿来到, 快找椿商量对策 and 椿却没有
+    回应 stay admitted. This is not a general Chinese word segmenter or a
+    sentence-meaning check.
     """
     if end - start != 1 or start < 0 or end > len(text):
+        return False
+    if (start > 0 and text[start - 1] == "·") or (
+        end < len(text) and text[end] == "·"
+    ):
+        # A middle dot welds the halves of one invented compound name, on
+        # either side of this character, so it is not a standalone mention.
         return False
     if single_character_compound_at(text, start, end):
         return False
     if text[start:end] in _EVERYDAY_STANDALONE_CHARS:
         return single_character_name_context_ok(text, start, end)
+    if end < len(text) and _is_cjk_character(text[end]):
+        if single_character_name_context_ok(text, start, end):
+            return True
+        if text[end] in _SINGLE_NAME_PARTICLES:
+            return True
+        if text.startswith(_SINGLE_NAME_HONORIFICS, end):
+            return True
+        return any(
+            text[end:hi] in _WORDS
+            for hi in range(end + 2, min(len(text), end + MAX_WORD_LEN) + 1)
+        )
     return True
 
 
@@ -66551,7 +66636,16 @@ _WORDS = frozenset(
 
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
-        ["wuwaterm-cjk-matcher-v8", JIEBA_COMMIT, LEXICON_FILTER, sorted(words), sorted(_SINGLE_NAME_COMPOUNDS), sorted(_EVERYDAY_STANDALONE_CHARS)],
+        [
+            "wuwaterm-cjk-matcher-v9",
+            JIEBA_COMMIT,
+            LEXICON_FILTER,
+            sorted(words),
+            sorted(_SINGLE_NAME_COMPOUNDS),
+            sorted(_EVERYDAY_STANDALONE_CHARS),
+            sorted(_SINGLE_NAME_HONORIFICS),
+            sorted(_SINGLE_NAME_PARTICLES),
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()

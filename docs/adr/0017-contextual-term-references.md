@@ -105,3 +105,102 @@ supplement covers seven surfaces (`香椿`, `臭椿`, `椿树`, `椿芽`, `春�
 guards free user text, not official lines. This is a narrower reference and
 reporting set with measured evidence, which the Consequences above name as the
 permitted response, not a per-word exception to forced substitution.
+
+## Candidate supplement: occurrence-scoped references (2026-11-22, `q7`)
+
+The `q7` candidate (`feat/q7-occurrence-term-admission`) retains the decisions
+above and builds occurrence-scoped references directly on the structured
+`TermReference`/`TermOccurrence` model. A surface with competing official pairs
+supplies alternatives to the model rather than a hard lock. Deterministic
+whole-input translation prefers an established dictionary row over a derived
+row (`lookup.preferred_exact_entry`), while dictionary lookup exposes every
+candidate. A derived reference remains guidance to the model; it does not
+create a human precedent or a verified review finding.
+
+Single-character CJK name references require a plausible right boundary as well
+as the existing ordinary-word and name-context checks. An unrecognized CJK
+continuation or a middle dot on either side does not establish a standalone
+name mention. Translation and `review-v2` share this admission rule, advancing
+`MATCHER_REVISION` to `wuwaterm-cjk-matcher-v9`.
+
+For Chinese-to-English requests only, `skill_references.py` derives
+two-character skill stems from official `BinData/skill/skilltype.json` rows 2,
+3, 5, 6, and 11 (`origin="scoped_skill_stem"`). Admission requires local action
+and independent game-context evidence within the same clause of the submitted
+segment, excludes spans inside known lexicon words or longer selected terms,
+and requires a unique local sense marker when a stem has several meanings.
+Read-only previous context never enters admission.
+
+Each occurrence-scoped reference supplies zero-based, end-exclusive
+`model_start`/`model_end` ranges in the actual model input after placeholder
+replacement, validated fail-closed before any HTTP call. Skill-stem ranges also
+carry their target string so two meanings of one stem keep distinct positions.
+Plain single-meaning requests keep their pre-admission prompt bytes unchanged.
+These rules describe the `q7` Draft PR candidate before owner-authorized
+Stage-1 evaluation has been run.
+
+### Step B1 refinement: local context snippets and paragraph-level derived gating (2026-11-22)
+
+Offline root-cause analysis of `q5`/`q6` Stage-1 failures (`C-heart-ordinary`
+2/2 failures on `心很重要`/`她的心很痛`, `G-M0439` ordinary-word contamination,
+`C-derived-ordinary` on `教学楼`, and `D-003` `变奏入场` scoping) established
+two general presentation and admission flaws without any per-word exception:
+
+1. **Local context snippets replace bare numeric offsets on the model prompt**:
+   Under `zh->en` `thinking: disabled`, models cannot reliably count Unicode
+   scalar indices against JSON offset arrays, so placing `心 = Hsin` or
+   `椿 = Camellya` in the global reference table leaked the name into ordinary
+   occurrences even when `cjk_span.py` (v9) had excluded them. Occurrence-scoped
+   references (`single_char_name_mention`, `scoped_skill_stem`) now stay
+   coordinate-validated fail-closed via `validated_reference_ranges()`, but
+   render in a separate `Scoped term references:` block using deduplicated
+   single-line local snippets (`ONLY at:` / `NOT at:`, collapsing to
+   `(all occurrences in this text)` when >4 occurrences are admitted) instead
+   of bare integer offsets.
+2. **Paragraph-level official-term context gating for derived common nouns**:
+   Segment-wide (1,800-scalar) gating let an official term in one paragraph
+   inject derived common-noun hints (`Area_<n>_Title` such as `教学楼`,
+   `tier-base:<id>` soft casings such as `energy core` / `tuner`) into an
+   unrelated ordinary-prose paragraph in the same segment. Gating both derived
+   common-noun `reference_only` rows (`derived_context_gated_sources`) and
+   `derived_soft_casing` rows at natural-paragraph (`\n\n`) granularity keeps
+   ordinary paragraphs clean (`C-derived-ordinary`, `energy core`, `tuner`)
+   while preserving in-context derived terms (`D-004` `拉贝尔学部`,
+   `ordinary-en-zh` `sealed tubes`) and official version titles (`D-005`
+   `未选择的梦`).
+
+Both mechanisms strictly preserve ADR 0017's core principle: dictionary terms
+remain contextual guidance to the model, never hard-coded word exceptions or
+forced mechanical replacements.
+
+### Step B1b refinement: selective in-place locking for mixed single-character proper names (2026-11-22)
+
+The 4-POST `ordinary` Fail-Fast live probe (`469 -> 473`) confirmed that
+paragraph-level derived gating fixed `C-derived-ordinary` (`两栋教学楼` moved
+from `two Academia Hall buildings` on `0.10.2` to `two classroom buildings` on
+`q7`) and preserved `sealed tubes` -> `密音筒` on `ordinary-en-zh`. However,
+under `zh->en thinking: disabled`, whenever `心 = Hsin` or `椿 = Camellya`
+appeared anywhere in the system prompt — even inside `Scoped term references:`
+with explicit `ONLY at:` / `NOT at:` local snippets — `deepseek-flash` suffered
+negative-priming leakage and still rendered `心很重要` as `Hsin is very
+important` and `红椿蕊` as `Red Camellya Stamens`.
+
+Step B1b resolves this generally without per-word rules or relaxing ADR 0017
+for common nouns:
+
+- On `zh->en`, when an admitted single-character CJK proper name
+  (`resonator`/`speaker`, `reason == "single_char_name_mention"`) coexists in
+  `locked_text` with at least one unadmitted raw occurrence of the same
+  character (`raw_other_count > 0`), only the admitted spans passed by
+  `cjk_span.py` v9 are locked in place with opaque placeholders
+  (`__WUWA_TERM_...__ = Hsin` / `Camellya`) and the `TermReference` is removed
+  from the prompt's reference tables.
+- Because `Locked terms:` displays only the target English proper name and
+  never the Chinese source character, unadmitted occurrences (`心很重要`,
+  `她的心很痛`, `红椿蕊`, `香椿拌豆腐`) receive zero source-character priming in
+  the system prompt.
+- English proper names of resonators/speakers take neither plural inflection
+  nor articles, so selective locking preserves ADR 0017's plural/article
+  flexibility for every common noun (`Resonators`, `Echoes`), multi-character
+  term, unmixed single-character name (`raw_other_count == 0`, e.g. `R1-A5`),
+  and `scoped_skill_stem` (`变奏 = Intro Skill`).
