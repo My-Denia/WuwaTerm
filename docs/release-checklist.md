@@ -97,7 +97,7 @@ release. That boundary has not moved.
   installer takes its default Telegram release from that entry.
   `products.web` records the published Web `v0.4.3`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.3`.
+  published Windows `v0.6.4`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
@@ -126,7 +126,7 @@ release. That boundary has not moved.
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.3](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.3), released independently.
+- Windows product: [v0.6.4](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.4), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
