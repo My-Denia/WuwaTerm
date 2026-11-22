@@ -73,8 +73,8 @@ from .term_preparation import (
     TermOccurrence as TermOccurrence,
     TermReference as TermReference,
     format_scoped_reference_lines,
-    is_occurrence_scoped_reference,
     new_placeholder_prefix,
+    partition_references_for_prompt,
     prepare_protected_terms,
     prepare_term_segment,
     references_need_scope_instruction,
@@ -991,8 +991,8 @@ _SCOPED_REFERENCE_INSTRUCTION = (
     "of them. A casing variant is only a hint, not proof of an official sense. "
     "For Scoped term references below, apply a reference ONLY in the listed "
     "'ONLY at:' contexts (or everywhere when marked '(all occurrences in this "
-    "text)', except any listed 'NOT at:' contexts); never apply it in 'NOT at:' "
-    "contexts or to other ordinary words or compounds.\n"
+    "text)'); never apply it in 'NOT at:' contexts or to other ordinary words "
+    "or compounds.\n"
 )
 _SCOPED_REFERENCE_HEADER = "Scoped term references:\n"
 
@@ -1399,12 +1399,15 @@ async def _call_llm_async_with_client(
     context=None,
 ) -> str:
     coerced_refs = tuple(_coerce_term_reference(item) for item in references)
+    global_refs, scoped_refs = partition_references_for_prompt(
+        locked_text, coerced_refs
+    )
     # Fail-closed validation of occurrence coordinates before formatting or HTTP.
     scoped_ranges = validated_reference_ranges(
-        locked_text, coerced_refs, to_chinese=to_chinese
-    )
-    global_refs = tuple(
-        ref for ref in coerced_refs if not is_occurrence_scoped_reference(ref)
+        locked_text,
+        coerced_refs,
+        to_chinese=to_chinese,
+        extra_scoped=scoped_refs,
     )
     scoped_lines = format_scoped_reference_lines(
         locked_text, coerced_refs, to_chinese=to_chinese

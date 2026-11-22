@@ -218,6 +218,20 @@ def _is_latin_word_char(char: str) -> bool:
     )
 
 
+def has_latin_word_boundaries(text: str, start: int, end: int) -> bool:
+    """Reject a Latin-script match glued to surrounding Latin letters or digits.
+
+    Used by case-variant matching and by occurrence scanning of derived
+    soft-casing surfaces so ``tuner`` does not match inside ``retuner`` or
+    ``tuners``. Adjacent CJK text stays allowed.
+    """
+    if start > 0 and _is_latin_word_char(text[start - 1]):
+        return False
+    if end < len(text) and _is_latin_word_char(text[end]):
+        return False
+    return True
+
+
 def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
     """Reject a case-variant match glued to Latin letters or ASCII digits.
 
@@ -225,11 +239,7 @@ def _case_variant_boundaries_ok(text: str, start: int, end: int) -> bool:
     which the ASCII-only check does not cover, so xélodie or élodie ruès
     would otherwise lock. Adjacent CJK text stays allowed.
     """
-    if start > 0 and _is_latin_word_char(text[start - 1]):
-        return False
-    if end < len(text) and _is_latin_word_char(text[end]):
-        return False
-    return True
+    return has_latin_word_boundaries(text, start, end)
 
 
 def _matched_span_ok(

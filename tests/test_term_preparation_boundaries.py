@@ -297,7 +297,7 @@ def test_structured_references_preserve_exact_llm_request_payload(monkeypatch, s
         "supported by this occurrence, never combine or enforce all of them. A casing variant is "
         "only a hint, not proof of an official sense. For Scoped term references below, apply a "
         "reference ONLY in the listed 'ONLY at:' contexts (or everywhere when marked '(all "
-        "occurrences in this text)', except any listed 'NOT at:' contexts); never apply it in "
+        "occurrences in this text)'); never apply it in "
         "'NOT at:' contexts or to other ordinary words or compounds.\\n"
         'Dictionary term references:\\n声骸 = Echo (core_term)\\n'
         'Scoped term references:\\n椿 = Camellya (resonator) — ONLY at: 欢迎「椿」和声骸"},'
@@ -365,10 +365,13 @@ def test_paragraph_level_context_gate_and_enclosing_global_skip():
     assert hall_ref.occurrences[0].start < text.index("\n\n")
 
     # Enclosing global reference 「心」 is NOT listed under NOT at: for scoped 心,
-    # while ordinary 心很重要 IS listed under NOT at:.
+    # while ordinary 心很重要 IS listed under NOT at:. And 教学楼 has an
+    # unadmitted occurrence in paragraph 1, so it is also routed to Scoped
+    # term references with ONLY at / NOT at instead of global references.
     scoped_lines = format_scoped_reference_lines(
         prepared.locked_text, prepared.references, to_chinese=False
     )
     assert scoped_lines == (
+        "教学楼 = Academia Hall (location) — ONLY at: 共鸣者在「教学楼」集合。 | NOT at: 我们学校的「教学楼」很旧。",
         "心 = Hsin (resonator) — ONLY at: 心」出现了，「心」加入队伍，心 | NOT at: 心加入队伍，「心」很重要。",
     )

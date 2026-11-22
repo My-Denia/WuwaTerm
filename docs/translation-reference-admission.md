@@ -121,12 +121,16 @@ Any request that needs none of these arrives at the model with the exact bytes
 it carried before this mechanism existed. `validated_reference_ranges` verifies
 every `(model_start, model_end)` coordinate against `locked_text` (after term
 and structural placeholders) fail-closed before any HTTP request leaves the
-process. Occurrence-scoped references (`single_char_name_mention` and
-`scoped_skill_stem`) are separated from `Dictionary term references:` into a
-`Scoped term references:` block rendered with deduplicated single-line local
-context snippets (`ONLY at:` / `NOT at:`, collapsing >4 admitted occurrences to
-`(all occurrences in this text)`) rather than bare numeric offsets, so
-`thinking: disabled` models do not have to count character indices.
+process. Occurrence-scoped references (`single_char_name_mention`, `scoped_skill_stem`,
+and any paragraph-gated derived reference whose surface also appears unadmitted
+elsewhere in `locked_text`) are separated from `Dictionary term references:`
+into a `Scoped term references:` block rendered with deduplicated single-line
+local context snippets (`ONLY at:` / `NOT at:`). Any colliding `ONLY at:` /
+`NOT at:` snippets automatically escalate through wider same-line windows, full
+natural paragraph, `[P{n}]` paragraph prefixes, and `[start,end)` scalar
+coordinates until strictly disjoint. Compression to `(all occurrences in this
+text)` is applied only when zero other raw occurrences of the surface exist
+anywhere in `locked_text` (including spans covered by longer global terms).
 
 ## Context fidelity
 

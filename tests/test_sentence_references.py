@@ -218,7 +218,7 @@ def test_single_char_heart_separates_only_at_from_ordinary_not_at_paragraphs(tmp
     ) in prompt
 
 
-def test_many_admitted_occurrences_compress_to_all_occurrences_label(tmp_path):
+def test_many_admitted_occurrences_compress_only_when_zero_raw_other_occurrences(tmp_path):
     translator = _service(tmp_path, (_record("椿", "Camellya"),))
     all_valid = "欢迎椿，找椿，看椿，带椿，选椿。"
     locked = _lock(translator, all_valid, to_chinese=False)
@@ -226,13 +226,213 @@ def test_many_admitted_occurrences_compress_to_all_occurrences_label(tmp_path):
         locked.locked_text, locked.references, to_chinese=False
     ) == ("椿 = Camellya (resonator) — (all occurrences in this text)",)
 
+    # Whenever any unadmitted occurrence exists (raw_other_count > 0), never
+    # compress to "(all occurrences in this text)"; keep ONLY at / NOT at.
     mixed_many = "欢迎椿，找椿，看椿，带椿，选椿。红椿蕊很强。"
     locked_mixed = _lock(translator, mixed_many, to_chinese=False)
-    assert format_scoped_reference_lines(
+    mixed_lines = format_scoped_reference_lines(
         locked_mixed.locked_text, locked_mixed.references, to_chinese=False
-    ) == (
-        "椿 = Camellya (resonator) — (all occurrences in this text) | NOT at: 椿,选椿。红「椿」蕊很强。",
     )
+    assert len(mixed_lines) == 1
+    assert "(all occurrences in this text)" not in mixed_lines[0]
+    assert "ONLY at:" in mixed_lines[0]
+    assert "| NOT at: 椿,选椿。红「椿」蕊很强。" in mixed_lines[0]
+
+
+def test_long_term_covered_occurrence_prevents_all_occurrences_compression(tmp_path):
+    # Finding #3 regression: 5 standalone 心 + 1 「心」 covered by global speaker
+    # 「心」 = "Hsin". Even though 「心」 is excluded from NOT at:, raw_other_count
+    # is 1, so 心 must keep ONLY at: instead of compressing to
+    # "(all occurrences in this text)" and must NOT add 「心」 to NOT at:.
+    translator = _service(
+        tmp_path,
+        (
+            _record("「心」", '"Hsin"', category="speaker", table="sp"),
+            _record("心", "Hsin", category="resonator", table="res"),
+        ),
+    )
+    source = "「心」出现了。心加入，心离开，心登场，心使用，心说。"
+    locked = _lock(translator, source, to_chinese=False)
+    scoped_lines = format_scoped_reference_lines(
+        locked.locked_text, locked.references, to_chinese=False
+    )
+    assert len(scoped_lines) == 1
+    line = scoped_lines[0]
+    assert line.startswith("心 = Hsin (resonator) — ONLY at: ")
+    assert "(all occurrences in this text)" not in line
+    assert "NOT at:" not in line
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+    assert 'Dictionary term references:\n「心」 = "Hsin" (speaker)' in prompt
+    assert f"Scoped term references:\n{line}" in prompt
+
+
+def test_paragraph_gated_derived_ref_with_unadmitted_occurrence_routes_to_scoped(
+    tmp_path,
+):
+    # Finding #1 regression: when the same derived common-noun surface (or
+    # soft-cased derived surface) passes paragraph gating in one paragraph and
+    # fails it in another, it MUST route to Scoped term references with ONLY at
+    # and NOT at — never into global Dictionary term references.
+    translator = _service(
+        tmp_path,
+        (
+            _record("共鸣者", "Resonator", category="core_term"),
+            TermRecord(
+                category="location",
+                source_file="Textmaps/multi_text/MultiText.json",
+                source_id="Area_41043_Title",
+                text_key="Area_41043_Title",
+                zh="教学楼",
+                en="Academia Hall",
+            ),
+            TermRecord(
+                category="item",
+                source_file="BinData/item/iteminfo.json",
+                source_id="tier-base:43020001",
+                text_key="tier-base:43020001",
+                zh="能源核心",
+                en="Energy Core",
+            ),
+        ),
+    )
+
+    zh_mixed = "共鸣者前往教学楼。\n\n我们学校的教学楼很旧。"
+    zh_locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(zh_mixed),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    zh_prompt = _system_prompt(
+        locked_text=zh_locked.locked_text,
+        locks=zh_locked.locks,
+        references=zh_locked.references,
+    )
+    global_block = zh_prompt.split("Dictionary term references:\n", 1)[1].split(
+        "\nScoped term references:\n", 1
+    )[0]
+    scoped_block = zh_prompt.split("\nScoped term references:\n", 1)[1]
+    assert "共鸣者 = Resonator (core_term)" in global_block
+    assert "教学楼" not in global_block
+    assert (
+        "教学楼 = Academia Hall (location) — ONLY at: 共鸣者前往「教学楼」。 | NOT at: 我们学校的「教学楼」很旧。"
+        in scoped_block
+    )
+
+    # When every occurrence of 教学楼 in the text is admitted, it stays global.
+    zh_all_admitted = "共鸣者前往教学楼。"
+    zh_all_locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(zh_all_admitted),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    zh_all_prompt = _system_prompt(
+        locked_text=zh_all_locked.locked_text,
+        locks=zh_all_locked.locks,
+        references=zh_all_locked.references,
+    )
+    assert "Scoped term references:\n" not in zh_all_prompt
+    assert "教学楼 = Academia Hall (location)" in zh_all_prompt
+
+    # Same rule for derived_soft_casing in en->zh.
+    en_mixed = "The energy core of a star.\n\nA Resonator upgrades the energy core."
+    en_locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(en_mixed),
+        to_chinese=True,
+        allow_plural_inflection=True,
+        allow_nfkc_spelling=True,
+    )
+    en_prompt = _system_prompt(
+        locked_text=en_locked.locked_text,
+        locks=en_locked.locks,
+        to_chinese=True,
+        references=en_locked.references,
+    )
+    assert "Dictionary term references:\n" not in en_prompt
+    assert "Scoped term references:\n" in en_prompt
+    assert "energy core = 能源核心 (item) — ONLY at:" in en_prompt
+    assert "| NOT at:" in en_prompt
+
+
+def test_colliding_scoped_snippets_escalate_until_strictly_disjoint():
+    # Finding #2 regression: identical 6-char left/right windows must expand,
+    # cross-paragraph identical texts must add [P1]/[P2], and same-paragraph
+    # identical texts must add [start,end) so ONLY at and NOT at never collide.
+    from wuwaterm.term_preparation import TermReference
+
+    # 1. Same 6-char context on both sides, different full line -> window expands.
+    line_text = (
+        "共鸣者先释放再衔接变奏入场并打满循环。\n\n"
+        "乐队先释放再衔接变奏入场并打满循环。"
+    )
+    pos_admitted = line_text.index("变奏")
+    ref_line = TermReference(
+        "变奏",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=(
+            TermOccurrence(
+                start=pos_admitted,
+                end=pos_admitted + 2,
+                matched_text="变奏",
+                segment_index=0,
+                model_start=pos_admitted,
+                model_end=pos_admitted + 2,
+            ),
+        ),
+        origin="scoped_skill_stem",
+        reason="local_skill_action",
+    )
+    [line_out] = format_scoped_reference_lines(line_text, (ref_line,), to_chinese=False)
+    only_part, not_part = line_out.split(" — ONLY at: ", 1)[1].split(" | NOT at: ", 1)
+    assert only_part != not_part
+    assert "共鸣者" in only_part
+    assert "乐队" in not_part
+
+    # 2. Identical text across two paragraphs -> [P1] / [P2] prefixes disambiguate.
+    para_text = "直接触发变奏入场。\n\n直接触发变奏入场。"
+    p1_pos = para_text.index("变奏")
+    ref_para = TermReference(
+        "变奏",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=(
+            TermOccurrence(p1_pos, p1_pos + 2, "变奏", 0, p1_pos, p1_pos + 2),
+        ),
+        origin="scoped_skill_stem",
+        reason="local_skill_action",
+    )
+    [para_out] = format_scoped_reference_lines(para_text, (ref_para,), to_chinese=False)
+    p_only, p_not = para_out.split(" — ONLY at: ", 1)[1].split(" | NOT at: ", 1)
+    assert p_only != p_not
+    assert p_only.startswith("[P1] ")
+    assert p_not.startswith("[P2] ")
+
+    # 3. Identical text inside the same paragraph (e.g. separated by an opaque
+    # placeholder) -> exact [start,end) coordinates disambiguate.
+    ph = "__WUWA_HTML_0123456789abcdef_0000__"
+    same_p_collide = f"触发变奏入场{ph}触发变奏入场"
+    c1 = same_p_collide.index("变奏")
+    c2 = same_p_collide.rindex("变奏")
+    ref_c = TermReference(
+        "变奏",
+        "变奏技能",
+        "Intro Skill",
+        "core_term",
+        occurrences=(TermOccurrence(c1, c1 + 2, "变奏", 0, c1, c1 + 2),),
+        origin="scoped_skill_stem",
+        reason="local_skill_action",
+    )
+    [c_out] = format_scoped_reference_lines(same_p_collide, (ref_c,), to_chinese=False)
+    c_only, c_not = c_out.split(" — ONLY at: ", 1)[1].split(" | NOT at: ", 1)
+    assert c_only != c_not
+    assert f"[{c1},{c1 + 2})" in c_only
+    assert f"[{c2},{c2 + 2})" in c_not
 
 
 def test_paragraph_level_official_term_context_gates_derived_and_soft_casing_references(

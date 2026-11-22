@@ -19,6 +19,7 @@ from .skill_references import SkillReference, skill_occurrences
 from .term_matching import (
     ReferenceCandidates,
     TermSpan,
+    has_latin_word_boundaries,
     is_cjk_character,
     reference_span_admitted,
     select_term_spans,
@@ -127,15 +128,122 @@ def is_contextual_reference(category: str, *, to_chinese: bool) -> bool:
 def is_occurrence_scoped_reference(ref: TermReference) -> bool:
     """Return whether ``ref`` applies only to specific admitted occurrences.
 
-    Two mechanisms are occurrence-scoped: single-character CJK resonator/speaker
-    mentions and bounded closed-class 2-character skill stems. Legacy tuple
-    references without occurrences remain global references.
+    Two mechanisms are unconditionally occurrence-scoped: single-character CJK
+    resonator/speaker mentions and bounded closed-class 2-character skill stems.
+    Legacy tuple references without occurrences remain global references.
     """
     return (
         ref.origin == "scoped_skill_stem"
         or ref.reason == "single_char_name_mention"
         or (len(ref.source) == 1 and is_cjk_character(ref.source) and bool(ref.occurrences))
     )
+
+
+def _is_paragraph_gated_derived_reference(ref: TermReference) -> bool:
+    """Return whether ``ref`` came from paragraph-gated derived admission."""
+    return ref.origin == "derived_soft_casing" or ref.reason in {
+        "soft_casing",
+        "reference_only",
+    }
+
+
+def _has_valid_model_occurrences(ref: TermReference) -> bool:
+    return bool(ref.occurrences) and all(
+        type(occ.model_start) is int and type(occ.model_end) is int
+        for occ in ref.occurrences
+    )
+
+
+def _raw_surface_spans(text: str, surface: str) -> list[tuple[int, int]]:
+    """Find every raw occurrence of ``surface`` in ``text``.
+
+    Latin-only surfaces require Latin word boundaries so ``tuner`` does not
+    collide with ``retuner`` or ``tuners``; CJK surfaces match substrings.
+    """
+    if not surface:
+        return []
+    is_latin_only = not any(is_cjk_character(ch) for ch in surface) and any(
+        ch.isalpha() for ch in surface
+    )
+    spans: list[tuple[int, int]] = []
+    pos = text.find(surface)
+    while pos != -1:
+        end = pos + len(surface)
+        if not is_latin_only or has_latin_word_boundaries(text, pos, end):
+            spans.append((pos, end))
+        pos = text.find(surface, pos + 1)
+    return spans
+
+
+def _is_strictly_enclosed(
+    span: tuple[int, int], global_occ_spans: Sequence[tuple[int, int]]
+) -> bool:
+    start, end = span
+    return any(
+        g_start <= start and end <= g_end and (g_start < start or end < g_end)
+        for g_start, g_end in global_occ_spans
+    )
+
+
+def partition_references_for_prompt(
+    locked_text: str,
+    references: Sequence[TermReference],
+) -> tuple[tuple[TermReference, ...], tuple[TermReference, ...]]:
+    """Split references into global vs. occurrence-scoped prompt blocks.
+
+    Unconditionally occurrence-scoped references (single-char CJK names and
+    ``scoped_skill_stem``) always enter the scoped block. Paragraph-gated
+    derived references (``derived_soft_casing`` and ``reference_only``) are
+    promoted to the scoped block whenever ``locked_text`` contains at least
+    one unadmitted occurrence not strictly enclosed by a global reference;
+    when all occurrences in ``locked_text`` are admitted they remain global.
+    """
+    scoped_indices: set[int] = {
+        idx
+        for idx, ref in enumerate(references)
+        if is_occurrence_scoped_reference(ref)
+    }
+
+    changed = True
+    while changed:
+        changed = False
+        global_occ_spans: list[tuple[int, int]] = []
+        for idx, ref in enumerate(references):
+            if idx in scoped_indices:
+                continue
+            for occ in ref.occurrences:
+                if type(occ.model_start) is int and type(occ.model_end) is int:
+                    global_occ_spans.append((occ.model_start, occ.model_end))
+
+        for idx, ref in enumerate(references):
+            if idx in scoped_indices:
+                continue
+            if not (
+                _is_paragraph_gated_derived_reference(ref)
+                and _has_valid_model_occurrences(ref)
+            ):
+                continue
+            admitted_set = {
+                (occ.model_start, occ.model_end)
+                for occ in ref.occurrences
+                if type(occ.model_start) is int and type(occ.model_end) is int
+            }
+            has_unadmitted = any(
+                span not in admitted_set
+                and not _is_strictly_enclosed(span, global_occ_spans)
+                for span in _raw_surface_spans(locked_text, ref.source)
+            )
+            if has_unadmitted:
+                scoped_indices.add(idx)
+                changed = True
+
+    global_refs = tuple(
+        ref for idx, ref in enumerate(references) if idx not in scoped_indices
+    )
+    scoped_refs = tuple(
+        ref for idx, ref in enumerate(references) if idx in scoped_indices
+    )
+    return global_refs, scoped_refs
 
 
 def references_need_scope_instruction(references: Sequence[TermReference]) -> bool:
@@ -164,17 +272,20 @@ def validated_reference_ranges(
     references: Sequence[TermReference],
     *,
     to_chinese: bool,
+    extra_scoped: Sequence[TermReference] = (),
 ) -> list[dict[str, object]]:
     """Build and validate occurrence ranges against the exact model input.
 
-    Only occurrence-scoped references (admitted single-character CJK names and
-    ``origin == "scoped_skill_stem"``) emit ranges. Every emitted coordinate is
-    checked against ``text`` (the actual user message after placeholders) before
-    any request leaves the process.
+    Validates every occurrence-scoped reference (admitted single-character CJK
+    names, ``origin == "scoped_skill_stem"``, and any dynamically promoted
+    scoped references in ``extra_scoped``). Every emitted coordinate is checked
+    against ``text`` (the actual user message after placeholders) before any
+    request leaves the process.
     """
+    extra_ids = {id(ref) for ref in extra_scoped}
     raw_spans: list[tuple[int, int, str, str | None]] = []
     for ref in references:
-        if not is_occurrence_scoped_reference(ref):
+        if not is_occurrence_scoped_reference(ref) and id(ref) not in extra_ids:
             continue
         is_skill_stem = ref.origin == "scoped_skill_stem"
         if not isinstance(ref.source, str) or not ref.source or not ref.occurrences:
@@ -223,12 +334,21 @@ def _local_context_snippet(
     start: int,
     end: int,
     *,
-    radius: int = SCOPED_SNIPPET_RADIUS,
+    radius: int | None = SCOPED_SNIPPET_RADIUS,
+    window_bounds: tuple[int, int] | None = None,
 ) -> str:
-    """Extract a bounded single-line local context snippet marking ``text[start:end]``."""
-    line_start = text.rfind("\n", 0, start) + 1
-    nl_after = text.find("\n", end)
-    line_end = len(text) if nl_after == -1 else nl_after
+    """Extract a bounded single-line local context snippet marking ``text[start:end]``.
+
+    ``radius=None`` uses the full line (or ``window_bounds`` when given for a
+    whole-paragraph escalation). Any internal newlines are collapsed to spaces
+    so every scoped reference remains one line.
+    """
+    if window_bounds is None:
+        line_start = text.rfind("\n", 0, start) + 1
+        nl_after = text.find("\n", end)
+        line_end = len(text) if nl_after == -1 else nl_after
+    else:
+        line_start, line_end = window_bounds
 
     left_bound = line_start
     right_bound = line_end
@@ -239,9 +359,95 @@ def _local_context_snippet(
             right_bound = match.start()
             break
 
-    left = text[max(left_bound, start - radius) : start]
-    right = text[end : min(right_bound, end + radius)]
+    lo = left_bound if radius is None else max(left_bound, start - radius)
+    hi = right_bound if radius is None else min(right_bound, end + radius)
+    left = text[lo:start].replace("\n", " ")
+    right = text[end:hi].replace("\n", " ")
     return f"{left}「{text[start:end]}」{right}".strip()
+
+
+def _disambiguate_scoped_snippets(
+    locked_text: str,
+    admitted_spans: Sequence[tuple[int, int]],
+    not_at_spans: Sequence[tuple[int, int]],
+    *,
+    radius: int = SCOPED_SNIPPET_RADIUS,
+) -> tuple[list[str], list[str]]:
+    """Build ``ONLY at:`` and ``NOT at:`` snippets guaranteed never to collide.
+
+    Starts at ``radius`` on the same line. If any snippet appears in both sets,
+    escalates only colliding spans through:
+    1. wider same-line windows (12, 24, 48, 96, full line);
+    2. full natural paragraph;
+    3. 1-based paragraph prefix ``[P{n}]`` when colliding spans cross paragraphs;
+    4. exact scalar range ``[start,end)`` when identical text recurs in one
+       paragraph.
+    """
+    only_map = {
+        span: _local_context_snippet(locked_text, *span, radius=radius)
+        for span in admitted_spans
+    }
+    not_map = {
+        span: _local_context_snippet(locked_text, *span, radius=radius)
+        for span in not_at_spans
+    }
+
+    collisions = set(only_map.values()) & set(not_map.values())
+    if collisions:
+        for step_radius in (12, 24, 48, 96, None):
+            if step_radius is not None and step_radius <= radius:
+                continue
+            for mapping in (only_map, not_map):
+                for span, text_val in list(mapping.items()):
+                    if text_val in collisions:
+                        mapping[span] = _local_context_snippet(
+                            locked_text, *span, radius=step_radius
+                        )
+            collisions = set(only_map.values()) & set(not_map.values())
+            if not collisions:
+                break
+
+    if collisions:
+        para_spans = _paragraph_spans(locked_text)
+        for mapping in (only_map, not_map):
+            for span, text_val in list(mapping.items()):
+                if text_val in collisions:
+                    p_idx = _paragraph_index(para_spans, span[0])
+                    mapping[span] = _local_context_snippet(
+                        locked_text,
+                        *span,
+                        radius=None,
+                        window_bounds=para_spans[p_idx],
+                    )
+        collisions = set(only_map.values()) & set(not_map.values())
+
+    if collisions:
+        para_spans = _paragraph_spans(locked_text)
+        for text_val in list(collisions):
+            only_matching = [s for s, v in only_map.items() if v == text_val]
+            not_matching = [s for s, v in not_map.items() if v == text_val]
+            p_nums = {
+                _paragraph_index(para_spans, s[0]) + 1
+                for s in (*only_matching, *not_matching)
+            }
+            if len(p_nums) > 1:
+                for span in only_matching:
+                    p_num = _paragraph_index(para_spans, span[0]) + 1
+                    only_map[span] = f"[P{p_num}] {only_map[span]}"
+                for span in not_matching:
+                    p_num = _paragraph_index(para_spans, span[0]) + 1
+                    not_map[span] = f"[P{p_num}] {not_map[span]}"
+        collisions = set(only_map.values()) & set(not_map.values())
+
+    if collisions:
+        for mapping in (only_map, not_map):
+            for span, text_val in list(mapping.items()):
+                if text_val in collisions:
+                    mapping[span] = f"{text_val} [{span[0]},{span[1]})"
+
+    only_snippets = list(dict.fromkeys(only_map[span] for span in admitted_spans))
+    not_snippets = list(dict.fromkeys(not_map[span] for span in not_at_spans))
+    return only_snippets, not_snippets
 
 
 def format_scoped_reference_lines(
@@ -252,31 +458,36 @@ def format_scoped_reference_lines(
     radius: int = SCOPED_SNIPPET_RADIUS,
     compress_threshold: int = SCOPED_ALL_OCCURRENCES_THRESHOLD,
 ) -> tuple[str, ...]:
-    """Render occurrence-scoped references with local context snippets instead of numeric offsets.
+    """Render occurrence-scoped references with local context snippets.
 
-    Validates all occurrence coordinates fail-closed via
-    ``validated_reference_ranges`` first. Each scoped reference lists deduplicated
-    local snippets around admitted occurrences (``ONLY at:``), and when
-    ``locked_text`` contains unadmitted occurrences of the same surface not
-    already owned by an enclosing global reference, appends ``NOT at:`` snippets.
-    When every occurrence in ``locked_text`` is admitted and there are more than
-    ``compress_threshold`` occurrences, collapses the snippet list to
-    ``(all occurrences in this text)`` to prevent prompt bloat.
+    Validates all scoped occurrence coordinates fail-closed via
+    ``validated_reference_ranges`` first. Includes both unconditionally
+    occurrence-scoped references and paragraph-gated derived references that
+    have unadmitted occurrences in ``locked_text``.
+
+    Compression to ``(all occurrences in this text)`` is allowed ONLY when
+    ``locked_text`` contains zero other raw occurrences of ``ref.source``
+    (``raw_other_count == 0``, including occurrences covered by longer global
+    terms). Whenever any other raw occurrence exists — even if covered by a
+    longer global term — ``ONLY at:`` snippets are preserved without adding
+    global-term spans into ``NOT at:``.
     """
-    validated_reference_ranges(locked_text, references, to_chinese=to_chinese)
+    global_refs, scoped_refs = partition_references_for_prompt(locked_text, references)
+    validated_reference_ranges(
+        locked_text,
+        references,
+        to_chinese=to_chinese,
+        extra_scoped=scoped_refs,
+    )
 
     global_occ_spans: list[tuple[int, int]] = []
-    for ref in references:
-        if is_occurrence_scoped_reference(ref):
-            continue
+    for ref in global_refs:
         for occ in ref.occurrences:
             if type(occ.model_start) is int and type(occ.model_end) is int:
                 global_occ_spans.append((occ.model_start, occ.model_end))
 
     lines: list[str] = []
-    for ref in references:
-        if not is_occurrence_scoped_reference(ref):
-            continue
+    for ref in scoped_refs:
         target = ref.zh if to_chinese else ref.en
         admitted_spans = sorted(
             {
@@ -286,42 +497,30 @@ def format_scoped_reference_lines(
             }
         )
         admitted_set = set(admitted_spans)
-        unadmitted_spans: list[tuple[int, int]] = []
-        pos = locked_text.find(ref.source)
-        while pos != -1:
-            end = pos + len(ref.source)
-            span = (pos, end)
-            if span not in admitted_set and not any(
-                g_start <= pos and end <= g_end for g_start, g_end in global_occ_spans
-            ):
-                unadmitted_spans.append(span)
-            pos = locked_text.find(ref.source, pos + 1)
-
-        only_snippets = list(
-            dict.fromkeys(
-                _local_context_snippet(locked_text, s, e, radius=radius)
-                for s, e in admitted_spans
-            )
-        )
-        not_snippets = list(
-            dict.fromkeys(
-                _local_context_snippet(locked_text, s, e, radius=radius)
-                for s, e in unadmitted_spans
-            )
-        )
+        raw_other_count = 0
+        not_at_spans: list[tuple[int, int]] = []
+        for span in _raw_surface_spans(locked_text, ref.source):
+            if span in admitted_set:
+                continue
+            raw_other_count += 1
+            if not _is_strictly_enclosed(span, global_occ_spans):
+                not_at_spans.append(span)
 
         header = f"{ref.source} = {target} ({ref.category})"
-        many_admitted = len(admitted_spans) > compress_threshold
-        if not not_snippets and many_admitted:
+        if raw_other_count == 0 and len(admitted_spans) > compress_threshold:
             lines.append(f"{header} — (all occurrences in this text)")
-        elif not not_snippets:
-            lines.append(f"{header} — ONLY at: {'; '.join(only_snippets)}")
-        elif many_admitted:
-            lines.append(
-                f"{header} — (all occurrences in this text)"
-                f" | NOT at: {'; '.join(not_snippets)}"
+        elif not not_at_spans:
+            only_snippets = list(
+                dict.fromkeys(
+                    _local_context_snippet(locked_text, s, e, radius=radius)
+                    for s, e in admitted_spans
+                )
             )
+            lines.append(f"{header} — ONLY at: {'; '.join(only_snippets)}")
         else:
+            only_snippets, not_snippets = _disambiguate_scoped_snippets(
+                locked_text, admitted_spans, not_at_spans, radius=radius
+            )
             lines.append(
                 f"{header} — ONLY at: {'; '.join(only_snippets)}"
                 f" | NOT at: {'; '.join(not_snippets)}"
