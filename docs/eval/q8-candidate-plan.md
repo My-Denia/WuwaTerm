@@ -80,9 +80,13 @@ character that was not an admitted mention. In `D-003`, 26 of 29 `心` sit insid
 `心月狐`, `应世心`, `照世心`, `霆心域` and `核心` — terms that already own a
 prompt line — so the lock decision was driven by 26 occurrences that cannot
 prime anything. The function now counts only raw occurrences that **no longer
-reference encloses** (`_is_strictly_enclosed` against the occurrences of every
-multi-character reference), the same test
-`partition_references_for_prompt()` already uses.
+*global* reference encloses**: `_is_strictly_enclosed` against the occurrences
+of every multi-character reference that `partition_references_for_prompt()`
+keeps in the global block, the same test that function already uses. A longer
+surface routed into the scoped block (a paragraph-gated derived name, a bounded
+skill stem) is shown to the model as a local snippet keyed to its own admitted
+occurrence, so it does not make the character behind it unambiguous and does
+not suppress the lock.
 
 `D-003` still has exactly **1** unenclosed `心`: a mid-document prose sentence
 whose right neighbour `基` keeps `single_character_name_context_ok()` false, so

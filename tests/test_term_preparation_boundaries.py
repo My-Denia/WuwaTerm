@@ -489,7 +489,13 @@ def _mention_reference(
 
 
 def _context_reference(
-    source: str, en: str, span: tuple[int, int], *, category: str = "resonator"
+    source: str,
+    en: str,
+    span: tuple[int, int],
+    *,
+    category: str = "resonator",
+    origin: str = "dictionary",
+    reason: str = "contextual",
 ) -> TermReference:
     start, end = span
     return TermReference(
@@ -507,9 +513,37 @@ def _context_reference(
                 model_end=end,
             ),
         ),
-        origin="dictionary",
-        reason="contextual",
+        origin=origin,
+        reason=reason,
     )
+
+
+def test_mixed_single_char_lock_ignores_a_scoped_longer_reference_covering_it():
+    # A bounded skill stem is occurrence-scoped: the model sees it as a local
+    # snippet keyed to its own admitted occurrence, never as a global
+    # `surface = official` line. It therefore cannot make the character behind
+    # it unambiguous, and letting it count as enclosure would cancel the lock
+    # on the only unadmitted occurrence there is.
+    text = "心流开启。\n\n队伍(心+守岸人)。"
+    formula = text.index("(心") + 1
+    references = [
+        _mention_reference("心", "Hsin", ((formula, formula + 1),)),
+        _context_reference(
+            "心流",
+            "Heartflow",
+            (0, 2),
+            origin="scoped_skill_stem",
+            reason="local_skill_action",
+        ),
+    ]
+
+    locked_text, locks, references_after = _lock_mixed_single_char_names(
+        text, [], references, placeholder_prefix="__P_"
+    )
+
+    assert locks == (("__P_0000__", "心", "Hsin"),)
+    assert locked_text[formula : formula + len("__P_0000__")] == "__P_0000__"
+    assert [ref.source for ref in references_after] == ["心流"]
 
 
 def test_mixed_single_char_lock_spares_a_character_used_only_inside_longer_terms():

@@ -831,7 +831,7 @@ def _lock_mixed_single_char_names(
 
     On ``zh->en``, when an admitted single-character resonator/speaker name
     coexists in ``locked_text`` with at least one unadmitted raw occurrence of
-    the same character that no longer reference encloses
+    the same character that no longer *global* reference encloses
     (``raw_other_count > 0`` — ordinary prose such as ``心很重要``, a novel
     compound such as ``红椿蕊``, or a quoted ``「心」``), keeping ``心 = Hsin``
     in the system prompt triggers negative priming under
@@ -839,8 +839,8 @@ def _lock_mixed_single_char_names(
     placeholders (whose ``Locked terms:`` lines expose only the English
     target, never the Chinese source character) and removing the reference
     eliminates leakage while leaving unmixed names (``raw_other_count == 0``,
-    which now includes characters that appear only inside longer references
-    such as ``心月狐`` and ``核心``) as contextual references.
+    which now includes characters that appear only inside longer global
+    references such as ``心月狐`` and ``核心``) as contextual references.
     """
     pairs_by_source: dict[str, set[tuple[str, str]]] = {}
     for ref in references:
@@ -850,10 +850,16 @@ def _lock_mixed_single_char_names(
     # by that longer term's own prompt line, so it is not evidence of the
     # negative priming this locking exists for. Counting it would hard-lock a
     # one-character name in a document that never uses the character on its
-    # own. Only a raw occurrence that no longer reference encloses counts.
+    # own. Only a raw occurrence that a longer term the model actually reads as
+    # a reference encloses counts: a longer surface that
+    # ``partition_references_for_prompt()`` routes into the scoped block (a
+    # paragraph-gated derived name, a bounded skill stem) is shown as a local
+    # snippet keyed to its own admitted occurrences, so it does not make the
+    # character behind it unambiguous and must not suppress this lock.
+    global_refs, _scoped_refs = partition_references_for_prompt(locked_text, references)
     longer_reference_spans: list[tuple[int, int]] = [
         (occ.model_start, occ.model_end)
-        for other in references
+        for other in global_refs
         if len(other.source) > 1
         for occ in other.occurrences
         if type(occ.model_start) is int and type(occ.model_end) is int
