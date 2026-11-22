@@ -12,10 +12,21 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.10.2`, which separates
-  component deployment, transaction recovery and verification (#285), and
-  terminology matching and preparation from sentence translation (#286). The
-  data and client contract pins remain unchanged. Before it is `v0.10.1`, a
+  published tag. The latest published Core release is `v0.10.3`, which delivers
+  documentation corrections (#289), moves the self-host installer default Web
+  release to `v0.4.3` and updates the client contract pins to Web `v0.4.3` and
+  Windows `v0.6.3` (#290, #297), introduces structured `TermReference` and
+  `TermOccurrence` domain models with Rule #9 forbidding private cross-module
+  imports (#291), places `component_handoff_finish` below `deployment_admission`
+  with Rule #10 Tarjan SCC cycle enforcement (#292), adds per-request API stage
+  tracing with `slot_wait_ms`, `llm_post_ms` and 504 stage attribution (#293),
+  enforces Rule #11 matching storage boundaries and Rule #12
+  `deployment_admission` dynamic tool manifest validation (#295), and unifies
+  the Pure ASGI request deadline and cancellation lifecycle (#296, MY-476).
+  Before it is `v0.10.2`, which separates component deployment, transaction
+  recovery and verification (#285), and terminology matching and preparation
+  from sentence translation (#286), with the data and client contract pins
+  unchanged. Before it is `v0.10.1`, a
   translation release on top of `v0.10.0`: paragraph regrouping of a context-mode answer now
   reads a per-line share ratio over the whole segment instead of the 7.5%
   running-share bound and the six-line window, so a merge and a split at any
@@ -77,7 +88,7 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.10.2` and its published asset hashes are recorded
+  target-version file. Core `0.10.3` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
@@ -92,7 +103,7 @@ release. That boundary has not moved.
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
   `docs/self-hosting.md` name the same published release: `main`, the
-  `v0.10.2` tag and this `v0.10.3` tag record and print `v0.4.1`, the Telegram
+  `v0.10.2` tag and the `v0.10.3` tag record and print `v0.4.1`, the Telegram
   release that pins Core `v0.10.1`. A Core tag can only record a client release
   that already exists, so the `v0.10.1` tag, frozen
   before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
@@ -107,7 +118,7 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` and this `v0.10.3` tag record and install Web `v0.4.3`;
+  they differ. `main` and the `v0.10.3` tag record and install Web `v0.4.3`;
   the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
@@ -256,7 +267,7 @@ The 0.8.0 capability checks still apply to this release:
   to that config and fails the release preflight when the two disagree. A pin
   move is one commit over all four files. `main` after `v0.10.2` moved them to
   Web `v0.4.2` (`262d715527eeb7c64ee9c6d922b3c34d7722813b`) and Windows `v0.6.2`
-  (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`); this release moves them to the
+  (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), and `0.10.3` moved them to the
   two revisions above, together with the installer's default Web release.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.4.1 pins the published Core
