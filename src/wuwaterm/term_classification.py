@@ -94,6 +94,34 @@ def derived_reference_only_sources(entries: Iterable[TermEntry]) -> frozenset[st
     )
 
 
+def derived_context_gated_sources(entries: Iterable[TermEntry]) -> frozenset[str]:
+    """Return derived common-noun surfaces that require paragraph-level official context.
+
+    Orphan ``Area_<n>_Title`` locations (e.g. ``教学楼``) and four-tier item
+    bases (e.g. ``能量袋``, ``能源核心``) share surfaces with everyday words, so
+    they are only handed to the model as references inside a paragraph that
+    also contains at least one non-derived official dictionary hit. Uncurated
+    ``Advertising_VersionTitle_<n>`` rows remain reference-only (never
+    hard-locked) but are official multi-character release titles directly
+    paired in ``MultiText.json``, so they are not dropped when a paragraph
+    mentions only the release title.
+    """
+    reference_only = derived_reference_only_sources(entries)
+    if not reference_only:
+        return frozenset()
+    version_title_surfaces: set[str] = set()
+    for entry in entries:
+        if (
+            is_derived_name_entry(entry)
+            and ADVERTISING_VERSION_TITLE_RE.fullmatch(entry.text_key) is not None
+        ):
+            if entry.zh:
+                version_title_surfaces.add(entry.zh)
+            if entry.en:
+                version_title_surfaces.add(entry.en)
+    return reference_only - version_title_surfaces
+
+
 def select_preferred_exact_entry(
     candidates: Iterable[LookupCandidate],
 ) -> TermEntry | None:

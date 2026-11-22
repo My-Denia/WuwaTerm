@@ -48,10 +48,15 @@ def model_server(monkeypatch):
             # references the request supplied, then corrupt the structure or
             # the placeholders as a real model may.
             system = payload["messages"][0]["content"]
-            if "Dictionary term references:\n" in system:
-                block = system.split("Dictionary term references:\n", 1)[1]
+            for header in ("Dictionary term references:\n", "Scoped term references:\n"):
+                if header not in system:
+                    continue
+                block = system.split(header, 1)[1]
                 for line in block.splitlines():
-                    source, sep, rest = line.partition(" = ")
+                    if line in ("Dictionary term references:", "Scoped term references:"):
+                        break
+                    head, _, _ = line.partition(" — ")
+                    source, sep, rest = head.partition(" = ")
                     if not sep or not rest.endswith(")"):
                         continue
                     official, _, category = rest.rpartition(" (")

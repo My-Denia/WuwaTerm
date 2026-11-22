@@ -7,6 +7,7 @@ may use its admissible NFKC spellings.
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -40,6 +41,10 @@ _SCOPED_REASONS = frozenset(
         "local_skill_action",
     }
 )
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n[^\S\n]*\n")
+_OPAQUE_PLACEHOLDER_RE = re.compile(r"__WUWA_(?:TERM|HTML)_[0-9a-f]{16}_[0-9]{4,}__")
+SCOPED_SNIPPET_RADIUS = 6
+SCOPED_ALL_OCCURRENCES_THRESHOLD = 4
 
 
 @dataclass(frozen=True)
@@ -119,11 +124,25 @@ def is_contextual_reference(category: str, *, to_chinese: bool) -> bool:
     return category in CONTEXTUAL_REFERENCE_CATEGORIES
 
 
+def is_occurrence_scoped_reference(ref: TermReference) -> bool:
+    """Return whether ``ref`` applies only to specific admitted occurrences.
+
+    Two mechanisms are occurrence-scoped: single-character CJK resonator/speaker
+    mentions and bounded closed-class 2-character skill stems. Legacy tuple
+    references without occurrences remain global references.
+    """
+    return (
+        ref.origin == "scoped_skill_stem"
+        or ref.reason == "single_char_name_mention"
+        or (len(ref.source) == 1 and is_cjk_character(ref.source) and bool(ref.occurrences))
+    )
+
+
 def references_need_scope_instruction(references: Sequence[TermReference]) -> bool:
     """Return whether any reference needs the scoped-reference explanation.
 
     Plain single-meaning multi-character references keep the pre-admission
-    prompt bytes unchanged. Three mechanisms opt into the scope explanation:
+    prompt bytes unchanged. Scoped mechanisms opt into the explanation:
     an admitted one-character name mention, a surface with competing official
     pairs, a soft-cased derived name, or a bounded local skill stem.
     """
@@ -131,7 +150,7 @@ def references_need_scope_instruction(references: Sequence[TermReference]) -> bo
     for ref in references:
         if ref.origin in _SCOPED_ORIGINS or ref.reason in _SCOPED_REASONS:
             return True
-        if len(ref.source) == 1 and is_cjk_character(ref.source) and ref.occurrences:
+        if is_occurrence_scoped_reference(ref):
             return True
         pairs = seen_pairs_by_source.setdefault(ref.source, set())
         pairs.add((ref.zh, ref.en))
@@ -146,7 +165,7 @@ def validated_reference_ranges(
     *,
     to_chinese: bool,
 ) -> list[dict[str, object]]:
-    """Build and validate JSON occurrence ranges against the exact model input.
+    """Build and validate occurrence ranges against the exact model input.
 
     Only occurrence-scoped references (admitted single-character CJK names and
     ``origin == "scoped_skill_stem"``) emit ranges. Every emitted coordinate is
@@ -155,16 +174,15 @@ def validated_reference_ranges(
     """
     raw_spans: list[tuple[int, int, str, str | None]] = []
     for ref in references:
-        is_skill_stem = ref.origin == "scoped_skill_stem"
-        is_single_char = len(ref.source) == 1 and is_cjk_character(ref.source)
-        if not is_skill_stem and not (is_single_char and ref.occurrences):
+        if not is_occurrence_scoped_reference(ref):
             continue
-        if not isinstance(ref.source, str) or not ref.source:
+        is_skill_stem = ref.origin == "scoped_skill_stem"
+        if not isinstance(ref.source, str) or not ref.source or not ref.occurrences:
             raise ValueError("reference range does not match the model input")
         target: str | None = None
         if is_skill_stem:
             target = ref.zh if to_chinese else ref.en
-            if not isinstance(target, str) or not target or not ref.occurrences:
+            if not isinstance(target, str) or not target:
                 raise ValueError("reference range does not match the model input")
         for occ in ref.occurrences:
             start = occ.model_start
@@ -198,6 +216,190 @@ def validated_reference_ranges(
             entry["target"] = target
         payload.append(entry)
     return payload
+
+
+def _local_context_snippet(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    radius: int = SCOPED_SNIPPET_RADIUS,
+) -> str:
+    """Extract a bounded single-line local context snippet marking ``text[start:end]``."""
+    line_start = text.rfind("\n", 0, start) + 1
+    nl_after = text.find("\n", end)
+    line_end = len(text) if nl_after == -1 else nl_after
+
+    left_bound = line_start
+    right_bound = line_end
+    for match in _OPAQUE_PLACEHOLDER_RE.finditer(text, line_start, line_end):
+        if match.end() <= start and match.end() > left_bound:
+            left_bound = match.end()
+        elif match.start() >= end and match.start() < right_bound:
+            right_bound = match.start()
+            break
+
+    left = text[max(left_bound, start - radius) : start]
+    right = text[end : min(right_bound, end + radius)]
+    return f"{left}「{text[start:end]}」{right}".strip()
+
+
+def format_scoped_reference_lines(
+    locked_text: str,
+    references: Sequence[TermReference],
+    *,
+    to_chinese: bool,
+    radius: int = SCOPED_SNIPPET_RADIUS,
+    compress_threshold: int = SCOPED_ALL_OCCURRENCES_THRESHOLD,
+) -> tuple[str, ...]:
+    """Render occurrence-scoped references with local context snippets instead of numeric offsets.
+
+    Validates all occurrence coordinates fail-closed via
+    ``validated_reference_ranges`` first. Each scoped reference lists deduplicated
+    local snippets around admitted occurrences (``ONLY at:``), and when
+    ``locked_text`` contains unadmitted occurrences of the same surface not
+    already owned by an enclosing global reference, appends ``NOT at:`` snippets.
+    When every occurrence in ``locked_text`` is admitted and there are more than
+    ``compress_threshold`` occurrences, collapses the snippet list to
+    ``(all occurrences in this text)`` to prevent prompt bloat.
+    """
+    validated_reference_ranges(locked_text, references, to_chinese=to_chinese)
+
+    global_occ_spans: list[tuple[int, int]] = []
+    for ref in references:
+        if is_occurrence_scoped_reference(ref):
+            continue
+        for occ in ref.occurrences:
+            if type(occ.model_start) is int and type(occ.model_end) is int:
+                global_occ_spans.append((occ.model_start, occ.model_end))
+
+    lines: list[str] = []
+    for ref in references:
+        if not is_occurrence_scoped_reference(ref):
+            continue
+        target = ref.zh if to_chinese else ref.en
+        admitted_spans = sorted(
+            {
+                (occ.model_start, occ.model_end)
+                for occ in ref.occurrences
+                if type(occ.model_start) is int and type(occ.model_end) is int
+            }
+        )
+        admitted_set = set(admitted_spans)
+        unadmitted_spans: list[tuple[int, int]] = []
+        pos = locked_text.find(ref.source)
+        while pos != -1:
+            end = pos + len(ref.source)
+            span = (pos, end)
+            if span not in admitted_set and not any(
+                g_start <= pos and end <= g_end for g_start, g_end in global_occ_spans
+            ):
+                unadmitted_spans.append(span)
+            pos = locked_text.find(ref.source, pos + 1)
+
+        only_snippets = list(
+            dict.fromkeys(
+                _local_context_snippet(locked_text, s, e, radius=radius)
+                for s, e in admitted_spans
+            )
+        )
+        not_snippets = list(
+            dict.fromkeys(
+                _local_context_snippet(locked_text, s, e, radius=radius)
+                for s, e in unadmitted_spans
+            )
+        )
+
+        header = f"{ref.source} = {target} ({ref.category})"
+        many_admitted = len(admitted_spans) > compress_threshold
+        if not not_snippets and many_admitted:
+            lines.append(f"{header} — (all occurrences in this text)")
+        elif not not_snippets:
+            lines.append(f"{header} — ONLY at: {'; '.join(only_snippets)}")
+        elif many_admitted:
+            lines.append(
+                f"{header} — (all occurrences in this text)"
+                f" | NOT at: {'; '.join(not_snippets)}"
+            )
+        else:
+            lines.append(
+                f"{header} — ONLY at: {'; '.join(only_snippets)}"
+                f" | NOT at: {'; '.join(not_snippets)}"
+            )
+    return tuple(lines)
+
+
+def _paragraph_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Return ``(start, end)`` ranges of paragraphs separated by blank lines."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for match in _PARAGRAPH_SPLIT_RE.finditer(text):
+        spans.append((pos, match.start()))
+        pos = match.end()
+    spans.append((pos, len(text)))
+    return tuple(spans)
+
+
+def _paragraph_index(spans: Sequence[tuple[int, int]], offset: int) -> int:
+    for idx, (start, end) in enumerate(spans):
+        if start <= offset <= end:
+            return idx
+    return max(0, len(spans) - 1)
+
+
+def _paragraphs_with_official_terms(
+    context_text: str,
+    para_spans: Sequence[tuple[int, int]],
+    *,
+    lockable: Lockable,
+    categories: dict[str, str],
+    reference_only: frozenset[str],
+    allow_plural_inflection: bool,
+    nfkc_spelling_sources: frozenset[str],
+    preselected: Sequence[TermSpan] | None = None,
+    preselected_offset: int = 0,
+) -> frozenset[int]:
+    """Return paragraph indices containing >=1 non-derived official dictionary hit.
+
+    Counts both primary non-``reference_only`` dictionary spans and admitted
+    single-character resonator/speaker mentions so derived common-noun and
+    soft-casing references are gated at natural-paragraph granularity.
+    """
+    if preselected is not None and preselected_offset == 0:
+        primary_spans = list(preselected)
+    else:
+        primary_spans = [
+            span
+            for span in select_term_spans(
+                context_text,
+                lockable,
+                context_text,
+                0,
+                allow_plural_inflection=allow_plural_inflection,
+                nfkc_spelling_sources=nfkc_spelling_sources,
+            )
+            if reference_span_admitted(span, context_text, 0)
+        ]
+
+    qualifying: set[int] = {
+        _paragraph_index(para_spans, span.start)
+        for span in primary_spans
+        if span.source not in reference_only
+    }
+    for source, _official in lockable:
+        if len(source) != 1 or not is_cjk_character(source):
+            continue
+        if categories.get(source, "") not in CONTEXTUAL_REFERENCE_CATEGORIES:
+            continue
+        start = context_text.find(source)
+        while start != -1:
+            end = start + 1
+            if not any(span.start <= start < span.end for span in primary_spans) and (
+                single_character_name_mention_at(context_text, start, end)
+            ):
+                qualifying.add(_paragraph_index(para_spans, start))
+            start = context_text.find(source, start + 1)
+    return frozenset(qualifying)
 
 
 def _span_decision(
@@ -412,7 +614,9 @@ def prepare_term_segment(
     segment_index: int = 0,
     reference_candidates: ReferenceCandidates | None = None,
     soft_sources: frozenset[str] | None = None,
-    context_has_terms: bool | None = None,
+    context_gated_reference_only: frozenset[str] = frozenset(),
+    official_context_paragraphs: frozenset[int] | None = None,
+    paragraph_spans: tuple[tuple[int, int], ...] | None = None,
     skill_refs: tuple[SkillReference, ...] = (),
 ) -> PreparedTerms:
     """Prepare one visible segment; offsets refer to its full visible context."""
@@ -440,29 +644,48 @@ def prepare_term_segment(
             if reference_span_admitted(span, context_text, context_offset)
         ]
 
-    # A derived soft-casing hint needs actual dictionary term context in the
-    # submitted segment. Isolated ordinary prose such as "the energy core of a
-    # star" must not gain game hints merely because a derived base shares that
-    # spelling.
-    has_term_context = bool(selected)
-    if soft_sources and not has_term_context and context_text != text:
-        if context_has_terms is not None:
-            has_term_context = context_has_terms
+    # Paragraph-level non-derived official term context gates both derived
+    # common-noun references (context_gated_reference_only) and derived
+    # soft-casing hints (soft_sources). Isolated ordinary paragraphs such as
+    # "我们学校的教学楼很旧。" or "The energy core of a star." stay free of
+    # game hints even inside a multi-paragraph request containing game terms
+    # in other paragraphs.
+    needs_para_gate = to_chinese is not None and (
+        (bool(soft_sources) and any(source in text for source in soft_sources))
+        or (
+            bool(context_gated_reference_only)
+            and any(span.source in context_gated_reference_only for span in selected)
+        )
+    )
+    para_spans: tuple[tuple[int, int], ...] = ()
+    official_paragraphs: frozenset[int] = frozenset()
+    if needs_para_gate:
+        para_spans = (
+            paragraph_spans
+            if paragraph_spans is not None
+            else _paragraph_spans(context_text)
+        )
+        if official_context_paragraphs is not None:
+            official_paragraphs = official_context_paragraphs
         else:
-            has_term_context = any(
-                reference_span_admitted(span, context_text, 0)
-                for span in select_term_spans(
-                    context_text,
-                    lockable,
-                    context_text,
-                    0,
-                    allow_plural_inflection=allow_plural_inflection,
-                )
+            official_paragraphs = _paragraphs_with_official_terms(
+                context_text,
+                para_spans,
+                lockable=lockable,
+                categories=categories,
+                reference_only=reference_only,
+                allow_plural_inflection=allow_plural_inflection,
+                nfkc_spelling_sources=(
+                    nfkc_spelling_sources if context_text == text else frozenset()
+                ),
+                preselected=selected if context_text == text else None,
+                preselected_offset=context_offset,
             )
+
     if (
         to_chinese is not None
         and soft_sources
-        and has_term_context
+        and official_paragraphs
         and any(source in text for source in soft_sources)
     ):
         extended_lockable = lockable + tuple(
@@ -481,6 +704,11 @@ def prepare_term_segment(
                 nfkc_spelling_sources=nfkc_spelling_sources,
             )
             if reference_span_admitted(span, context_text, context_offset)
+            and (
+                span.source not in soft_sources
+                or _paragraph_index(para_spans, context_offset + span.start)
+                in official_paragraphs
+            )
         ]
 
     parts: list[str] = []
@@ -515,7 +743,13 @@ def prepare_term_segment(
             output_length += len(placeholder)
         else:
             parts.append(text[span.start : span.end])
-            if decision == "reference":
+            suppressed_derived = (
+                decision == "reference"
+                and span.source in context_gated_reference_only
+                and _paragraph_index(para_spans, context_offset + span.start)
+                not in official_paragraphs
+            )
+            if decision == "reference" and not suppressed_derived:
                 is_single_char_name = len(span.source) == 1 and is_cjk_character(
                     span.source
                 )
@@ -595,6 +829,7 @@ def prepare_protected_terms(
     allow_plural_inflection: bool,
     placeholder_prefix: str,
     reference_candidates: ReferenceCandidates | None = None,
+    context_gated_reference_only: frozenset[str] = frozenset(),
     skill_refs: tuple[SkillReference, ...] = (),
 ) -> PreparedTerms:
     """Merge segment results in source order with one placeholder namespace."""
@@ -614,20 +849,27 @@ def prepare_protected_terms(
 
     candidates = reference_candidates if (to_chinese is not None and reference_candidates) else {}
     soft_sources: frozenset[str] = frozenset()
-    context_has_terms: bool | None = None
-    if to_chinese is not None and candidates:
+    para_spans: tuple[tuple[int, int], ...] | None = None
+    official_paragraphs: frozenset[int] | None = None
+    if to_chinese is not None and (candidates or context_gated_reference_only):
         primary_sources = {source for source, _official in lockable}
-        soft_sources = frozenset(candidates.keys() - primary_sources)
-        if soft_sources and len(segments) > 1:
-            context_has_terms = any(
-                reference_span_admitted(span, context_text, 0)
-                for span in select_term_spans(
-                    context_text,
-                    lockable,
-                    context_text,
-                    0,
-                    allow_plural_inflection=allow_plural_inflection,
-                )
+        soft_sources = frozenset(candidates.keys() - primary_sources) if candidates else frozenset()
+        if (
+            (soft_sources and any(source in context_text for source in soft_sources))
+            or (
+                context_gated_reference_only
+                and any(source in context_text for source in context_gated_reference_only)
+            )
+        ):
+            para_spans = _paragraph_spans(context_text)
+            official_paragraphs = _paragraphs_with_official_terms(
+                context_text,
+                para_spans,
+                lockable=lockable,
+                categories=categories,
+                reference_only=reference_only,
+                allow_plural_inflection=allow_plural_inflection,
+                nfkc_spelling_sources=frozenset(),
             )
 
     locked_segments: list[str] = []
@@ -653,7 +895,9 @@ def prepare_protected_terms(
             segment_index=segment_index,
             reference_candidates=candidates,
             soft_sources=soft_sources,
-            context_has_terms=context_has_terms,
+            context_gated_reference_only=context_gated_reference_only,
+            official_context_paragraphs=official_paragraphs,
+            paragraph_spans=para_spans,
             skill_refs=skill_refs,
         )
         locked_segments.append(prepared.locked_text)

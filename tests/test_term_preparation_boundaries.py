@@ -19,6 +19,7 @@ from wuwaterm.sentence import SentenceTranslator
 from wuwaterm.term_preparation import (
     TermOccurrence,
     TermReference,
+    format_scoped_reference_lines,
     prepare_protected_terms,
     prepare_term_segment,
 )
@@ -294,13 +295,12 @@ def test_structured_references_preserve_exact_llm_request_payload(monkeypatch, s
         "the number and article the sentence needs: Resonators, Echoes, a Resonator, the Echo.\\n"
         "Multiple official pairs for one source surface are alternatives: select the meaning "
         "supported by this occurrence, never combine or enforce all of them. A casing variant is "
-        "only a hint, not proof of an official sense. If occurrence ranges are listed, that "
-        "reference applies only at those ranges in the user message; a character embedded "
-        "elsewhere in a longer compound is not a name reference and does not establish an "
-        "official translation for the whole compound.\\n"
-        'Dictionary term references:\\n声骸 = Echo (core_term)\\n椿 = Camellya (resonator)\\n'
-        'Reference occurrence ranges (JSON; zero-based, end-exclusive):\\n'
-        '[{\\"source\\": \\"椿\\", \\"ranges\\": [[2, 3]]}]\\n"},'
+        "only a hint, not proof of an official sense. For Scoped term references below, apply a "
+        "reference ONLY in the listed 'ONLY at:' contexts (or everywhere when marked '(all "
+        "occurrences in this text)', except any listed 'NOT at:' contexts); never apply it in "
+        "'NOT at:' contexts or to other ordinary words or compounds.\\n"
+        'Dictionary term references:\\n声骸 = Echo (core_term)\\n'
+        'Scoped term references:\\n椿 = Camellya (resonator) — ONLY at: 欢迎「椿」和声骸"},'
         '{"role":"user","content":"欢迎椿和声骸"}],"temperature":0}'
     ).encode("utf-8")
     assert raw_bodies[1] == expected_scoped_zh_en
@@ -329,3 +329,46 @@ def test_structured_references_preserve_exact_llm_request_payload(monkeypatch, s
         '__WUWA_HTML_0123456789abcdef_0001__"}],"temperature":0}'
     ).encode("utf-8")
     assert raw_bodies[2] == expected_en_zh_html
+
+
+def test_paragraph_level_context_gate_and_enclosing_global_skip():
+    lockable = (
+        ("共鸣者", ("共鸣者", "Resonator")),
+        ("教学楼", ("教学楼", "Academia Hall")),
+        ("「心」", ("「心」", '"Hsin"')),
+        ("心", ("心", "Hsin")),
+    )
+    categories = {
+        "共鸣者": "core_term",
+        "教学楼": "location",
+        "「心」": "speaker",
+        "心": "resonator",
+    }
+    text = "共鸣者在教学楼集合。\n\n我们学校的教学楼很旧。\n\n「心」出现了，心加入队伍，心很重要。"
+    prepared = prepare_term_segment(
+        text,
+        lockable=lockable,
+        context_text=text,
+        context_offset=0,
+        categories=categories,
+        reference_only=frozenset({"教学楼"}),
+        context_gated_reference_only=frozenset({"教学楼"}),
+        to_chinese=False,
+        allow_plural_inflection=False,
+        nfkc_spelling_sources=frozenset(),
+        placeholder_prefix="__P_",
+    )
+    # 教学楼 is emitted ONLY for paragraph 0 (with 共鸣者), not paragraph 1.
+    hall_ref = next(ref for ref in prepared.references if ref.source == "教学楼")
+    assert len(hall_ref.occurrences) == 1
+    assert text[hall_ref.occurrences[0].start : hall_ref.occurrences[0].end] == "教学楼"
+    assert hall_ref.occurrences[0].start < text.index("\n\n")
+
+    # Enclosing global reference 「心」 is NOT listed under NOT at: for scoped 心,
+    # while ordinary 心很重要 IS listed under NOT at:.
+    scoped_lines = format_scoped_reference_lines(
+        prepared.locked_text, prepared.references, to_chinese=False
+    )
+    assert scoped_lines == (
+        "心 = Hsin (resonator) — ONLY at: 心」出现了，「心」加入队伍，心 | NOT at: 心加入队伍，「心」很重要。",
+    )

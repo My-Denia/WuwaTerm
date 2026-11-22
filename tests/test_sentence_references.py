@@ -26,12 +26,14 @@ from wuwaterm.models import TermRecord
 from wuwaterm.sentence import (
     SentenceTranslator,
     _CONTEXTUAL_REFERENCE_INSTRUCTION,
+    _SCOPED_REFERENCE_HEADER,
     _SCOPED_REFERENCE_INSTRUCTION,
     _UNTRUSTED_SOURCE_INSTRUCTION,
     _call_llm_async_with_client,
 )
 from wuwaterm.term_preparation import (
     TermOccurrence,
+    format_scoped_reference_lines,
     references_need_scope_instruction,
     validated_reference_ranges,
 )
@@ -168,8 +170,10 @@ def test_one_character_name_scopes_its_occurrences(tmp_path):
         references=locked.references,
     )
     assert _SCOPED_REFERENCE_INSTRUCTION in prompt
-    assert "Reference occurrence ranges (JSON; zero-based, end-exclusive):\n" in prompt
-    assert '[{"source": "椿", "ranges": [[2, 3]]}]' in prompt
+    assert _SCOPED_REFERENCE_HEADER in prompt
+    assert "Dictionary term references:\n" not in prompt
+    assert "椿 = Camellya (resonator) — ONLY at: 欢迎「椿」来到。" in prompt
+    assert "Reference occurrence ranges" not in prompt
     assert locked.locked_text == "欢迎椿来到。"
 
 
@@ -189,6 +193,115 @@ def test_mixed_valid_mention_and_embedded_compound_scopes_only_the_valid_mention
     assert validated_reference_ranges(
         locked.locked_text, locked.references, to_chinese=False
     ) == [{"source": "椿", "ranges": [[0, 1]]}]
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+    assert "Scoped term references:\n" in prompt
+    assert "椿 = Camellya (resonator) — ONLY at: 「椿」的红椿蕊很强 | NOT at: 椿的红「椿」蕊很强。" in prompt
+
+
+def test_single_char_heart_separates_only_at_from_ordinary_not_at_paragraphs(tmp_path):
+    translator = _service(tmp_path, (_record("心", "Hsin"),))
+    source = "心很重要。\n\n她的心很痛。\n\n心加入队伍。"
+    locked = _lock(translator, source, to_chinese=False)
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+    assert "Dictionary term references:\n" not in prompt
+    assert (
+        "Scoped term references:\n"
+        "心 = Hsin (resonator) — ONLY at: 「心」加入队伍。 | NOT at: 「心」很重要。; 她的「心」很痛。"
+    ) in prompt
+
+
+def test_many_admitted_occurrences_compress_to_all_occurrences_label(tmp_path):
+    translator = _service(tmp_path, (_record("椿", "Camellya"),))
+    all_valid = "欢迎椿，找椿，看椿，带椿，选椿。"
+    locked = _lock(translator, all_valid, to_chinese=False)
+    assert format_scoped_reference_lines(
+        locked.locked_text, locked.references, to_chinese=False
+    ) == ("椿 = Camellya (resonator) — (all occurrences in this text)",)
+
+    mixed_many = "欢迎椿，找椿，看椿，带椿，选椿。红椿蕊很强。"
+    locked_mixed = _lock(translator, mixed_many, to_chinese=False)
+    assert format_scoped_reference_lines(
+        locked_mixed.locked_text, locked_mixed.references, to_chinese=False
+    ) == (
+        "椿 = Camellya (resonator) — (all occurrences in this text) | NOT at: 椿,选椿。红「椿」蕊很强。",
+    )
+
+
+def test_paragraph_level_official_term_context_gates_derived_and_soft_casing_references(
+    tmp_path,
+):
+    translator = _service(
+        tmp_path,
+        (
+            _record("共鸣者", "Resonator", category="core_term"),
+            TermRecord(
+                category="location",
+                source_file="Textmaps/multi_text/MultiText.json",
+                source_id="Area_41043_Title",
+                text_key="Area_41043_Title",
+                zh="教学楼",
+                en="Academia Hall",
+            ),
+            TermRecord(
+                category="location",
+                source_file="Textmaps/multi_text/MultiText.json",
+                source_id="Area_41037_Title",
+                text_key="Area_41037_Title",
+                zh="拉贝尔学部",
+                en="Rabelle College",
+            ),
+            TermRecord(
+                category="item",
+                source_file="BinData/item/iteminfo.json",
+                source_id="tier-base:43020001",
+                text_key="tier-base:43020001",
+                zh="能源核心",
+                en="Energy Core",
+            ),
+            TermRecord(
+                category="item",
+                source_file="BinData/item/iteminfo.json",
+                source_id="tier-base:36000001",
+                text_key="tier-base:36000001",
+                zh="密音筒",
+                en="Sealed Tube",
+            ),
+        ),
+    )
+
+    # zh->en multi-paragraph: p0 has official 共鸣者 -> 拉贝尔学部 admitted;
+    # p1 is ordinary prose with no official term -> 教学楼 dropped.
+    zh_multi = "共鸣者前往拉贝尔学部。\n\n我们学校的教学楼很旧。"
+    zh_locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(zh_multi),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+    zh_sources = [ref.source for ref in zh_locked.references]
+    assert "共鸣者" in zh_sources
+    assert "拉贝尔学部" in zh_sources
+    assert "教学楼" not in zh_sources
+
+    # en->zh multi-paragraph: p0 is ordinary prose -> energy core dropped;
+    # p1 has official Resonator -> sealed tubes admitted.
+    en_multi = "The energy core of a star.\n\nA Resonator uses sealed tubes."
+    en_locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(en_multi),
+        to_chinese=True,
+        allow_plural_inflection=True,
+        allow_nfkc_spelling=True,
+    )
+    en_sources = [ref.source for ref in en_locked.references]
+    assert "sealed tubes" in en_sources
+    assert "energy core" not in en_sources
 
 
 def test_embedded_character_compound_is_not_a_reference(tmp_path):

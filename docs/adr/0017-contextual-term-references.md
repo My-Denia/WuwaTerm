@@ -138,3 +138,37 @@ carry their target string so two meanings of one stem keep distinct positions.
 Plain single-meaning requests keep their pre-admission prompt bytes unchanged.
 These rules describe the `q7` Draft PR candidate before owner-authorized
 Stage-1 evaluation has been run.
+
+### Step B1 refinement: local context snippets and paragraph-level derived gating (2026-11-22)
+
+Offline root-cause analysis of `q5`/`q6` Stage-1 failures (`C-heart-ordinary`
+2/2 failures on `心很重要`/`她的心很痛`, `G-M0439` ordinary-word contamination,
+`C-derived-ordinary` on `教学楼`, and `D-003` `变奏入场` scoping) established
+two general presentation and admission flaws without any per-word exception:
+
+1. **Local context snippets replace bare numeric offsets on the model prompt**:
+   Under `zh->en` `thinking: disabled`, models cannot reliably count Unicode
+   scalar indices against JSON offset arrays, so placing `心 = Hsin` or
+   `椿 = Camellya` in the global reference table leaked the name into ordinary
+   occurrences even when `cjk_span.py` (v9) had excluded them. Occurrence-scoped
+   references (`single_char_name_mention`, `scoped_skill_stem`) now stay
+   coordinate-validated fail-closed via `validated_reference_ranges()`, but
+   render in a separate `Scoped term references:` block using deduplicated
+   single-line local snippets (`ONLY at:` / `NOT at:`, collapsing to
+   `(all occurrences in this text)` when >4 occurrences are admitted) instead
+   of bare integer offsets.
+2. **Paragraph-level official-term context gating for derived common nouns**:
+   Segment-wide (1,800-scalar) gating let an official term in one paragraph
+   inject derived common-noun hints (`Area_<n>_Title` such as `教学楼`,
+   `tier-base:<id>` soft casings such as `energy core` / `tuner`) into an
+   unrelated ordinary-prose paragraph in the same segment. Gating both derived
+   common-noun `reference_only` rows (`derived_context_gated_sources`) and
+   `derived_soft_casing` rows at natural-paragraph (`\n\n`) granularity keeps
+   ordinary paragraphs clean (`C-derived-ordinary`, `energy core`, `tuner`)
+   while preserving in-context derived terms (`D-004` `拉贝尔学部`,
+   `ordinary-en-zh` `sealed tubes`) and official version titles (`D-005`
+   `未选择的梦`).
+
+Both mechanisms strictly preserve ADR 0017's core principle: dictionary terms
+remain contextual guidance to the model, never hard-coded word exceptions or
+forced mechanical replacements.

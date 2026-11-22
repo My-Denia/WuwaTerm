@@ -812,10 +812,20 @@ def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
     assert (ordinary.locks, ordinary.references) == ((), ())
     assert ordinary.locked_text == "The energy core of a star."
 
-    zh_source = names_lock("今天去刷能源核心。", to_chinese=False)
-    assert zh_source.locks == ()
-    assert [ref.as_tuple() for ref in zh_source.references] == [
-        ("能源核心", "能源核心", "Energy Core", "item")
+    # Isolated Chinese prose without an official game term in the paragraph
+    # suppresses the derived common-noun reference while still owning its span
+    # so inner 核心 is not extracted on its own.
+    isolated_zh = names_lock("今天去刷能源核心。", to_chinese=False)
+    assert isolated_zh.locks == ()
+    assert isolated_zh.references == ()
+
+    # Inside a paragraph with an official game term (泊金港), the derived base
+    # reaches the model as a contextual reference.
+    with_context_zh = names_lock("今天去泊金港刷能源核心。", to_chinese=False)
+    assert with_context_zh.locks == ()
+    assert [ref.as_tuple() for ref in with_context_zh.references] == [
+        ("泊金港", "泊金港", "Gold's Landing", "location"),
+        ("能源核心", "能源核心", "Energy Core", "item"),
     ]
 
 
@@ -845,11 +855,18 @@ def test_tuner_collision_keeps_both_meanings_as_contextual_references(names_lock
 
 def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):
     # MY-18: 教学楼 is the Area title of Academia Hall and the everyday word
-    # for a school building. zh->en hands every category to the model as a
-    # reference, never a lock; en->zh locks only the capitalized name.
+    # for a school building. In an isolated ordinary paragraph with no official
+    # game term it emits no reference; inside a paragraph with an official game
+    # term it reaches zh->en as a reference, never a lock. en->zh locks only
+    # the capitalized name.
     school = names_lock("我们学校的教学楼很旧。", to_chinese=False)
     assert school.locks == ()
-    assert tuple(ref.as_tuple() for ref in school.references) == (
+    assert school.references == ()
+
+    in_game = names_lock("泊金港旁边的教学楼很旧。", to_chinese=False)
+    assert in_game.locks == ()
+    assert tuple(ref.as_tuple() for ref in in_game.references) == (
+        ("泊金港", "泊金港", "Gold's Landing", "location"),
         ("教学楼", "教学楼", "Academia Hall", "location"),
     )
 
@@ -945,13 +962,27 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
         )
 
     translator = SentenceTranslator(names_db, llm_transport=httpx.MockTransport(model))
-    text = "".join(DERIVED_NAME_PROSE)
-    assert asyncio.run(translator.translate_async(text)) == "translated"
-
-    [body] = bodies
-    system, user = (message["content"] for message in body["messages"])
-    assert user == text
+    # Isolated ordinary prose without official game terms receives no derived hints.
+    ordinary_text = "".join(DERIVED_NAME_PROSE)
+    assert asyncio.run(translator.translate_async(ordinary_text)) == "translated"
+    ordinary_system = bodies[-1]["messages"][0]["content"]
     for reference in (
+        "教学楼 = Academia Hall (location)",
+        "学院公寓 = Academy Dormitory (location)",
+        "能量袋 = Energy Bag (item)",
+        "生活中枢 = Living Commons (location)",
+    ):
+        assert reference not in ordinary_system
+
+    # When the same paragraph contains an official game term (泊金港), the
+    # derived names reach the model as contextual references.
+    game_text = "在泊金港附近，" + "".join(DERIVED_NAME_PROSE)
+    assert asyncio.run(translator.translate_async(game_text)) == "translated"
+
+    system, user = (message["content"] for message in bodies[-1]["messages"])
+    assert user == translator.prepare_text(game_text)
+    for reference in (
+        "泊金港 = Gold's Landing (location)",
         "教学楼 = Academia Hall (location)",
         "学院公寓 = Academy Dormitory (location)",
         "能量袋 = Energy Bag (item)",

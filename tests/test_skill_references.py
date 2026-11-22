@@ -13,7 +13,7 @@ from wuwaterm.models import TermRecord
 from wuwaterm.protected_text import ProtectedStructure, ProtectedText
 from wuwaterm.sentence import (
     SentenceTranslator,
-    _REFERENCE_RANGE_HEADER,
+    _SCOPED_REFERENCE_HEADER,
     _call_llm_async_with_client,
 )
 from wuwaterm.term_preparation import (
@@ -59,14 +59,11 @@ def _lock(translator, source, *, to_chinese: bool = False):
     )
 
 
-def _ranges(body):
+def _scoped_section(body):
     system = body["messages"][0]["content"]
     user = body["messages"][1]["content"]
-    payload = json.loads(system.split(_REFERENCE_RANGE_HEADER, 1)[1].splitlines()[0])
-    for item in payload:
-        for start, end in item["ranges"]:
-            assert user[start:end] == item["source"]
-    return user, payload
+    section = system.split(_SCOPED_REFERENCE_HEADER, 1)[1].split("\nContext rules:", 1)[0]
+    return user, section.splitlines()
 
 
 @pytest.fixture(autouse=True)
@@ -258,15 +255,15 @@ def test_actual_request_contains_exact_ranges_after_placeholders(tmp_path, monke
             asyncio.run(translate_protected())
 
     assert len(bodies) == 1
-    user, payload = _ranges(bodies[0])
+    user, scoped_lines = _scoped_section(bodies[0])
     assert "__WUWA_TERM_" in user
     if mode in {"protected", "async_protected"}:
         assert "__WUWA_HTML_" in user
-    start = user.index("变奏")
-    assert payload == [
-        {"source": "变奏", "target": "Intro Skill", "ranges": [[start, start + 2]]}
-    ]
-    assert "变奏 = Intro Skill (core_term)" in bodies[0]["messages"][0]["content"]
+    assert len(scoped_lines) == 1
+    assert scoped_lines[0].startswith("变奏 = Intro Skill (core_term) — ONLY at: ")
+    assert "「变奏」入场" in scoped_lines[0]
+    assert "__WUWA_" not in scoped_lines[0]
+    assert "Dictionary term references:\n" not in bodies[0]["messages"][0]["content"]
 
 
 def test_actual_request_binds_each_ambiguous_prefix_to_its_own_target(tmp_path):
@@ -289,16 +286,11 @@ def test_actual_request_binds_each_ambiguous_prefix_to_its_own_target(tmp_path):
 
     asyncio.run(run())
     assert len(bodies) == 1
-    user, payload = _ranges(bodies[0])
-    first = user.index("共鸣")
-    second = user.rindex("共鸣")
-    assert payload == [
-        {"source": "共鸣", "target": "Resonance Skill", "ranges": [[first, first + 2]]},
-        {"source": "共鸣", "target": "Resonance Liberation", "ranges": [[second, second + 2]]},
+    _user, scoped_lines = _scoped_section(bodies[0])
+    assert scoped_lines == [
+        "共鸣 = Resonance Skill (core_term) — ONLY at: 放技能后触发「共鸣」伤害。释放解 | NOT at: 放解放后触发「共鸣」伤害。",
+        "共鸣 = Resonance Liberation (core_term) — ONLY at: 放解放后触发「共鸣」伤害。 | NOT at: 放技能后触发「共鸣」伤害。释放解",
     ]
-    assert "other alternatives for the same source do not apply at that range" in (
-        bodies[0]["messages"][0]["content"]
-    )
 
 
 def test_read_only_previous_context_is_not_skill_admission_evidence(tmp_path):
@@ -322,7 +314,7 @@ def test_read_only_previous_context_is_not_skill_admission_evidence(tmp_path):
 
     asyncio.run(run())
     assert len(bodies) == 1
-    assert _REFERENCE_RANGE_HEADER not in bodies[0]["messages"][0]["content"]
+    assert _SCOPED_REFERENCE_HEADER not in bodies[0]["messages"][0]["content"]
     assert "变奏 = Intro Skill" not in bodies[0]["messages"][0]["content"]
 
 

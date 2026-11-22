@@ -53,6 +53,7 @@ from .review import segment_core as _segment_core
 from .semantic_review_contract import PRECEDENT_WORDING
 from .skill_references import SkillReference, skill_references
 from .term_classification import (
+    derived_context_gated_sources as _derived_context_gated_sources,
     derived_reference_only_sources as _derived_reference_only_sources,
 )
 from .term_matching import (
@@ -71,6 +72,8 @@ from .term_preparation import (
     CONTEXTUAL_REFERENCE_CATEGORIES as CONTEXTUAL_REFERENCE_CATEGORIES,
     TermOccurrence as TermOccurrence,
     TermReference as TermReference,
+    format_scoped_reference_lines,
+    is_occurrence_scoped_reference,
     new_placeholder_prefix,
     prepare_protected_terms,
     prepare_term_segment,
@@ -107,6 +110,7 @@ _CJK_NEIGHBOR_CLASS = rf"[\u3400-\u9fff{_CJK_PUNCTUATION}]"
 
 _SourceSnapshot = tuple[
     tuple[tuple[str, tuple[str, str, str]], ...],
+    frozenset[str],
     frozenset[str],
     frozenset[str],
     ReferenceCandidates,
@@ -211,6 +215,7 @@ class SentenceTranslator:
         self._lockable_sources_cache_key: tuple[object, ...] | None = None
         self._lockable_sources_cache: _SourceSnapshot = (
             (),
+            frozenset(),
             frozenset(),
             frozenset(),
             {},
@@ -347,6 +352,11 @@ class SentenceTranslator:
             reference_candidates=(
                 self._reference_candidates() if to_chinese is not None else None
             ),
+            context_gated_reference_only=(
+                self._context_gated_reference_only_sources()
+                if to_chinese is not None
+                else frozenset()
+            ),
             skill_refs=self._skill_references() if to_chinese is False else (),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
@@ -391,6 +401,11 @@ class SentenceTranslator:
             placeholder_prefix=new_placeholder_prefix(protected.for_model()),
             reference_candidates=(
                 self._reference_candidates() if to_chinese is not None else None
+            ),
+            context_gated_reference_only=(
+                self._context_gated_reference_only_sources()
+                if to_chinese is not None
+                else frozenset()
             ),
             skill_refs=self._skill_references() if to_chinese is False else (),
         )
@@ -812,9 +827,14 @@ class SentenceTranslator:
     ) -> tuple[
         tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
     ]:
-        rows, nfkc_sources, _reference_only, _candidates, _skills = (
-            self._lockable_snapshot()
-        )
+        (
+            rows,
+            nfkc_sources,
+            _reference_only,
+            _context_gated,
+            _candidates,
+            _skills,
+        ) = self._lockable_snapshot()
         return self._eligible_rows(rows), nfkc_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
@@ -854,6 +874,7 @@ class SentenceTranslator:
             tuple(sources.items()),
             nfkc_sources,
             _derived_reference_only_sources(entries),
+            _derived_context_gated_sources(entries),
             model_reference_candidates(
                 entries,
                 sources,
@@ -888,16 +909,20 @@ class SentenceTranslator:
         return self._lockable_snapshot()[1]
 
     def _reference_only_sources(self) -> frozenset[str]:
-        """Chinese surfaces that are references, never locks (derived names)."""
+        """Surfaces that are references, never locks (derived names/titles)."""
         return self._lockable_snapshot()[2]
+
+    def _context_gated_reference_only_sources(self) -> frozenset[str]:
+        """Derived common-noun surfaces gated by paragraph-level official context."""
+        return self._lockable_snapshot()[3]
 
     def _reference_candidates(self) -> ReferenceCandidates:
         """Surface -> every official pair the model path may offer for it."""
-        return self._lockable_snapshot()[3]
+        return self._lockable_snapshot()[4]
 
     def _skill_references(self) -> tuple[SkillReference, ...]:
         """Bounded closed-class 2-char skill stems for zh->en references."""
-        return self._lockable_snapshot()[4]
+        return self._lockable_snapshot()[5]
 
     def _lockable_snapshot(self) -> _SourceSnapshot:
         # Each source text (Chinese OR English form) maps to the official
@@ -964,18 +989,12 @@ _SCOPED_REFERENCE_INSTRUCTION = (
     "Multiple official pairs for one source surface are alternatives: select "
     "the meaning supported by this occurrence, never combine or enforce all "
     "of them. A casing variant is only a hint, not proof of an official sense. "
-    "If occurrence ranges are listed, that reference applies only at those "
-    "ranges in the user message; a character embedded elsewhere in a longer "
-    "compound is not a name reference and does not establish an official "
-    "translation for the whole compound.\n"
+    "For Scoped term references below, apply a reference ONLY in the listed "
+    "'ONLY at:' contexts (or everywhere when marked '(all occurrences in this "
+    "text)', except any listed 'NOT at:' contexts); never apply it in 'NOT at:' "
+    "contexts or to other ordinary words or compounds.\n"
 )
-_REFERENCE_RANGE_HEADER = (
-    "\nReference occurrence ranges (JSON; zero-based, end-exclusive):\n"
-)
-_REFERENCE_RANGE_TARGET_INSTRUCTION = (
-    "A range with a target applies only to the reference for that target; "
-    "other alternatives for the same source do not apply at that range.\n"
-)
+_SCOPED_REFERENCE_HEADER = "Scoped term references:\n"
 
 
 # translation-context-v1 (ADR 0019): added only when a request opts in, so a
@@ -1380,10 +1399,21 @@ async def _call_llm_async_with_client(
     context=None,
 ) -> str:
     coerced_refs = tuple(_coerce_term_reference(item) for item in references)
+    # Fail-closed validation of occurrence coordinates before formatting or HTTP.
     scoped_ranges = validated_reference_ranges(
         locked_text, coerced_refs, to_chinese=to_chinese
     )
-    needs_scope = references_need_scope_instruction(coerced_refs) or bool(scoped_ranges)
+    global_refs = tuple(
+        ref for ref in coerced_refs if not is_occurrence_scoped_reference(ref)
+    )
+    scoped_lines = format_scoped_reference_lines(
+        locked_text, coerced_refs, to_chinese=to_chinese
+    )
+    needs_scope = (
+        references_need_scope_instruction(coerced_refs)
+        or bool(scoped_ranges)
+        or bool(scoped_lines)
+    )
     # locks are (placeholder, zh_official, en_official); show the model the
     # official term in the TARGET language so the locked placeholder maps to
     # the right side on restore.
@@ -1391,7 +1421,7 @@ async def _call_llm_async_with_client(
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     reference_lines = "\n".join(
         f"{ref.source} = {(ref.zh, ref.en)[official_index - 1]} ({ref.category})"
-        for ref in coerced_refs
+        for ref in global_refs
     )
     if to_chinese:
         placeholder_instruction = "Keep all placeholders exactly unchanged. "
@@ -1421,18 +1451,16 @@ async def _call_llm_async_with_client(
         if html_mode:
             system_content += _HTML_MODE_INSTRUCTION
     system_content += f"Locked terms:\n{lock_lines}"
-    if reference_lines:
+    if reference_lines or scoped_lines:
         system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION
         if needs_scope:
             system_content += _SCOPED_REFERENCE_INSTRUCTION
-        if any("target" in item for item in scoped_ranges):
-            system_content += _REFERENCE_RANGE_TARGET_INSTRUCTION
-        system_content += f"Dictionary term references:\n{reference_lines}"
-        if scoped_ranges:
+        if reference_lines:
+            system_content += f"Dictionary term references:\n{reference_lines}"
+        if scoped_lines:
+            prefix = "\n" if reference_lines else ""
             system_content += (
-                _REFERENCE_RANGE_HEADER
-                + json.dumps(scoped_ranges, ensure_ascii=False)
-                + "\n"
+                prefix + _SCOPED_REFERENCE_HEADER + "\n".join(scoped_lines)
             )
     if context is not None:
         system_content += _context_instruction(context)

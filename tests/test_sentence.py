@@ -2346,7 +2346,7 @@ def test_exclusions_keep_derived_soft_spelling_casefold_ambiguity(
     assert direct_explicit["VEXIL BOX"] == (("青纹盒", "Vexil Box", "item"),)
     assert direct_explicit["VEXIL BOXES"] == (("青纹盒", "Vexil Box", "item"),)
 
-    rows, _nfkc, _ref_only, snap_candidates, _skills = (
+    rows, _nfkc, _ref_only, _context_gated, snap_candidates, _skills = (
         translator._read_lockable_sources()
     )
     lockable_map = dict(rows)

@@ -46,16 +46,23 @@ collapses those rows per surface by `(zh, en)`, keeping the highest-priority
 than one per row. Only more than one distinct `(zh, en)` pair makes a surface
 ambiguous.
 
-## Casing is evidence for a candidate, not a forced meaning
+## Casing and paragraph-level context for derived common nouns
 
-The prior hard-lock spelling set remains separate. Derived English names may
-gain lowercase and uppercase soft spellings (`origin="derived_soft_casing"`,
-`reason="soft_casing"`) on the model path only when the submitted segment
-already contains dictionary term context. This supplies `sealed tubes` in a
-game-material guide without adding hints to isolated ordinary prose such as
-`the energy core of a star` or `a guitar tuner`. The existing exact/plural
-owner wins, pre-exclusion casefold collisions block synthesis even if one
-member is later excluded, and both free-text exclusion lists still apply.
+The prior hard-lock spelling set remains separate. Derived common-noun rows
+(`Area_<n>_Title` such as `教学楼` and `tier-base:<id>` such as `能源核心` /
+`能量袋`, via `term_classification.derived_context_gated_sources`) and derived
+English soft-casing spellings (`origin="derived_soft_casing"`,
+`reason="soft_casing"`, such as `sealed tubes`) are admitted as model
+references only when their **natural paragraph** (separated by blank lines
+`\n\n`) already contains at least one non-derived official dictionary hit
+(including admitted resonator/speaker names). This keeps isolated ordinary
+paragraphs such as `我们学校的教学楼很旧。`, `the energy core of a star`, or
+`a guitar tuner` free of game hints even inside a multi-paragraph segment,
+while preserving in-context derived terms (`拉贝尔学部` in a game paragraph,
+`sealed tubes` alongside `Sealed Tubes`) and official `Advertising_VersionTitle_<n>`
+release titles. The existing exact/plural owner wins, pre-exclusion casefold
+collisions block synthesis even if one member is later excluded, and both
+free-text exclusion lists still apply.
 
 ## A one-character name does not name every compound containing it
 
@@ -100,24 +107,26 @@ Each admitted occurrence is carried as a `TermReference` with
 `TermOccurrence` coordinates (`model_start`, `model_end`) in the final model
 input. English-to-Chinese requests never invoke this rule.
 
-## On-demand request scope
+## On-demand request scope and local context snippets
 
 The prompt is unchanged unless the request actually needs the extra
 explanation:
 
-- an admitted one-character CJK name mention (scoped by `TermOccurrence`
-  ranges);
-- a bounded `scoped_skill_stem` reference (scoped by `TermOccurrence` ranges
-  with `"target"`);
+- an admitted one-character CJK name mention (`single_char_name_mention`);
+- a bounded `scoped_skill_stem` reference (`local_skill_action`);
 - a selected surface with more than one distinct official pair;
 - a soft-cased spelling of a derived name.
 
 Any request that needs none of these arrives at the model with the exact bytes
-it carried before this mechanism existed. `Reference occurrence ranges (JSON;
-zero-based, end-exclusive):` is rendered only when occurrence-scoped references
-produce ranges, and `validated_reference_ranges` verifies every coordinate
-against `locked_text` (after term and structural placeholders) before any HTTP
-request leaves the process.
+it carried before this mechanism existed. `validated_reference_ranges` verifies
+every `(model_start, model_end)` coordinate against `locked_text` (after term
+and structural placeholders) fail-closed before any HTTP request leaves the
+process. Occurrence-scoped references (`single_char_name_mention` and
+`scoped_skill_stem`) are separated from `Dictionary term references:` into a
+`Scoped term references:` block rendered with deduplicated single-line local
+context snippets (`ONLY at:` / `NOT at:`, collapsing >4 admitted occurrences to
+`(all occurrences in this text)`) rather than bare numeric offsets, so
+`thinking: disabled` models do not have to count character indices.
 
 ## Context fidelity
 
