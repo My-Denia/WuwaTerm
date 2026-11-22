@@ -24,6 +24,7 @@ from wuwaterm.sentence import (
     _call_llm_async,
     _llm_error_from_response,
 )
+from wuwaterm.term_preparation import format_scoped_reference_lines
 
 
 def _llm_failure_diagnostic_type():
@@ -1686,8 +1687,11 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     assert ("心", "心", "Hsin", "resonator") not in locked_tuples
 
     # 2. Subsequent independent uncovered name mention in a mixed text
-    # (other raw occurrences of 心 exist in 心照红尘 and 「心」) is selectively
-    # locked in place rather than injected as a naked 心 = Hsin reference.
+    # (other raw occurrences of 心 exist in 心照红尘 and 「心」) stays a scoped
+    # reference: the longer 「心」 = "Hsin" already carries the same character
+    # and the same official English, so hard-locking the mention would show
+    # Hsin twice and ask the model to reproduce a token next to its own target
+    # (the duplicate_placeholder shape). It is never a naked global line.
     text_with_subsequent_name = (
         "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，心加入队伍。"
     )
@@ -1696,10 +1700,14 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     )
     subsequent_tuples = {ref.as_tuple() for ref in locked_subsequent.references}
     assert ("「心」", "「心」", '"Hsin"', "speaker") in subsequent_tuples
-    assert ("心", "心", "Hsin", "resonator") not in subsequent_tuples
-    assert [(zh, en) for _, zh, en in locked_subsequent.locks] == [("心", "Hsin")]
+    assert ("心", "心", "Hsin", "resonator") in subsequent_tuples
+    assert locked_subsequent.locks == ()
+    scoped_lines = format_scoped_reference_lines(
+        locked_subsequent.locked_text, locked_subsequent.references, to_chinese=False
+    )
+    assert scoped_lines[0].startswith("心 = Hsin (resonator) — ONLY at:")
     assert locked_subsequent.restore(locked_subsequent.locked_text, to_en=True) == (
-        "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，Hsin加入队伍。"
+        "全新3.7版本「心照红尘」即将开启！完成任务可结识「心」，心加入队伍。"
     )
 
     # 3. Version title / ordinary compound without name mention triggers no reference.

@@ -1,7 +1,8 @@
 # q8 Translation Quality Candidate Plan & Frozen Offline Scope
 
 - Status: **Draft candidate, offline verification only (0 live LLM calls in this
-  PR).** No Stage-1 or Stage-2 budget has been spent on this branch.
+  PR).** Stage 1 Run #1 has been executed and read (`515 -> 521`, 6 POSTs); no
+  Stage 2 budget has been spent.
 - Branch: `feat/q8-quality-candidate`
 - Development base: `main` (`0c6fa4b`, Core `v0.10.3`, including PR #299's
   `contracts/products.json` and `docs/products.md`, which this branch leaves
@@ -43,8 +44,9 @@ boundary with `"有"` (`cjk_span.py`), paragraph-level derived gating with
 rendering (`term_preparation.py`), and selective in-place locking of mixed
 one-character names (`_lock_mixed_single_char_names`).
 
-On top of that, `q8` changes exactly two behaviours, both aimed at the same
-`D-003` failure.
+On top of that, `q8` changes four behaviours: the two below aimed at the first
+`D-003` failure, and the two in Section 2.3 aimed at what Stage 1 Run #1 then
+showed.
 
 ### 2.1 Root cause 1 — `zh->en` never asked for placeholder preservation
 
@@ -102,7 +104,54 @@ has at least one genuine unenclosed occurrence. Its effect is to stop
 hard-locking a name in a document whose only other occurrences are inside longer
 official terms.
 
-### 2.3 Observability (no API change)
+### 2.3 Root causes 3 and 4 — what Stage-1 Run #1 actually showed
+
+Stage 1 Run #1 spent 6 POSTs (`515 -> 521`) and was read in full. It cleared
+the latency and control half of the gate: `D-009` answered in `2.9 s` with
+`30/30` on its fixed 3-group split, `ordinary-zh-en` held **`6/6`**, `D-008`
+answered in `2.1 s` and `D-012` in `2.6 s`. It did **not** clear the `D-003`
+gate: the answer came back `200 OK` and was rejected as
+`duplicate_placeholder` with `actual = 7`, and `ordinary-en-zh#p1` regressed
+under `en_zh = disabled`.
+
+**Root cause 3 — selective locking fought a longer reference.** `D-003` carries
+`心月狐 = Hsin the Moon Fox` as a global reference, and `心 = Hsin` as a mixed
+one-character mention. Locking `心` put `Hsin` in the prompt twice: once as a
+placeholder's target, once inside `心月狐`'s own line. The model then wrote that
+placeholder where `心月狐` belongs, reused it 7 times, and left `p41`
+(`因为心基础数值最高`) unprimed enough to come back as `the heart`. `R1-A3` has
+the same shape (`「心」 = "Hsin"`, `心团子 = Hsin Cube`).
+`_lock_mixed_single_char_names` now leaves such a mention as a reference when a
+longer **global** reference satisfies both conditions:
+
+- the character is inside the longer source (`心 in 心月狐`), and
+- the mention's official target appears in the longer target as a
+  case-insensitive whole word (`\bHsin\b in "Hsin the Moon Fox"`).
+
+`ordinary-zh-en` has no such pair (`心` / `椿` appear alone there), so it still
+selectively locks `心` x1 and `椿` x3; the Run #1 `R1-B1` reference set has no
+longer `椿` term carrying `Camellya` either, so its `椿` locks stay; unmixed
+names are unaffected. `D-003` and `R1-A3` now carry **0 locks**, keep
+`心 = Hsin` as an occurrence-scoped reference, and `D-003` keeps
+`变奏 = Intro Skill` scoped.
+
+**Root cause 4 — a competing `(speaker)` pair had no label rule.**
+`ordinary-en-zh` offers `Tuner = 调音师 (speaker)` and `Tuner = 调谐器 (item)`.
+The section `Use a Basic Tuner first, then the Tuner.` came back as
+`...然后再用调音师` because `(speaker)` was listed first and nothing said a speaker
+label is not an item. When — and only when — one surface carries a `(speaker)`
+entry **and** at least one other kind, the prompt now appends, directly after
+the competing-pairs instruction:
+
+> When a term has both a (speaker) meaning and another meaning such as (item) or
+> (core_term), use the (speaker) translation ONLY for a dialogue speaker label
+> (such as 'Name: ...') or a speaking person, never for an item, material or
+> gameplay object.
+
+A request whose references carry no such competition keeps its exact prompt
+bytes.
+
+### 2.4 Observability (no API change)
 
 `LockedSentence.restore()` already raised with a structured, sanitised
 diagnostic (`reason`, `detail`, `expected_count`, `actual_count`). Two gaps on
@@ -118,9 +167,12 @@ the way out are closed:
 
 No HTTP body, status, error envelope or OpenAPI change.
 
-## 3. Stage Plan (Not Executed Here)
+## 3. Stage Plan
 
-`q8` is proposed with two independent stages, each gated on its own evidence.
+`q8` has two independent stages, each gated on its own evidence. Stage 1 Run #1
+has been executed (6 POSTs, `515 -> 521`) and is recorded in Section 2.3; the
+Run #1 fixes on this branch are **offline-verified only**, so Stage 1 must run
+again before Stage 2 can be judged.
 
 | Stage | Question | POSTs | Contents |
 | --- | --- | --- | --- |
@@ -165,6 +217,27 @@ place, over the frozen `D` (15 docs / 17 segments), `ordinary` (2 docs),
 Owner-facing gates that stay frozen: model timeout `45 s` and request budget
 `90 s` are untouched; `zh->en` thinking stays `disabled`; `en->zh` stays
 `omit` unless Stage 2 runs it explicitly; `H2` remains `held-out used`.
+
+### 4.1 Stage-1 Run #1 fix verification
+
+That table describes the q7->q8 comparison made before Run #1. The two Run #1
+fixes (Section 2.3) were verified separately, without live calls:
+
+- unit tests over the real dictionary records: `心月狐 = Hsin the Moon Fox`
+  skips the `心` lock, `心魔 = Camellya's Alter Ego` does not (its English lacks
+  the whole-word target), `「心」 = "Hsin"` skips it, and a `Tuner` speaker+item
+  pair emits the label rule while a plain reference set keeps the exact prompt
+  bytes;
+- a locally rebuilt dictionary (`3a5726ad9355…`, 12,089 rows) over documents
+  shaped like the Run #1 inputs: `D-003` **0 locks** with `心 = Hsin` kept as an
+  occurrence-scoped reference and `变奏 = Intro Skill` still scoped, `R1-A3`
+  **0 locks**, `ordinary-zh-en` **unchanged** (`椿` x3 + `心` x1 locked).
+
+The held-out bundles are not in this repository, so this branch reports the
+lock/reference outcome by shape rather than by re-emitting corpus text or
+claiming a byte-level manifest diff it cannot recompute here. Re-running the
+Stage-1 manifest against the same frozen inputs is the first step of the next
+authorized run.
 
 ## 5. Non-Goals
 

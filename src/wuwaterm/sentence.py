@@ -995,6 +995,17 @@ _SCOPED_REFERENCE_INSTRUCTION = (
     "or compounds.\n"
 )
 _SCOPED_REFERENCE_HEADER = "Scoped term references:\n"
+# Appended only when one source surface reaches the model carrying a (speaker)
+# entry and at least one other kind of entry: an English source such as "Tuner"
+# is both the dialogue speaker 调音师 and the gameplay item 调谐器, and nothing in
+# the reference lines says which one a given occurrence is. Requests without
+# that competition keep their exact prompt bytes.
+_SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION = (
+    "When a term has both a (speaker) meaning and another meaning such as "
+    "(item) or (core_term), use the (speaker) translation ONLY for a dialogue "
+    "speaker label (such as 'Name: ...') or a speaking person, never for an "
+    "item, material or gameplay object. "
+)
 
 
 # translation-context-v1 (ADR 0019): added only when a request opts in, so a
@@ -1388,6 +1399,25 @@ def _coerce_term_reference(
     return TermReference(*ref)
 
 
+def _needs_speaker_label_disambiguation(
+    references: Sequence[TermReference],
+) -> bool:
+    """Return whether one surface carries a (speaker) entry beside another kind.
+
+    Only then does the prompt need telling apart a dialogue speaker label from
+    an item or material of the same name; a surface with a single kind of
+    entry, or one whose competing pairs are all speakers, keeps the prompt it
+    already had.
+    """
+    categories_by_source: dict[str, set[str]] = {}
+    for ref in references:
+        categories_by_source.setdefault(ref.source.casefold(), set()).add(ref.category)
+    return any(
+        "speaker" in categories and len(categories) > 1
+        for categories in categories_by_source.values()
+    )
+
+
 async def _call_llm_async_with_client(
     client: httpx.AsyncClient,
     locked_text: str,
@@ -1477,6 +1507,8 @@ async def _call_llm_async_with_client(
         system_content += "\n" + _CONTEXTUAL_REFERENCE_INSTRUCTION
         if needs_scope:
             system_content += _SCOPED_REFERENCE_INSTRUCTION
+            if _needs_speaker_label_disambiguation(coerced_refs):
+                system_content += _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION
         if reference_lines:
             system_content += f"Dictionary term references:\n{reference_lines}"
         if scoped_lines:

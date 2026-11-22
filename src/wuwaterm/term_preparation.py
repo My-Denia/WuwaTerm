@@ -819,6 +819,32 @@ def _collect_scoped_skill_references(
         )
 
 
+def _longer_reference_shares_official_target(
+    ref: TermReference, global_refs: Sequence[TermReference]
+) -> bool:
+    """Return whether a longer global reference already names ``ref``'s target.
+
+    ``心`` also opens ``心月狐 = Hsin the Moon Fox``, and ``Hsin`` is the
+    official English of both. Hard-locking the one-character mention puts that
+    official word in the prompt twice -- once as a locked placeholder's target
+    and once as part of the longer term's own line -- and the model then writes
+    the placeholder where the longer term's name belongs, which is exactly the
+    ``duplicate_placeholder`` rejection this avoids. Leaving the mention as an
+    occurrence-scoped reference keeps its official translation in the prompt
+    without asking the model to hold the same word in two unrelated forms.
+    """
+    if not ref.en or not ref.source:
+        return False
+    pattern = re.compile(rf"\b{re.escape(ref.en)}\b", re.IGNORECASE)
+    return any(
+        len(other.source) > 1
+        and ref.source in other.source
+        and bool(other.en)
+        and pattern.search(other.en) is not None
+        for other in global_refs
+    )
+
+
 def _lock_mixed_single_char_names(
     locked_text: str,
     locks: list[Lock],
@@ -841,6 +867,13 @@ def _lock_mixed_single_char_names(
     eliminates leakage while leaving unmixed names (``raw_other_count == 0``,
     which now includes characters that appear only inside longer global
     references such as ``心月狐`` and ``核心``) as contextual references.
+
+    A mixed name is also left as a reference when a longer global reference
+    already carries its official target beside the same source character
+    (``心`` next to ``心月狐 = Hsin the Moon Fox``): locking it would show
+    ``Hsin`` both as a placeholder target and inside the longer term, which is
+    the shape that made the model reuse one placeholder across the longer
+    term's mentions.
     """
     pairs_by_source: dict[str, set[tuple[str, str]]] = {}
     for ref in references:
@@ -875,6 +908,7 @@ def _lock_mixed_single_char_names(
             or not is_cjk_character(ref.source)
             or len(pairs_by_source.get(ref.source, ())) != 1
             or not _has_valid_model_occurrences(ref)
+            or _longer_reference_shares_official_target(ref, global_refs)
         ):
             continue
         admitted_spans = sorted(

@@ -204,3 +204,27 @@ for common nouns:
   flexibility for every common noun (`Resonators`, `Echoes`), multi-character
   term, unmixed single-character name (`raw_other_count == 0`, e.g. `R1-A5`),
   and `scoped_skill_stem` (`变奏 = Intro Skill`).
+
+### Step B1b refinement 2: does a longer reference already carry the target? (2026-11-22)
+
+`q8` Stage 1 Run #1 (`515 -> 521`) showed where Step B1b over-reaches. `D-003`
+carries `心月狐 = Hsin the Moon Fox` as a global reference, so locking `心` put
+`Hsin` in the prompt twice — once as the token's target, once inside
+`心月狐`'s own line — and `deepseek-flash` wrote that token where `心月狐`
+belongs, reusing it 7 times (`duplicate_placeholder`, `actual = 7`); `p41`
+(`因为心基础数值最高`) lost the name and came back as `the heart`.
+
+A mixed mention is therefore left as an occurrence-scoped reference when a
+longer **global** reference satisfies both conditions:
+
+- the mention's source character is inside the longer source (`心` in `心月狐`), and
+- the mention's official target appears in the longer target as a
+  case-insensitive whole word (`\bHsin\b` in `Hsin the Moon Fox`).
+
+Such a reference already shows the model that character's official English, so
+the lock adds no information and adds a second copy of the same word to
+reproduce. Documents whose longer terms do not carry that target keep the lock
+unchanged (`ordinary-zh-en` `心` x1 / `椿` x3, `心魔 = Camellya's Alter Ego`
+beside `心`); per the Run #1 reference set, no `R1-B1` reference carries
+`Camellya` inside a longer `椿` term either, so its `椿` locks stay. `D-003`
+and `R1-A3` now carry zero locks and keep `心 = Hsin` as a scoped reference.

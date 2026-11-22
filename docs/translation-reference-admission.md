@@ -133,7 +133,14 @@ raw occurrence of the same character (`raw_other_count > 0`), the admitted
 spans are instead selectively locked in place with opaque placeholders (so
 `Locked terms:` exposes only the English proper name, never the Chinese source
 character) and removed from reference tables to prevent negative-priming
-leakage onto ordinary prose or compounds. Remaining references (including
+leakage onto ordinary prose or compounds. One exception keeps the mention as an
+occurrence-scoped reference: a longer **global** reference that contains the
+same source character and whose target contains the mention's official target
+as a case-insensitive whole word (`心` beside `心月狐 = Hsin the Moon Fox`,
+`「心」 = "Hsin"`, `心团子 = Hsin Cube`). That reference already shows the model
+the same official word, so locking would only add a second copy for the model to
+reproduce (see ADR 0017's Step B1b refinement 2 and the `duplicate_placeholder`
+evidence from `q8` Stage 1 Run #1). Remaining references (including
 `scoped_skill_stem`) have their `(model_start, model_end)` coordinates
 re-aligned after the inserted placeholders and validated fail-closed. Any
 colliding `ONLY at:` / `NOT at:` snippets automatically escalate through wider

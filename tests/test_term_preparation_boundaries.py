@@ -361,22 +361,26 @@ def test_paragraph_level_context_gate_and_enclosing_global_skip():
     )
     # 教学楼 is emitted ONLY for paragraph 0 (with 共鸣者), not paragraph 1;
     # because paragraph 1 has an unadmitted 教学楼, 教学楼 routes to Scoped term
-    # references with ONLY at / NOT at. Meanwhile 心 is mixed (admitted 心加入队伍
-    # + unadmitted 心很重要 & 「心」), so 心加入队伍 is selectively locked in place
-    # and removed from references so 心 = Hsin never reaches the system prompt.
+    # references with ONLY at / NOT at. 心 is mixed (admitted 心加入队伍 plus
+    # unadmitted 心很重要 & 「心」) yet stays a reference: the longer 「心」
+    # = "Hsin" already carries the same character and the same official
+    # English, so hard-locking the mention would show Hsin twice and is skipped.
     hall_ref = next(ref for ref in prepared.references if ref.source == "教学楼")
     assert len(hall_ref.occurrences) == 1
     assert text[hall_ref.occurrences[0].start : hall_ref.occurrences[0].end] == "教学楼"
     assert hall_ref.occurrences[0].start < text.index("\n\n")
-    assert [(zh, en) for _, zh, en in prepared.locks] == [("心", "Hsin")]
-    assert not any(ref.source == "心" for ref in prepared.references)
-    assert "「心」出现了，__P_0000__加入队伍，心很重要。" in prepared.locked_text
+    assert prepared.locks == ()
+    assert prepared.locked_text == text
+    heart_ref = next(ref for ref in prepared.references if ref.source == "心")
+    assert (heart_ref.zh, heart_ref.en, heart_ref.category) == ("心", "Hsin", "resonator")
+    assert heart_ref.reason == "single_char_name_mention"
 
     scoped_lines = format_scoped_reference_lines(
         prepared.locked_text, prepared.references, to_chinese=False
     )
     assert scoped_lines == (
         "教学楼 = Academia Hall (location) — ONLY at: 共鸣者在「教学楼」集合。 | NOT at: 我们学校的「教学楼」很旧。",
+        "心 = Hsin (resonator) — ONLY at: 心」出现了，「心」加入队伍，心 | NOT at: 心加入队伍，「心」很重要。",
     )
 
 
@@ -571,10 +575,13 @@ def test_mixed_single_char_lock_spares_a_character_used_only_inside_longer_terms
     assert [ref.source for ref in references_after] == ["心", "心月狐", "守岸人"]
 
 
-def test_mixed_single_char_lock_still_triggers_on_an_unenclosed_occurrence():
-    # D-003's shape: the same character also appears as ordinary prose outside
-    # every longer term, so the admitted mentions stay selectively locked and
-    # the reference table drops 心 = Hsin entirely.
+def test_mixed_single_char_lock_skips_a_longer_term_carrying_the_same_official_target():
+    # D-003's shape: 心 is admitted in a team formula and also appears as prose
+    # outside every longer term, while 心月狐 = Hsin the Moon Fox reaches the
+    # prompt as a global reference. Locking 心 there shows Hsin twice -- once as
+    # a placeholder target and once inside 心月狐 -- and the model then writes
+    # that placeholder where 心月狐 belongs, so the whole answer is rejected as
+    # duplicate_placeholder. The mention stays a reference instead.
     text = "心月狐出场。\n\n队伍(心+守岸人)。\n\n而且因为心基础数值最高。"
     fox = text.index("心月狐")
     formula = text.index("(心") + 1
@@ -589,12 +596,105 @@ def test_mixed_single_char_lock_still_triggers_on_an_unenclosed_occurrence():
         text, [], references, placeholder_prefix="__P_"
     )
 
+    assert locks == ()
+    assert locked_text == text
+    assert [ref.source for ref in references_after] == ["心", "心月狐"]
+    heart_ref = references_after[0]
+    assert (heart_ref.zh, heart_ref.en, heart_ref.category) == ("心", "Hsin", "resonator")
+
+
+def test_mixed_single_char_lock_still_triggers_when_no_longer_term_carries_the_target():
+    # The same frequencies as D-003, but the longer term's English does not
+    # contain the one-character name's official target (心魔 = Camellya's Alter
+    # Ego), so the character really is used on its own somewhere and the
+    # mention is locked as before.
+    text = "心魔出现了。\n\n队伍(心+守岸人)。\n\n而且因为心基础数值最高。"
+    demon = text.index("心魔")
+    formula = text.index("(心") + 1
+    references = [
+        _mention_reference("心", "Hsin", ((formula, formula + 1),)),
+        _context_reference(
+            "心魔", "Camellya's Alter Ego", (demon, demon + 2), category="speaker"
+        ),
+    ]
+
+    locked_text, locks, references_after = _lock_mixed_single_char_names(
+        text, [], references, placeholder_prefix="__P_"
+    )
+
     assert locks == (("__P_0000__", "心", "Hsin"),)
     assert locked_text[formula : formula + len("__P_0000__")] == "__P_0000__"
-    # The formula token is inserted, so the prose 心 keeps its own position in
-    # the latter part of the segment and stays plain text.
-    assert locked_text.endswith("而且因为心基础数值最高。")
-    assert [ref.source for ref in references_after] == ["心月狐"]
+    assert [ref.source for ref in references_after] == ["心魔"]
+
+
+def test_selective_locking_still_covers_the_ordinary_document_names(tmp_path, monkeypatch):
+    # ordinary-zh-en keeps its locks: neither 心 nor 椿 is also carried by a
+    # longer reference there (no 心月狐/Hsin, no 椿华/Camellya pair), so the
+    # mixed one-character mentions 心 x1 and 椿 x3 are still locked in place.
+    from wuwaterm.db import connect, initialize, insert_records
+    from wuwaterm.models import TermRecord
+    from wuwaterm.sentence import _call_llm_async_with_client
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "fixture")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "fixture")
+
+    db_path = tmp_path / "ordinary-names.db"
+    with connect(db_path) as conn:
+        initialize(conn)
+        insert_records(
+            conn,
+            [
+                TermRecord("resonator", "BinData/role/roleinfo.json", "1", "1", "心", "Hsin"),
+                TermRecord("resonator", "BinData/role/roleinfo.json", "2", "2", "椿", "Camellya"),
+            ],
+        )
+        conn.commit()
+    translator = SentenceTranslator(db_path)
+
+    source = (
+        "椿的爆发很高，欢迎大家选择椿。\n\n"
+        "她的心很痛。\n\n"
+        "心加入队伍，带椿一起出发。\n\n"
+        "红椿蕊很强，香椿拌豆腐很好吃。"
+    )
+    locked = translator._lock_terms_with_references(
+        translator.prepare_text_keeping_paragraphs(source),
+        to_chinese=False,
+        allow_nfkc_spelling=True,
+    )
+
+    assert [(zh, en) for _, zh, en in locked.locks] == [
+        ("椿", "Camellya"),
+        ("椿", "Camellya"),
+        ("心", "Hsin"),
+        ("椿", "Camellya"),
+    ]
+    assert locked.references == ()
+    assert "红椿蕊" in locked.locked_text
+    assert "香椿拌豆腐" in locked.locked_text
+
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": " ok "}}]}
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await _call_llm_async_with_client(
+                client,
+                locked.locked_text,
+                locked.locks,
+                references=locked.references,
+            )
+
+    asyncio.run(run())
+    prompt = seen["body"]["messages"][0]["content"]
+    assert "心 = Hsin" not in prompt
+    assert "椿 = Camellya" not in prompt
 
 
 def test_mixed_single_char_lock_keeps_ordinary_prose_and_compound_mixing():

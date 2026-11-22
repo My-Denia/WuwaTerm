@@ -32,6 +32,7 @@ from wuwaterm.sentence import (
     _CONTEXTUAL_REFERENCE_INSTRUCTION,
     _SCOPED_REFERENCE_HEADER,
     _SCOPED_REFERENCE_INSTRUCTION,
+    _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION,
     _UNTRUSTED_SOURCE_INSTRUCTION,
     _call_llm_async_with_client,
 )
@@ -705,7 +706,104 @@ def test_competing_official_pairs_are_alternatives_not_a_lock(tmp_path):
         references=locked.references,
     )
     assert _SCOPED_REFERENCE_INSTRUCTION in prompt
+    assert _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION in prompt
     assert "Reference occurrence ranges" not in prompt
+
+
+def test_competing_speaker_pair_gets_the_speaker_label_rule(tmp_path):
+    # ordinary-en-zh#p1: "Use a Basic Tuner first, then the Tuner." came back as
+    # 调音师 because the (speaker) pair reached the model first with nothing
+    # saying a speaker label is not an item. Only a surface that carries both a
+    # (speaker) entry and another kind of entry earns the rule.
+    translator = _service(
+        tmp_path,
+        (
+            _record("调音师", "Tuner", category="speaker", table="speaker"),
+            TermRecord(
+                category="item",
+                source_file="BinData/item/iteminfo.json",
+                source_id="tier-base:36000011",
+                text_key="tier-base:36000011",
+                zh="调谐器",
+                en="Tuner",
+            ),
+        ),
+    )
+
+    locked = _lock(translator, "Use a Tuner first, then the Tuner.", to_chinese=True)
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        to_chinese=True,
+        references=locked.references,
+    )
+
+    assert "Tuner = 调音师 (speaker)" in prompt
+    assert "Tuner = 调谐器 (item)" in prompt
+    assert _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION in prompt
+    # The rule rides immediately after the competing-pairs instruction, so a
+    # reader of the prompt sees the exception in the same block.
+    assert (
+        _SCOPED_REFERENCE_INSTRUCTION + _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION
+    ) in prompt
+
+
+def test_plain_references_keep_the_prompt_without_the_speaker_label_rule(tmp_path):
+    # No competing (speaker) pair: a single-meaning reference set must reach the
+    # model with the prompt bytes it carried before the rule existed.
+    translator = _service(
+        tmp_path,
+        (
+            _record("今汐", "Jinhsi"),
+            _record("调音师", "Tuner", category="speaker", table="speaker"),
+        ),
+    )
+
+    locked = _lock(translator, "今汐登场，调音师到场。", to_chinese=False)
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+
+    assert _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION not in prompt
+    assert _SCOPED_REFERENCE_INSTRUCTION not in prompt
+    assert prompt == (
+        "Translate Chinese Wuthering Waves text into English. "
+        + _UNTRUSTED_SOURCE_INSTRUCTION
+        + "Keep all placeholders exactly unchanged. "
+        "Do not paraphrase locked official terms. Return English only.\n"
+        "Locked terms:\n\n"
+        + _CONTEXTUAL_REFERENCE_INSTRUCTION
+        + "Dictionary term references:\n"
+        "今汐 = Jinhsi (resonator)\n"
+        "调音师 = Tuner (speaker)"
+    )
+
+
+def test_competing_pairs_without_a_speaker_keep_the_prompt_without_the_rule(tmp_path):
+    # 守岸人 carries two resonator pairs (Shorekeeper / The Shorekeeper). That is
+    # a competing-pair request and still gets the alternatives instruction, but
+    # no speaker is involved, so the label rule must not appear: it talks about
+    # (speaker) meanings that this request does not offer.
+    translator = _service(
+        tmp_path,
+        (
+            _record("守岸人", "Shorekeeper"),
+            _record("守岸人", "The Shorekeeper"),
+        ),
+    )
+
+    locked = _lock(translator, "守岸人登场。", to_chinese=False)
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+
+    assert references_need_scope_instruction(locked.references) is True
+    assert _SCOPED_REFERENCE_INSTRUCTION in prompt
+    assert _SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION not in prompt
 
 
 @pytest.mark.parametrize("derived_count", [1, 6])
