@@ -242,12 +242,46 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "dec0ea3aaa4f2a3ba24dbf577a4eb2c9eede6ee8",
-        "tree": "033bff47f4eb80603f6fc95389500d25cd9fceca",
+        "commit": "8c0c4a9f87742b97a6bfa0496dc5100336393861",
+        "tree": "69f0965d46ea9aadc58f0605d60f97117d0d770c",
         "status": "success",
-        "status_note": "README-only release record (#39) on top of the release source d0bd6c4b. The locked-dependency audit passed on this commit (run 44950097813); source CI run 44942744840 and release build run 44943730174 passed on d0bd6c4b."
+        "status_note": "The v0.6.4 release source (#41), which is also this repository's main. Main CI push run 45014621283, Dependency audit run 45014621284 and release build run 45015537107 all passed on this commit."
       },
       "release": {
+        "version": "0.6.4",
+        "tag": "v0.6.4",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.4",
+        "published_at": "2026-11-22T11:17:04Z",
+        "source_commit": "8c0c4a9f87742b97a6bfa0496dc5100336393861",
+        "source_tree": "69f0965d46ea9aadc58f0605d60f97117d0d770c",
+        "assets": [
+          "WuwaTerm-0.6.4-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.6.4-windows-x64.zip": "63fb9750d28ea984fdd14949e543c01ec18b47456cd52a2c1f985a7c1f62acbf",
+          "manifest.json": "1742ef481c1de1e89cece4b13d05c76644a9d7e407ec7e45f2f36bf90907c5b5",
+          "SHA256SUMS": "710fa1907181bd6b454469bfb9c8d6ec8913d47d6e68134c98eb4ecb12a035e4"
+        },
+        "zip_sha256": "63fb9750d28ea984fdd14949e543c01ec18b47456cd52a2c1f985a7c1f62acbf",
+        "signed": false,
+        "note": "v0.6.4 ships Windows-side duplicate-source segment attribution hardening (MY-350; cross-client Web/SPEC consistency remains open), transient manual-split suppression during translation (MY-379), 150% DPI segment list wrap (MY-364), About version display (MY-367), 150% DPI SpinBox vector chevron arrows (MY-368) and 150% DPI frameGeometry right-edge clamp (MY-366) (#40), then bumps the package version to 0.6.4 (#41). Manuscript formats v1 through v4, the HTTP API contract and the pinned contract sources (Core 9a4f680f, Web v0.4.3 ba8d01b2) are unchanged. The release ZIP is 57,324,001 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) and is built from 8c0c4a9f by release run 45015537107 after main CI push run 45014621283."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v4",
+        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.6.4: main CI push run 45014621283 and Dependency audit run 45014621284 passed on 8c0c4a9f, and release build run 45015537107 passed on the same commit. The three published assets (WuwaTerm-0.6.4-windows-x64.zip 57,324,001 bytes, manifest.json 283 bytes, SHA256SUMS 97 bytes) were downloaded anonymously, matched sha256sum -c SHA256SUMS and passed unzip -t; the release is unsigned.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/8c0c4a9f87742b97a6bfa0496dc5100336393861/README.md"
+      ],
+      "source_version": "0.6.4",
+      "previous_release": {
         "version": "0.6.3",
         "tag": "v0.6.3",
         "status": "released",
@@ -267,43 +301,9 @@
         },
         "zip_sha256": "1242766292883790ff034f1900aaed4be600e33cf76c193442e0fe94eff9148a",
         "signed": false,
-        "note": "v0.6.3 extracts the document run controller from the manuscript view (#36) and types the client boundary (#37), then prepares the release (#38). DocumentRunController is pure Python and owns the run; a narrow WorkbenchApiClient Protocol and typed ReviewReport and SemanticReviewReport structures replace the view's own access, and the edit, undo, term-choice and semantic-decision commands move into the pure Python module document_edits.py. Manuscript formats v1 through v4 and the HTTP API contract are unchanged. The release ZIP is 57,318,522 bytes and is built from d0bd6c4b by release run 44943730174 after source CI run 44942744840; contracts/sources.json pins the Web contract source to WuwaTerm-Web v0.4.3 (ba8d01b2). The release record and verification are in README at dec0ea3 (#39)."
+        "note": "v0.6.3 extracts the document run controller from the manuscript view (#36) and types the client boundary (#37), then prepares the release (#38). DocumentRunController is pure Python and owns the run; a narrow WorkbenchApiClient Protocol and typed ReviewReport and SemanticReviewReport structures replace the view's own access, and the edit, undo, term-choice and semantic-decision commands move into the pure Python module document_edits.py. Manuscript formats v1 through v4 and the HTTP API contract are unchanged. The release ZIP is 57,318,522 bytes and is built from d0bd6c4b by release run 44943730174 after source CI run 44942744840; contracts/sources.json pins the Web contract source to WuwaTerm-Web v0.4.3 (ba8d01b2). The release record and verification are in README at dec0ea3 (#39). Kept as history after v0.6.4; the release and its assets are still published. v0.6.2 and earlier remain on the release page."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v4",
-        "note": "The client reads wuwaterm-manuscript-v1, v2, v3 and v4, and writes the lowest format that holds the content: a v4-only limit (more than 32 findings, resolutions or choices, or a not_evaluated reason) is what moves a file up. Local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.6.3: source CI run 44942744840 and the locked-dependency audit run 44942744792 passed on d0bd6c4b, and release build run 44943730174 passed on the same commit. The three published assets were downloaded anonymously and matched SHA256SUMS; the ZIP is 57,318,522 bytes and the manifest records validation_run_id 44942744840 with signed false. It is unsigned, and the release record reports no --self-check run for this version.",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/dec0ea3aaa4f2a3ba24dbf577a4eb2c9eede6ee8/README.md"
-      ],
-      "source_version": "0.6.3",
-      "previous_release": {
-        "version": "0.6.2",
-        "tag": "v0.6.2",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.2",
-        "published_at": "2026-11-20T15:15:07Z",
-        "source_commit": "f60e14618b60eacf9841c4b1aca5d3e427fa37a0",
-        "source_tree": "da82a0ee64f01ecea9e13030f8420c43f141644e",
-        "assets": [
-          "WuwaTerm-0.6.2-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.6.2-windows-x64.zip": "62d3183cd51077d8aa218f07fa516bf3f6255369c9b0e8ac2d83e2263c94dcba",
-          "manifest.json": "10f1ecd93084b22de714ebe99086a9668ec8f6f45f5d8e507c1578cb3aac261b",
-          "SHA256SUMS": "21fd57ab3a680a9d1cabad3ff0b88c17394c68bb7e001d8fcee19eb80ce0121f"
-        },
-        "zip_sha256": "62d3183cd51077d8aa218f07fa516bf3f6255369c9b0e8ac2d83e2263c94dcba",
-        "signed": false,
-        "note": "v0.6.2 centralizes long-manuscript segment review state and scheduling (#34): the domain layer supplies the state, live-basis probe and next segment to review, and the Qt workbench uses those results. With terminology review enabled, reopening first obtains the current service basis before scheduling needed terminology and semantic reviews. Manuscript formats v1 through v4 and the HTTP API contract are unchanged. The release ZIP is 57,296,633 bytes and is built from f60e1461 by release run 44759124071 after source CI run 44747897498. The release record and verification are in README at f4f0e7ef (#35). Kept as history after v0.6.3; the release and its assets are still published."
-      },
-      "adoption_note": "0.6.3 is published. Adoption is unknown: no record shows whether the owner desktop runs the published 0.6.3 ZIP."
+      "adoption_note": "0.6.4 is published. Adoption is unknown: no installed copy is recorded on the owner desktop yet."
     },
     {
       "id": "web",
