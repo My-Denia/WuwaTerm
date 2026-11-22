@@ -39,6 +39,7 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     extract_llm_content as _extract_llm_content,
     has_structured_budget_signal as _has_structured_budget_signal,
     llm_error_from_response as _llm_error_from_response,
+    log_llm_failure,
     require_nonblank_llm_output as _require_nonblank_llm_output,
     safe_llm_failure_diagnostic,
     structured_llm_error_text as _structured_llm_error_text,
@@ -495,10 +496,7 @@ class SentenceTranslator:
             return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
             diagnostic = safe_llm_failure_diagnostic(exc)
-            LOGGER.warning(
-                "llm translation failed reason=%s",
-                diagnostic.reason,
-            )
+            log_llm_failure(diagnostic)
             return exc.user_message
 
     async def translate_async(
@@ -570,11 +568,7 @@ class SentenceTranslator:
                 raise
             # Swallowed here by contract (caller gets the notice text), so
             # this is the only place the failure reason can reach the logs.
-            diagnostic = safe_llm_failure_diagnostic(exc)
-            LOGGER.warning(
-                "llm translation failed reason=%s",
-                diagnostic.reason,
-            )
+            log_llm_failure(safe_llm_failure_diagnostic(exc))
             return exc.user_message
 
     def translate_protected(
@@ -1451,11 +1445,30 @@ async def _call_llm_async_with_client(
         if html_mode:
             system_content += _HTML_MODE_INSTRUCTION_ZH
     else:
+        # A locked span is a placeholder the model must hand back untouched.
+        # Saying that only as "keep all placeholders exactly unchanged" is not
+        # enough next to a ``Locked terms:`` line that spells out the same
+        # term's English: a recipe-shaped segment such as a parenthesised team
+        # formula invites the model to write the official English word where
+        # the token was, and the fail-closed restore then rejects the whole
+        # answer as ``missing_placeholder``. With no locks the plain sentence
+        # stays byte-for-byte what it was, so a request that cannot carry a
+        # placeholder keeps its exact prompt.
+        placeholder_instruction = "Keep all placeholders exactly unchanged. "
+        if locks and not html_mode:
+            placeholder_instruction = (
+                "Placeholder tokens (such as __WUWA_TERM_...__) are mandatory protocol "
+                "syntax, not natural-language output. Copy every placeholder token "
+                "byte-for-byte exactly once (including inside parentheses or formulas like "
+                "'(TOKEN+A+B)'). Never replace a placeholder with the official term shown "
+                "under Locked terms; the server validates and restores official terms after "
+                "your response.\n"
+            )
         system_content = (
             "Translate Chinese Wuthering Waves text into English. "
             + _UNTRUSTED_SOURCE_INSTRUCTION
-            + "Keep all placeholders exactly unchanged. "
-            "Do not paraphrase locked official terms. Return English only.\n"
+            + placeholder_instruction
+            + "Do not paraphrase locked official terms. Return English only.\n"
         )
         if html_mode:
             system_content += _HTML_MODE_INSTRUCTION

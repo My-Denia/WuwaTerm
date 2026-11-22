@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 
 import httpx
 import pytest
@@ -25,6 +27,8 @@ from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.models import TermRecord
 from wuwaterm.sentence import (
     SentenceTranslator,
+    TRANSLATION_UNAVAILABLE_NOTICE,
+    LLMTranslationError,
     _CONTEXTUAL_REFERENCE_INSTRUCTION,
     _SCOPED_REFERENCE_HEADER,
     _SCOPED_REFERENCE_INSTRUCTION,
@@ -39,7 +43,7 @@ from wuwaterm.term_preparation import (
 )
 
 
-def _service(tmp_path, records, metadata=()):
+def _service(tmp_path, records, metadata=(), transport=None):
     path = tmp_path / "sentence-refs.db"
     with connect(path) as conn:
         initialize(conn)
@@ -49,7 +53,7 @@ def _service(tmp_path, records, metadata=()):
         )
         insert_records(conn, records)
         conn.commit()
-    return SentenceTranslator(path)
+    return SentenceTranslator(path, llm_transport=transport)
 
 
 def _record(zh: str, en: str, category: str = "resonator", table: str = "a") -> TermRecord:
@@ -840,3 +844,118 @@ class _Context:
 
 def _context():
     return _Context()
+
+
+# The zh->en counterpart of the en->zh protocol sentence: a locked span is a
+# placeholder the model has to hand back untouched, and saying so only as
+# "keep all placeholders exactly unchanged" sat next to a `Locked terms:` line
+# that spells out the same term's English.
+_ZH_EN_PLACEHOLDER_PROTOCOL = (
+    "Placeholder tokens (such as __WUWA_TERM_...__) are mandatory protocol "
+    "syntax, not natural-language output. Copy every placeholder token "
+    "byte-for-byte exactly once (including inside parentheses or formulas like "
+    "'(TOKEN+A+B)'). Never replace a placeholder with the official term shown "
+    "under Locked terms; the server validates and restores official terms after "
+    "your response.\n"
+)
+_PLAIN_PLACEHOLDER_SENTENCE = "Keep all placeholders exactly unchanged. "
+_PLACEHOLDER_TOKEN_RE = re.compile(r"__WUWA_TERM_[0-9a-f]{16}_[0-9]{4,}__")
+
+
+def test_zh_en_locked_spans_carry_the_placeholder_protocol(tmp_path):
+    # 椿的红椿蕊很强: the admitted 椿 is locked in place, so the request now
+    # carries a token the model could be tempted to write as `Camellya` --
+    # exactly the shape that made D-003's parenthesised team formulas fail
+    # fail-closed restore on a 200 OK answer.
+    translator = _service(tmp_path, (_record("椿", "Camellya"),))
+
+    locked = _lock(translator, "椿的红椿蕊很强。", to_chinese=False)
+    assert len(locked.locks) == 1
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+
+    assert _ZH_EN_PLACEHOLDER_PROTOCOL in prompt
+    assert _PLAIN_PLACEHOLDER_SENTENCE not in prompt
+    assert prompt.startswith(
+        "Translate Chinese Wuthering Waves text into English. "
+        + _UNTRUSTED_SOURCE_INSTRUCTION
+        + _ZH_EN_PLACEHOLDER_PROTOCOL
+        + "Do not paraphrase locked official terms. Return English only.\n"
+    )
+
+
+def test_zh_en_without_locked_spans_keeps_the_plain_prompt(tmp_path):
+    # The protocol sentence is paid for only by a request that carries a
+    # placeholder. A plain non-locked zh->en request keeps the pre-admission
+    # prompt byte for byte, which is what makes the change auditable.
+    translator = _service(tmp_path, (_record("今汐", "Jinhsi"),))
+
+    locked = _lock(translator, "今汐登场。", to_chinese=False)
+    assert locked.locks == ()
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        references=locked.references,
+    )
+
+    assert prompt == _PLAIN_PROMPT_ZH_EN
+    assert _ZH_EN_PLACEHOLDER_PROTOCOL not in prompt
+    assert _PLAIN_PLACEHOLDER_SENTENCE in prompt
+
+
+def test_zh_en_html_mode_keeps_its_structural_placeholder_instruction(tmp_path):
+    # Markup requests already carry the structural-placeholder sentence; the
+    # plain-text protocol sentence would only compete with it.
+    translator = _service(tmp_path, (_record("椿", "Camellya"),))
+
+    locked = _lock(translator, "椿的红椿蕊很强。", to_chinese=False)
+    prompt = _system_prompt(
+        locked_text=locked.locked_text,
+        locks=locked.locks,
+        html_mode=True,
+    )
+
+    assert _ZH_EN_PLACEHOLDER_PROTOCOL not in prompt
+    assert _PLAIN_PLACEHOLDER_SENTENCE in prompt
+    assert "copy every structural placeholder exactly once" in prompt
+
+
+def test_restore_rejection_carries_its_detail_and_logs_no_source_text(
+    tmp_path, caplog
+):
+    # D-003's actual failure: the model answered 200 OK with the official
+    # English term where the token was. The answer is rejected fail-closed and
+    # the diagnostic has to say which placeholder rule broke -- and how many
+    # tokens it saw -- so an offline harness can tell this apart from a
+    # provider timeout. Neither the log nor the diagnostic carries text.
+    def expand_token(request):
+        user_text = json.loads(request.content.decode())["messages"][-1]["content"]
+        content = _PLACEHOLDER_TOKEN_RE.sub("Camellya", user_text)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    translator = _service(
+        tmp_path,
+        (_record("椿", "Camellya"),),
+        transport=httpx.MockTransport(expand_token),
+    )
+    locked = _lock(translator, "椿的红椿蕊很强。", to_chinese=False)
+    placeholder = locked.locks[0][0]
+    with pytest.raises(LLMTranslationError) as excinfo:
+        locked.restore("Camellya的红椿蕊很强。", to_en=True)
+    assert excinfo.value.reason == "invalid_response"
+    assert excinfo.value.diagnostic.detail == "missing_placeholder"
+    assert excinfo.value.diagnostic.expected_count == 1
+    assert excinfo.value.diagnostic.actual_count == 0
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.llm_transport"):
+        swallowed = asyncio.run(translator.translate_async("椿的红椿蕊很强。"))
+
+    assert swallowed == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "reason=invalid_response detail=missing_placeholder" in caplog.text
+    assert "expected=1 actual=0" in caplog.text
+    assert "椿的红椿蕊很强" not in caplog.text
+    assert "Camellya的红椿蕊很强" not in caplog.text
+    assert placeholder not in caplog.text

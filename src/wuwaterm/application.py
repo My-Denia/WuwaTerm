@@ -82,6 +82,7 @@ from .sentence import (
     SentenceTranslator,
     TRANSLATION_UNAVAILABLE_NOTICE as TRANSLATION_UNAVAILABLE_NOTICE,
     llm_configured as _llm_configured,
+    log_llm_failure,
     safe_llm_failure_diagnostic,
 )
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
@@ -450,11 +451,12 @@ def _llm_failure_outcome(
         raw_reason = None
     business_reason = _safe_business_reason(raw_reason)
     diagnostic = safe_llm_failure_diagnostic(exc)
-    reason = diagnostic.reason
     # The pipeline swallows the exception by contract (callers get an outcome).
     # Keep the safe diagnostic on the outcome so an HTTP adapter can correlate
-    # it with its server-minted request id without exposing exception text.
-    LOGGER.warning("llm translation failed reason=%s", reason)
+    # it with its server-minted request id without exposing exception text, and
+    # log its fixed-vocabulary detail so a rejected 200-OK answer is
+    # distinguishable from a provider failure after the fact.
+    log_llm_failure(diagnostic)
     return TranslationOutcome(
         kind=KIND_ERROR,
         text=exc.user_message,

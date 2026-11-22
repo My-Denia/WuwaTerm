@@ -17,6 +17,7 @@ import pytest
 from wuwaterm.protected_text import ProtectedStructure, ProtectedText
 from wuwaterm.sentence import SentenceTranslator
 from wuwaterm.term_preparation import (
+    _lock_mixed_single_char_names,
     TermOccurrence,
     TermReference,
     format_scoped_reference_lines,
@@ -456,3 +457,125 @@ def test_context_mode_keeps_intra_paragraph_single_newline_as_one_paragraph(
     assert "教学楼 = Academia Hall (location)" in prompts[0]
     assert "教学楼 = Academia Hall" not in prompts[1]
     assert "教学楼 = Academia Hall" not in prompts[2]
+
+
+def _mention_reference(
+    source: str,
+    en: str,
+    spans: tuple[tuple[int, int], ...],
+    *,
+    zh: str | None = None,
+    category: str = "resonator",
+) -> TermReference:
+    return TermReference(
+        source=source,
+        zh=source if zh is None else zh,
+        en=en,
+        category=category,
+        occurrences=tuple(
+            TermOccurrence(
+                start=start,
+                end=end,
+                matched_text=source,
+                segment_index=0,
+                model_start=start,
+                model_end=end,
+            )
+            for start, end in spans
+        ),
+        origin="dictionary",
+        reason="single_char_name_mention",
+    )
+
+
+def _context_reference(
+    source: str, en: str, span: tuple[int, int], *, category: str = "resonator"
+) -> TermReference:
+    start, end = span
+    return TermReference(
+        source=source,
+        zh=source,
+        en=en,
+        category=category,
+        occurrences=(
+            TermOccurrence(
+                start=start,
+                end=end,
+                matched_text=source,
+                segment_index=0,
+                model_start=start,
+                model_end=end,
+            ),
+        ),
+        origin="dictionary",
+        reason="contextual",
+    )
+
+
+def test_mixed_single_char_lock_spares_a_character_used_only_inside_longer_terms():
+    # 心 appears twice: once inside the longer official term 心月狐 and once as
+    # an admitted mention in a team formula. The longer term already carries
+    # its own prompt line, so the character is never used on its own here and
+    # the mention has nothing to be confused with: hard-locking it would add a
+    # placeholder -- and a restore failure surface -- for no priming benefit.
+    text = "心月狐出场。\n\n队伍(心+守岸人)。"
+    fox = text.index("心月狐")
+    formula = text.index("(心") + 1
+    shorekeeper = text.index("守岸人")
+    references = [
+        _mention_reference("心", "Hsin", ((formula, formula + 1),)),
+        _context_reference("心月狐", "Hsin the Moon Fox", (fox, fox + 3)),
+        _context_reference("守岸人", "Shorekeeper", (shorekeeper, shorekeeper + 3)),
+    ]
+
+    locked_text, locks, references_after = _lock_mixed_single_char_names(
+        text, [], references, placeholder_prefix="__P_"
+    )
+
+    assert locks == ()
+    assert locked_text == text
+    assert [ref.source for ref in references_after] == ["心", "心月狐", "守岸人"]
+
+
+def test_mixed_single_char_lock_still_triggers_on_an_unenclosed_occurrence():
+    # D-003's shape: the same character also appears as ordinary prose outside
+    # every longer term, so the admitted mentions stay selectively locked and
+    # the reference table drops 心 = Hsin entirely.
+    text = "心月狐出场。\n\n队伍(心+守岸人)。\n\n而且因为心基础数值最高。"
+    fox = text.index("心月狐")
+    formula = text.index("(心") + 1
+    prose = text.rindex("心")
+    assert prose != formula
+    references = [
+        _mention_reference("心", "Hsin", ((formula, formula + 1),)),
+        _context_reference("心月狐", "Hsin the Moon Fox", (fox, fox + 3)),
+    ]
+
+    locked_text, locks, references_after = _lock_mixed_single_char_names(
+        text, [], references, placeholder_prefix="__P_"
+    )
+
+    assert locks == (("__P_0000__", "心", "Hsin"),)
+    assert locked_text[formula : formula + len("__P_0000__")] == "__P_0000__"
+    # The formula token is inserted, so the prose 心 keeps its own position in
+    # the latter part of the segment and stays plain text.
+    assert locked_text.endswith("而且因为心基础数值最高。")
+    assert [ref.source for ref in references_after] == ["心月狐"]
+
+
+def test_mixed_single_char_lock_keeps_ordinary_prose_and_compound_mixing():
+    # The two shapes the lock exists for are unenclosed by definition: ordinary
+    # prose (心很重要) and a novel compound nobody lists (红椿蕊).
+    for text, source, en, admitted_at, expected in (
+        ("心很重要。\n\n心加入队伍。", "心", "Hsin", 6, "__P_0000__"),
+        ("椿的红椿蕊很强。", "椿", "Camellya", 0, "__P_0000__"),
+    ):
+        references = [
+            _mention_reference(source, en, ((admitted_at, admitted_at + 1),)),
+        ]
+        locked_text, locks, references_after = _lock_mixed_single_char_names(
+            text, [], references, placeholder_prefix="__P_"
+        )
+        assert locks == (("__P_0000__", source, en),), text
+        assert locked_text[admitted_at : admitted_at + len(expected)] == expected
+        assert references_after == ()

@@ -183,6 +183,26 @@ def safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
 _safe_llm_failure_diagnostic = safe_llm_failure_diagnostic
 
 
+def log_llm_failure(diagnostic: LLMFailureDiagnostic) -> None:
+    """Log one swallowed LLM failure with its fixed-vocabulary detail.
+
+    ``reason`` alone cannot separate a provider timeout from a 200-OK answer
+    that ``LockedSentence.restore`` rejected because a placeholder came back
+    missing or duplicated, and those two have different owners (the provider
+    versus this process' prompt-and-restore pair). ``detail`` and the two
+    counts are bounded values from this module's own vocabulary — never source
+    text, never model output — so they are safe beside the reason. Counts stay
+    absent when the failure carried none, and no caller text is logged.
+    """
+    LOGGER.warning(
+        "llm translation failed reason=%s detail=%s expected=%s actual=%s",
+        diagnostic.reason,
+        diagnostic.detail,
+        diagnostic.expected_count,
+        diagnostic.actual_count,
+    )
+
+
 def require_nonblank_llm_output(content: str) -> str:
     if not isinstance(content, str):
         raise LLMTranslationError(
