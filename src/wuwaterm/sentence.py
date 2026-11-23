@@ -93,28 +93,32 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 # One reasoning setting per direction: Chinese-to-English and English-to-Chinese
 # have different latency and quality trade-offs. Into English, thinking is off
-# by default (long segments otherwise outlast the model timeout); into Chinese
-# the mode follows the request itself (``auto``), because no single mode for the
-# direction is right: a short document answers best, and fast enough, with
-# thinking on, while a long or lock-dense one runs past the model timeout under
-# it.
+# by default (long segments otherwise outlast the model timeout). Into Chinese
+# the default leaves the choice to the provider (``omit``), the long-standing
+# request shape an unconfigured deployment already runs on; an operator who
+# wants this process to pick a mode per request opts in with ``auto``, because
+# no single mode for the direction is right: a short document answers best, and
+# fast enough, with thinking on, while a long or lock-dense one runs past the
+# model timeout under it.
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
-# Into Chinese the default is ``auto``: this process resolves one of the modes
-# above per request (see ``select_en_zh_auto_thinking``) instead of leaving the
-# choice to the provider default. Any explicit value in the variable above still
-# wins, which is what makes ``WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`` the
-# rollback to the provider-default request this default replaced. Into English
-# there is nothing to adapt: ``disabled`` is the measured answer for every
-# segment, so ``auto`` is unknown there.
+# Into Chinese the default is ``omit``: the request carries no reasoning field at
+# all and the provider decides, which is what every deployment that sets nothing
+# has always sent. ``WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`` is the opt-in:
+# this process then resolves one of the modes above per request (see
+# ``select_en_zh_auto_thinking``) instead of leaving the choice to the provider.
+# Any explicit value in the variable above wins over ``auto`` too, so a
+# deployment can pin one mode without unsetting anything. Into English there is
+# nothing to adapt: ``disabled`` is the measured answer for every segment, so
+# ``auto`` is unknown there.
 TRANSLATION_THINKING_AUTO = "auto"
 TRANSLATION_THINKING_EN_ZH_MODES = (
     *TRANSLATION_THINKING_MODES,
     TRANSLATION_THINKING_AUTO,
 )
 TRANSLATION_THINKING_ZH_EN_DEFAULT = "disabled"
-TRANSLATION_THINKING_EN_ZH_DEFAULT = TRANSLATION_THINKING_AUTO
+TRANSLATION_THINKING_EN_ZH_DEFAULT = "omit"
 # The explicit modes whose request asks the provider to reason: ``low``/``high``
 # enable it at that effort, ``omit`` asks for the provider default, which is
 # thinking on for DeepSeek.
@@ -587,6 +591,14 @@ class SentenceTranslator:
             to_chinese, locked.locked_text, lock_count=lock_count
         )
         try:
+            # One segment gets at most one corrective call on top of its first
+            # attempt, whichever kind it is (see ``_retry_without_thinking`` and
+            # ``_repaired_paragraph_translation``). The flag is what keeps a
+            # timeout fallback from chaining into a paragraph repair: after a
+            # ``low`` attempt has already timed out, that repair would spend the
+            # segment's last budget on a third call that walks back into the
+            # exact mode that just overran, the one call least likely to answer.
+            corrective_call_used = False
             try:
                 translated = await self._call_llm_async_limited(
                     locked.locked_text,
@@ -608,11 +620,14 @@ class SentenceTranslator:
                     before_llm_call=before_llm_call,
                     thinking_mode=thinking_mode,
                 )
+                corrective_call_used = True
             translated = _require_nonblank_llm_output(translated)
             restored = locked.restore(translated, to_en=not to_chinese)
             if context is None:
                 return restored
             regrouped = _regroup_lines_into_source_paragraphs(prepared, restored)
+            if corrective_call_used:
+                return regrouped
             repaired = await self._repaired_paragraph_translation(
                 locked,
                 prepared,
@@ -658,6 +673,10 @@ class SentenceTranslator:
         little budget left, a guard that refuses the second call, or a retry that
         fails on its own. A request that already timed out cannot be made worse
         by trying, and it is not made slower than the budget it has left.
+
+        This call is the segment's one corrective call: the caller marks it used
+        and skips the paragraph repair, so a segment whose ``low`` attempt timed
+        out never spends a third call stepping back up into ``low``.
         """
         if not to_chinese or failure.reason != "timeout":
             raise failure
@@ -724,6 +743,10 @@ class SentenceTranslator:
         paragraph count, and ``None`` in every other case, which leaves the first
         attempt's translation in place: a successful first call is never turned
         into a failure by the repair that was meant to improve it.
+
+        This is a segment's one corrective call, and it runs at most once: the
+        caller reaches it only when the first attempt answered and no timeout
+        fallback was spent (see ``translate_async``).
         """
         source_layout = _paragraph_line_counts(prepared)
         if len(source_layout) < 2:
@@ -1654,10 +1677,11 @@ def _translation_thinking_mode(to_chinese: bool) -> str:
     The mode comes from ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` for a request
     into Chinese and ``WUWATERM_TRANSLATION_THINKING_ZH_EN`` for one into
     English, read per call. A blank value is that direction's default
-    (``disabled`` into English, ``auto`` into Chinese); an unknown value falls
+    (``disabled`` into English, ``omit`` into Chinese); an unknown value falls
     back to the same default rather than failing every translation. ``auto`` is
-    only a value into Chinese: into English no request shape needs it, so it is
-    unknown there and takes that direction's warning-and-default path.
+    accepted only into Chinese, where it opts into per-request selection: into
+    English no request shape needs it, so it is unknown there and takes that
+    direction's warning-and-default path.
     """
     if to_chinese:
         env, default = TRANSLATION_THINKING_EN_ZH_ENV, TRANSLATION_THINKING_EN_ZH_DEFAULT

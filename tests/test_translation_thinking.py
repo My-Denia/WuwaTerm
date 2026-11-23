@@ -3,9 +3,10 @@
 Every case reads the JSON body the real transport POSTs to an ``httpx.MockTransport`` model.
 
 Into English the mode is an instruction and is sent as written. Into Chinese the
-default is ``auto``: the request picks a mode for itself from its own shape, and
-only a value an operator names explicitly replaces that — which is what makes
-``WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`` the documented rollback.
+default is ``omit``: an unconfigured deployment sends no reasoning field and the
+provider decides, the request shape it has always sent. ``auto`` is the opt-in
+that makes the request pick a mode for itself from its own shape, and any value
+an operator names explicitly replaces ``auto`` too.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def _post(
     return model.body(), kwargs[0]
 
 
-def test_defaults_disable_thinking_into_english_and_follow_the_request_into_chinese(
+def test_defaults_disable_thinking_into_english_and_omit_the_field_into_chinese(
     monkeypatch,
 ):
     zh_en, zh_en_kwargs = _post(monkeypatch, False)
@@ -91,29 +92,43 @@ def test_defaults_disable_thinking_into_english_and_follow_the_request_into_chin
     assert list(zh_en) == [*BODY_KEYS, "thinking"] and zh_en["thinking"] == DISABLED["thinking"]
     assert "reasoning_effort" not in zh_en and "max_tokens" not in zh_en
     assert zh_en_kwargs == {"purpose": "translation", "extra_body": DISABLED}
-    # A one-line, lock-free English source is the shape `auto` thinks on.
-    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "auto"
-    assert list(en_zh) == [*BODY_KEYS, "thinking", "reasoning_effort"]
-    assert en_zh["reasoning_effort"] == "low" and en_zh["thinking"] == LOW["thinking"]
-    assert en_zh_kwargs == {"purpose": "translation", "extra_body": LOW}
+    # Into Chinese nothing is named unless an operator names it: the request is
+    # byte-identical to the one this setting never touched. The adaptive route
+    # ``auto`` offers is opt-in only.
+    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "omit"
+    assert list(en_zh) == BODY_KEYS and "reasoning_effort" not in en_zh
+    assert en_zh_kwargs == {"purpose": "translation"}
 
 
-def test_the_auto_default_routes_on_the_request_shape(monkeypatch):
-    """The default, with nothing set, is the adaptive route in both directions."""
+def test_auto_is_opt_in_and_routes_on_the_request_shape_once_set(monkeypatch):
+    """``auto`` is the opt-in; unset, the same two requests send no field at all."""
     long_document = _paragraphs(30)
 
-    short, short_kwargs = _post(monkeypatch, True)
-    heavy, heavy_kwargs = _post(monkeypatch, True, text=long_document, locks=_locks(11))
+    unset_short, unset_short_kwargs = _post(monkeypatch, True)
+    unset_heavy, unset_heavy_kwargs = _post(
+        monkeypatch, True, text=long_document, locks=_locks(11)
+    )
+
+    assert unset_short_kwargs == unset_heavy_kwargs == {"purpose": "translation"}
+    assert list(unset_short) == list(unset_heavy) == BODY_KEYS
+
+    short, short_kwargs = _post(monkeypatch, True, {EN_ZH: "auto"})
+    heavy, heavy_kwargs = _post(
+        monkeypatch, True, {EN_ZH: "auto"}, text=long_document, locks=_locks(11)
+    )
 
     assert short_kwargs == {"purpose": "translation", "extra_body": LOW}
     assert heavy_kwargs == {"purpose": "translation", "extra_body": DISABLED}
 
 
-def test_omit_is_the_rollback_to_the_provider_default_request(monkeypatch):
+def test_the_default_into_chinese_is_the_provider_default_request(monkeypatch):
+    """Nothing set and ``=omit`` are the same request, in body and in kwargs."""
+    default, default_kwargs = _post(monkeypatch, True)
     omitted, omitted_kwargs = _post(monkeypatch, True, {EN_ZH: "omit"})
 
-    assert omitted_kwargs == {"purpose": "translation"}  # no extra_body keyword at all
-    assert list(omitted) == BODY_KEYS
+    assert default == omitted
+    assert default_kwargs == omitted_kwargs == {"purpose": "translation"}
+    assert list(default) == BODY_KEYS
 
 
 @pytest.mark.parametrize("raw_thinking", ["disabled", "low", "high", "omit"])
