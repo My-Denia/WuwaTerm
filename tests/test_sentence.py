@@ -4126,6 +4126,85 @@ def test_the_admission_guard_runs_before_the_fallback(monkeypatch, sample_db):
     assert len(posts) == 1
 
 
+def test_auto_timeout_fallback_never_chains_into_paragraph_repair_third_call(
+    monkeypatch, sample_db
+):
+    """One segment, one corrective call: the fallback already spent it.
+
+    Staged exactly as the production shape went: ``auto`` picked ``low`` for a
+    two-paragraph segment, that call timed out, and the fallback answered with
+    thinking off but merged the title into the body paragraph. The paragraph
+    repair used to fire after it as a third call carrying ``low`` again — the
+    mode that had just overrun — so the segment paid three model calls and
+    walked back into the shape that failed. The fallback's answer now stands.
+    """
+    translator, posts = _thinking_llm(
+        monkeypatch,
+        sample_db,
+        [httpx.ReadTimeout("slow"), MERGED_ANSWER],
+        thinking_en_zh="auto",
+    )
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    # Call 1 `low`, Call 2 `disabled`, and never a third `low`.
+    assert len(posts) == 2
+    assert [post["reasoning"] for post in posts] == [THINKING_LOW, THINKING_DISABLED]
+    assert out == MERGED_ANSWER
+    # The count sentence belongs to a repair that never ran, so the fallback's
+    # request is untouched by it.
+    assert all(
+        "paragraphs separated by blank lines" not in post["system"] for post in posts
+    )
+
+
+def test_standalone_paragraph_repair_still_runs_at_most_once(monkeypatch, sample_db):
+    """Without a timeout fallback the repair is that one correction, and only one.
+
+    The script would answer a third call happily; the budget is what stops it,
+    not the script.
+    """
+    translator, posts = _thinking_llm(
+        monkeypatch,
+        sample_db,
+        [MERGED_ANSWER, REPAIRED_ANSWER, REPAIRED_ANSWER],
+        thinking_en_zh="auto",
+    )
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert out == REPAIRED_ANSWER
+    assert len(posts) == 2
+    assert [post["reasoning"] for post in posts] == [THINKING_LOW, THINKING_LOW]
+
+
+def test_the_default_into_chinese_sends_no_corrective_call_it_cannot_justify(
+    monkeypatch, sample_db
+):
+    """The default is ``omit``, so a timeout is final until an operator opts in.
+
+    No `auto`, no timeout fallback: an unconfigured deployment keeps the single
+    request it has always sent, and the paragraph repair beside it is bounded to
+    the one call it was always allowed.
+    """
+    timing_out, timeout_posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+    )
+    with pytest.raises(LLMTranslationError) as caught:
+        _translate_plain(timing_out, "A short English line.", to_chinese=True)
+    assert caught.value.reason == "timeout"
+    assert len(timeout_posts) == 1
+    assert timeout_posts[0]["reasoning"] == {}  # nothing named, provider decides
+
+    repaired, repair_posts = _thinking_llm(
+        monkeypatch, sample_db, [MERGED_ANSWER, REPAIRED_ANSWER]
+    )
+    assert _translate_context(repaired, SMALL_SOURCE, to_chinese=True) == REPAIRED_ANSWER
+    assert len(repair_posts) == 2
+    # The one repair keeps the configured mode instead of second-guessing it.
+    assert repair_posts[0]["reasoning"] == repair_posts[1]["reasoning"] == {}
+
+
 def test_the_english_fidelity_clause_exists_only_into_english(
     monkeypatch, sample_db
 ):

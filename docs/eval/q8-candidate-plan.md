@@ -272,14 +272,18 @@ quality on a document that answers inside the timeout, and costs the whole
 segment on one that does not. `q8r1` therefore adapts per request instead of
 picking one mode for the direction, and keeps the two corrections bounded.
 
-### 6.1 Layer 1 — the request picks the mode (`auto`, now the default)
+### 6.1 Layer 1 — the request picks the mode (`auto`, opt-in)
 
-`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`, and `auto` is the default
-into Chinese. It started as an opt-in while the live evidence was incomplete
+`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`. Into Chinese the default
+stays `omit` — an unconfigured deployment keeps sending the provider-default
+request it always sent, and `auto` is the value an operator sets to have the
+process choose. It started as an opt-in while the live evidence was incomplete
 (Section 7 is that evidence), because which of the two measured shapes dominates
 a real workload could only be settled by running it. It has now been run: the
 full held-out set scored at or above every frozen gate, including the long
-documents that used to time out.
+documents that used to time out. The default stayed `omit` through the cut, on
+the owner's direction: an unconfigured deployment is not the place to spend a
+known timeout risk.
 
 `select_en_zh_auto_thinking(prepared_text, lock_count=...)` is pure and
 request-local:
@@ -292,9 +296,8 @@ Both bounds sit on the timeout side of the measurement above: 23 paragraphs with
 paragraphs / 5 locks did not answer at all. Locks count beside paragraphs because
 a placeholder-dense prompt is the other shape that reproduces text slowly. An
 explicit `omit`, `disabled`, `low` or `high` never reaches the helper — it is
-returned unchanged, so `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` restores the
-provider-default request this default replaced — and `auto` into English stays
-an unknown value (there is no request shape there to adapt).
+returned unchanged, so any named mode replaces `auto` — and `auto` into English
+stays an unknown value (there is no request shape there to adapt).
 
 ### 6.2 Layer 2 — at most one paragraph-count repair
 
@@ -321,6 +324,13 @@ else — a matching count, too little budget, a refused guard, an error, or an
 answer that still has the wrong count — returns the first attempt's translation.
 A successful first call is never degraded into an `llm_unavailable` by the repair
 meant to improve it.
+
+Layer 2 and Layer 3 are one budget, not two: a segment gets **at most one
+corrective call in total**, so it never costs more than two model calls. When
+Layer 3 has already fired, the paragraph repair is skipped even if the fallback's
+answer has the wrong count — otherwise a `low -> disabled -> low` chain would
+spend the segment's last budget walking back into the exact mode that had just
+timed out.
 
 ### 6.3 Layer 3 — at most one fast fallback on an `auto` timeout
 
@@ -352,7 +362,7 @@ byte-identical (the Chinese side of that pair is already the numerics rule).
 
 | Check | Result |
 | --- | --- |
-| default | `auto` into Chinese resolves per request; `=omit` still sends no reasoning field |
+| default | `omit` into Chinese sends no reasoning field and is byte-identical to the request before this setting existed; `=auto` opts into per-request resolution |
 | `auto` on the measured shapes | `D-009` 11 locks/30p → `disabled`, Plan B 5/10 → `disabled`, `D-012` 2/23 → `low`, `D-010` 0/2 → `low`, `ordinary` 2/6 → `low` |
 | explicit modes | `omit`/`disabled`/`low`/`high` bypass `auto` on the same shape and send exactly what they say |
 | `en->zh` first call | byte-identical prompt, one POST, `extra_body` exactly what the resolved mode sends |
@@ -413,9 +423,10 @@ candidate and were not re-costed.**
 
 ### 7.1 Adopted configuration
 
-- `WUWATERM_TRANSLATION_THINKING_EN_ZH` defaults to `auto`; every explicit
-  `omit`/`disabled`/`low`/`high` still overrides it, and the paragraph-count
-  repair never changes an explicit mode (Section 6.2).
+- `WUWATERM_TRANSLATION_THINKING_EN_ZH` defaults to `omit`; `auto` is the
+  opt-in that resolves a mode per request, every explicit
+  `omit`/`disabled`/`low`/`high` overrides it, and the paragraph-count repair
+  never changes an explicit mode (Section 6.2).
 - Model timeout `45 s`, request budget `90 s`, `segmentation-v1` (`L = 1800`),
   the OpenAPI/HTTP contracts and the product contracts are unchanged.
 - `H2` stays `held-out used`; the ledger closes at `568/569` with no further run

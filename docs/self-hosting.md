@@ -385,10 +385,11 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
 plus the timeout and concurrency bounds beside them and
 `WUWATERM_TRANSLATION_THINKING_ZH_EN` and `WUWATERM_TRANSLATION_THINKING_EN_ZH`
-(default `disabled` into English and `auto` into Chinese; `auto` picks `disabled`
-or `low` from the request's own paragraph and lock count, and any explicit
-`omit`, `disabled`, `low` or `high` replaces it — `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`
-restores the provider-default request). Known regression
+(default `disabled` into English and `omit` into Chinese; `omit` sends no reasoning
+field, so the provider default applies, and any explicit `disabled`, `low` or
+`high` names a mode. Into Chinese `auto` is the opt-in that picks `disabled` or
+`low` from the request's own paragraph and lock count —
+`WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`). Known regression
 with `disabled` into English: a character-mechanic name that contains a
 one-character resonator name may be rendered with the resonator name; set
 `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.

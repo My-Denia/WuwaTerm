@@ -103,7 +103,7 @@ Optional LLM environment variables:
   in-flight LLM calls.
 - `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into
   English) and `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese),
-  default `disabled` into English and `auto` into Chinese; `disabled`, `low`,
+  default `disabled` into English and `omit` into Chinese; `disabled`, `low`,
   `high` and `omit` are accepted in both directions and `auto` only into
   Chinese. `omit` sends neither field, so the provider default applies, which on
   DeepSeek is high-effort thinking and can outlast
@@ -111,19 +111,21 @@ Optional LLM environment variables:
   `thinking: {"type": "disabled"}`. `low` and `high` turn thinking on at that
   `reasoning_effort`. Measured into English: `disabled` removed the long-segment
   timeouts, which occur only into English, and it is the default there. Into
-  Chinese `auto` picks one of the modes for each request from the request's own
-  shape: 25 or more paragraphs or 4 or more locked official terms is sent
-  `disabled`, anything shorter as `low`. That split follows the measurement
-  behind it — long or lock-dense documents ran past the model timeout with
-  thinking on and answered in about 3 s with it off, while a 23-paragraph
-  document answered in 20.7 s under `low` — and a full held-out run scored it at
-  or above every frozen gate, including the long documents that used to time out.
-  Setting any explicit `omit`, `disabled`, `low` or `high` replaces `auto` in
-  that direction, so `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` restores the
-  provider-default request this default replaced. Known regression with
-  `disabled` into English: a character-mechanic name that contains a
-  one-character resonator name may be rendered with the resonator name; set
-  `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.
+  Chinese `omit` is the default and names nothing, so an unconfigured
+  deployment sends exactly the request it always sent. `auto` is the opt-in that
+  picks one of the modes per request from the request's own shape: 25 or more
+  paragraphs or 4 or more locked official terms is sent `disabled`, anything
+  shorter as `low`. That split follows the measurement behind it — long or
+  lock-dense documents ran past the model timeout with thinking on and answered
+  in about 3 s with it off, while a 23-paragraph document answered in 20.7 s
+  under `low` — and a full held-out run scored it at or above every frozen gate,
+  including the long documents that used to time out. Setting any explicit
+  `omit`, `disabled`, `low` or `high` replaces `auto` in that direction, so a
+  deployment that opted in can pin one mode without unsetting `auto`. Known
+  regression with `disabled` into English: a character-mechanic name that
+  contains a one-character resonator name may be rendered with the resonator
+  name; set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous
+  behaviour.
   Translation requests only; a blank value is that direction's default and an
   unknown value logs a warning naming the variable and uses that default. Read
   on every request.
@@ -152,11 +154,12 @@ user-facing unavailable notice and HTTP 503 `llm_unavailable` envelope stay the
 same; the specific detail is available in server diagnostics. Ordinary HTTP
 errors retain their existing classification.
 
-A strict endpoint is the case for an explicit `omit` in each direction it
-serves. Into Chinese `auto` is the default and sends the reasoning fields (a
-short request as `low`, a long or lock-dense one as `disabled`), so such a
-deployment needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` there. The two
-corrective calls described under
+A strict endpoint is served by the directions' defaults: `disabled` into English
+and `omit` into Chinese both send only the fields the endpoint accepts. Into
+Chinese `auto` is the opt-in that sends the reasoning fields (a short request as
+`low`, a long or lock-dense one as `disabled`), so a deployment that opts in
+there needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or a provider that
+supports them. The two corrective calls described under
 [translation strategy](#llm-configuration) — one paragraph-count repair and one
 fast fallback on an `auto` timeout — are the only retries in the translation
 path, each at most one attempt, and a request rejected by the provider is still
