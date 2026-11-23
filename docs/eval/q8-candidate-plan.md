@@ -426,7 +426,9 @@ candidate changes all `34` `R` requests rather than `4`. The other `30` were not
 re-costed and their final request identity was not re-derived here (the
 held-out bundles are not in this repository), so **full `R` non-regression under
 the final source is an open unknown, not a claim**; running them and
-re-deriving the manifest diff belong to the next authorized run.
+re-deriving the manifest diff belong to the next authorized run. *(Update:
+the authorized full `34/34` `R` re-evaluation against final `v0.11.0` was
+subsequently completed and closes this open unknown; see Section 8 below.)*
 
 ### 7.1 Adopted configuration
 
@@ -436,5 +438,33 @@ re-deriving the manifest diff belong to the next authorized run.
   never changes an explicit mode (Section 6.2).
 - Model timeout `45 s`, request budget `90 s`, `segmentation-v1` (`L = 1800`),
   the OpenAPI/HTTP contracts and the product contracts are unchanged.
-- `H2` stays `held-out used`; the ledger closes at `568/569` with no further run
-  planned.
+- `H2` stays `held-out used`; Section 7 closed at `568/569` before the
+  subsequent Section 8 full `R` verification (`602/606`).
+
+## 8. Final `v0.11.0` Full `R` Verification (`602/606`, 34 POSTs) and Production `auto` Adoption
+
+Following owner authorization after `v0.11.0` (`074f3cb7`), the open Section 7
+gap was closed with a clean full `R` re-evaluation (frozen `full-R.json`
+`506a4f0c...`, `30` documents / `34` segments) executed directly against final
+`v0.11.0` (`074f3cb7`, `src` tree `f9fc89aa...`), the `12,097`-row production
+dictionary (`2bc0154b...`), and `zh->en` `disabled`:
+
+- **Budget and run integrity**: `34` planned live POSTs (`34/34` succeeded,
+  `0` failures, `0` rejections, `0` re-sampling, `0` `q5` outputs mixed into
+  candidate scoring); ledger verified `568 -> 602` against the `606` ceiling
+  (`4` spare POSTs left unused). All `34` wire requests carried
+  `thinking={"type":"disabled"}`.
+- **Deterministic scores (`R-v0110.json`, baseline cross-check `664/120/38` matching `q4`)**:
+  - `M-Gold`: **`667/675`** (extended `668/675`, matching `q5`'s `667/675`; floor `>= 664/675`) — **PASS**.
+  - `Set 1`: **`119/124`** (`q5`: `120/124`; floor `>= 119/124`) — **PASS** (single diff vs `q5` on `A1` `连携技能` / `Concerto Skill`).
+  - `Set 2`: **`38/39`** (`q5`: `38/39`; floor `>= 38/39`) — **PASS**.
+  - Target spot checks (`R1-A3`, `R1-A5`, `R1-B1`): all complete with `0`
+    placeholder rejections and `0` `Camellya` leaks.
+- **Step 2a production config adoption**: `WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`
+  was explicitly enabled only in the VPS API `.env` file (verified separate from
+  the independent Telegram service's `.env`), recreating only `wuwaterm-api`
+  with the existing `r11` runtime image (`sha256:aa510a67...`) without image
+  rebuilds, dictionary changes, or Telegram restarts. Core's open-source default
+  remains `omit`, and `wuwaterm-telegram` (`0.4.1`) plus the `12,097`-row
+  `terms.db` remain untouched. This records production configuration adoption
+  only, without claiming `q8r1` experimental metrics as production telemetry.
