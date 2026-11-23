@@ -12,7 +12,26 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.10.3`, which delivers
+  published tag. The latest published Core release is `v0.11.0`, a dictionary
+  and translation release on top of `v0.10.3`: the CJK matcher moves to
+  `wuwaterm-cjk-matcher-v9`, which admits a single-character name only at a
+  plausible right boundary and counts `有` as a particle, and the pinned `3.7`
+  data yields eight dictionary rows it did not have before (the seven remaining
+  `Advertising_VersionTitle_30`–`36` titles and the item base `调谐器` / `Tuner`
+  beside the speaker `调音师` / `Tuner`), so this release needs a full `build-db`
+  rebuild and a runtime-only update changes none of it (#300). Reference
+  admission is occurrence-scoped, `zh->en` locks a mixed single-character name
+  selectively and disambiguates a surface that arrives as both a `(speaker)`
+  and another kind of entry, and `WUWATERM_TRANSLATION_THINKING_EN_ZH` gains an
+  opt-in `auto` that resolves the mode per request — `disabled` at 4 or more
+  locks or 25 or more paragraphs and `low` otherwise — with one
+  paragraph-count repair and one timeout fallback sharing a single corrective
+  call (#300, #302). The measured `D` `en->zh` usable `65/101 -> 93/101`,
+  `D-009` `0/30 -> 28/30` and `ordinary` `12/12` were taken with `auto`
+  explicitly opted in; the production `en->zh` default stays `omit` and
+  `zh->en` stays `disabled`, so an unconfigured deployment sends the
+  byte-identical provider-default request it sent before the setting existed.
+  Before it is `v0.10.3`, which delivers
   documentation corrections (#289), moves the self-host installer default Web
   release to `v0.4.3` and updates the client contract pins to Web `v0.4.3` and
   Windows `v0.6.3` (#290, #297), introduces structured `TermReference` and
@@ -88,7 +107,7 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.10.3` and its published asset hashes are recorded
+  target-version file. Core `0.11.0` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
@@ -103,9 +122,9 @@ release. That boundary has not moved.
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
   `docs/self-hosting.md` name the same published release: `main`, the
-  `v0.10.2` tag and the `v0.10.3` tag record and print `v0.4.1`, the Telegram
-  release that pins Core `v0.10.1`. A Core tag can only record a client release
-  that already exists, so the `v0.10.1` tag, frozen
+  `v0.10.2`, `v0.10.3` and `v0.11.0` tags record and print `v0.4.1`, the
+  Telegram release that pins Core `v0.10.1`. A Core tag can only record a
+  client release that already exists, so the `v0.10.1` tag, frozen
   before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
   and `setup.sh`, which pins Core `v0.10.0`. An install from the `v0.10.1` tag
   therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.4.1`) or runs
@@ -118,8 +137,9 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` and the `v0.10.3` tag record and install Web `v0.4.3`;
-  the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
+  they differ. `main`, the `v0.10.3` and `v0.11.0` tags record and install Web
+  `v0.4.3`; the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and
+  install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
   `WUWATERM_WEB_VERSION=v0.4.3` or runs from `main`. A clone of `v0.9.0`
@@ -255,7 +275,7 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.3` pins Web `v0.4.3`
+  release carries. `0.10.3` and `0.11.0` pin Web `v0.4.3`
   (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
   (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends
