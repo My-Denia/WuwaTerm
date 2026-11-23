@@ -3818,7 +3818,7 @@ def test_a_dropped_paragraph_is_repaired_by_one_retry_that_names_the_count(
     monkeypatch, sample_db
 ):
     translator, posts = _thinking_llm(
-        monkeypatch, sample_db, [MERGED_ANSWER, REPAIRED_ANSWER]
+        monkeypatch, sample_db, [MERGED_ANSWER, REPAIRED_ANSWER], thinking_en_zh="auto"
     )
 
     out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
@@ -3976,7 +3976,9 @@ def test_the_repair_steps_thinking_up_when_the_first_attempt_had_none(
     source = "\n\n".join(f"Line {index}." for index in range(25))
     merged = "\n\n".join(f"译文{index}。" for index in range(24))
     repaired = "\n\n".join(f"第{index}行。" for index in range(25))
-    translator, posts = _thinking_llm(monkeypatch, sample_db, [merged, repaired])
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [merged, repaired], thinking_en_zh="auto"
+    )
 
     out = _translate_context(translator, source, to_chinese=True)
 
@@ -3991,7 +3993,7 @@ def test_an_auto_timeout_falls_back_to_one_shorter_call_without_thinking(
     monkeypatch, sample_db
 ):
     translator, posts = _thinking_llm(
-        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"], thinking_en_zh="auto"
     )
 
     out = _translate_plain(translator, "A short English line.", to_chinese=True)
@@ -4032,7 +4034,7 @@ def test_the_fallback_fits_inside_what_is_left_of_the_budget(monkeypatch, sample
     from wuwaterm import request_trace
 
     translator, posts = _thinking_llm(
-        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"], thinking_en_zh="auto"
     )
 
     async def run():
@@ -4056,7 +4058,9 @@ def test_the_fallback_fits_inside_what_is_left_of_the_budget(monkeypatch, sample
 def test_a_too_small_remaining_budget_skips_the_fallback(monkeypatch, sample_db):
     from wuwaterm import request_trace
 
-    translator, posts = _thinking_llm(monkeypatch, sample_db, [httpx.ReadTimeout("slow")])
+    translator, posts = _thinking_llm(
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow")], thinking_en_zh="auto"
+    )
 
     async def run():
         request_trace.start()
@@ -4079,7 +4083,10 @@ def test_a_fallback_that_fails_keeps_the_original_timeout_diagnostic(
     monkeypatch, sample_db
 ):
     translator, posts = _thinking_llm(
-        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), httpx.ReadTimeout("slow")]
+        monkeypatch,
+        sample_db,
+        [httpx.ReadTimeout("slow"), httpx.ReadTimeout("slow")],
+        thinking_en_zh="auto",
     )
 
     with pytest.raises(LLMTranslationError) as caught:
@@ -4092,7 +4099,7 @@ def test_a_fallback_that_fails_keeps_the_original_timeout_diagnostic(
 
 def test_the_admission_guard_runs_before_the_fallback(monkeypatch, sample_db):
     translator, posts = _thinking_llm(
-        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"]
+        monkeypatch, sample_db, [httpx.ReadTimeout("slow"), "译文"], thinking_en_zh="auto"
     )
     calls: list[int] = []
 
@@ -4162,6 +4169,34 @@ def test_the_fidelity_clause_reaches_the_request_it_belongs_to(
     assert (clause in posts[0]["system"]) is present
 
 
+def test_an_explicit_disabled_keeps_its_mode_through_a_paragraph_repair(
+    monkeypatch, sample_db
+):
+    """The repair adds the count; it does not overrule a configured mode.
+
+    Only ``auto`` picks a mode per request, so only ``auto`` may pick a different
+    one on the retry. A deployment that set ``=disabled`` for its own reasons —
+    the documented way to stay off the long-segment timeout — keeps that exact
+    request, even on the extra call.
+    """
+    translator, posts = _thinking_llm(
+        monkeypatch,
+        sample_db,
+        [MERGED_ANSWER, REPAIRED_ANSWER],
+        thinking_en_zh="disabled",
+    )
+
+    out = _translate_context(translator, SMALL_SOURCE, to_chinese=True)
+
+    assert out == REPAIRED_ANSWER
+    assert len(posts) == 2
+    assert posts[0]["reasoning"] == posts[1]["reasoning"] == THINKING_DISABLED
+    # The count sentence is still appended: the repair keeps its one reason for
+    # existing, and only the mode is left alone.
+    assert "paragraphs separated by blank lines" in posts[1]["system"]
+    assert "paragraphs separated by blank lines" not in posts[0]["system"]
+
+
 def test_a_replacement_transport_that_predates_the_knobs_gets_no_extra_call(
     monkeypatch, sample_db
 ):
@@ -4175,6 +4210,9 @@ def test_a_replacement_transport_that_predates_the_knobs_gets_no_extra_call(
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    # `auto` so the only thing standing between this transport and a corrective
+    # call is the two knobs it does not accept.
+    monkeypatch.setenv(EN_ZH_THINKING, "auto")
     seen: list[str] = []
 
     async def legacy_call(

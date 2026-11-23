@@ -82,7 +82,7 @@ def _post(
     return model.body(), kwargs[0]
 
 
-def test_defaults_disable_thinking_into_english_and_follow_the_request_into_chinese(
+def test_defaults_disable_thinking_into_english_and_send_nothing_into_chinese(
     monkeypatch,
 ):
     zh_en, zh_en_kwargs = _post(monkeypatch, False)
@@ -91,11 +91,30 @@ def test_defaults_disable_thinking_into_english_and_follow_the_request_into_chin
     assert list(zh_en) == [*BODY_KEYS, "thinking"] and zh_en["thinking"] == DISABLED["thinking"]
     assert "reasoning_effort" not in zh_en and "max_tokens" not in zh_en
     assert zh_en_kwargs == {"purpose": "translation", "extra_body": DISABLED}
-    # A one-line, lock-free English source is the shape `auto` thinks on.
-    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "auto"
-    assert list(en_zh) == [*BODY_KEYS, "thinking", "reasoning_effort"]
-    assert en_zh["reasoning_effort"] == "low" and en_zh["thinking"] == LOW["thinking"]
-    assert en_zh_kwargs == {"purpose": "translation", "extra_body": LOW}
+    # `auto` is opt-in, so an unset variable keeps the request every existing
+    # deployment already sends: no reasoning field at all.
+    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "omit"
+    assert list(en_zh) == BODY_KEYS
+    assert en_zh_kwargs == {"purpose": "translation"}  # no extra_body keyword at all
+
+
+def test_auto_is_opted_into_and_then_follows_the_request_shape(monkeypatch):
+    """The same document, with and without `auto`."""
+    long_document = _paragraphs(30)
+
+    omitted, omitted_kwargs = _post(monkeypatch, True, text=long_document, locks=_locks(11))
+    auto, auto_kwargs = _post(
+        monkeypatch, True, {EN_ZH: "auto"}, text=long_document, locks=_locks(11)
+    )
+
+    assert omitted_kwargs == {"purpose": "translation"}  # provider default
+    assert list(omitted) == BODY_KEYS
+    assert auto_kwargs == {"purpose": "translation", "extra_body": DISABLED}
+    assert {
+        key: value
+        for key, value in auto.items()
+        if key in ("thinking", "reasoning_effort")
+    } == DISABLED
 
 
 @pytest.mark.parametrize("raw_thinking", ["disabled", "low", "high", "omit"])
@@ -105,8 +124,9 @@ def test_an_explicit_en_zh_mode_bypasses_auto_and_is_sent_as_written(
     """An operator's named mode is an instruction, not a hint.
 
     Read on the request shape that ``auto`` sends with thinking OFF (30
-    paragraphs, 11 locks): the explicit value still decides, so
-    ``WUWATERM_TRANSLATION_THINKING_EN_ZH`` stays the rollback switch.
+    paragraphs, 11 locks): with ``auto`` set beside the named mode the explicit
+    value still decides, so a deployment can pin one mode without unsetting
+    ``auto`` anywhere.
     """
     explicit, explicit_kwargs = _post(
         monkeypatch,
@@ -170,7 +190,9 @@ def test_auto_into_chinese_picks_the_mode_from_the_request_shape(
     source = _paragraphs(paragraph_count)
 
     assert select_en_zh_auto_thinking(source, lock_count=locks) == expected
-    body, _ = _post(monkeypatch, True, text=source, locks=_locks(locks))
+    body, _ = _post(
+        monkeypatch, True, {EN_ZH: "auto"}, text=source, locks=_locks(locks)
+    )
     assert {
         key: value
         for key, value in body.items()
@@ -192,7 +214,9 @@ def test_auto_only_ever_sends_a_concrete_mode(monkeypatch):
         (_paragraphs(23), 2, "low"),
         (_paragraphs(30), 11, "disabled"),
     ):
-        body, kwargs = _post(monkeypatch, True, text=source, locks=_locks(locks))
+        body, kwargs = _post(
+            monkeypatch, True, {EN_ZH: "auto"}, text=source, locks=_locks(locks)
+        )
         assert body.get("reasoning_effort") != "auto"
         assert kwargs["extra_body"] == _reasoning_fields(expected)
 

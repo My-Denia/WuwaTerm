@@ -272,11 +272,17 @@ quality on a document that answers inside the timeout, and costs the whole
 segment on one that does not. `q8r1` therefore adapts per request instead of
 picking one mode for the direction, and keeps the two corrections bounded.
 
-### 6.1 Layer 1 — the request picks the mode (`auto`)
+### 6.1 Layer 1 — the request picks the mode (`auto`, opt-in)
 
-`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`, and `auto` is the new default
-into Chinese. `select_en_zh_auto_thinking(prepared_text, lock_count=...)` is pure
-and request-local:
+`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`. The default into Chinese stays
+`omit`: that is the request every existing deployment and every endpoint without
+a setting already sends, and which of the two measured shapes dominates a real
+workload is exactly what a live `en->zh` run has to show before the default
+moves. `auto` is enabled per deployment with
+`WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`.
+
+`select_en_zh_auto_thinking(prepared_text, lock_count=...)` is pure and
+request-local:
 
 - `lock_count >= 4` **or** `para_count >= 25` → `disabled`;
 - otherwise → `low`.
@@ -285,10 +291,8 @@ Both bounds sit on the timeout side of the measurement above: 23 paragraphs with
 2 locks answered in 20.7 s under `low`, while 30 paragraphs / 11 locks and 10
 paragraphs / 5 locks did not answer at all. Locks count beside paragraphs because
 a placeholder-dense prompt is the other shape that reproduces text slowly. An
-explicit `omit`, `disabled`, `low` or `high` never reaches the helper, so
-`WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` stays the rollback to the previous
-provider-default request, and `auto` into English stays an unknown value (there is
-no request shape there to adapt).
+explicit `omit`, `disabled`, `low` or `high` never reaches the helper, and `auto`
+into English stays an unknown value (there is no request shape there to adapt).
 
 ### 6.2 Layer 2 — at most one paragraph-count repair
 
@@ -306,8 +310,11 @@ references and locks plus:
 The retry starts only with at least `15 s` of request budget left
 (`request_trace.remaining_budget_seconds()`), is bounded by
 `min(llm_timeout, remaining - 2 s)`, runs the caller's `before_llm_call` guard so
-admission accounting and caps see it, and steps `disabled -> low` when the first
-attempt had no reasoning and the document carries fewer than 4 locks. Anything
+admission accounting and caps see it, and steps `disabled -> low` only under
+`auto`, when the first attempt had no reasoning and the document carries fewer
+than 4 locks. An explicit `disabled`/`omit`/`low`/`high` keeps its mode on the
+retry too — the repair adds the paragraph count, it does not overrule a
+configured mode. Anything
 else — a matching count, too little budget, a refused guard, an error, or an
 answer that still has the wrong count — returns the first attempt's translation.
 A successful first call is never degraded into an `llm_unavailable` by the repair
@@ -343,10 +350,12 @@ byte-identical (the Chinese side of that pair is already the numerics rule).
 
 | Check | Result |
 | --- | --- |
+| default | `WUWATERM_TRANSLATION_THINKING_EN_ZH` unset sends no reasoning field (`omit`), unchanged |
 | `auto` on the measured shapes | `D-009` 11 locks/30p → `disabled`, Plan B 5/10 → `disabled`, `D-012` 2/23 → `low`, `D-010` 0/2 → `low`, `ordinary` 2/6 → `low` |
 | explicit modes | `omit`/`disabled`/`low`/`high` bypass `auto` on the same shape and send exactly what they say |
 | `en->zh` first call | byte-identical prompt, one POST, `extra_body` exactly what the resolved mode sends |
 | paragraph repair | a `2 -> 1` answer is retried once with the count sentence, then accepted when it matches; every failure path returns the first answer |
+| explicit `disabled` + repair | the retry still sends `thinking: {"type": "disabled"}` and only the count sentence is added |
 | budget | `< 15 s` left skips the repair, `< 10 s` left skips the fallback, and both bounds shrink to the remaining budget |
 | `zh->en` clause | present into English, absent into Chinese, and `en->zh` `_CONTEXT_RULES_INSTRUCTION` unchanged |
 | `scripts/validate.py` (6 steps) | green on this HEAD |

@@ -94,27 +94,25 @@ DEFAULT_LLM_MAX_CONCURRENCY = 4
 # One reasoning setting per direction: Chinese-to-English and English-to-Chinese
 # have different latency and quality trade-offs. Into English, thinking is off
 # by default (long segments otherwise outlast the model timeout); into Chinese
-# the mode follows the request itself (``auto``), because the two measured
-# failure shapes there point in opposite directions: a document with few
-# paragraph breaks and few locked names answers best, and fast enough, with
-# thinking on, while a long one with many paragraphs or many locked names runs
-# past the model timeout under it.
+# the provider default stays, which is the request every existing deployment and
+# every endpoint without a setting already sends.
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
-# Into Chinese the default is ``auto``: this process resolves one of the modes
-# above per request (see ``select_en_zh_auto_thinking``) instead of leaving the
-# choice to the provider default. Any explicit value in the variable above still
-# wins, which is what makes ``WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`` the
-# rollback switch to the behaviour this default replaced. Into English there is
-# nothing to adapt: ``disabled`` is the measured answer for every segment.
+# Into Chinese ``auto`` lets this process resolve one of the modes above per
+# request (see ``select_en_zh_auto_thinking``) instead of leaving the choice to
+# the provider default. It is opt-in, not the default: the two measured failure
+# shapes it answers point in opposite directions (below), and which of them
+# dominates a real workload is what the live run has to show before the default
+# moves. Into English there is nothing to adapt — ``disabled`` is the measured
+# answer for every segment — so ``auto`` is unknown there.
 TRANSLATION_THINKING_AUTO = "auto"
 TRANSLATION_THINKING_EN_ZH_MODES = (
     *TRANSLATION_THINKING_MODES,
     TRANSLATION_THINKING_AUTO,
 )
 TRANSLATION_THINKING_ZH_EN_DEFAULT = "disabled"
-TRANSLATION_THINKING_EN_ZH_DEFAULT = TRANSLATION_THINKING_AUTO
+TRANSLATION_THINKING_EN_ZH_DEFAULT = "omit"
 # The explicit modes whose request asks the provider to reason: ``low``/``high``
 # enable it at that effort, ``omit`` asks for the provider default, which is
 # thinking on for DeepSeek.
@@ -746,12 +744,15 @@ class SentenceTranslator:
         # A mode that had no reasoning to spend on the first attempt gets some
         # for this one: the retry is trying to lay out more structure, and on a
         # document with few enough locks that is the measured better answer. A
-        # request that was already reasoning keeps the effort it chose.
+        # request that was already reasoning keeps the effort it chose, and an
+        # explicit mode is never second-guessed — only ``auto`` picks a mode per
+        # request, so only ``auto`` may pick a different one here.
         retry_thinking_mode = thinking_mode
         if (
             thinking_mode == "disabled"
             and to_chinese
             and len(locked.locks) < EN_ZH_AUTO_LOCK_LIMIT
+            and _translation_thinking_mode(True) == TRANSLATION_THINKING_AUTO
         ):
             retry_thinking_mode = "low"
         timeout_seconds = (
