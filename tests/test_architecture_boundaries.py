@@ -704,6 +704,60 @@ def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
     assert cab.check_scripts_import_cycles() == []
 
 
+def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
+    """Pure terminology modules stay decoupled from SQLite/lookup even transitively.
+
+    ``segmentation`` currently imports ``review`` for ``paragraph_ranges`` and
+    ``segment_core`` (and is still checked directly by Rule #11); the seven
+    pure terminology modules below must not reach ``lookup``, ``db`` or
+    ``sqlite3`` even through transitive imports.
+    """
+    from scripts import check_architecture_boundaries as cab
+
+    modules = cab._pkg_modules()
+    graph = {
+        name: {
+            imported
+            for imported, _type_only, _lineno in cab._iter_import_events(path)
+            if imported in modules
+        }
+        for name, path in modules.items()
+    }
+    externals = {
+        name: {
+            imported
+            for imported, _type_only, _lineno in cab._iter_import_events(path)
+            if imported not in modules
+        }
+        for name, path in modules.items()
+    }
+    pure_term_roots = cab.PURE_MATCHING - {"segmentation"}
+    assert pure_term_roots == {
+        "cjk_span",
+        "english_plural",
+        "protected_text",
+        "skill_references",
+        "term_classification",
+        "term_matching",
+        "term_preparation",
+    }
+    for root in sorted(pure_term_roots):
+        seen: set[str] = {root}
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for neighbor in graph.get(current, ()):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        assert not (seen & cab.PURE_MATCHING_FORBIDDEN_STORAGE), (root, sorted(seen))
+        for reached in seen:
+            assert not any(
+                ext == "sqlite3" or ext.startswith("sqlite3.")
+                for ext in externals.get(reached, ())
+            ), (root, reached, sorted(externals.get(reached, ())))
+
+
 def test_pure_matching_modules_do_not_import_db_or_lookup():
     from scripts import check_architecture_boundaries as cab
 

@@ -517,6 +517,48 @@ def _write_arikatsu(
     return root
 
 
+def test_arikatsu_imports_the_version_title_family(tmp_path: Path):
+    # MY-18: the TextMap carries the whole Advertising_VersionTitle_<n> family,
+    # not just the curated title. Each member is imported by its key shape with
+    # its own source key, and a curated member keeps its one existing row.
+    # Synthetic titles: the pinned data's real ones belong to release
+    # announcements, which this repository does not copy into its tests.
+    titles = {
+        "Advertising_VersionTitle_33": ("测试标题甲", "Test Title Alpha"),
+        "Advertising_VersionTitle_34": ("测试标题乙", "Test Title Beta"),
+        # This member is curated, so it is already in CORE_TERM_KEYS.
+        "Advertising_VersionTitle_37": ("测试标题丙", "Test Title Gamma"),
+        # A made-up future member checks that import follows the key shape.
+        "Advertising_VersionTitle_100": ("测试标题丁", "Test Title Delta"),
+    }
+    ordinary = {
+        key: ("普通界面文本", "Ordinary UI text")
+        for key in (
+            "Advertising_VersionTitle_",
+            "Advertising_VersionTitle_next",
+            "Advertising_VersionTitle_34_Subtitle",
+            "Other_Advertising_VersionTitle_34",
+            "Advertising_VersionDesc_34",
+        )
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", {**titles, **ordinary}, {})
+    multitext = "Textmaps/multi_text/MultiText.json"
+
+    records = iter_records(root, "arikatsu")
+
+    imported = sorted(
+        (r.source_id, r.text_key, r.zh, r.en)
+        for r in records
+        if r.source_file == multitext
+        and r.text_key.startswith("Advertising_VersionTitle_")
+    )
+    assert imported == [
+        (key, key, titles[key][0], titles[key][1]) for key in sorted(titles)
+    ]
+    assert sum(r.text_key == "Advertising_VersionTitle_37" for r in records) == 1
+    assert not [r for r in records if r.text_key in ordinary]
+
+
 def test_arikatsu_system_bindata_tables_skip_default_rows(tmp_path: Path):
     root = tmp_path / "arikatsu"
     texts = {
@@ -716,7 +758,19 @@ def test_arikatsu_derives_base_row_only_for_complete_tier_families(
     names_checkout: Path,
 ):
     records = iter_records(names_checkout, "arikatsu")
+    # MY-18: one surface naming different things no longer kills a complete
+    # family. 调谐器 / Tuner sits beside the speaker 调音师 / Tuner, and 复苏吸雾 /
+    # Revival Inhaler beside the core term 复苏吸雾 / Revival Mist; a repeated
+    # identical pair is still dropped.
     assert [r for r in records if r.source_id.startswith("tier-base:")] == [
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:42100013",
+            "tier-base:42100013",
+            "复苏吸雾",
+            "Revival Inhaler",
+        ),
         TermRecord(
             "item",
             "BinData/item/iteminfo.json",
@@ -732,6 +786,14 @@ def test_arikatsu_derives_base_row_only_for_complete_tier_families(
             "tier-base:42100022",
             "能量袋",
             "Energy Bag",
+        ),
+        TermRecord(
+            "item",
+            "BinData/item/iteminfo.json",
+            "tier-base:36000011",
+            "tier-base:36000011",
+            "调谐器",
+            "Tuner",
         ),
     ]
     assert [(r.category, r.source_id) for r in records if r.zh == "营养块"] == [
@@ -750,37 +812,61 @@ def test_tier_base_row_owns_its_span_in_both_directions(names_lock):
     assert (ordinary.locks, ordinary.references) == ((), ())
     assert ordinary.locked_text == "The energy core of a star."
 
-    zh_source = names_lock("今天去刷能源核心。", to_chinese=False)
-    assert zh_source.locks == ()
-    assert [ref.as_tuple() for ref in zh_source.references] == [
-        ("能源核心", "能源核心", "Energy Core", "item")
+    # Isolated Chinese prose without an official game term in the paragraph
+    # suppresses the derived common-noun reference while still owning its span
+    # so inner 核心 is not extracted on its own.
+    isolated_zh = names_lock("今天去刷能源核心。", to_chinese=False)
+    assert isolated_zh.locks == ()
+    assert isolated_zh.references == ()
+
+    # Inside a paragraph with an official game term (泊金港), the derived base
+    # reaches the model as a contextual reference.
+    with_context_zh = names_lock("今天去泊金港刷能源核心。", to_chinese=False)
+    assert with_context_zh.locks == ()
+    assert [ref.as_tuple() for ref in with_context_zh.references] == [
+        ("泊金港", "泊金港", "Gold's Landing", "location"),
+        ("能源核心", "能源核心", "Energy Core", "item"),
     ]
 
 
-def test_tuner_stays_the_speaker_reference_it_was_before_tier_bases(names_lock):
-    # MY-18: bare "Tuner" is already the speaker 调音师, so 调谐器 / Tuner is
-    # not derived. Bare "Tuner" stays a contextual speaker reference carrying
-    # 调音师, as before tier bases, also where the sentence means the item:
-    # the model weighs it, nothing hard-locks it to 调谐器. A tier name locks.
-    tuner = ("Tuner", "调音师", "Tuner", "speaker")
+def test_tuner_collision_keeps_both_meanings_as_contextual_references(names_lock):
+    # MY-18: the same English surface names a speaker and an item, so both
+    # pairs reach the model as alternatives and neither becomes a hard
+    # replacement. A tier name still locks.
+    tuners = (
+        ("Tuner", "调音师", "Tuner", "speaker"),
+        ("Tuner", "调谐器", "Tuner", "item"),
+    )
     speaker = names_lock("Tuner: Hold that note.", to_chinese=True)
-    assert (speaker.locks, tuple(ref.as_tuple() for ref in speaker.references)) == ((), (tuner,))
+    assert speaker.locks == ()
+    assert tuple(ref.as_tuple() for ref in speaker.references) == tuners
 
     item = names_lock("Use a Basic Tuner first, then the Tuner.", to_chinese=True)
     assert [(zh, en) for _, zh, en in item.locks] == [("初级调谐器", "Basic Tuner")]
-    assert tuple(ref.as_tuple() for ref in item.references) == (tuner,)
+    assert tuple(ref.as_tuple() for ref in item.references) == tuners
 
+    # Lowercase prose is not the surface at all: the ordinary word stays as
+    # written and gains no reference.
     ordinary = names_lock("Bring a guitar tuner.", to_chinese=True)
-    assert (ordinary.locks, ordinary.references) == ((), ())
+    assert ordinary.locks == ()
+    assert ordinary.references == ()
+    assert ordinary.locked_text == "Bring a guitar tuner."
 
 
 def test_orphan_area_title_on_an_ordinary_word_is_only_a_reference(names_lock):
     # MY-18: 教学楼 is the Area title of Academia Hall and the everyday word
-    # for a school building. zh->en hands every category to the model as a
-    # reference, never a lock; en->zh locks only the capitalized name.
+    # for a school building. In an isolated ordinary paragraph with no official
+    # game term it emits no reference; inside a paragraph with an official game
+    # term it reaches zh->en as a reference, never a lock. en->zh locks only
+    # the capitalized name.
     school = names_lock("我们学校的教学楼很旧。", to_chinese=False)
     assert school.locks == ()
-    assert tuple(ref.as_tuple() for ref in school.references) == (
+    assert school.references == ()
+
+    in_game = names_lock("泊金港旁边的教学楼很旧。", to_chinese=False)
+    assert in_game.locks == ()
+    assert tuple(ref.as_tuple() for ref in in_game.references) == (
+        ("泊金港", "泊金港", "Gold's Landing", "location"),
         ("教学楼", "教学楼", "Academia Hall", "location"),
     )
 
@@ -876,13 +962,27 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
         )
 
     translator = SentenceTranslator(names_db, llm_transport=httpx.MockTransport(model))
-    text = "".join(DERIVED_NAME_PROSE)
-    assert asyncio.run(translator.translate_async(text)) == "translated"
-
-    [body] = bodies
-    system, user = (message["content"] for message in body["messages"])
-    assert user == text
+    # Isolated ordinary prose without official game terms receives no derived hints.
+    ordinary_text = "".join(DERIVED_NAME_PROSE)
+    assert asyncio.run(translator.translate_async(ordinary_text)) == "translated"
+    ordinary_system = bodies[-1]["messages"][0]["content"]
     for reference in (
+        "教学楼 = Academia Hall (location)",
+        "学院公寓 = Academy Dormitory (location)",
+        "能量袋 = Energy Bag (item)",
+        "生活中枢 = Living Commons (location)",
+    ):
+        assert reference not in ordinary_system
+
+    # When the same paragraph contains an official game term (泊金港), the
+    # derived names reach the model as contextual references.
+    game_text = "在泊金港附近，" + "".join(DERIVED_NAME_PROSE)
+    assert asyncio.run(translator.translate_async(game_text)) == "translated"
+
+    system, user = (message["content"] for message in bodies[-1]["messages"])
+    assert user == translator.prepare_text(game_text)
+    for reference in (
+        "泊金港 = Gold's Landing (location)",
         "教学楼 = Academia Hall (location)",
         "学院公寓 = Academy Dormitory (location)",
         "能量袋 = Energy Bag (item)",

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from pathlib import Path
 
 import httpx
@@ -579,3 +580,50 @@ def test_a_record_is_written_for_every_request_not_only_traced_ones(
 )
 def test_direction_from_target_is_closed(target, token):
     assert request_trace.direction_from_target(target) == token
+
+
+def test_remaining_budget_is_none_outside_a_request():
+    """No trace means no budget is known, which is not a budget of zero."""
+    assert request_trace.current() is None
+    assert request_trace.remaining_budget_seconds() is None
+
+
+def test_remaining_budget_is_none_for_a_request_with_no_deadline():
+    request_trace.start()
+    try:
+        assert request_trace.remaining_budget_seconds() is None
+        request_trace.set_deadline(30.0)
+        assert request_trace.remaining_budget_seconds() is not None
+    finally:
+        request_trace.reset()
+
+
+def test_remaining_budget_counts_down_and_stops_at_zero():
+    """An expired deadline reports 0.0, so a caller compares against a bound."""
+    request_trace.start()
+    try:
+        request_trace.set_deadline(0.3)
+        first = request_trace.remaining_budget_seconds()
+        assert first is not None and 0.0 < first <= 0.3
+
+        request_trace.set_deadline(0.05)
+        assert request_trace.deadline_expired() is False
+        time.sleep(0.08)
+        assert request_trace.deadline_expired() is True
+        assert request_trace.remaining_budget_seconds() == 0.0
+    finally:
+        request_trace.reset()
+
+
+def test_remaining_budget_reads_the_same_deadline_the_guard_reads():
+    """One armed deadline answers both questions, so they cannot disagree."""
+    request_trace.start()
+    try:
+        request_trace.set_deadline(0.05)
+        assert request_trace.remaining_budget_seconds() > 0.0
+        assert request_trace.deadline_expired() is False
+        time.sleep(0.08)
+        assert request_trace.remaining_budget_seconds() == 0.0
+        assert request_trace.deadline_expired() is True
+    finally:
+        request_trace.reset()

@@ -82,6 +82,7 @@ from .sentence import (
     SentenceTranslator,
     TRANSLATION_UNAVAILABLE_NOTICE as TRANSLATION_UNAVAILABLE_NOTICE,
     llm_configured as _llm_configured,
+    log_llm_failure,
     safe_llm_failure_diagnostic,
 )
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
@@ -409,9 +410,9 @@ def _dictionary_stage(
     # Direction is auto-detected from the visible text unless the caller
     # supplies an explicit target. Dictionary and LLM use the same direction.
     to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
-    result = service.lookup_exact(prepared, limit=5)
-    if result.exact and result.best:
-        official = result.best.entry.zh if to_chinese else result.best.entry.en
+    exact = translator.preferred_exact_entry(prepared, service=service)
+    if exact is not None:
+        official = exact.zh if to_chinese else exact.en
         if official:
             return _DictionaryStage(
                 prepared,
@@ -450,11 +451,12 @@ def _llm_failure_outcome(
         raw_reason = None
     business_reason = _safe_business_reason(raw_reason)
     diagnostic = safe_llm_failure_diagnostic(exc)
-    reason = diagnostic.reason
     # The pipeline swallows the exception by contract (callers get an outcome).
     # Keep the safe diagnostic on the outcome so an HTTP adapter can correlate
-    # it with its server-minted request id without exposing exception text.
-    LOGGER.warning("llm translation failed reason=%s", reason)
+    # it with its server-minted request id without exposing exception text, and
+    # log its fixed-vocabulary detail so a rejected 200-OK answer is
+    # distinguishable from a provider failure after the fact.
+    log_llm_failure(diagnostic)
     return TranslationOutcome(
         kind=KIND_ERROR,
         text=exc.user_message,
