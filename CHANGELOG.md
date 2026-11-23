@@ -79,9 +79,17 @@ does not distribute generated game data or generated SQLite databases.
   measured under the shipped `omit` default**, so they describe the opt-in, not
   an unconfigured deployment. The same run took `D` `zh-en` usable `126/131 ->
   128/131`, `ordinary` to `12/12`, and cut the 17-document `D` `en-zh` runtime
-  from `221.4 s` to `147.7 s`. Targeted `R` covered the `4` of `34` segments
-  whose request actually changes (`4/4`, no placeholder rejections, no name
-  leaks); the full `R` `34/34` set was **not** re-run and is not claimed.
+  from `221.4 s` to `147.7 s`. The targeted `R` check ran the `4` of `34`
+  segments an earlier request diff picked (`R1-B1` with its `24 + 6` locks,
+  `R1-A3#1`, `R1-A5`) and passed `4/4` with `0` placeholder rejections, `0`
+  `Camellya` leaks, `0` ordinary-`心` leaks and literal cues unchanged. That diff
+  predates this release's `zh->en` fidelity sentence
+  (`_ZH_EN_FIDELITY_INSTRUCTION`), which every `zh->en` request carrying a
+  context receives while the evaluation manifest passes a context for every
+  segment, so the final source changes all `34` `R` requests. The other `30`
+  segments were not re-run and their final request identity was not re-derived,
+  so **full `R` non-regression under the final source is an open unknown, not a
+  claim**.
 - The model timeout (`45 s`), the request budget (`90 s`), `segmentation-v1`
   (`L = 1800`), the OpenAPI/HTTP contracts and the product contracts are
   unchanged, and `H2` stays `held-out used` (#300, #302).
