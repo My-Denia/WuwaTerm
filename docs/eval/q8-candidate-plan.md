@@ -414,12 +414,19 @@ Arm notes from the same run:
 - `D` `en-zh` runtime fell by a third for the same denominator because the arm
   that used to burn `45 s` per attempt on `D-009` now answers in `3.7 s`.
 
-Targeted `R` regression check: the `4` of `34` segments whose request actually
-changes (`R1-B1` with its `24 + 6` locks, `R1-A3#1`, `R1-A5`) completed `4/4`
+Targeted `R` regression check: the `4` of `34` segments an earlier request diff
+picked (`R1-B1` with its `24 + 6` locks, `R1-A3#1`, `R1-A5`) completed `4/4`
 with `0` placeholder rejections, `0` `Camellya` leaks, `0` ordinary-`心` leaks
 and literal cues unchanged. **This is a targeted `4/34` check, not a rerun of the
-full `R` set of `34/34` segments; the remaining `30` are unchanged by this
-candidate and were not re-costed.**
+full `R` set of `34/34` segments.** The `4` were picked from the Section 4
+`q7 -> q8` diff, and that diff predates Section 6.4's fidelity sentence: the
+sentence is appended to every `zh->en` request carrying a context, while
+`scripts/build_q7_eval_manifest.py` passes one for every segment, so the final
+candidate changes all `34` `R` requests rather than `4`. The other `30` were not
+re-costed and their final request identity was not re-derived here (the
+held-out bundles are not in this repository), so **full `R` non-regression under
+the final source is an open unknown, not a claim**; running them and
+re-deriving the manifest diff belong to the next authorized run.
 
 ### 7.1 Adopted configuration
 
