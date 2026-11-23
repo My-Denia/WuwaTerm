@@ -94,25 +94,27 @@ DEFAULT_LLM_MAX_CONCURRENCY = 4
 # One reasoning setting per direction: Chinese-to-English and English-to-Chinese
 # have different latency and quality trade-offs. Into English, thinking is off
 # by default (long segments otherwise outlast the model timeout); into Chinese
-# the provider default stays, which is the request every existing deployment and
-# every endpoint without a setting already sends.
+# the mode follows the request itself (``auto``), because no single mode for the
+# direction is right: a short document answers best, and fast enough, with
+# thinking on, while a long or lock-dense one runs past the model timeout under
+# it.
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
 TRANSLATION_THINKING_MODES = ("disabled", "low", "high", "omit")
-# Into Chinese ``auto`` lets this process resolve one of the modes above per
-# request (see ``select_en_zh_auto_thinking``) instead of leaving the choice to
-# the provider default. It is opt-in, not the default: the two measured failure
-# shapes it answers point in opposite directions (below), and which of them
-# dominates a real workload is what the live run has to show before the default
-# moves. Into English there is nothing to adapt — ``disabled`` is the measured
-# answer for every segment — so ``auto`` is unknown there.
+# Into Chinese the default is ``auto``: this process resolves one of the modes
+# above per request (see ``select_en_zh_auto_thinking``) instead of leaving the
+# choice to the provider default. Any explicit value in the variable above still
+# wins, which is what makes ``WUWATERM_TRANSLATION_THINKING_EN_ZH=omit`` the
+# rollback to the provider-default request this default replaced. Into English
+# there is nothing to adapt: ``disabled`` is the measured answer for every
+# segment, so ``auto`` is unknown there.
 TRANSLATION_THINKING_AUTO = "auto"
 TRANSLATION_THINKING_EN_ZH_MODES = (
     *TRANSLATION_THINKING_MODES,
     TRANSLATION_THINKING_AUTO,
 )
 TRANSLATION_THINKING_ZH_EN_DEFAULT = "disabled"
-TRANSLATION_THINKING_EN_ZH_DEFAULT = "omit"
+TRANSLATION_THINKING_EN_ZH_DEFAULT = TRANSLATION_THINKING_AUTO
 # The explicit modes whose request asks the provider to reason: ``low``/``high``
 # enable it at that effort, ``omit`` asks for the provider default, which is
 # thinking on for DeepSeek.

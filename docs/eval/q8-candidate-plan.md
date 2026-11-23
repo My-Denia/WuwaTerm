@@ -1,11 +1,9 @@
 # q8 Translation Quality Candidate Plan & Frozen Offline Scope
 
-- Status: **Draft candidate, offline verification only (0 live LLM calls in this
-  PR).** Stage 1 Run #1 has been executed and read (`515 -> 521`, 6 POSTs).
-  Phase 1 then ran the `en->zh` latency probe and closed at `540 -> 545` against
-  the cumulative cap of `569`; those 5 POSTs and their per-document timings are
-  the calibration basis for the `q8r1` design in Section 6. No budget is spent
-  by this PR.
+- Status: **Stage 3 complete — `q8r1` passed every frozen gate and is the
+  adopted candidate.** Stage 1 Run #1 (`515 -> 521`), Phase 1 (`540 -> 545`) and
+  the Phase 3 full run (`568/569`, 23 POSTs) have all been executed and read;
+  the ledger has `1` POST left and no further run is planned.
 - Branch: `feat/q8-quality-candidate`
 - Development base: `main` (`0c6fa4b`, Core `v0.10.3`, including PR #299's
   `contracts/products.json` and `docs/products.md`, which this branch leaves
@@ -195,9 +193,11 @@ Stage 1 is judged immediately after its own POSTs; failing it stops the run
 before Stage 2 spends anything.
 
 Stage 2 is enabled **only** by the environment variable
-`WUWATERM_TRANSLATION_THINKING_EN_ZH`: the production default stays `"omit"` in
-`constants.py` and `settings.py`. Flipping that default is a separate decision
-that only a passing Stage 2 can justify.
+`WUWATERM_TRANSLATION_THINKING_EN_ZH`: the production default stayed `"omit"` in
+`constants.py` and `settings.py` while Stage 2 ran, and flipping that default
+was kept as a separate decision that only a passing Stage 2 could justify. That
+decision is now made on the Phase 3 evidence in Section 7, and `q8r1` is the
+candidate that carries it.
 
 ## 4. Offline Verification (0 Live Calls)
 
@@ -272,14 +272,14 @@ quality on a document that answers inside the timeout, and costs the whole
 segment on one that does not. `q8r1` therefore adapts per request instead of
 picking one mode for the direction, and keeps the two corrections bounded.
 
-### 6.1 Layer 1 — the request picks the mode (`auto`, opt-in)
+### 6.1 Layer 1 — the request picks the mode (`auto`, now the default)
 
-`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`. The default into Chinese stays
-`omit`: that is the request every existing deployment and every endpoint without
-a setting already sends, and which of the two measured shapes dominates a real
-workload is exactly what a live `en->zh` run has to show before the default
-moves. `auto` is enabled per deployment with
-`WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`.
+`WUWATERM_TRANSLATION_THINKING_EN_ZH` gains `auto`, and `auto` is the default
+into Chinese. It started as an opt-in while the live evidence was incomplete
+(Section 7 is that evidence), because which of the two measured shapes dominates
+a real workload could only be settled by running it. It has now been run: the
+full held-out set scored at or above every frozen gate, including the long
+documents that used to time out.
 
 `select_en_zh_auto_thinking(prepared_text, lock_count=...)` is pure and
 request-local:
@@ -291,8 +291,10 @@ Both bounds sit on the timeout side of the measurement above: 23 paragraphs with
 2 locks answered in 20.7 s under `low`, while 30 paragraphs / 11 locks and 10
 paragraphs / 5 locks did not answer at all. Locks count beside paragraphs because
 a placeholder-dense prompt is the other shape that reproduces text slowly. An
-explicit `omit`, `disabled`, `low` or `high` never reaches the helper, and `auto`
-into English stays an unknown value (there is no request shape there to adapt).
+explicit `omit`, `disabled`, `low` or `high` never reaches the helper — it is
+returned unchanged, so `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` restores the
+provider-default request this default replaced — and `auto` into English stays
+an unknown value (there is no request shape there to adapt).
 
 ### 6.2 Layer 2 — at most one paragraph-count repair
 
@@ -350,7 +352,7 @@ byte-identical (the Chinese side of that pair is already the numerics rule).
 
 | Check | Result |
 | --- | --- |
-| default | `WUWATERM_TRANSLATION_THINKING_EN_ZH` unset sends no reasoning field (`omit`), unchanged |
+| default | `auto` into Chinese resolves per request; `=omit` still sends no reasoning field |
 | `auto` on the measured shapes | `D-009` 11 locks/30p → `disabled`, Plan B 5/10 → `disabled`, `D-012` 2/23 → `low`, `D-010` 0/2 → `low`, `ordinary` 2/6 → `low` |
 | explicit modes | `omit`/`disabled`/`low`/`high` bypass `auto` on the same shape and send exactly what they say |
 | `en->zh` first call | byte-identical prompt, one POST, `extra_body` exactly what the resolved mode sends |
@@ -360,5 +362,61 @@ byte-identical (the Chinese side of that pair is already the numerics rule).
 | `zh->en` clause | present into English, absent into Chinese, and `en->zh` `_CONTEXT_RULES_INSTRUCTION` unchanged |
 | `scripts/validate.py` (6 steps) | green on this HEAD |
 
-`H2` stays `held-out used`. No live call is made by this PR, and the Draft stays
-a Draft.
+`H2` stays `held-out used`. No live call is made by this commit; Section 7 is
+the live evidence the strategy was adopted on.
+
+## 7. Phase 3 — Live Acceptance (`568/569`, 23 POSTs)
+
+`q8r1` ran on `c1bab1aa` with `WUWATERM_TRANSLATION_THINKING_EN_ZH=auto` and a
+full-document denominator per arm. Ledger `545 -> 568` of `569`; no run failed
+and no arm was re-run to reach a verdict. Scoring was doubled-blind and
+independently arbitrated: `95.9%` judge agreement, `0/71` identical-output drift.
+
+The left column of every pair below is the comparison baseline the frozen gate
+uses. The `q8` `52042932` scores stay immutable and are **not** the comparison
+basis of this table.
+
+| Arm | Before | `q8r1` |
+| --- | --- | --- |
+| `ordinary` `zh-en` (6) | `3/6`, pollution `3` | **`6/6`, all A, pollution `0`, targets `6/6`** |
+| `ordinary` `en-zh` (6) | `5/6`, critical `1` | **`6/6` (`5` A / `1` B), critical `0`, targets `6/6`** |
+| `D` `zh-en` usable A+B (131) | `126/131` | **`128/131` (+2)** |
+| `D` `zh-en` critical (131) | `7` | **`6` (-1, `0` number errors)** |
+| `D` `zh-en` name targets (169) | `150/169` | **`153/169` (+3 fixed / `0` regressed)** |
+| `D` `zh-en` semantic targets (6) | `1/6` | **`3/6`** (`D-004#p4:negation`, `D-005#p34:reference`, both mechanically confirmed) |
+| `D` `en-zh` paired usable A+B (71) | `65/71` | **`65/71`** |
+| `D` `en-zh` paired critical (71) | `6` | **`6`** (zero regression) |
+| `D` `en-zh` full denominator (101) | `65/101` | **`93/101` (+28, `0` timeouts)** |
+| `D` `en-zh` runtime (17 docs) | `221.4 s` | **`147.7 s`** |
+
+Arm notes from the same run:
+
+- `D-003` returned its full `45/45` in `7.5 s` under `auto`'s `low`, so the
+  placeholder-protocol and locking-scope work of Sections 2.1-2.3 keeps holding
+  on the arm it was built for.
+- `D-010` restored `2/2`, i.e. the paragraph-count repair in Section 6.2 did put
+  back the title paragraph that Stage 2 lost.
+- `D-012` took `34.3 s` and `#p12` was fixed — the shape that `auto` sends with
+  `low` stayed inside the model timeout at the upper end of the `low` band.
+- `D-009` answered in `3.7 s` at `30/30` (`0/30` timed out), and both defects
+  that arm had carried (`p0:meaning`, `p15:idiom`) passed: `auto` routed it to
+  `disabled` on its `30` paragraphs and `11` locks.
+- `D` `en-zh` runtime fell by a third for the same denominator because the arm
+  that used to burn `45 s` per attempt on `D-009` now answers in `3.7 s`.
+
+Targeted `R` regression check: the `4` of `34` segments whose request actually
+changes (`R1-B1` with its `24 + 6` locks, `R1-A3#1`, `R1-A5`) completed `4/4`
+with `0` placeholder rejections, `0` `Camellya` leaks, `0` ordinary-`心` leaks
+and literal cues unchanged. **This is a targeted `4/34` check, not a rerun of the
+full `R` set of `34/34` segments; the remaining `30` are unchanged by this
+candidate and were not re-costed.**
+
+### 7.1 Adopted configuration
+
+- `WUWATERM_TRANSLATION_THINKING_EN_ZH` defaults to `auto`; every explicit
+  `omit`/`disabled`/`low`/`high` still overrides it, and the paragraph-count
+  repair never changes an explicit mode (Section 6.2).
+- Model timeout `45 s`, request budget `90 s`, `segmentation-v1` (`L = 1800`),
+  the OpenAPI/HTTP contracts and the product contracts are unchanged.
+- `H2` stays `held-out used`; the ledger closes at `568/569` with no further run
+  planned.

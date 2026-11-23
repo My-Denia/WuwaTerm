@@ -82,7 +82,7 @@ def _post(
     return model.body(), kwargs[0]
 
 
-def test_defaults_disable_thinking_into_english_and_send_nothing_into_chinese(
+def test_defaults_disable_thinking_into_english_and_follow_the_request_into_chinese(
     monkeypatch,
 ):
     zh_en, zh_en_kwargs = _post(monkeypatch, False)
@@ -91,30 +91,29 @@ def test_defaults_disable_thinking_into_english_and_send_nothing_into_chinese(
     assert list(zh_en) == [*BODY_KEYS, "thinking"] and zh_en["thinking"] == DISABLED["thinking"]
     assert "reasoning_effort" not in zh_en and "max_tokens" not in zh_en
     assert zh_en_kwargs == {"purpose": "translation", "extra_body": DISABLED}
-    # `auto` is opt-in, so an unset variable keeps the request every existing
-    # deployment already sends: no reasoning field at all.
-    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "omit"
-    assert list(en_zh) == BODY_KEYS
-    assert en_zh_kwargs == {"purpose": "translation"}  # no extra_body keyword at all
+    # A one-line, lock-free English source is the shape `auto` thinks on.
+    assert TRANSLATION_THINKING_EN_ZH_DEFAULT == "auto"
+    assert list(en_zh) == [*BODY_KEYS, "thinking", "reasoning_effort"]
+    assert en_zh["reasoning_effort"] == "low" and en_zh["thinking"] == LOW["thinking"]
+    assert en_zh_kwargs == {"purpose": "translation", "extra_body": LOW}
 
 
-def test_auto_is_opted_into_and_then_follows_the_request_shape(monkeypatch):
-    """The same document, with and without `auto`."""
+def test_the_auto_default_routes_on_the_request_shape(monkeypatch):
+    """The default, with nothing set, is the adaptive route in both directions."""
     long_document = _paragraphs(30)
 
-    omitted, omitted_kwargs = _post(monkeypatch, True, text=long_document, locks=_locks(11))
-    auto, auto_kwargs = _post(
-        monkeypatch, True, {EN_ZH: "auto"}, text=long_document, locks=_locks(11)
-    )
+    short, short_kwargs = _post(monkeypatch, True)
+    heavy, heavy_kwargs = _post(monkeypatch, True, text=long_document, locks=_locks(11))
 
-    assert omitted_kwargs == {"purpose": "translation"}  # provider default
+    assert short_kwargs == {"purpose": "translation", "extra_body": LOW}
+    assert heavy_kwargs == {"purpose": "translation", "extra_body": DISABLED}
+
+
+def test_omit_is_the_rollback_to_the_provider_default_request(monkeypatch):
+    omitted, omitted_kwargs = _post(monkeypatch, True, {EN_ZH: "omit"})
+
+    assert omitted_kwargs == {"purpose": "translation"}  # no extra_body keyword at all
     assert list(omitted) == BODY_KEYS
-    assert auto_kwargs == {"purpose": "translation", "extra_body": DISABLED}
-    assert {
-        key: value
-        for key, value in auto.items()
-        if key in ("thinking", "reasoning_effort")
-    } == DISABLED
 
 
 @pytest.mark.parametrize("raw_thinking", ["disabled", "low", "high", "omit"])
