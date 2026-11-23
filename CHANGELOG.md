@@ -3,6 +3,98 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.11.0 - 2026-11-23
+
+### Terms
+
+- The CJK matcher moves to `wuwaterm-cjk-matcher-v9` and admits a single-char
+  CJK name only at a plausible right boundary, with `有` added to the particle
+  set so a mention such as `椿有极其优秀的` is admitted while everyday `心` and
+  ordinary compounds stay out. Both translation reference admission and
+  review-v2 consult the same helper, and stored v8 resolution contexts go stale
+  and are re-reviewed (#300).
+- The pinned `3.7` data yields 8 official dictionary rows it did not have
+  before: the 7 remaining multi-character `Advertising_VersionTitle_<n>` release
+  titles (`30`–`36`; `37` was already curated), which runtime treats as
+  contextual references on both sides and never as a forced substitution, and
+  the derived item base `调谐器` / `Tuner` beside the speaker `调音师` /
+  `Tuner` (#300). Because these are rows in the shipped dictionary, this release
+  needs a **full `build-db` rebuild** — a runtime-only update keeps the old
+  database and changes none of this.
+
+### Translation
+
+- Reference admission is occurrence-scoped (#300): retained pre-exclusion
+  casefold collisions stay as model candidates, derived references
+  (`Area_<n>_Title`, `tier-base:<id>`, soft-casing hints) are gated on
+  natural-paragraph official term context, and an admitted reference carries
+  fail-closed `model_start` / `model_end` coordinates so a prompt can show a
+  local snippet instead of a bare offset. Plain single-meaning requests keep
+  byte-identical prompts.
+- On `zh->en`, a mixed single-char CJK proper name whose character also appears
+  unadmitted is locked in place selectively: only the admitted spans become
+  opaque placeholders, and a character a longer global term already translates
+  (`心` inside `心月狐` / `Hsin the Moon Fox`) is left as a scoped reference
+  instead, so the prompt never carries the same target twice. A surface that
+  reaches the model as both a `(speaker)` entry and another kind of entry now
+  gets one sentence telling them apart, which fixes `ordinary-en-zh` reading
+  `the Tuner` as `调音师` (#300).
+- `zh->en` context requests ask for numeric qualifiers and trailing ellipses to
+  survive translation; no existing rule changed and the `en->zh` prompt is
+  byte-identical (#300).
+- `WUWATERM_TRANSLATION_THINKING_EN_ZH` gains an opt-in `auto` that resolves the
+  mode per request, because Phase 1 measured both shapes in one direction: 23
+  paragraphs with 2 locks answered in 20.7 s under `low`, while 30 paragraphs /
+  11 locks and 10 paragraphs / 5 locks did not answer at all with thinking on
+  and did answer with it off. Layer 1 sends `disabled` at 4 or more locks or 25
+  or more paragraphs and `low` otherwise, both bounds on the timeout side of
+  those measurements. Layer 2 is one paragraph-count repair on a context-mode
+  answer whose paragraph count differs from its source. Layer 3 is one shorter
+  retry with thinking off after an `auto` timeout. Layer 2 and Layer 3 share one
+  budget, and every repair runs the caller's `before_llm_call` guard and fits
+  inside the remaining request budget (#300).
+- **The production `en->zh` default stays `omit`**, and `zh->en` stays
+  `disabled` (#302). `auto` is a complete, tested opt-in: an unconfigured
+  deployment keeps sending the byte-identical provider-default request it sent
+  before the setting existed, and `=omit` remains the documented rollback. Only
+  `auto` may pick a different mode for a repair — an explicit
+  `omit`/`disabled`/`low`/`high` keeps the request it says, and the paragraph
+  repair still adds its count sentence.
+- A segment's corrective calls are now one budget: at most **one** corrective
+  call, i.e. at most 2 model calls per segment, enforced inside
+  `translate_async` (#302). Under `auto`, a `low` first attempt that timed out
+  fell back to `disabled`, and if that fallback merged two paragraphs the
+  paragraph repair then fired a third call carrying `low` again — the mode that
+  had just overrun. The fallback now spends the segment's single corrective
+  call, so the repair is skipped and the valid `disabled` translation stands; a
+  segment whose first attempt needed no fallback still gets its one repair, and
+  an explicit mode still shores up its own request.
+- Measured effect, read exactly as measured: with `auto` **explicitly opted in**
+  (`WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`, `q8r1` on `c1bab1aa`, `545 ->
+  568` of `569`, 23 POSTs, no re-runs, doubled-blind scoring at `95.9%` judge
+  agreement and `0/71` identical-output drift), `D` `en-zh` usable went `65/101
+  -> 93/101` with `0` timeouts, `D-009` went `0/30` usable to `28/30` at `3.7 s`
+  (all 30 segments answered), and the paired `65/71` usable with `6` critical
+  errors both held with zero regression. **None of these `en-zh` numbers was
+  measured under the shipped `omit` default**, so they describe the opt-in, not
+  an unconfigured deployment. The same run took `D` `zh-en` usable `126/131 ->
+  128/131`, `ordinary` to `12/12`, and cut the 17-document `D` `en-zh` runtime
+  from `221.4 s` to `147.7 s`. Targeted `R` covered the `4` of `34` segments
+  whose request actually changes (`4/4`, no placeholder rejections, no name
+  leaks); the full `R` `34/34` set was **not** re-run and is not claimed.
+- The model timeout (`45 s`), the request budget (`90 s`), `segmentation-v1`
+  (`L = 1800`), the OpenAPI/HTTP contracts and the product contracts are
+  unchanged, and `H2` stays `held-out used` (#300, #302).
+
+### Documentation
+
+- New ADR 0017 and `docs/translation-reference-admission.md` record the
+  reference-admission model; `docs/eval/q7-candidate-plan.md` keeps the `q7`
+  no-adopt record and `docs/eval/q8-candidate-plan.md` records `q8`/`q8r1`,
+  including the Phase 3 acceptance run and the adopted configuration. The
+  thinking default is documented in `docs/privacy-and-llm.md` and
+  `docs/self-hosting.md` (#300, #302).
+
 ## 0.10.3 - 2026-11-21
 
 ### API
