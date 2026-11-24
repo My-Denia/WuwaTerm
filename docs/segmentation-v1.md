@@ -59,7 +59,7 @@ with no non-WS scalar has no paragraph regions.
 ### Sentence regions
 
 Sentence boundaries are the shared review/segmentation boundaries
-(`review._sentence_ranges_v2`, applied to the core of the region being split):
+(`text_spans.sentence_ranges_v2`, applied to the core of the region being split):
 a run of the scalars
 `。．.！？!?` and U+000A ends a sentence, except that `.` and `．` do not end
 one when both neighbours are digits (Python `str.isdigit()`; this keeps `3.7`

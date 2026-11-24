@@ -49,8 +49,10 @@ from .lookup import TermService, preferred_exact_entry
 from .models import TermEntry
 from .normalize import normalize_text, normalize_user_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
-from .review import WHITESPACE as _SEGMENT_WHITESPACE
-from .review import segment_core as _segment_core
+from .text_spans import (
+    WHITESPACE as _SEGMENT_WHITESPACE,
+    segment_core as _segment_core,
+)
 from .semantic_review_contract import PRECEDENT_WORDING
 from .skill_references import SkillReference, skill_references
 from .term_classification import (
