@@ -16,13 +16,15 @@ Nothing here ever logs the base URL, key, model output or any text.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -44,6 +46,8 @@ TRANSLATION_UNAVAILABLE_NOTICE = (
 _LLM_FAILURE_REASONS = frozenset(
     {
         "budget",
+        "operation_budget",
+        "cancelled",
         "rate_limit",
         "upstream",
         "timeout",
@@ -102,6 +106,8 @@ def _safe_diagnostic_count(value: object) -> int | None:
 
 FailureReason = Literal[
     "budget",
+    "operation_budget",
+    "cancelled",
     "rate_limit",
     "upstream",
     "timeout",
@@ -478,6 +484,41 @@ def add_call_observer(fn: CallObserver) -> Callable[[], None]:
     return remove
 
 
+class ExecutionBudgetGuard(Protocol):
+    """Protocol for operation-scoped call, cancellation, and deadline guards."""
+
+    @property
+    def is_cancelled(self) -> bool: ...
+
+    def remaining_seconds(self) -> float | None: ...
+
+    def check_can_continue(self) -> None: ...
+
+    def ensure_transport_can_start(self) -> None: ...
+
+
+_ACTIVE_EXECUTION_BUDGET: contextvars.ContextVar[ExecutionBudgetGuard | None] = (
+    contextvars.ContextVar("wuwaterm_execution_budget", default=None)
+)
+
+
+def current_execution_budget() -> ExecutionBudgetGuard | None:
+    """Return the active operation execution budget, if any."""
+    return _ACTIVE_EXECUTION_BUDGET.get()
+
+
+@contextmanager
+def activate_execution_budget(
+    budget: ExecutionBudgetGuard | None,
+) -> Iterator[ExecutionBudgetGuard | None]:
+    """Bind ``budget`` for the current async context and restore on exit."""
+    token = _ACTIVE_EXECUTION_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _ACTIVE_EXECUTION_BUDGET.reset(token)
+
+
 async def post_chat_completion(
     client: httpx.AsyncClient,
     messages: list[dict],
@@ -522,6 +563,9 @@ async def post_chat_completion(
         raise LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout"
         )
+    active_budget = current_execution_budget()
+    if active_budget is not None:
+        active_budget.ensure_transport_can_start()
     for hook in tuple(_PRE_SEND_HOOKS):
         hook(purpose)
     outcome: CallOutcome = "request"
@@ -581,6 +625,7 @@ async def post_chat_completion(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_api_response"
         ) from exc
     finally:
+        request_trace.note_llm_outcome(outcome)
         request_trace.end_llm_post()
         elapsed_ms = int((time.monotonic() - started) * 1000)
         LOGGER.info(

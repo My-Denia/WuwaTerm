@@ -87,6 +87,7 @@ from .sentence import (
     log_llm_failure,
     safe_llm_failure_diagnostic,
 )
+from .translation_plan import OperationExecutionBudget as OperationExecutionBudget
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
 
 
@@ -505,6 +506,7 @@ async def _translate_long_plain_text(
     context: TranslationContext | None = None,
     before_llm_call: LlmCallGuard | None = None,
     on_segment: Callable[[object, str], None] | None = None,
+    execution_budget: OperationExecutionBudget | None = None,
 ) -> TranslationOutcome:
     """Translate segment by segment, keeping every separator verbatim.
 
@@ -514,33 +516,52 @@ async def _translate_long_plain_text(
     read-only context; nothing else crosses segments. A request's explicit
     context seeds the first segment and its precedents go with every one.
     """
+    segments = _segment_text(text)
+    non_empty_segments = sum(
+        1 for segment in segments if segment.core_start < segment.core_end
+    )
+    op_budget = (
+        execution_budget
+        if execution_budget is not None
+        else OperationExecutionBudget.for_segments(non_empty_segments)
+    )
     pieces: list[str] = []
     before = context.before if context is not None else None
     precedents = context.precedents if context is not None else ()
-    for segment in _segment_text(text):
-        core = text[segment.core_start : segment.core_end]
-        if not core:
-            pieces.append(text[segment.start : segment.end])
-            continue
-        try:
-            translated = await translator.translate_async(
-                core,
-                to_chinese=to_chinese,
-                propagate_errors=True,
-                before_llm_call=before_llm_call,
-                context=TranslationContext(before=before, precedents=precedents),
+    with op_budget.activate():
+        for segment in segments:
+            core = text[segment.core_start : segment.core_end]
+            if not core:
+                pieces.append(text[segment.start : segment.end])
+                continue
+            if op_budget.is_cancelled or op_budget.deadline_expired():
+                reason = "cancelled" if op_budget.is_cancelled else "timeout"
+                return _llm_failure_outcome(
+                    LLMTranslationError(
+                        TRANSLATION_UNAVAILABLE_NOTICE, reason=reason
+                    ),
+                    to_chinese,
+                )
+            try:
+                translated = await translator.translate_async(
+                    core,
+                    to_chinese=to_chinese,
+                    propagate_errors=True,
+                    before_llm_call=before_llm_call,
+                    context=TranslationContext(before=before, precedents=precedents),
+                    execution_budget=op_budget,
+                )
+            except LLMTranslationError as exc:
+                return _llm_failure_outcome(exc, to_chinese)
+            translated = _strip_separators(translated)
+            if on_segment is not None:
+                on_segment(segment, translated)
+            pieces.append(
+                text[segment.start : segment.core_start]
+                + translated
+                + text[segment.core_end : segment.end]
             )
-        except LLMTranslationError as exc:
-            return _llm_failure_outcome(exc, to_chinese)
-        translated = _strip_separators(translated)
-        if on_segment is not None:
-            on_segment(segment, translated)
-        pieces.append(
-            text[segment.start : segment.core_start]
-            + translated
-            + text[segment.core_end : segment.end]
-        )
-        before = ContextBefore(source=_tail(core), target=_tail(translated))
+            before = ContextBefore(source=_tail(core), target=_tail(translated))
     return TranslationOutcome(kind=KIND_LLM, text="".join(pieces), to_chinese=to_chinese)
 
 
@@ -552,6 +573,7 @@ async def _translate_plain_async(
     before_llm_call: LlmCallGuard | None = None,
     context: TranslationContext | None = None,
     source_text: str | None = None,
+    execution_budget: OperationExecutionBudget | None = None,
 ) -> TranslationOutcome:
     try:
         if context is None:
@@ -560,6 +582,7 @@ async def _translate_plain_async(
                 to_chinese=to_chinese,
                 propagate_errors=True,
                 before_llm_call=before_llm_call,
+                execution_budget=execution_budget,
             )
         else:
             translated = await translator.translate_async(
@@ -568,6 +591,7 @@ async def _translate_plain_async(
                 propagate_errors=True,
                 before_llm_call=before_llm_call,
                 context=context,
+                execution_budget=execution_budget,
             )
     except LLMTranslationError as exc:
         return _llm_failure_outcome(exc, to_chinese)
@@ -591,6 +615,7 @@ async def translate_request_async(
     splitter: TextSplitter | None = None,
     before_llm_call: LlmCallGuard | None = None,
     offload: Offload | None = None,
+    execution_budget: OperationExecutionBudget | None = None,
 ) -> TranslationOutcome:
     """Run the shared dictionary-first pipeline for one job."""
     if offload is None:
@@ -615,61 +640,86 @@ async def translate_request_async(
             to_chinese=to_chinese,
             context=request.context,
             before_llm_call=before_llm_call,
+            execution_budget=execution_budget,
         )
 
-    if request.markup and markup_translator is not None and request.context is None:
-        if before_llm_call is None:
-            # Existing two-argument adapter hooks remain supported for callers
-            # which did not request a pre-call guard.
-            markup = await markup_translator(request.markup, to_chinese=to_chinese)
-        else:
-            # Incompatible hooks fail without a retry; otherwise a guard could
-            # silently disappear before an actual upstream request.
-            markup = await markup_translator(
-                request.markup,
-                to_chinese=to_chinese,
-                before_llm_call=before_llm_call,
-            )
-        if markup.text is not None:
-            return TranslationOutcome(
-                kind=KIND_LLM,
-                text=markup.text,
-                to_chinese=to_chinese,
-                dictionary_miss=_should_append_dict_miss(
-                    prepared, translator, markup.text, to_chinese=to_chinese
-                ),
-                markup_used=True,
-            )
-        if not markup.fallback_to_plain:
-            # The outcome vocabulary must stay stable no matter which adapter
-            # supplied the hook, so an unknown code from an injected translator
-            # is normalized rather than published.
-            code = markup.error_code
-            if code not in TRANSLATION_ERROR_CODES:
-                if code is not None:
-                    LOGGER.warning(
-                        "markup translator returned an unknown error code; "
-                        "reporting %s instead",
-                        ERROR_LLM_UNAVAILABLE,
-                    )
-                code = ERROR_LLM_UNAVAILABLE
-            return TranslationOutcome(
-                kind=KIND_ERROR,
-                text=markup.message or "",
-                to_chinese=to_chinese,
-                error_code=code,
-            )
-
-    return await _translate_plain_async(
-        translator,
-        prepared,
-        to_chinese=to_chinese,
-        before_llm_call=before_llm_call,
-        context=request.context,
-        # A context-mode request keeps its paragraph breaks (see
-        # SentenceTranslator.prepare_text_keeping_paragraphs).
-        source_text=request.text if request.context is not None else None,
+    op_budget = (
+        execution_budget
+        if execution_budget is not None
+        else OperationExecutionBudget.for_segments(1)
     )
+    with op_budget.activate():
+        if request.markup and markup_translator is not None and request.context is None:
+            if before_llm_call is None:
+                # Existing two-argument adapter hooks remain supported for callers
+                # which did not request a pre-call guard.
+                markup = await markup_translator(
+                    request.markup, to_chinese=to_chinese
+                )
+            else:
+                # Incompatible hooks fail without a retry; otherwise a guard could
+                # silently disappear before an actual upstream request.
+                markup = await markup_translator(
+                    request.markup,
+                    to_chinese=to_chinese,
+                    before_llm_call=before_llm_call,
+                )
+            if markup.text is not None:
+                return TranslationOutcome(
+                    kind=KIND_LLM,
+                    text=markup.text,
+                    to_chinese=to_chinese,
+                    dictionary_miss=_should_append_dict_miss(
+                        prepared, translator, markup.text, to_chinese=to_chinese
+                    ),
+                    markup_used=True,
+                )
+            if not markup.fallback_to_plain:
+                # The outcome vocabulary must stay stable no matter which adapter
+                # supplied the hook, so an unknown code from an injected translator
+                # is normalized rather than published.
+                code = markup.error_code
+                if code not in TRANSLATION_ERROR_CODES:
+                    if code is not None:
+                        LOGGER.warning(
+                            "markup translator returned an unknown error code; "
+                            "reporting %s instead",
+                            ERROR_LLM_UNAVAILABLE,
+                        )
+                    code = ERROR_LLM_UNAVAILABLE
+                return TranslationOutcome(
+                    kind=KIND_ERROR,
+                    text=markup.message or "",
+                    to_chinese=to_chinese,
+                    error_code=code,
+                )
+            if op_budget.is_cancelled or op_budget.deadline_expired():
+                reason = "cancelled" if op_budget.is_cancelled else "timeout"
+                return _llm_failure_outcome(
+                    LLMTranslationError(
+                        TRANSLATION_UNAVAILABLE_NOTICE, reason=reason
+                    ),
+                    to_chinese,
+                )
+            if op_budget.calls_used > 0 and not op_budget.try_consume_html_fallback():
+                return _llm_failure_outcome(
+                    LLMTranslationError(
+                        TRANSLATION_UNAVAILABLE_NOTICE, reason="operation_budget"
+                    ),
+                    to_chinese,
+                )
+
+        return await _translate_plain_async(
+            translator,
+            prepared,
+            to_chinese=to_chinese,
+            before_llm_call=before_llm_call,
+            context=request.context,
+            # A context-mode request keeps its paragraph breaks (see
+            # SentenceTranslator.prepare_text_keeping_paragraphs).
+            source_text=request.text if request.context is not None else None,
+            execution_budget=op_budget,
+        )
 
 
 def translate_request(
@@ -1080,6 +1130,7 @@ async def semantic_review_async(
     request_id: str,
     before_llm_call: LlmCallGuard | None = None,
     offload: Offload | None = None,
+    execution_budget: OperationExecutionBudget | None = None,
 ) -> SemanticReviewOutcome:
     """Protocol-neutral semantic review of one paired segment (ADR 0018).
 
@@ -1095,6 +1146,22 @@ async def semantic_review_async(
         # The HTTP adapter refuses this before it gets here; an in-process
         # caller gets the same answer instead of an exception.
         return SemanticReviewOutcome(error_code=ERROR_INPUT_TOO_LONG)
+    op_budget = (
+        execution_budget
+        if execution_budget is not None
+        else OperationExecutionBudget(
+            max_total_calls=1,
+            max_corrective_calls=0,
+            max_corrective_calls_per_segment=0,
+        )
+    )
+    if op_budget.is_cancelled or op_budget.deadline_expired():
+        reason = "cancelled" if op_budget.is_cancelled else "timeout"
+        return SemanticReviewOutcome(
+            error_code=ERROR_LLM_UNAVAILABLE,
+            model_calls=0,
+            llm_failure=LLMFailureDiagnostic(reason),
+        )
     snapshot = _SnapshotOnce(service)
 
     def term_reviewer(source: str, target: str, direction: str) -> ReviewReport:
@@ -1123,20 +1190,25 @@ async def semantic_review_async(
             before_llm_call=before_llm_call,
             extra_body=extra_body,
             timeout_seconds=timeout_seconds,
+            execution_budget=op_budget,
         )
 
+    calls_before = op_budget.calls_used
     try:
-        result = await _review_segment(
-            job,
-            request_id=request_id,
-            complete=complete,
-            term_reviewer=term_reviewer,
-            offload=offload,
-        )
+        with op_budget.activate():
+            result = await _review_segment(
+                job,
+                request_id=request_id,
+                complete=complete,
+                term_reviewer=term_reviewer,
+                offload=offload,
+            )
     except LLMTranslationError as exc:
         failure = _llm_failure_outcome(exc, job.direction == DIRECTION_TO_CHINESE)
         return SemanticReviewOutcome(
-            error_code=failure.error_code, model_calls=1, llm_failure=failure.llm_failure
+            error_code=failure.error_code,
+            model_calls=op_budget.calls_used - calls_before,
+            llm_failure=failure.llm_failure,
         )
     return SemanticReviewOutcome(
         body=result.response.body,

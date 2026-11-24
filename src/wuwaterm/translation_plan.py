@@ -19,11 +19,14 @@ import json
 import logging
 import os
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from . import llm_transport
+from . import request_trace
 from .cjk_span import MATCHER_REVISION
 from .review import WHITESPACE as _SEGMENT_WHITESPACE
 from .review import paragraph_ranges
@@ -527,20 +530,224 @@ def resolve_request_policy_from_env(
 
 
 @dataclass
-class SegmentExecutionBudget:
-    """Corrective-call budget scoped to one translated segment."""
+class OperationExecutionBudget:
+    """Shared execution budget across segments, corrective retries, and HTML fallback.
 
+    Enforces bounded upstream model call counts, corrective-call caps (shared
+    with HTML -> plain fallback and paragraph repair / timeout fallback),
+    optional operation wall-clock deadline, and cooperative cancellation.
+    """
+
+    max_total_calls: int | None = None
     max_corrective_calls: int = 1
+    max_corrective_calls_per_segment: int = 1
+    timeout_seconds: float | None = None
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+    calls_used: int = 0
     corrective_calls_used: int = 0
+    html_fallbacks_used: int = 0
+    _deadline_at: float | None = field(default=None, init=False, repr=False, compare=False)
+    _cancelled: bool = field(default=False, init=False, repr=False, compare=False)
+    _cancel_reason: str | None = field(default=None, init=False, repr=False, compare=False)
+    _in_attempt_depth: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.max_total_calls is not None and self.max_total_calls < 0:
+            raise ValueError("max_total_calls must be non-negative")
+        if self.max_corrective_calls < 0:
+            raise ValueError("max_corrective_calls must be non-negative")
+        if self.max_corrective_calls_per_segment < 0:
+            raise ValueError("max_corrective_calls_per_segment must be non-negative")
+        if self.timeout_seconds is not None:
+            if float(self.timeout_seconds) < 0:
+                raise ValueError("timeout_seconds must be non-negative")
+            self._deadline_at = self.clock() + float(self.timeout_seconds)
+
+    @classmethod
+    def for_segments(
+        cls,
+        segment_count: int,
+        *,
+        max_total_calls: int | None = None,
+        max_corrective_calls: int | None = None,
+        max_corrective_calls_per_segment: int = 1,
+        timeout_seconds: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> OperationExecutionBudget:
+        """Build default per-operation budget sized to ``segment_count``."""
+        n = max(1, int(segment_count))
+        corr = n if max_corrective_calls is None else max_corrective_calls
+        total = (n + corr) if max_total_calls is None else max_total_calls
+        return cls(
+            max_total_calls=total,
+            max_corrective_calls=corr,
+            max_corrective_calls_per_segment=max_corrective_calls_per_segment,
+            timeout_seconds=timeout_seconds,
+            clock=clock,
+        )
+
+    def cancel(self, reason: str | None = None) -> None:
+        """Mark this operation cooperatively cancelled before subsequent calls."""
+        self._cancelled = True
+        if reason is not None and self._cancel_reason is None:
+            self._cancel_reason = reason
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    @property
+    def cancel_reason(self) -> str | None:
+        return self._cancel_reason
+
+    def own_remaining_seconds(self) -> float | None:
+        if self._deadline_at is None:
+            return None
+        return max(0.0, self._deadline_at - self.clock())
+
+    def remaining_seconds(self) -> float | None:
+        own = self.own_remaining_seconds()
+        traced = request_trace.remaining_budget_seconds()
+        if own is None:
+            return traced
+        if traced is None:
+            return own
+        return min(own, traced)
+
+    def deadline_expired(self) -> bool:
+        return (
+            self._deadline_at is not None and self.clock() >= self._deadline_at
+        ) or request_trace.deadline_expired()
+
+    @property
+    def remaining_calls(self) -> int | None:
+        if self.max_total_calls is None:
+            return None
+        return max(0, self.max_total_calls - self.calls_used)
+
+    @property
+    def can_start_call(self) -> bool:
+        return self.max_total_calls is None or self.calls_used < self.max_total_calls
 
     @property
     def can_use_corrective_call(self) -> bool:
         return self.corrective_calls_used < self.max_corrective_calls
 
+    def _check_unbudgeted_stops(self) -> None:
+        if self._cancelled:
+            raise llm_transport.LLMTranslationError(
+                llm_transport.TRANSLATION_UNAVAILABLE_NOTICE,
+                reason="cancelled",
+            )
+        if self.deadline_expired():
+            raise llm_transport.LLMTranslationError(
+                llm_transport.TRANSLATION_UNAVAILABLE_NOTICE,
+                reason="timeout",
+            )
+
+    def check_can_continue(self) -> None:
+        """Raise ``LLMTranslationError`` if cancelled, timed out, or out of calls."""
+        self._check_unbudgeted_stops()
+        if not self.can_start_call:
+            request_trace.note_budget_exhausted()
+            raise llm_transport.LLMTranslationError(
+                llm_transport.TRANSLATION_UNAVAILABLE_NOTICE,
+                reason="operation_budget",
+            )
+
+    def consume_corrective_call(self) -> None:
+        if not self.can_use_corrective_call:
+            raise RuntimeError("operation corrective call budget exhausted")
+        self.corrective_calls_used += 1
+
+    def try_consume_html_fallback(self) -> bool:
+        """Attempt to spend one shared corrective slot on an HTML->plain fallback."""
+        if self._cancelled or self.deadline_expired():
+            return False
+        if not self.can_use_corrective_call or not self.can_start_call:
+            request_trace.note_budget_exhausted()
+            return False
+        self.corrective_calls_used += 1
+        self.html_fallbacks_used += 1
+        request_trace.note_html_fallback()
+        return True
+
+    def segment_budget(
+        self, *, policy_max_corrective_calls: int = 1
+    ) -> SegmentExecutionBudget:
+        """Create a segment-scoped corrective budget backed by this operation budget."""
+        effective_max = min(
+            max(0, int(policy_max_corrective_calls)),
+            self.max_corrective_calls_per_segment,
+        )
+        return SegmentExecutionBudget(
+            max_corrective_calls=effective_max,
+            operation_budget=self,
+        )
+
+    @contextmanager
+    def call_attempt(self) -> Iterator[None]:
+        """Claim one upstream model call slot from this operation budget."""
+        self.check_can_continue()
+        self.calls_used += 1
+        self._in_attempt_depth += 1
+        try:
+            yield
+        finally:
+            self._in_attempt_depth -= 1
+
+    def ensure_transport_can_start(self) -> None:
+        """Choke-point check inside ``llm_transport.post_chat_completion``."""
+        self._check_unbudgeted_stops()
+        if self._in_attempt_depth > 0:
+            return
+        if not self.can_start_call:
+            request_trace.note_budget_exhausted()
+            raise llm_transport.LLMTranslationError(
+                llm_transport.TRANSLATION_UNAVAILABLE_NOTICE,
+                reason="operation_budget",
+            )
+        self.calls_used += 1
+
+    @contextmanager
+    def activate(self) -> Iterator[OperationExecutionBudget]:
+        """Bind this budget to the active async context for nested transport calls."""
+        with llm_transport.activate_execution_budget(self):
+            yield self
+
+
+@dataclass
+class SegmentExecutionBudget:
+    """Corrective-call budget scoped to one translated segment."""
+
+    max_corrective_calls: int = 1
+    corrective_calls_used: int = 0
+    operation_budget: OperationExecutionBudget | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @property
+    def can_use_corrective_call(self) -> bool:
+        if self.corrective_calls_used >= self.max_corrective_calls:
+            return False
+        if self.operation_budget is not None:
+            return (
+                self.operation_budget.can_use_corrective_call
+                and self.operation_budget.can_start_call
+            )
+        return True
+
     def consume_corrective_call(self) -> None:
         if not self.can_use_corrective_call:
             raise RuntimeError("segment corrective call budget exhausted")
+        if self.operation_budget is not None:
+            self.operation_budget.consume_corrective_call()
         self.corrective_calls_used += 1
+
+    def remaining_seconds(self) -> float | None:
+        if self.operation_budget is not None:
+            return self.operation_budget.remaining_seconds()
+        return request_trace.remaining_budget_seconds()
 
 
 @dataclass(frozen=True)

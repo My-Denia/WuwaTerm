@@ -74,10 +74,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 import sys
+import threading
+from collections import deque
 from contextlib import asynccontextmanager
 from time import monotonic as _monotonic
-from typing import AsyncIterator, Final
+from typing import Any, AsyncIterator, Final
+
+LOGGER = logging.getLogger(__name__)
 
 # What the request was doing. Only these names may appear in a record.
 STAGE_INIT: Final = "init"
@@ -108,6 +113,16 @@ DIRECTION_UNKNOWN: Final = "-"
 
 _DIRECTIONS: Final[frozenset[str]] = frozenset(
     {DIRECTION_EN_TO_ZH, DIRECTION_ZH_TO_EN}
+)
+
+_CONFIGURED_THINKING_MODES: Final[frozenset[str]] = frozenset(
+    {"disabled", "low", "high", "omit", "auto"}
+)
+_CONCRETE_THINKING_MODES: Final[frozenset[str]] = frozenset(
+    {"disabled", "low", "high", "omit"}
+)
+_LLM_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"ok", "http_error", "timeout", "connect", "request", "invalid_api_response"}
 )
 
 UNKNOWN_VALUE: Final = "-"
@@ -147,6 +162,17 @@ class RequestTrace:
         "_direction",
         "_deadline_at",
         "_stop_stage",
+        "_configured_thinking",
+        "_initial_thinking_mode",
+        "_timeout_fallback_attempts",
+        "_timeout_fallback_succeeded",
+        "_paragraph_regroup_applied",
+        "_paragraph_repair_attempts",
+        "_paragraph_repair_succeeded",
+        "_html_fallback_attempts",
+        "_budget_exhausted",
+        "_timed_out",
+        "_llm_outcomes",
     )
 
     def __init__(self) -> None:
@@ -161,6 +187,17 @@ class RequestTrace:
         self._direction = DIRECTION_UNKNOWN
         self._deadline_at: float | None = None
         self._stop_stage: str | None = None
+        self._configured_thinking = UNKNOWN_VALUE
+        self._initial_thinking_mode = UNKNOWN_VALUE
+        self._timeout_fallback_attempts = 0
+        self._timeout_fallback_succeeded = 0
+        self._paragraph_regroup_applied = 0
+        self._paragraph_repair_attempts = 0
+        self._paragraph_repair_succeeded = 0
+        self._html_fallback_attempts = 0
+        self._budget_exhausted = 0
+        self._timed_out = False
+        self._llm_outcomes: dict[str, int] = {}
 
     # -- what a record is written from -------------------------------------
 
@@ -214,6 +251,50 @@ class RequestTrace:
         return (_monotonic() - self.started_at) * 1000.0
 
     @property
+    def configured_thinking(self) -> str:
+        return self._configured_thinking
+
+    @property
+    def initial_thinking_mode(self) -> str:
+        return self._initial_thinking_mode
+
+    @property
+    def timeout_fallback_attempts(self) -> int:
+        return self._timeout_fallback_attempts
+
+    @property
+    def timeout_fallback_succeeded(self) -> int:
+        return self._timeout_fallback_succeeded
+
+    @property
+    def paragraph_regroup_applied(self) -> int:
+        return self._paragraph_regroup_applied
+
+    @property
+    def paragraph_repair_attempts(self) -> int:
+        return self._paragraph_repair_attempts
+
+    @property
+    def paragraph_repair_succeeded(self) -> int:
+        return self._paragraph_repair_succeeded
+
+    @property
+    def html_fallback_attempts(self) -> int:
+        return self._html_fallback_attempts
+
+    @property
+    def budget_exhausted(self) -> int:
+        return self._budget_exhausted
+
+    @property
+    def timed_out(self) -> bool:
+        return self._timed_out
+
+    @property
+    def llm_outcomes(self) -> dict[str, int]:
+        return dict(self._llm_outcomes)
+
+    @property
     def llm_involved(self) -> bool:
         """Whether this request got as far as the model stage.
 
@@ -221,6 +302,21 @@ class RequestTrace:
         so every other record keeps exactly the shape it had before.
         """
         return self._llm_calls > 0 or self._slot_wait_ms > 0.0
+
+    @property
+    def has_strategy_activity(self) -> bool:
+        """Whether any execution strategy, thinking mode, or budget bound fired."""
+        return (
+            self._configured_thinking != UNKNOWN_VALUE
+            or self._initial_thinking_mode != UNKNOWN_VALUE
+            or self._timeout_fallback_attempts > 0
+            or self._timeout_fallback_succeeded > 0
+            or self._paragraph_regroup_applied > 0
+            or self._paragraph_repair_attempts > 0
+            or self._paragraph_repair_succeeded > 0
+            or self._html_fallback_attempts > 0
+            or self._budget_exhausted > 0
+        )
 
     # -- the deadline guard ------------------------------------------------
 
@@ -285,6 +381,42 @@ class RequestTrace:
             return
         self._llm_post_started = None
         self._llm_post_ms += (_monotonic() - started) * 1000.0
+
+    def _note_thinking(self, configured: str, initial: str) -> None:
+        if type(configured) is str and configured in _CONFIGURED_THINKING_MODES:
+            self._configured_thinking = configured
+        if type(initial) is str and initial in _CONCRETE_THINKING_MODES:
+            self._initial_thinking_mode = initial
+
+    def _note_timeout_fallback(self, *, succeeded: bool) -> None:
+        self._timeout_fallback_attempts += 1
+        if succeeded:
+            self._timeout_fallback_succeeded += 1
+
+    def _note_paragraph_regroup(self) -> None:
+        self._paragraph_regroup_applied += 1
+
+    def _note_paragraph_repair(self, *, succeeded: bool) -> None:
+        self._paragraph_repair_attempts += 1
+        if succeeded:
+            self._paragraph_repair_succeeded += 1
+
+    def _note_html_fallback(self) -> None:
+        self._html_fallback_attempts += 1
+
+    def _note_budget_exhausted(self) -> None:
+        self._budget_exhausted += 1
+
+    def _note_llm_outcome(self, outcome: str) -> None:
+        token = (
+            outcome
+            if type(outcome) is str and outcome in _LLM_OUTCOMES
+            else UNKNOWN_VALUE
+        )
+        self._llm_outcomes[token] = self._llm_outcomes.get(token, 0) + 1
+
+    def _mark_timed_out(self) -> None:
+        self._timed_out = True
 
 
 _active: contextvars.ContextVar[RequestTrace | None] = contextvars.ContextVar(
@@ -468,3 +600,337 @@ def completion_fields(trace: RequestTrace | None) -> str:
     if trace is None or not trace.llm_involved:
         return ""
     return timing_fields(trace)
+
+
+def note_thinking(configured: str, initial: str) -> None:
+    """Record configured and initial thinking modes for the active request."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_thinking(configured, initial)
+
+
+def note_timeout_fallback(*, succeeded: bool) -> None:
+    """Record one timeout fallback attempt and whether it rescued the call."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_timeout_fallback(succeeded=succeeded)
+
+
+def note_paragraph_regroup() -> None:
+    """Record that conservative paragraph regrouping reshaped an answer."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_paragraph_regroup()
+
+
+def note_paragraph_repair(*, succeeded: bool) -> None:
+    """Record one paragraph-repair attempt and whether it matched layout."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_paragraph_repair(succeeded=succeeded)
+
+
+def note_html_fallback() -> None:
+    """Record one HTML-to-plain fallback inside a translation operation."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_html_fallback()
+
+
+def note_budget_exhausted() -> None:
+    """Record that an operation execution budget stopped an extra call."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_budget_exhausted()
+
+
+def note_llm_outcome(outcome: str) -> None:
+    """Record the outcome vocabulary token for one attempted LLM POST."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_llm_outcome(outcome)
+
+
+def mark_timed_out() -> None:
+    """Mark the active request trace as ended by wall-clock timeout."""
+    trace = _active.get()
+    if trace is not None:
+        trace._mark_timed_out()
+
+
+def strategy_fields(trace: RequestTrace | None) -> str:
+    """Render fixed-vocabulary strategy counters for structured logging."""
+    if trace is None:
+        return (
+            f"configured_thinking={UNKNOWN_VALUE} "
+            f"initial_thinking={UNKNOWN_VALUE} "
+            "timeout_fallback=0/0 "
+            "paragraph_regroup=0 "
+            "paragraph_repair=0/0 "
+            "html_fallback=0 "
+            "budget_exhausted=0"
+        )
+    return (
+        f"configured_thinking={trace.configured_thinking} "
+        f"initial_thinking={trace.initial_thinking_mode} "
+        f"timeout_fallback={trace.timeout_fallback_succeeded}/{trace.timeout_fallback_attempts} "
+        f"paragraph_regroup={trace.paragraph_regroup_applied} "
+        f"paragraph_repair={trace.paragraph_repair_succeeded}/{trace.paragraph_repair_attempts} "
+        f"html_fallback={trace.html_fallback_attempts} "
+        f"budget_exhausted={trace.budget_exhausted}"
+    )
+
+
+def log_strategy_summary(request_id: str, trace: RequestTrace | None) -> None:
+    """Emit a separate non-sensitive strategy log line on ``wuwaterm.request_trace``."""
+    if trace is None or not trace.has_strategy_activity:
+        return
+    LOGGER.info(
+        "llm strategy request_id=%s direction=%s %s",
+        request_id,
+        trace.direction,
+        strategy_fields(trace),
+    )
+
+
+def _rate(num: int | float, den: int | float) -> float | None:
+    if den <= 0:
+        return None
+    return round(float(num) / float(den), 4)
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+
+
+def _latency_summary(values: deque[float]) -> dict[str, int | float | None]:
+    if not values:
+        return {"count": 0, "mean": None, "p50": None, "p95": None, "max": None}
+    ordered = sorted(values)
+    n = len(ordered)
+    return {
+        "count": n,
+        "mean": round(sum(ordered) / n, 3),
+        "p50": round(_percentile(ordered, 0.50), 3),
+        "p95": round(_percentile(ordered, 0.95), 3),
+        "max": round(ordered[-1], 3),
+    }
+
+
+class RuntimeMetrics:
+    """Thread-safe in-process aggregator for request, latency, cost, and strategy metrics."""
+
+    def __init__(self, *, sample_window: int = 512) -> None:
+        if sample_window < 1:
+            raise ValueError("sample_window must be at least 1")
+        self._lock = threading.Lock()
+        self._sample_window = sample_window
+        self._requests_total = 0
+        self._requests_succeeded = 0
+        self._requests_client_error = 0
+        self._requests_server_error = 0
+        self._requests_timed_out = 0
+        self._requests_client_gone = 0
+
+        self._llm_requests_total = 0
+        self._llm_requests_succeeded = 0
+        self._llm_requests_timed_out = 0
+        self._llm_requests_failed = 0
+        self._llm_calls_total = 0
+        self._llm_outcomes: dict[str, int] = {}
+        self._by_direction: dict[str, dict[str, int]] = {}
+
+        self._request_elapsed_ms: deque[float] = deque(maxlen=sample_window)
+        self._slot_wait_ms: deque[float] = deque(maxlen=sample_window)
+        self._llm_post_ms: deque[float] = deque(maxlen=sample_window)
+
+        self._configured_thinking_counts: dict[str, int] = {}
+        self._initial_thinking_counts: dict[str, int] = {}
+        self._timeout_fallback_attempts = 0
+        self._timeout_fallback_succeeded = 0
+        self._paragraph_regroup_applied = 0
+        self._paragraph_repair_attempts = 0
+        self._paragraph_repair_succeeded = 0
+        self._html_fallback_attempts = 0
+        self._budget_exhausted_count = 0
+
+    def record_request(
+        self,
+        *,
+        status_code: int,
+        elapsed_ms: float,
+        trace: RequestTrace | None,
+        timed_out: bool = False,
+    ) -> None:
+        """Record metrics for one finished HTTP request without retaining caller text."""
+        is_timed_out = (
+            timed_out
+            or status_code == 504
+            or (trace is not None and trace.timed_out)
+        )
+        is_succeeded = 200 <= status_code < 400 and not is_timed_out
+        is_client_gone = status_code == 499
+        bounded_elapsed = max(0.0, float(elapsed_ms))
+
+        with self._lock:
+            self._requests_total += 1
+            if is_timed_out:
+                self._requests_timed_out += 1
+            if is_succeeded:
+                self._requests_succeeded += 1
+            elif is_client_gone:
+                self._requests_client_gone += 1
+            elif 400 <= status_code < 500:
+                self._requests_client_error += 1
+            elif 500 <= status_code < 600:
+                self._requests_server_error += 1
+
+            self._request_elapsed_ms.append(bounded_elapsed)
+            if trace is None:
+                return
+
+            if trace.llm_involved:
+                self._slot_wait_ms.append(max(0.0, float(trace.slot_wait_ms)))
+                self._llm_post_ms.append(max(0.0, float(trace.llm_post_ms)))
+
+            outcomes = trace.llm_outcomes
+            is_llm_req = (
+                trace.llm_involved or trace.has_strategy_activity or bool(outcomes)
+            )
+            if is_llm_req:
+                self._llm_requests_total += 1
+                if is_succeeded:
+                    self._llm_requests_succeeded += 1
+                elif is_timed_out:
+                    self._llm_requests_timed_out += 1
+                else:
+                    self._llm_requests_failed += 1
+                self._llm_calls_total += trace.llm_calls
+
+                direction = trace.direction
+                bucket = self._by_direction.get(direction)
+                if bucket is None:
+                    bucket = {
+                        "requests": 0,
+                        "succeeded": 0,
+                        "timed_out": 0,
+                        "calls": 0,
+                    }
+                    self._by_direction[direction] = bucket
+                bucket["requests"] += 1
+                if is_succeeded:
+                    bucket["succeeded"] += 1
+                elif is_timed_out:
+                    bucket["timed_out"] += 1
+                bucket["calls"] += trace.llm_calls
+
+                for outcome_key, count in outcomes.items():
+                    self._llm_outcomes[outcome_key] = (
+                        self._llm_outcomes.get(outcome_key, 0) + count
+                    )
+
+            cfg = trace.configured_thinking
+            if cfg != UNKNOWN_VALUE:
+                self._configured_thinking_counts[cfg] = (
+                    self._configured_thinking_counts.get(cfg, 0) + 1
+                )
+            init_mode = trace.initial_thinking_mode
+            if init_mode != UNKNOWN_VALUE:
+                self._initial_thinking_counts[init_mode] = (
+                    self._initial_thinking_counts.get(init_mode, 0) + 1
+                )
+            self._timeout_fallback_attempts += trace.timeout_fallback_attempts
+            self._timeout_fallback_succeeded += trace.timeout_fallback_succeeded
+            self._paragraph_regroup_applied += trace.paragraph_regroup_applied
+            self._paragraph_repair_attempts += trace.paragraph_repair_attempts
+            self._paragraph_repair_succeeded += trace.paragraph_repair_succeeded
+            self._html_fallback_attempts += trace.html_fallback_attempts
+            self._budget_exhausted_count += trace.budget_exhausted
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a JSON-serializable snapshot of aggregated metrics."""
+        with self._lock:
+            return {
+                "requests": {
+                    "total": self._requests_total,
+                    "succeeded": self._requests_succeeded,
+                    "client_error": self._requests_client_error,
+                    "server_error": self._requests_server_error,
+                    "timed_out": self._requests_timed_out,
+                    "client_gone": self._requests_client_gone,
+                    "success_rate": _rate(
+                        self._requests_succeeded, self._requests_total
+                    ),
+                    "timeout_rate": _rate(
+                        self._requests_timed_out, self._requests_total
+                    ),
+                },
+                "llm": {
+                    "requests": self._llm_requests_total,
+                    "succeeded": self._llm_requests_succeeded,
+                    "timed_out": self._llm_requests_timed_out,
+                    "failed": self._llm_requests_failed,
+                    "success_rate": _rate(
+                        self._llm_requests_succeeded, self._llm_requests_total
+                    ),
+                    "timeout_rate": _rate(
+                        self._llm_requests_timed_out, self._llm_requests_total
+                    ),
+                    "calls_total": self._llm_calls_total,
+                    "avg_calls_per_request": _rate(
+                        self._llm_calls_total, self._llm_requests_total
+                    ),
+                    "outcomes": dict(sorted(self._llm_outcomes.items())),
+                    "by_direction": {
+                        direction: {
+                            "requests": entry["requests"],
+                            "succeeded": entry["succeeded"],
+                            "timed_out": entry["timed_out"],
+                            "calls": entry["calls"],
+                            "avg_calls_per_request": _rate(
+                                entry["calls"], entry["requests"]
+                            ),
+                        }
+                        for direction, entry in sorted(self._by_direction.items())
+                    },
+                },
+                "latency_ms": {
+                    "request_elapsed": _latency_summary(self._request_elapsed_ms),
+                    "slot_wait": _latency_summary(self._slot_wait_ms),
+                    "llm_post": _latency_summary(self._llm_post_ms),
+                },
+                "strategy": {
+                    "configured_thinking": dict(
+                        sorted(self._configured_thinking_counts.items())
+                    ),
+                    "initial_thinking": dict(
+                        sorted(self._initial_thinking_counts.items())
+                    ),
+                    "timeout_fallback": {
+                        "attempts": self._timeout_fallback_attempts,
+                        "succeeded": self._timeout_fallback_succeeded,
+                        "rescue_rate": _rate(
+                            self._timeout_fallback_succeeded,
+                            self._timeout_fallback_attempts,
+                        ),
+                    },
+                    "paragraph_regroup_applied": self._paragraph_regroup_applied,
+                    "paragraph_repair": {
+                        "attempts": self._paragraph_repair_attempts,
+                        "succeeded": self._paragraph_repair_succeeded,
+                        "rescue_rate": _rate(
+                            self._paragraph_repair_succeeded,
+                            self._paragraph_repair_attempts,
+                        ),
+                    },
+                    "html_fallback_attempts": self._html_fallback_attempts,
+                    "budget_exhausted_count": self._budget_exhausted_count,
+                },
+            }

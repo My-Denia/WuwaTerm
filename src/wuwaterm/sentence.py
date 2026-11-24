@@ -9,11 +9,12 @@ take the number and article the sentence needs.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import inspect
 import logging
 import re
 import statistics
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -105,6 +106,7 @@ from .translation_plan import (
     ZH_EN_FIDELITY_INSTRUCTION,
     AttemptKind,
     ConcreteThinkingMode,
+    OperationExecutionBudget as OperationExecutionBudget,
     OperationIdentity as OperationIdentity,
     PromptTemplates as PromptTemplates,
     ProviderProfile as ProviderProfile,
@@ -176,6 +178,26 @@ class SyncLlmCaller(Protocol):
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> str: ...
+
+
+def _resolve_operation_budget(
+    explicit: OperationExecutionBudget | None,
+) -> OperationExecutionBudget | None:
+    if explicit is not None:
+        return explicit
+    active = llm_transport.current_execution_budget()
+    return active if isinstance(active, OperationExecutionBudget) else None
+
+
+@contextmanager
+def _maybe_activate_budget(
+    budget: OperationExecutionBudget | None,
+) -> Iterator[None]:
+    if budget is None or llm_transport.current_execution_budget() is budget:
+        yield
+        return
+    with budget.activate():
+        yield
 
 
 _CJK_PUNCTUATION = "，。！？、；：（）《》【】“”‘’·…—"
@@ -680,6 +702,7 @@ class SentenceTranslator:
         before_llm_call: LlmCallGuard | None = None,
         propagate_errors: bool = False,
         context: TranslationContextProtocol | None = None,
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> str:
         """Translate plain text; ``context`` opts into translation-context-v1.
 
@@ -706,6 +729,7 @@ class SentenceTranslator:
                 allow_nfkc_spelling=True,
             )
             return locked.restore(locked.locked_text, to_en=not to_chinese)
+        op_budget = _resolve_operation_budget(execution_budget)
         locked = self._lock_terms_with_references(
             prepared,
             to_chinese=to_chinese,
@@ -723,7 +747,19 @@ class SentenceTranslator:
             locked_text=locked.locked_text,
             lock_count=len(locked.locks),
         )
-        budget = SegmentExecutionBudget(max_corrective_calls=policy.max_corrective_calls)
+        request_trace.note_thinking(
+            policy.configured_mode(to_chinese=to_chinese),
+            thinking_mode,
+        )
+        budget = (
+            op_budget.segment_budget(
+                policy_max_corrective_calls=policy.max_corrective_calls
+            )
+            if op_budget is not None
+            else SegmentExecutionBudget(
+                max_corrective_calls=policy.max_corrective_calls
+            )
+        )
         try:
             # One segment gets at most one corrective call on top of its first
             # attempt, whichever kind it is (see ``_retry_without_thinking`` and
@@ -741,6 +777,7 @@ class SentenceTranslator:
                     before_llm_call=before_llm_call,
                     context=context,
                     thinking_mode=thinking_mode,
+                    execution_budget=op_budget,
                 )
             except LLMTranslationError as exc:
                 # The one failure ``auto`` into Chinese is allowed to retry: it
@@ -754,17 +791,19 @@ class SentenceTranslator:
                     thinking_mode=thinking_mode,
                     policy=policy,
                     budget=budget,
+                    execution_budget=op_budget,
                 )
             translated = _require_nonblank_llm_output(translated)
             restored = locked.restore(translated, to_en=not to_chinese)
             if context is None:
                 return restored
-            regrouped = (
-                _regroup_lines_into_source_paragraphs(prepared, restored)
-                if policy.paragraph_regroup_enabled
-                else restored
-            )
-            if not policy.paragraph_repair_enabled or not budget.can_use_corrective_call:
+            if policy.paragraph_regroup_enabled:
+                regrouped = _regroup_lines_into_source_paragraphs(prepared, restored)
+                if regrouped != restored:
+                    request_trace.note_paragraph_regroup()
+            else:
+                regrouped = restored
+            if not policy.paragraph_repair_enabled:
                 return regrouped
             repaired = await self._repaired_paragraph_translation(
                 locked,
@@ -776,6 +815,7 @@ class SentenceTranslator:
                 thinking_mode=thinking_mode,
                 policy=policy,
                 budget=budget,
+                execution_budget=op_budget,
             )
             return regrouped if repaired is None else repaired
         except LLMTranslationError as exc:
@@ -797,6 +837,7 @@ class SentenceTranslator:
         thinking_mode: ConcreteThinkingMode,
         policy: RequestPolicy | None = None,
         budget: SegmentExecutionBudget | None = None,
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> str:
         """One faster retry of a timed-out ``auto`` English-to-Chinese call.
 
@@ -825,8 +866,6 @@ class SentenceTranslator:
             if policy is None
             else policy
         )
-        if budget is not None and not budget.can_use_corrective_call:
-            raise failure
         if not active_policy.allows_timeout_fallback(
             to_chinese=to_chinese,
             initial_thinking_mode=thinking_mode,
@@ -839,15 +878,22 @@ class SentenceTranslator:
         # reasoning fields again, so the retry could only time out once more.
         if not _async_llm_supports_param("thinking_mode"):
             raise failure
-        timeout_seconds = active_policy.timeout_fallback_seconds(
-            request_trace.remaining_budget_seconds()
+        if budget is not None and not budget.can_use_corrective_call:
+            request_trace.note_budget_exhausted()
+            raise failure
+        remaining = (
+            budget.remaining_seconds()
+            if budget is not None
+            else request_trace.remaining_budget_seconds()
         )
+        timeout_seconds = active_policy.timeout_fallback_seconds(remaining)
         if timeout_seconds is None:
             raise failure
         if budget is not None:
             budget.consume_corrective_call()
+        op_budget = _resolve_operation_budget(execution_budget)
         try:
-            return await self._call_llm_async_limited(
+            result = await self._call_llm_async_limited(
                 locked.locked_text,
                 locked.locks,
                 to_chinese=to_chinese,
@@ -860,8 +906,12 @@ class SentenceTranslator:
                 thinking_mode="disabled",
                 timeout_seconds=timeout_seconds,
                 attempt_kind="timeout_fallback",
+                execution_budget=op_budget,
             )
+            request_trace.note_timeout_fallback(succeeded=True)
+            return result
         except LLMTranslationError as exc:
+            request_trace.note_timeout_fallback(succeeded=False)
             raise failure from exc
 
     async def _repaired_paragraph_translation(
@@ -876,6 +926,7 @@ class SentenceTranslator:
         thinking_mode: ConcreteThinkingMode,
         policy: RequestPolicy | None = None,
         budget: SegmentExecutionBudget | None = None,
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> str | None:
         """One retry that asks for the source's paragraph count, or ``None``.
 
@@ -907,8 +958,6 @@ class SentenceTranslator:
         )
         if not active_policy.paragraph_repair_enabled:
             return None
-        if budget is not None and not budget.can_use_corrective_call:
-            return None
         source_layout = _paragraph_line_counts(prepared)
         if len(source_layout) < 2:
             return None
@@ -918,8 +967,16 @@ class SentenceTranslator:
         # run: it would ask the same question again and double the wait.
         if not _async_llm_supports_param("prompt_suffix"):
             return None
+        if budget is not None and not budget.can_use_corrective_call:
+            request_trace.note_budget_exhausted()
+            return None
+        remaining = (
+            budget.remaining_seconds()
+            if budget is not None
+            else request_trace.remaining_budget_seconds()
+        )
         allowed, timeout_seconds = active_policy.paragraph_repair_timeout_seconds(
-            request_trace.remaining_budget_seconds()
+            remaining
         )
         if not allowed:
             return None
@@ -941,6 +998,7 @@ class SentenceTranslator:
         )
         if budget is not None:
             budget.consume_corrective_call()
+        op_budget = _resolve_operation_budget(execution_budget)
         try:
             retried = await self._call_llm_async_limited(
                 locked.locked_text,
@@ -953,18 +1011,23 @@ class SentenceTranslator:
                 prompt_suffix=constraint,
                 timeout_seconds=timeout_seconds,
                 attempt_kind="paragraph_repair",
+                execution_budget=op_budget,
             )
             retried = _require_nonblank_llm_output(retried)
             restored = locked.restore(retried, to_en=not to_chinese)
         except LLMTranslationError:
+            request_trace.note_paragraph_repair(succeeded=False)
             return None
-        retry_regrouped = (
-            _regroup_lines_into_source_paragraphs(prepared, restored)
-            if active_policy.paragraph_regroup_enabled
-            else restored
-        )
+        if active_policy.paragraph_regroup_enabled:
+            retry_regrouped = _regroup_lines_into_source_paragraphs(prepared, restored)
+            if retry_regrouped != restored:
+                request_trace.note_paragraph_regroup()
+        else:
+            retry_regrouped = restored
         if len(_paragraph_line_counts(retry_regrouped)) != len(source_layout):
+            request_trace.note_paragraph_repair(succeeded=False)
             return None
+        request_trace.note_paragraph_repair(succeeded=True)
         return retry_regrouped
 
     def translate_protected(
@@ -996,10 +1059,21 @@ class SentenceTranslator:
         *,
         to_chinese: bool = False,
         before_llm_call: LlmCallGuard | None = None,
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> ProtectedText:
         """Async protected translation, with the guard inside the shared slot."""
+        op_budget = _resolve_operation_budget(execution_budget)
         locked = self._lock_protected_terms_with_references(
             protected, to_chinese=to_chinese, allow_plural_inflection=to_chinese
+        )
+        policy = self.request_policy(to_chinese=to_chinese)
+        request_trace.note_thinking(
+            policy.configured_mode(to_chinese=to_chinese),
+            policy.resolve_initial_thinking_mode(
+                to_chinese=to_chinese,
+                locked_text=locked.locked_text,
+                lock_count=len(locked.locks),
+            ),
         )
         translated = await self._call_llm_async_limited(
             locked.locked_text,
@@ -1008,6 +1082,7 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             references=locked.references,
             before_llm_call=before_llm_call,
+            execution_budget=op_budget,
         )
         return self._restore_protected(
             protected, locked, _require_nonblank_llm_output(translated),
@@ -1047,6 +1122,7 @@ class SentenceTranslator:
         prompt_suffix: str = "",
         timeout_seconds: float | None = None,
         attempt_kind: AttemptKind = "initial",
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> str:
         """One model call under the shared slot and the caller's guard.
 
@@ -1057,6 +1133,9 @@ class SentenceTranslator:
         call. ``prompt_suffix`` appends one extra instruction to the system
         prompt; empty keeps the prompt byte-for-byte what it was.
         """
+        op_budget = _resolve_operation_budget(execution_budget)
+        if op_budget is not None:
+            op_budget.check_can_continue()
         # Recorded before the queue, not after it: a request refused at the time
         # budget while still waiting for a slot should still say which pair it
         # was translating. No-op outside an HTTP request (bot, channel, CLI).
@@ -1066,6 +1145,8 @@ class SentenceTranslator:
             else request_trace.DIRECTION_ZH_TO_EN
         )
         async with request_trace.llm_slot(self._current_llm_slots()):
+            if op_budget is not None:
+                op_budget.check_can_continue()
             client = (
                 await self._current_llm_client()
                 if _async_llm_supports_param("client")
@@ -1075,25 +1156,46 @@ class SentenceTranslator:
                 guarded = before_llm_call()
                 if inspect.isawaitable(guarded):
                     await guarded
-            return await _invoke_async_llm(
-                locked_text,
-                locks,
-                html_mode=html_mode,
-                to_chinese=to_chinese,
-                timeout_seconds=(
-                    self.llm_timeout_seconds
-                    if timeout_seconds is None
-                    else timeout_seconds
-                ),
-                client=client,
-                en_zh_protocol=self._en_zh_protocol,
-                references=references,
-                context=context,
-                thinking_mode=thinking_mode,
-                prompt_suffix=prompt_suffix,
-                provider_profile=self._provider_profile,
-                attempt_kind=attempt_kind,
+            attempt_timeout = (
+                self.llm_timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
             )
+            if op_budget is None:
+                return await _invoke_async_llm(
+                    locked_text,
+                    locks,
+                    html_mode=html_mode,
+                    to_chinese=to_chinese,
+                    timeout_seconds=attempt_timeout,
+                    client=client,
+                    en_zh_protocol=self._en_zh_protocol,
+                    references=references,
+                    context=context,
+                    thinking_mode=thinking_mode,
+                    prompt_suffix=prompt_suffix,
+                    provider_profile=self._provider_profile,
+                    attempt_kind=attempt_kind,
+                )
+            own_rem = op_budget.own_remaining_seconds()
+            if own_rem is not None:
+                attempt_timeout = min(attempt_timeout, max(0.05, own_rem))
+            with _maybe_activate_budget(op_budget), op_budget.call_attempt():
+                return await _invoke_async_llm(
+                    locked_text,
+                    locks,
+                    html_mode=html_mode,
+                    to_chinese=to_chinese,
+                    timeout_seconds=attempt_timeout,
+                    client=client,
+                    en_zh_protocol=self._en_zh_protocol,
+                    references=references,
+                    context=context,
+                    thinking_mode=thinking_mode,
+                    prompt_suffix=prompt_suffix,
+                    provider_profile=self._provider_profile,
+                    attempt_kind=attempt_kind,
+                )
 
     async def complete_chat_async(
         self,
@@ -1106,29 +1208,55 @@ class SentenceTranslator:
         before_llm_call: LlmCallGuard | None = None,
         extra_body: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
+        execution_budget: OperationExecutionBudget | None = None,
     ) -> str:
         """Run one chat completion under the shared LLM slot and client.
 
         ``timeout_seconds`` replaces the translator's own timeout for this
         request only.
         """
-
+        op_budget = _resolve_operation_budget(execution_budget)
+        if op_budget is not None:
+            op_budget.check_can_continue()
         async with request_trace.llm_slot(self._current_llm_slots()):
+            if op_budget is not None:
+                op_budget.check_can_continue()
             client = await self._current_llm_client()
             if before_llm_call is not None:
                 guarded = before_llm_call()
                 if inspect.isawaitable(guarded):
                     await guarded
-            return await llm_transport.post_chat_completion(
-                client,
-                messages,
-                purpose=purpose,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                model_env=model_env,
-                extra_body=extra_body,
-                timeout_seconds=timeout_seconds,
-            )
+            if op_budget is None:
+                return await llm_transport.post_chat_completion(
+                    client,
+                    messages,
+                    purpose=purpose,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    model_env=model_env,
+                    extra_body=extra_body,
+                    timeout_seconds=timeout_seconds,
+                )
+            effective_timeout = timeout_seconds
+            own_rem = op_budget.own_remaining_seconds()
+            if own_rem is not None:
+                base = (
+                    self.llm_timeout_seconds
+                    if timeout_seconds is None
+                    else timeout_seconds
+                )
+                effective_timeout = min(base, max(0.05, own_rem))
+            with _maybe_activate_budget(op_budget), op_budget.call_attempt():
+                return await llm_transport.post_chat_completion(
+                    client,
+                    messages,
+                    purpose=purpose,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    model_env=model_env,
+                    extra_body=extra_body,
+                    timeout_seconds=effective_timeout,
+                )
 
     def _call_llm_sync(
         self,

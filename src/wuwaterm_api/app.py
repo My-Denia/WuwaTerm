@@ -25,11 +25,13 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote
 
 import anyio
+import anyio.lowlevel
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -49,6 +51,7 @@ from wuwaterm.application import (
     ERROR_PAYLOAD_TOO_LARGE,
     ERROR_RATE_LIMITED,
     ERROR_UNAUTHORIZED,
+    KIND_ERROR,
     KIND_LLM,
     REVIEW_DENSE_MAX_FINDINGS,
     REVIEW_MAX_FINDINGS,
@@ -99,9 +102,13 @@ from wuwaterm.request_trace import (
     STAGE_POSTPROCESS,
     STAGE_PREPARE_TERMS,
     UNKNOWN_VALUE,
+    RuntimeMetrics,
     completion_fields,
     current as current_trace,
+    deadline_expired,
     direction_from_target,
+    log_strategy_summary,
+    mark_timed_out,
     reset as reset_trace,
     set_deadline,
     set_direction,
@@ -1106,8 +1113,9 @@ class RequestIdMiddleware:
     second ``http.response.start`` being synthesised.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, metrics: RuntimeMetrics | None = None) -> None:
         self.app = app
+        self.metrics = metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -1118,7 +1126,7 @@ class RequestIdMiddleware:
         request_id = _new_request_id()
         request.state.request_id = request_id
         cache_headers = _status_response_headers(request)
-        start_trace()
+        trace = start_trace()
         started = time.perf_counter()
         # What the caller gets when the exception escapes to the handler
         # outside this middleware; overwritten as soon as a response exists.
@@ -1149,10 +1157,19 @@ class RequestIdMiddleware:
             status_code = CLIENT_GONE_STATUS
             raise
         finally:
+            elapsed_seconds = time.perf_counter() - started
             try:
                 _log_request_completed(
-                    request, request_id, status_code, time.perf_counter() - started
+                    request, request_id, status_code, elapsed_seconds
                 )
+                log_strategy_summary(request_id, trace)
+                if self.metrics is not None:
+                    self.metrics.record_request(
+                        status_code=status_code,
+                        elapsed_ms=elapsed_seconds * 1000.0,
+                        trace=trace,
+                        timed_out=(status_code == 504 or trace.timed_out),
+                    )
             except Exception:
                 # An exception raised from a `finally` REPLACES the one
                 # propagating through it, so a fault while describing a request
@@ -1320,6 +1337,38 @@ def _replay(receive: Receive, body: bytes) -> Receive:
     return replay
 
 
+_ACTIVE_REQUEST_TIMEOUT_SCOPE: ContextVar[anyio.CancelScope | None] = ContextVar(
+    "_ACTIVE_REQUEST_TIMEOUT_SCOPE", default=None
+)
+
+
+async def _abort_if_request_deadline_expired(outcome: object) -> None:
+    """Route an already-expired request deadline back to ``TimeoutMiddleware``.
+
+    ``OperationExecutionBudget`` and ``llm_transport`` check
+    ``request_trace.deadline_expired()`` synchronously before starting a
+    paid model call. If that check refuses a call in the brief window after
+    the deadline elapsed but before ``anyio``'s timer callback runs,
+    returning HTTP 503 ``llm_unavailable`` would misclassify a server-side
+    504 timeout. Cancelling the active request's ``CancelScope`` and hitting
+    a checkpoint hands control back to ``TimeoutMiddleware`` cleanly without
+    being intercepted by FastAPI's ``Exception`` handlers.
+    """
+    if not deadline_expired():
+        return
+    try:
+        diagnostic = getattr(outcome, "llm_failure", None)
+    except Exception:
+        return
+    if type(diagnostic) is not LLMFailureDiagnostic or diagnostic.reason != "timeout":
+        return
+    cancel_scope = _ACTIVE_REQUEST_TIMEOUT_SCOPE.get()
+    if cancel_scope is None:
+        return
+    cancel_scope.cancel()
+    await anyio.lowlevel.checkpoint()
+
+
 class TimeoutMiddleware:
     """Bound the wall-clock cost of a single request, and cancel what it owns.
 
@@ -1367,12 +1416,17 @@ class TimeoutMiddleware:
         # cancellation chain in between.
         set_deadline(self.timeout_seconds)
         exchange = _ResponseExchange(send)
-        try:
-            with anyio.fail_after(self.timeout_seconds):
+        with anyio.CancelScope(
+            deadline=anyio.current_time() + self.timeout_seconds
+        ) as cancel_scope:
+            token = _ACTIVE_REQUEST_TIMEOUT_SCOPE.set(cancel_scope)
+            try:
                 await self.app(scope, receive, exchange.send)
+            finally:
+                _ACTIVE_REQUEST_TIMEOUT_SCOPE.reset(token)
+        if not cancel_scope.cancelled_caught:
             return
-        except TimeoutError:
-            pass
+        mark_timed_out()
 
         # The total was already on the record; what it could not say is
         # WHERE the time went, which is what the request trace keeps. The
@@ -1892,6 +1946,7 @@ def create_app(
         limit=DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
+    app.state.metrics = RuntimeMetrics()
     # Two halves of one mechanism, both sized by auth_max_concurrency:
     # `auth_slots` decides ADMISSION without queuing (full -> 429, and no
     # scrypt is ever scheduled), `auth_pool` is the BOUND on how many
@@ -1919,7 +1974,7 @@ def create_app(
         max_body_bytes=resolved.max_body_bytes,
         read_timeout_seconds=resolved.request_timeout_seconds,
     )
-    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(RequestIdMiddleware, metrics=app.state.metrics)
 
     _register_error_handlers(app)
     _register_routes(app)
@@ -2112,6 +2167,8 @@ def _register_routes(app: FastAPI) -> None:
             # the request time budget) while it runs.
             offload=asyncio.to_thread,
         )
+        if outcome.kind == KIND_ERROR:
+            await _abort_if_request_deadline_expired(outcome)
         set_stage(STAGE_POSTPROCESS)
         LOGGER.info(
             "translation device=%s kind=%s direction=%s context=%s request_id=%s",
@@ -2387,6 +2444,8 @@ def _register_routes(app: FastAPI) -> None:
             before_llm_call=_device_llm_guard(request, device),
             offload=asyncio.to_thread,
         )
+        if outcome.error_code is not None:
+            await _abort_if_request_deadline_expired(outcome)
         set_stage(STAGE_POSTPROCESS)
         # Lengths, counts and status only: neither text is ever logged.
         LOGGER.info(

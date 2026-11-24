@@ -308,7 +308,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 |-------|---------|-----------------|
 | Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Pure matching (subset of Domain core) | `term_matching`, `term_preparation`, `cjk_span`, `protected_text`, `segmentation`, `english_plural`, `skill_references`, `term_classification` | `db`, `lookup`, `sqlite3` (including under `TYPE_CHECKING`) |
-| Domain + provider | `sentence`, `translation_plan`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
+| Domain + provider | `sentence`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
@@ -346,13 +346,25 @@ divergent pipeline without anyone noticing, which is exactly what a second
 surface is most likely to do.
 
 The fifth entry is an instrument, not a way in. `request_trace` holds the
-per-request stage timings the API has to begin and read, and the two stages it
-times (`llm_slot_wait`, `llm_post`) are opened by `sentence` and `llm_transport`
-CORE, which the adapter may not import. It therefore has to be reachable from
-both sides, and it is the smallest thing that can be: a `ContextVar` plus a
-clock, importing nothing from this package at all, holding no dictionary, no
-pipeline and no transport. Adding a name to this list is still a deliberate act
-— the guard and this paragraph are what make it one.
+per-request stage timings (`llm_slot_wait`, `llm_post`), strategy/thinking/budget
+counters (`llm strategy` summary logs), and the in-process `RuntimeMetrics`
+aggregator read by `app.state.metrics`; the stages are opened by `sentence` and
+`llm_transport` CORE, which the adapter may not import. Offline log aggregation
+lives in `scripts/summarize_runtime_metrics.py`. It therefore has to be
+reachable from both sides, and it is the smallest thing that can be: a
+`ContextVar`, a clock, and bounded fixed-vocabulary counters, importing nothing
+from any sibling module, holding no dictionary, no pipeline, and no transport.
+Adding a name to this list is still a deliberate act — the guard and this
+paragraph are what make it one.
+
+The shared execution-budget boundary lives in `translation_plan.OperationExecutionBudget`:
+single-segment `translate_request_async` defaults to at most 2 upstream calls
+and 1 shared corrective slot across HTML->plain fallback, timeout fallback, and
+paragraph repair (closing MY-483); multi-segment long-text operations size calls
+to non-empty segments plus at most one corrective call per segment; linked-channel
+`channel_post_handler` aligns `OperationExecutionBudget` with `ChannelRuntime.reserve`;
+and `llm_transport.post_chat_completion` enforces active cancellation, deadline,
+and total-call bounds at the HTTP choke point.
 
 **The deployment-tool import direction.** The flat `scripts/` deployment tools
 are a second graph, and the same script checks it for cycles over real AST
