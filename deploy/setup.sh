@@ -97,7 +97,7 @@ Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
 steps name (default: the tag contracts/products.json of this checkout records,
-v0.4.1 here; the script's own constant when that file is absent).
+v0.5.0 here; the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
 v0.4.3, the current published release, or latest (default: the tag
 contracts/products.json records, v0.4.3 here; the script's own constant when
@@ -389,7 +389,7 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # snapshot and docs/products.md points readers at it, so when that file can be
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
-DEFAULT_TELEGRAM_VERSION=v0.4.1
+DEFAULT_TELEGRAM_VERSION=v0.5.0
 DEFAULT_WEB_VERSION=v0.4.3
 
 recorded_product_tag() {
