@@ -85,6 +85,7 @@ from .translation_plan import (
     EN_ZH_AUTO_PARAGRAPH_LIMIT as EN_ZH_AUTO_PARAGRAPH_LIMIT,
     HTML_MODE_INSTRUCTION,
     HTML_MODE_INSTRUCTION_ZH,
+    PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE,
     RETRY_BUDGET_HEADROOM_SECONDS as RETRY_BUDGET_HEADROOM_SECONDS,
     SCOPED_REFERENCE_HEADER,
     SCOPED_REFERENCE_INSTRUCTION,
@@ -113,6 +114,8 @@ from .translation_plan import (
     TranslationContextProtocol,
     TranslationPlan as TranslationPlan,
     TranslationRequestSpec as TranslationRequestSpec,
+    build_paragraph_repair_request_spec as build_paragraph_repair_request_spec,
+    build_timeout_fallback_request_spec as build_timeout_fallback_request_spec,
     build_translation_request_spec as build_translation_request_spec,
     canonical_json,
     coerce_term_reference as _coerce_term_reference,
@@ -156,6 +159,7 @@ class AsyncLlmCaller(Protocol):
         thinking_mode: ConcreteThinkingMode | None = None,
         prompt_suffix: str = "",
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+        attempt_kind: AttemptKind = "initial",
     ) -> Coroutine[Any, Any, str]: ...
 
 
@@ -169,6 +173,8 @@ class SyncLlmCaller(Protocol):
         timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
         en_zh_protocol: bool = False,
         references: Sequence[TermReference] = (),
+        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> str: ...
 
 
@@ -824,6 +830,7 @@ class SentenceTranslator:
         if not active_policy.allows_timeout_fallback(
             to_chinese=to_chinese,
             initial_thinking_mode=thinking_mode,
+            provider_profile=self._provider_profile,
         ):
             raise failure
         if not _is_timeout_failure(failure):
@@ -852,6 +859,7 @@ class SentenceTranslator:
                 context=context,
                 thinking_mode="disabled",
                 timeout_seconds=timeout_seconds,
+                attempt_kind="timeout_fallback",
             )
         except LLMTranslationError as exc:
             raise failure from exc
@@ -916,10 +924,8 @@ class SentenceTranslator:
         if not allowed:
             return None
         paragraphs = len(source_layout)
-        constraint = (
-            f"\nThe source has exactly {paragraphs} paragraphs separated by "
-            "blank lines. Translate every title, heading, and paragraph and "
-            f"return exactly {paragraphs} paragraphs separated by blank lines."
+        constraint = current_prompt_templates().format_paragraph_repair_instruction(
+            paragraphs
         )
         # A mode that had no reasoning to spend on the first attempt gets some
         # for this one: the retry is trying to lay out more structure, and on a
@@ -931,6 +937,7 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             initial_thinking_mode=thinking_mode,
             lock_count=len(locked.locks),
+            provider_profile=self._provider_profile,
         )
         if budget is not None:
             budget.consume_corrective_call()
@@ -945,6 +952,7 @@ class SentenceTranslator:
                 thinking_mode=retry_thinking_mode,
                 prompt_suffix=constraint,
                 timeout_seconds=timeout_seconds,
+                attempt_kind="paragraph_repair",
             )
             retried = _require_nonblank_llm_output(retried)
             restored = locked.restore(retried, to_en=not to_chinese)
@@ -1038,6 +1046,7 @@ class SentenceTranslator:
         thinking_mode: ConcreteThinkingMode | None = None,
         prompt_suffix: str = "",
         timeout_seconds: float | None = None,
+        attempt_kind: AttemptKind = "initial",
     ) -> str:
         """One model call under the shared slot and the caller's guard.
 
@@ -1083,6 +1092,7 @@ class SentenceTranslator:
                 thinking_mode=thinking_mode,
                 prompt_suffix=prompt_suffix,
                 provider_profile=self._provider_profile,
+                attempt_kind=attempt_kind,
             )
 
     async def complete_chat_async(
@@ -1136,6 +1146,8 @@ class SentenceTranslator:
             timeout_seconds=self.llm_timeout_seconds,
             en_zh_protocol=self._en_zh_protocol,
             references=references,
+            provider_profile=self._provider_profile,
+            transport=self._llm_transport,
         )
 
     def _current_llm_slots(self) -> asyncio.Semaphore:
@@ -1381,6 +1393,7 @@ _CONTEXT_RULES_INSTRUCTION = CONTEXT_RULES_INSTRUCTION
 # was — the Chinese side of that pair (3+1, S0R1, a bare bound) is already the
 # numerics rule above, and nothing measured there asks for more.
 _ZH_EN_FIDELITY_INSTRUCTION = ZH_EN_FIDELITY_INSTRUCTION
+_PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE = PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE
 
 
 def current_prompt_templates() -> PromptTemplates:
@@ -1396,6 +1409,7 @@ def current_prompt_templates() -> PromptTemplates:
         context_rules=_CONTEXT_RULES_INSTRUCTION,
         zh_en_fidelity=_ZH_EN_FIDELITY_INSTRUCTION,
         precedent_wording=PRECEDENT_WORDING,
+        paragraph_repair_template=_PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE,
     )
 
 
@@ -1640,6 +1654,8 @@ def _call_llm(
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     en_zh_protocol: bool = False,
     references: Sequence[TermReference] = (),
+    provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
     if _call_llm_async is _DEFAULT_CALL_LLM_ASYNC:
@@ -1650,12 +1666,14 @@ def _call_llm(
                 html_mode=html_mode,
                 to_chinese=to_chinese,
                 timeout_seconds=timeout_seconds,
+                transport=transport,
                 en_zh_protocol=en_zh_protocol,
                 references=references,
+                provider_profile=provider_profile,
             )
         )
     # Tests and embedders replace the async transport with a callable that may
-    # predate term references; only pass the keyword when it is accepted.
+    # predate term references or provider profiles; only pass accepted keywords.
     supported = inspect.signature(_call_llm_async).parameters
     kwargs: dict[str, Any] = {
         "html_mode": html_mode,
@@ -1666,6 +1684,10 @@ def _call_llm(
         kwargs["references"] = references
     if en_zh_protocol:
         kwargs["en_zh_protocol"] = True
+    if "provider_profile" in supported:
+        kwargs["provider_profile"] = provider_profile
+    if transport is not None and "transport" in supported:
+        kwargs["transport"] = transport
     legacy_caller: Callable[..., Coroutine[Any, Any, str]] = _call_llm_async
     return asyncio.run(legacy_caller(locked_text, locks, **kwargs))
 
@@ -1684,6 +1706,7 @@ async def _call_llm_async(
     thinking_mode: ConcreteThinkingMode | None = None,
     prompt_suffix: str = "",
     provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    attempt_kind: AttemptKind = "initial",
 ) -> str:
     if client is not None:
         # The shared client already carries the translator's own timeout, so the
@@ -1706,6 +1729,7 @@ async def _call_llm_async(
             thinking_mode=thinking_mode,
             prompt_suffix=prompt_suffix,
             provider_profile=provider_profile,
+            attempt_kind=attempt_kind,
         )
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds), transport=transport
@@ -1724,6 +1748,7 @@ async def _call_llm_async(
             thinking_mode=thinking_mode,
             prompt_suffix=prompt_suffix,
             provider_profile=provider_profile,
+            attempt_kind=attempt_kind,
         )
 
 
@@ -1751,6 +1776,7 @@ async def _invoke_async_llm(
     thinking_mode: ConcreteThinkingMode | None,
     prompt_suffix: str,
     provider_profile: ProviderProfile,
+    attempt_kind: AttemptKind = "initial",
 ) -> str:
     """Single compatibility adapter between SentenceTranslator and monkeypatched callers."""
     if _call_llm_async is _DEFAULT_CALL_LLM_ASYNC:
@@ -1767,6 +1793,7 @@ async def _invoke_async_llm(
             thinking_mode=thinking_mode,
             prompt_suffix=prompt_suffix,
             provider_profile=provider_profile,
+            attempt_kind=attempt_kind,
         )
     supported = inspect.signature(_call_llm_async).parameters
     kwargs: dict[str, Any] = {}
@@ -1780,6 +1807,7 @@ async def _invoke_async_llm(
         ("thinking_mode", thinking_mode),
         ("prompt_suffix", prompt_suffix),
         ("provider_profile", provider_profile),
+        ("attempt_kind", attempt_kind),
     ):
         if name in supported:
             kwargs[name] = value
@@ -1800,6 +1828,8 @@ def _invoke_sync_llm(
     timeout_seconds: float,
     en_zh_protocol: bool,
     references: Sequence[TermReference],
+    provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     if _call_llm is _DEFAULT_CALL_LLM:
         return _DEFAULT_CALL_LLM(
@@ -1810,6 +1840,8 @@ def _invoke_sync_llm(
             timeout_seconds=timeout_seconds,
             en_zh_protocol=en_zh_protocol,
             references=references,
+            provider_profile=provider_profile,
+            transport=transport,
         )
     supported = inspect.signature(_call_llm).parameters
     kwargs: dict[str, Any] = {}
@@ -1819,9 +1851,12 @@ def _invoke_sync_llm(
         ("references", references),
         ("en_zh_protocol", en_zh_protocol),
         ("timeout_seconds", timeout_seconds),
+        ("provider_profile", provider_profile),
     ):
         if name in supported:
             kwargs[name] = value
+    if transport is not None and "transport" in supported:
+        kwargs["transport"] = transport
     legacy_caller: Callable[..., str] = _call_llm
     return legacy_caller(locked_text, locks, **kwargs)
 
@@ -1876,6 +1911,7 @@ async def _call_llm_async_with_client(
     thinking_mode: ConcreteThinkingMode | None = None,
     prompt_suffix: str = "",
     provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    attempt_kind: AttemptKind = "initial",
 ) -> str:
     """One translation POST, with the prompt this request's references need.
 
@@ -1922,6 +1958,7 @@ async def _call_llm_async_with_client(
         thinking_mode_override=thinking_mode,
         prompt_suffix=prompt_suffix,
         timeout_override=timeout_seconds,
+        attempt_kind=attempt_kind,
     )
     return await llm_transport.post_chat_completion(
         client,

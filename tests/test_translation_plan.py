@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from tests.test_api_semantic_review import configure_llm
-from wuwaterm import llm_transport
+from wuwaterm import llm_transport, sentence
 from wuwaterm.application import ContextBefore, Precedent, TranslationContext
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.models import TermRecord
@@ -18,10 +18,13 @@ from wuwaterm.sentence import SentenceTranslator
 from wuwaterm.term_preparation import TermOccurrence, TermReference
 from wuwaterm.translation_plan import (
     DEFAULT_PROVIDER_PROFILE,
+    PromptTemplates,
     ProviderProfile,
     RequestPolicy,
     SegmentExecutionBudget,
     TranslationPlan,
+    build_paragraph_repair_request_spec,
+    build_timeout_fallback_request_spec,
     build_translation_request_spec,
 )
 
@@ -453,3 +456,244 @@ def test_en_zh_auto_retry_ignores_hostile_failure_reason(tmp_path: Path, monkeyp
             )
     finally:
         asyncio.run(translator.aclose())
+
+
+def test_provider_profile_propagates_across_sync_async_and_protected_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from wuwaterm.telegram_html import protect_telegram_html
+
+    db_path = _make_db(tmp_path)
+    configure_llm(monkeypatch, semantic_enabled=False)
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "profile-model")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "disabled")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "disabled")
+
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": body["messages"][-1]["content"]}}]},
+        )
+
+    omit_profile = ProviderProfile(name="omit_gateway", thinking_protocol="omit_all")
+    omit_translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(handler),
+        provider_profile=omit_profile,
+    )
+    default_translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    try:
+        protected = protect_telegram_html("<b>你好世界</b>")
+        omit_translator.translate("你好世界", to_chinese=False)
+        omit_translator.translate_protected(protected.neutral, to_chinese=False)
+        omit_translator.translate_html("<b>你好世界</b>", to_chinese=False)
+        asyncio.run(omit_translator.translate_async("你好世界", to_chinese=False))
+        asyncio.run(
+            omit_translator.translate_protected_async(protected.neutral, to_chinese=False)
+        )
+        assert len(captured) == 5
+        for body in captured:
+            assert "thinking" not in body
+            assert "reasoning_effort" not in body
+
+        captured.clear()
+        default_translator.translate("你好世界", to_chinese=False)
+        asyncio.run(default_translator.translate_async("你好世界", to_chinese=False))
+        assert len(captured) == 2
+        for body in captured:
+            assert body.get("thinking") == {"type": "disabled"}
+    finally:
+        asyncio.run(omit_translator.aclose())
+        asyncio.run(default_translator.aclose())
+
+
+def test_omit_all_auto_skips_futile_timeout_fallback_and_repair_escalation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    db_path = _make_db(tmp_path)
+    configure_llm(monkeypatch, semantic_enabled=False)
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "omit-auto-model")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "auto")
+
+    omit_profile = ProviderProfile(name="omit_gateway", thinking_protocol="omit_all")
+    auto_policy = RequestPolicy(configured_thinking_en_zh="auto", timeout_seconds=45.0)
+    assert DEFAULT_PROVIDER_PROFILE.distinguishes_thinking_modes("low", "disabled") is True
+    assert omit_profile.distinguishes_thinking_modes("low", "disabled") is False
+    assert (
+        auto_policy.allows_timeout_fallback(
+            to_chinese=True, initial_thinking_mode="low", provider_profile=omit_profile
+        )
+        is False
+    )
+    assert (
+        auto_policy.paragraph_repair_thinking_mode(
+            to_chinese=True,
+            initial_thinking_mode="disabled",
+            lock_count=1,
+            provider_profile=omit_profile,
+        )
+        == "disabled"
+    )
+
+    calls = 0
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(timeout_handler),
+        provider_profile=omit_profile,
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError):
+            asyncio.run(
+                translator.translate_async(
+                    "Short line that times out.",
+                    to_chinese=True,
+                    propagate_errors=True,
+                )
+            )
+        assert calls == 1
+    finally:
+        asyncio.run(translator.aclose())
+
+
+def test_corrective_attempt_kinds_and_prompt_template_operation_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    db_path = _make_db(tmp_path)
+    configure_llm(monkeypatch, semantic_enabled=False)
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "corrective-model")
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "auto")
+
+    # Direct corrective spec helper unit checks
+    repair_plan = TranslationPlan(
+        source_text="One.\n\nTwo.",
+        prepared_text="One.\n\nTwo.",
+        locked_text="One.\n\nTwo.",
+        locks=(),
+        references=(),
+        to_chinese=True,
+    )
+    policy_auto = RequestPolicy(configured_thinking_en_zh="auto", timeout_seconds=45.0)
+    timeout_spec = build_timeout_fallback_request_spec(
+        repair_plan, policy=policy_auto, model="m", timeout_override=20.0
+    )
+    assert timeout_spec.attempt_kind == "timeout_fallback"
+    assert timeout_spec.thinking_mode == "disabled"
+    assert timeout_spec.timeout_seconds == 20.0
+
+    repair_spec = build_paragraph_repair_request_spec(
+        repair_plan,
+        policy=policy_auto,
+        paragraphs=2,
+        initial_thinking_mode="disabled",
+        model="m",
+        timeout_override=30.0,
+    )
+    assert repair_spec.attempt_kind == "paragraph_repair"
+    assert repair_spec.thinking_mode == "low"
+    assert "exactly 2 paragraphs" in repair_spec.system_prompt
+
+    # Corrective template change updates OperationIdentity without changing initial RequestIdentity,
+    # and does not change OperationIdentity when paragraph repair is disabled.
+    altered_plan = TranslationPlan(
+        source_text="One.\n\nTwo.",
+        prepared_text="One.\n\nTwo.",
+        locked_text="One.\n\nTwo.",
+        locks=(),
+        references=(),
+        to_chinese=True,
+        prompt_templates=PromptTemplates(
+            paragraph_repair_template=(
+                "\nReturn {paragraphs} paragraphs strictly matching source breaks."
+            )
+        ),
+    )
+    init_a = build_translation_request_spec(repair_plan, policy=policy_auto, model="m")
+    init_b = build_translation_request_spec(altered_plan, policy=policy_auto, model="m")
+    op_a = init_a.operation_identity(policy_auto, DEFAULT_PROVIDER_PROFILE)
+    op_b = init_b.operation_identity(policy_auto, DEFAULT_PROVIDER_PROFILE)
+    assert op_a.request.request_sha256 == op_b.request.request_sha256
+    assert op_a.corrective_prompt_sha256 != op_b.corrective_prompt_sha256
+    assert op_a.operation_sha256 != op_b.operation_sha256
+
+    policy_no_repair = RequestPolicy(
+        configured_thinking_en_zh="auto", paragraph_repair_enabled=False
+    )
+    op_no_repair_a = init_a.operation_identity(policy_no_repair, DEFAULT_PROVIDER_PROFILE)
+    op_no_repair_b = init_b.operation_identity(policy_no_repair, DEFAULT_PROVIDER_PROFILE)
+    assert op_no_repair_a.corrective_prompt_sha256 is None
+    assert op_no_repair_b.corrective_prompt_sha256 is None
+    assert op_no_repair_a.operation_sha256 == op_no_repair_b.operation_sha256
+
+    # Production translate_async timeout_fallback and paragraph_repair pass attempt_kind cleanly.
+    recorded_specs: list[tuple[str, str]] = []
+    real_build_spec = sentence.build_translation_request_spec
+
+    def spy_build_spec(plan, **kwargs):
+        spec = real_build_spec(plan, **kwargs)
+        recorded_specs.append((spec.attempt_kind, spec.system_prompt))
+        return spec
+
+    monkeypatch.setattr(sentence, "build_translation_request_spec", spy_build_spec)
+
+    timeout_phase = {"n": 0}
+
+    def fallback_handler(request: httpx.Request) -> httpx.Response:
+        timeout_phase["n"] += 1
+        if timeout_phase["n"] == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "好的。"}}]})
+
+    t_timeout = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(fallback_handler)
+    )
+    try:
+        out = asyncio.run(t_timeout.translate_async("Short line.", to_chinese=True))
+        assert out == "好的。"
+        assert [kind for kind, _ in recorded_specs] == ["initial", "timeout_fallback"]
+    finally:
+        asyncio.run(t_timeout.aclose())
+
+    recorded_specs.clear()
+    repair_calls: list[dict] = []
+    orig_template = sentence._PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE
+    monkeypatch.setattr(
+        sentence,
+        "_PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE",
+        orig_template + " Do not merge them.",
+    )
+
+    def repair_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        repair_calls.append(body)
+        if len(repair_calls) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "一段话。"}}]})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "第一段。\n\n第二段。"}}]}
+        )
+
+    t_repair = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(repair_handler)
+    )
+    try:
+        ctx = TranslationContext(before=ContextBefore(source="Prev", target="前文"))
+        out = asyncio.run(
+            t_repair.translate_async("Para one.\n\nPara two.", to_chinese=True, context=ctx)
+        )
+        assert out == "第一段。\n\n第二段。"
+        assert [kind for kind, _ in recorded_specs] == ["initial", "paragraph_repair"]
+        assert "Do not merge them." in repair_calls[1]["messages"][0]["content"]
+    finally:
+        asyncio.run(t_repair.aclose())

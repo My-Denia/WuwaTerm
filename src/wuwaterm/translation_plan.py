@@ -75,6 +75,11 @@ TIMEOUT_FALLBACK_MIN_REMAINING_SECONDS = 10.0
 TIMEOUT_FALLBACK_TIMEOUT_SECONDS = 20.0
 RETRY_BUDGET_HEADROOM_SECONDS = 2.0
 POSTPROCESS_POLICY_VERSION = "paragraph-regroup-v2+restore-v1"
+PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE = (
+    "\nThe source has exactly {paragraphs} paragraphs separated by "
+    "blank lines. Translate every title, heading, and paragraph and "
+    "return exactly {paragraphs} paragraphs separated by blank lines."
+)
 
 HTML_MODE_INSTRUCTION = (
     "Opaque placeholders represent source structure; copy every structural "
@@ -184,6 +189,10 @@ class PromptTemplates:
     context_rules: str = CONTEXT_RULES_INSTRUCTION
     zh_en_fidelity: str = ZH_EN_FIDELITY_INSTRUCTION
     precedent_wording: str = PRECEDENT_WORDING
+    paragraph_repair_template: str = PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE
+
+    def format_paragraph_repair_instruction(self, paragraphs: int) -> str:
+        return self.paragraph_repair_template.format(paragraphs=paragraphs)
 
 
 DEFAULT_PROMPT_TEMPLATES = PromptTemplates()
@@ -204,6 +213,14 @@ class ProviderProfile:
         if mode == "disabled":
             return {"thinking": {"type": "disabled"}}
         return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
+
+    def distinguishes_thinking_modes(
+        self,
+        from_mode: ConcreteThinkingMode,
+        to_mode: ConcreteThinkingMode,
+    ) -> bool:
+        """Return whether switching ``from_mode`` -> ``to_mode`` changes wire fields."""
+        return self.reasoning_extra_body(from_mode) != self.reasoning_extra_body(to_mode)
 
     def to_identity_dict(self) -> dict[str, Any]:
         return {
@@ -368,11 +385,15 @@ class RequestPolicy:
         *,
         to_chinese: bool,
         initial_thinking_mode: ConcreteThinkingMode,
+        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     ) -> bool:
         return (
             to_chinese
             and self.configured_thinking_en_zh == TRANSLATION_THINKING_AUTO
             and initial_thinking_mode in TRANSLATION_THINKING_REASONING_MODES
+            and provider_profile.distinguishes_thinking_modes(
+                initial_thinking_mode, "disabled"
+            )
         )
 
     def timeout_fallback_seconds(
@@ -396,12 +417,14 @@ class RequestPolicy:
         to_chinese: bool,
         initial_thinking_mode: ConcreteThinkingMode,
         lock_count: int,
+        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     ) -> ConcreteThinkingMode:
         if (
             initial_thinking_mode == "disabled"
             and to_chinese
             and lock_count < self.auto_lock_limit
             and self.configured_thinking_en_zh == TRANSLATION_THINKING_AUTO
+            and provider_profile.distinguishes_thinking_modes("disabled", "low")
         ):
             return "low"
         return initial_thinking_mode
@@ -760,6 +783,7 @@ class OperationIdentity:
     dictionary_identity: str | None
     matcher_revision: str
     postprocess_version: str
+    corrective_prompt_sha256: str | None
     operation_sha256: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -770,6 +794,7 @@ class OperationIdentity:
             "dictionary_identity": self.dictionary_identity,
             "matcher_revision": self.matcher_revision,
             "postprocess_version": self.postprocess_version,
+            "corrective_prompt_sha256": self.corrective_prompt_sha256,
             "operation_sha256": self.operation_sha256,
         }
 
@@ -791,6 +816,7 @@ class TranslationRequestSpec:
     has_random_locks: bool = False
     dictionary_identity: str | None = None
     matcher_revision: str = MATCHER_REVISION
+    corrective_prompt_sha256: str = sha256_text(PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE)
 
     @property
     def system_prompt(self) -> str:
@@ -917,6 +943,11 @@ class TranslationRequestSpec:
             )
         )
         profile_sha = sha256_bytes(canonical_json(provider_profile.to_identity_dict()))
+        corrective_prompt_sha = (
+            self.corrective_prompt_sha256
+            if (policy.paragraph_repair_enabled and policy.max_corrective_calls > 0)
+            else None
+        )
         operation_sha = sha256_bytes(
             canonical_json(
                 {
@@ -926,6 +957,7 @@ class TranslationRequestSpec:
                     "dictionary_identity": self.dictionary_identity,
                     "matcher_revision": self.matcher_revision,
                     "postprocess_version": postprocess_version,
+                    "corrective_prompt_sha256": corrective_prompt_sha,
                 }
             )
         )
@@ -936,6 +968,7 @@ class TranslationRequestSpec:
             dictionary_identity=self.dictionary_identity,
             matcher_revision=self.matcher_revision,
             postprocess_version=postprocess_version,
+            corrective_prompt_sha256=corrective_prompt_sha,
             operation_sha256=operation_sha,
         )
 
@@ -984,4 +1017,59 @@ def build_translation_request_spec(
         has_random_locks=plan.has_random_locks,
         dictionary_identity=plan.dictionary_identity,
         matcher_revision=plan.matcher_revision,
+        corrective_prompt_sha256=sha256_text(
+            plan.prompt_templates.paragraph_repair_template
+        ),
+    )
+
+
+def build_timeout_fallback_request_spec(
+    plan: TranslationPlan,
+    *,
+    policy: RequestPolicy,
+    provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    model: str | None = None,
+    timeout_override: float | None = None,
+) -> TranslationRequestSpec:
+    """Construct the concrete request spec for a timeout-fallback retry."""
+    return build_translation_request_spec(
+        plan,
+        policy=policy,
+        provider_profile=provider_profile,
+        model=model,
+        thinking_mode_override="disabled",
+        timeout_override=timeout_override,
+        attempt_kind="timeout_fallback",
+    )
+
+
+def build_paragraph_repair_request_spec(
+    plan: TranslationPlan,
+    *,
+    policy: RequestPolicy,
+    paragraphs: int,
+    initial_thinking_mode: ConcreteThinkingMode,
+    provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+    model: str | None = None,
+    timeout_override: float | None = None,
+) -> TranslationRequestSpec:
+    """Construct the concrete request spec for a paragraph-repair retry."""
+    retry_mode = policy.paragraph_repair_thinking_mode(
+        to_chinese=plan.to_chinese,
+        initial_thinking_mode=initial_thinking_mode,
+        lock_count=len(plan.locks),
+        provider_profile=provider_profile,
+    )
+    prompt_suffix = plan.prompt_templates.format_paragraph_repair_instruction(
+        paragraphs
+    )
+    return build_translation_request_spec(
+        plan,
+        policy=policy,
+        provider_profile=provider_profile,
+        model=model,
+        thinking_mode_override=retry_mode,
+        prompt_suffix=prompt_suffix,
+        timeout_override=timeout_override,
+        attempt_kind="paragraph_repair",
     )

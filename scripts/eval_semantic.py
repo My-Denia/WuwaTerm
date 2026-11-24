@@ -178,11 +178,14 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     constants the builder pastes in; version 2 hashed the builder's source
     only, so changing such a constant left the fingerprint unchanged.
 
-    Version 4 replaces manual enumeration of translation prompt constants with
-    real offline request/operation identities constructed through
+    Version 4 is a configuration-level probe fingerprint (``evidence_scope =
+    "config_probes"``), distinct from per-segment initial requests, corrective
+    retries, and full execution-result evidence. It builds representative
+    offline initial and corrective request/operation identities through
     ``wuwaterm.translation_plan`` (covering direction fidelity rules, scoped
-    references, speaker disambiguation, thinking configuration, provider
-    profile, and execution policy) plus concrete semantic-review probes.
+    references, speaker disambiguation, paragraph-repair instructions, thinking
+    configuration, provider profile, and execution policy) plus concrete
+    semantic-review probes.
     A frozen hash is always checked with the version it was made with; frozen
     values are never rewritten.
     """
@@ -195,6 +198,8 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
         DEFAULT_PROVIDER_PROFILE,
         RequestPolicy,
         TranslationPlan,
+        build_paragraph_repair_request_spec,
+        build_timeout_fallback_request_spec,
         build_translation_request_spec,
         canonical_json,
         resolve_request_policy_from_env,
@@ -219,6 +224,33 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
         policy_plain = resolve_request_policy_from_env(en_zh_protocol=False)
         policy_en_zh_proto = resolve_request_policy_from_env(en_zh_protocol=True)
         profile = DEFAULT_PROVIDER_PROFILE
+
+        en_zh_context_plan = TranslationPlan(
+            source_text="Line one.\n\nLine two.",
+            prepared_text="Line one.\n\nLine two.",
+            locked_text="Line one.\n\nLine two.",
+            locks=(),
+            references=(),
+            to_chinese=True,
+            context=_FingerprintContext(
+                before=_FingerprintContextBefore("Prev", "前段"),
+                precedents=(
+                    _FingerprintPrecedent(
+                        "Echo", "official_pair", "声骸", "Echo"
+                    ),
+                ),
+            ),
+            prompt_templates=templates,
+        )
+        en_zh_heavy_plan = TranslationPlan(
+            source_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            prepared_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            locked_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            locks=(),
+            references=(),
+            to_chinese=True,
+            prompt_templates=templates,
+        )
 
         probe_specs: list[tuple[str, TranslationPlan, RequestPolicy]] = [
             (
@@ -345,40 +377,8 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
                 ),
                 policy_en_zh_proto,
             ),
-            (
-                "en_zh_context",
-                TranslationPlan(
-                    source_text="Line one.\n\nLine two.",
-                    prepared_text="Line one.\n\nLine two.",
-                    locked_text="Line one.\n\nLine two.",
-                    locks=(),
-                    references=(),
-                    to_chinese=True,
-                    context=_FingerprintContext(
-                        before=_FingerprintContextBefore("Prev", "前段"),
-                        precedents=(
-                            _FingerprintPrecedent(
-                                "Echo", "official_pair", "声骸", "Echo"
-                            ),
-                        ),
-                    ),
-                    prompt_templates=templates,
-                ),
-                policy_plain,
-            ),
-            (
-                "en_zh_heavy",
-                TranslationPlan(
-                    source_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
-                    prepared_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
-                    locked_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
-                    locks=(),
-                    references=(),
-                    to_chinese=True,
-                    prompt_templates=templates,
-                ),
-                policy_plain,
-            ),
+            ("en_zh_context", en_zh_context_plan, policy_plain),
+            ("en_zh_heavy", en_zh_heavy_plan, policy_plain),
             (
                 "en_zh_html",
                 TranslationPlan(
@@ -414,8 +414,55 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
                 model=translation_model,
             )
             op_id = spec.operation_identity(probe_policy, profile)
-            parts[f"translation_probe_{probe_name}_request"] = op_id.request.request_sha256
+            parts[f"translation_probe_{probe_name}_initial_request"] = op_id.request.request_sha256
             parts[f"translation_probe_{probe_name}_operation"] = op_id.operation_sha256
+
+        timeout_fallback_spec = build_timeout_fallback_request_spec(
+            en_zh_context_plan,
+            policy=policy_plain,
+            provider_profile=profile,
+            model=translation_model,
+            timeout_override=policy_plain.timeout_fallback_timeout_seconds,
+        )
+        parts["translation_probe_en_zh_timeout_fallback_request"] = (
+            timeout_fallback_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_fallback_timeout_seconds
+            ).request_sha256
+        )
+        context_repair_spec = build_paragraph_repair_request_spec(
+            en_zh_context_plan,
+            policy=policy_plain,
+            paragraphs=2,
+            initial_thinking_mode=policy_plain.resolve_initial_thinking_mode(
+                to_chinese=True,
+                locked_text=en_zh_context_plan.locked_text,
+                lock_count=len(en_zh_context_plan.locks),
+            ),
+            provider_profile=profile,
+            model=translation_model,
+        )
+        parts["translation_probe_en_zh_context_paragraph_repair_request"] = (
+            context_repair_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_seconds
+            ).request_sha256
+        )
+        heavy_repair_spec = build_paragraph_repair_request_spec(
+            en_zh_heavy_plan,
+            policy=policy_plain,
+            paragraphs=25,
+            initial_thinking_mode=policy_plain.resolve_initial_thinking_mode(
+                to_chinese=True,
+                locked_text=en_zh_heavy_plan.locked_text,
+                lock_count=len(en_zh_heavy_plan.locks),
+            ),
+            provider_profile=profile,
+            model=translation_model,
+        )
+        parts["translation_probe_en_zh_heavy_paragraph_repair_request"] = (
+            heavy_repair_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_seconds
+            ).request_sha256
+        )
 
         for probe_dir, explain_lang, job in (
             (
@@ -483,6 +530,7 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
             "parts": parts,
             "options": options,
             "fingerprint_version": version,
+            "evidence_scope": "config_probes",
         }
 
     parts = {
