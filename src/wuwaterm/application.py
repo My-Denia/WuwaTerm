@@ -1193,6 +1193,7 @@ async def semantic_review_async(
             execution_budget=op_budget,
         )
 
+    calls_before = op_budget.calls_used
     try:
         with op_budget.activate():
             result = await _review_segment(
@@ -1206,7 +1207,7 @@ async def semantic_review_async(
         failure = _llm_failure_outcome(exc, job.direction == DIRECTION_TO_CHINESE)
         return SemanticReviewOutcome(
             error_code=failure.error_code,
-            model_calls=op_budget.calls_used,
+            model_calls=op_budget.calls_used - calls_before,
             llm_failure=failure.llm_failure,
         )
     return SemanticReviewOutcome(

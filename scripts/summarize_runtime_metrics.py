@@ -211,16 +211,6 @@ def summarize_lines(lines: list[str] | tuple[str, ...] | Any) -> dict[str, Any]:
         elif kind == "request_timed_out":
             stage = _safe_token(fields.get("stage", "-"))
             timed_out_by_stage[stage] += 1
-            wait = _parse_float(fields.get("slot_wait_ms"))
-            post = _parse_float(fields.get("llm_post_ms"))
-            elapsed = _parse_float(fields.get("elapsed_ms"))
-            if elapsed is not None and fields.get("sent_status", "-") != "-":
-                # Record timed-out body close if request complete was omitted.
-                request_duration_ms.append(elapsed)
-            if wait is not None:
-                request_slot_wait_ms.append(wait)
-            if post is not None:
-                request_llm_post_ms.append(post)
 
         elif kind == "llm_call":
             llm_calls_logged += 1

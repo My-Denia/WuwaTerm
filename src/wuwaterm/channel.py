@@ -631,7 +631,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             required_calls = len(
                 split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT)
             )
-        allow_plain_fallback = bool(html_text) and required_calls >= 2
+        allow_plain_fallback = (
+            len(plain) <= LLM_INPUT_CHAR_LIMIT
+            and bool(html_text)
+            and required_calls >= 2
+        )
         # New posts outrank edits near budget exhaustion. The check and the
         # reserve below are both synchronous on the single event loop, so the
         # headroom reading cannot race the reservation it gates. The gate is

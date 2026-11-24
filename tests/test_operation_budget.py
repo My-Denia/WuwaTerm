@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -40,7 +41,11 @@ from wuwaterm.lookup import TermService
 from wuwaterm.request_trace import current as current_trace, reset as reset_trace, start as start_trace
 from wuwaterm.sentence import SentenceTranslator
 from wuwaterm.settings import ChatSettings
-from wuwaterm.translation_policy import HTML_CONTENT_FAILURE_REASONS
+from wuwaterm.telegram_text import split_telegram_text
+from wuwaterm.translation_policy import (
+    HTML_CONTENT_FAILURE_REASONS,
+    LLM_INPUT_CHAR_LIMIT,
+)
 
 
 SMALL_PARAGRAPH_SOURCE = "The title line.\n\nFirst body line.\nSecond body line."
@@ -339,6 +344,82 @@ def test_my483_channel_html_fallback_and_plain_reservation_alignment(
     assert len(plain_posts) == 1
 
 
+def test_long_split_channel_post_with_html_text_blocks_timeout_fallback_leak(
+    monkeypatch, sample_db, caplog
+):
+    _set_llm_env(monkeypatch, thinking_en_zh="auto")
+    part1 = ("Chunk one English paragraph. " * 45).strip()
+    part2 = ("Chunk two English paragraph. " * 45).strip()
+    long_plain = f"{part1}\n\n{part2}"
+    assert len(long_plain) > LLM_INPUT_CHAR_LIMIT
+    assert len(split_telegram_text(long_plain, limit=LLM_INPUT_CHAR_LIMIT)) == 2
+
+    posts: list[dict] = []
+    translator = SentenceTranslator(
+        sample_db,
+        llm_transport=_mock_transport(
+            [httpx.ReadTimeout("slow"), "should never steal chunk 2 token"],
+            posts,
+        ),
+    )
+    config = BotConfig(
+        rate_limit_per_minute=10,
+        owner_user_id=11,
+        channel_autotranslate=True,
+        channel_llm_calls_per_minute=10,
+    )
+    chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
+    chat_settings.allow(-2002)
+    message = SimpleNamespace(
+        message_id=5011,
+        text=long_plain,
+        caption=None,
+        text_html=f"<b>{long_plain}</b>",
+        caption_html="",
+        sender_chat=SimpleNamespace(id=-3002, type="channel"),
+        is_automatic_forward=True,
+        date=datetime.now(timezone.utc),
+        edit_date=None,
+        replies=[],
+    )
+    update = SimpleNamespace(
+        update_id=9002,
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-2002, type="supergroup"),
+        effective_user=None,
+    )
+    context = SimpleNamespace(
+        args=[],
+        bot=SimpleNamespace(),
+        application=SimpleNamespace(
+            bot_data={
+                SERVICE_KEY: TermService(sample_db),
+                TRANSLATOR_KEY: translator,
+                CONFIG_KEY: config,
+                RATE_LIMITER_KEY: PerChatRateLimiter(limit=10),
+                REJECT_LIMITER_KEY: PerChatRateLimiter(limit=10),
+                ADMIN_CACHE_KEY: AdminStatusCache(),
+                CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(ttl_seconds=3600),
+                CHAT_SETTINGS_KEY: chat_settings,
+            }
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        try:
+            asyncio.run(channel_post_handler(update, context))
+        finally:
+            asyncio.run(translator.aclose())
+
+    assert len(posts) == 1
+    assert any(
+        "stage=llm reason=timeout" in rec.message for rec in caplog.records
+    )
+    assert not any(
+        "reason=operation_budget" in rec.message for rec in caplog.records
+    )
+
+
 def test_long_plain_text_respects_call_cap_cancel_deadline_and_task_cancel(
     monkeypatch, sample_db
 ):
@@ -469,7 +550,7 @@ def test_semantic_review_async_stops_on_cancelled_or_expired_budget(
     job = SemanticReviewJob(
         source="这是测试。",
         target="This is a test.",
-        direction="zh->en",
+        direction="en",
         explain_language="zh",
     )
 
@@ -483,6 +564,11 @@ def test_semantic_review_async_stops_on_cancelled_or_expired_budget(
         clock=lambda: now[0],
     )
     now[0] = 55.0
+    pre_used_budget = OperationExecutionBudget(
+        max_total_calls=1, max_corrective_calls=0
+    )
+    with pre_used_budget.call_attempt():
+        pass
 
     try:
         res_cancel = asyncio.run(
@@ -503,6 +589,15 @@ def test_semantic_review_async_stops_on_cancelled_or_expired_budget(
                 execution_budget=expired_budget,
             )
         )
+        res_exhausted = asyncio.run(
+            semantic_review_async(
+                service,
+                translator,
+                job,
+                request_id="req-exhausted",
+                execution_budget=pre_used_budget,
+            )
+        )
     finally:
         asyncio.run(translator.aclose())
 
@@ -515,3 +610,7 @@ def test_semantic_review_async_stops_on_cancelled_or_expired_budget(
     assert res_expired.error_code == "llm_unavailable"
     assert res_expired.llm_failure is not None
     assert res_expired.llm_failure.reason == "timeout"
+    assert res_exhausted.model_calls == 0
+    assert res_exhausted.error_code == "llm_unavailable"
+    assert res_exhausted.llm_failure is not None
+    assert res_exhausted.llm_failure.reason == "operation_budget"

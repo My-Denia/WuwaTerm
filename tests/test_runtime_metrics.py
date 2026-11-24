@@ -270,6 +270,11 @@ def test_summarize_runtime_metrics_cli_json_and_markdown(tmp_path: Path):
     }
     assert summary["diagnostics"]["reasons"] == {"invalid_response": 1, "timeout": 1}
     assert summary["channel_events"] == {"llm:success": 1}
+    assert summary["latency_ms"]["request_elapsed"]["count"] == 2
+    assert summary["latency_ms"]["slot_wait"]["count"] == 2
+    assert summary["latency_ms"]["llm_post"]["count"] == 2
+    assert summary["latency_ms"]["llm_post"]["p50"] == 45055.5
+    assert summary["latency_ms"]["llm_post"]["mean"] == 45055.5
 
     cli_json = subprocess.run(
         [sys.executable, "scripts/summarize_runtime_metrics.py", "--format", "json", str(log_file)],
@@ -290,3 +295,24 @@ def test_summarize_runtime_metrics_cli_json_and_markdown(tmp_path: Path):
     )
     assert "# WuwaTerm Runtime Metrics Summary" in cli_md.stdout
     assert "SUPER_PRIVATE_USER_TEXT" not in cli_md.stdout
+
+
+def test_summarize_runtime_metrics_non_llm_and_sent_status_timeouts():
+    lines = [
+        # Non-LLM 504 timeout: request complete omits slot_wait_ms/llm_post_ms/llm_calls.
+        "2026-11-24T12:00:00Z WARNING wuwaterm_api request timed out route=/v1/terms request_id=req_app sent_status=- elapsed_ms=1000.0 stage=app slot_wait_ms=0.0 llm_post_ms=0.0 llm_calls=0",
+        "2026-11-24T12:00:00Z INFO wuwaterm_api request complete request_id=req_app method=GET route=/v1/terms status=504 duration_ms=1000.0 device=dev1",
+        # Sent-status=200 body timeout: paired request complete already records duration/slot_wait/llm_post.
+        "2026-11-24T12:00:01Z WARNING wuwaterm_api request timed out route=/v1/translations request_id=req_stream sent_status=200 elapsed_ms=500.0 stage=llm_post slot_wait_ms=1.0 llm_post_ms=490.0 llm_calls=1 direction=en->zh",
+        "2026-11-24T12:00:01Z INFO wuwaterm_api request complete request_id=req_stream method=POST route=/v1/translations status=200 duration_ms=500.0 device=dev1 slot_wait_ms=1.0 llm_post_ms=490.0 llm_calls=1 direction=en->zh",
+    ]
+    summary = summarizer.summarize_lines(lines)
+    assert summary["requests"]["total"] == 2
+    assert summary["requests"]["timed_out_by_stage"] == {"app": 1, "llm_post": 1}
+    assert summary["latency_ms"]["request_elapsed"]["count"] == 2
+    assert summary["latency_ms"]["slot_wait"]["count"] == 1
+    assert summary["latency_ms"]["slot_wait"]["p50"] == 1.0
+    assert summary["latency_ms"]["llm_post"]["count"] == 1
+    assert summary["latency_ms"]["llm_post"]["p50"] == 490.0
+    assert summary["llm"]["requests"] == 1
+    assert summary["llm"]["calls_total"] == 1
