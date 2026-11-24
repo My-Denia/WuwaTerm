@@ -99,9 +99,12 @@ from wuwaterm.request_trace import (
     STAGE_POSTPROCESS,
     STAGE_PREPARE_TERMS,
     UNKNOWN_VALUE,
+    RuntimeMetrics,
     completion_fields,
     current as current_trace,
     direction_from_target,
+    log_strategy_summary,
+    mark_timed_out,
     reset as reset_trace,
     set_deadline,
     set_direction,
@@ -1106,8 +1109,9 @@ class RequestIdMiddleware:
     second ``http.response.start`` being synthesised.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, metrics: RuntimeMetrics | None = None) -> None:
         self.app = app
+        self.metrics = metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -1118,7 +1122,7 @@ class RequestIdMiddleware:
         request_id = _new_request_id()
         request.state.request_id = request_id
         cache_headers = _status_response_headers(request)
-        start_trace()
+        trace = start_trace()
         started = time.perf_counter()
         # What the caller gets when the exception escapes to the handler
         # outside this middleware; overwritten as soon as a response exists.
@@ -1149,10 +1153,19 @@ class RequestIdMiddleware:
             status_code = CLIENT_GONE_STATUS
             raise
         finally:
+            elapsed_seconds = time.perf_counter() - started
             try:
                 _log_request_completed(
-                    request, request_id, status_code, time.perf_counter() - started
+                    request, request_id, status_code, elapsed_seconds
                 )
+                log_strategy_summary(request_id, trace)
+                if self.metrics is not None:
+                    self.metrics.record_request(
+                        status_code=status_code,
+                        elapsed_ms=elapsed_seconds * 1000.0,
+                        trace=trace,
+                        timed_out=(status_code == 504 or trace.timed_out),
+                    )
             except Exception:
                 # An exception raised from a `finally` REPLACES the one
                 # propagating through it, so a fault while describing a request
@@ -1372,7 +1385,7 @@ class TimeoutMiddleware:
                 await self.app(scope, receive, exchange.send)
             return
         except TimeoutError:
-            pass
+            mark_timed_out()
 
         # The total was already on the record; what it could not say is
         # WHERE the time went, which is what the request trace keeps. The
@@ -1892,6 +1905,7 @@ def create_app(
         limit=DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
+    app.state.metrics = RuntimeMetrics()
     # Two halves of one mechanism, both sized by auth_max_concurrency:
     # `auth_slots` decides ADMISSION without queuing (full -> 429, and no
     # scrypt is ever scheduled), `auth_pool` is the BOUND on how many
@@ -1919,7 +1933,7 @@ def create_app(
         max_body_bytes=resolved.max_body_bytes,
         read_timeout_seconds=resolved.request_timeout_seconds,
     )
-    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(RequestIdMiddleware, metrics=app.state.metrics)
 
     _register_error_handlers(app)
     _register_routes(app)
