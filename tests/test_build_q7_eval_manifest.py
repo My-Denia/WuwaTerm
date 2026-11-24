@@ -444,3 +444,305 @@ def test_build_arm_manifest_identities_reflect_thinking_and_policy_changes(tmp_p
     assert en_omit["operation_identity_sha256"] != en_auto["operation_identity_sha256"]
     assert "变奏入场" not in json.dumps(auto_manifest, ensure_ascii=False)
     assert "Collect Astrite" not in json.dumps(auto_manifest, ensure_ascii=False)
+
+
+def test_archive_valid_translation_context_chaining_and_dictionary_hit(tmp_path: Path):
+    db_path = _build_synthetic_db(tmp_path)
+
+    chain_text = ("今天天气不错，大家准备出发。" * 140) + "\n\n今汐切换角色触发变奏入场。"
+    chain_bundle = tmp_path / "chain-inputs.json"
+    chain_bundle.write_text(
+        json.dumps(
+            {
+                "schema": "usability-run-inputs-v1",
+                "documents": [
+                    {
+                        "doc_id": "CHAIN-001",
+                        "set": "D",
+                        "direction": "zh-en",
+                        "text": chain_text,
+                        "source_sha256": manifest_mod.sha256_text(chain_text),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    real_seed = tmp_path / "real-seed.json"
+    real_seed.write_text(
+        json.dumps(
+            {
+                "arm": "real-seed",
+                "documents": [
+                    {
+                        "doc_id": "CHAIN-001",
+                        "direction": "zh-en",
+                        "status": "complete",
+                        "segments": [
+                            {"translation": "Jinhsi is ready."},
+                            {"translation": "Jinhsi switches in with Intro Skill."},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conflict_seed = tmp_path / "conflict-seed.json"
+    conflict_seed.write_text(
+        json.dumps(
+            {
+                "arm": "conflict-seed",
+                "documents": [
+                    {
+                        "doc_id": "CHAIN-001",
+                        "direction": "zh-en",
+                        "status": "complete",
+                        "segments": [{"translation": "CONFLICTING_SEED_SHOULD_BE_IGNORED"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seeded_manifest = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-seeded",
+            db_path=db_path,
+            input_paths=[chain_bundle],
+            prior_context_paths=[real_seed],
+        )
+    )
+    seg1_base, seg2_base = seeded_manifest["requests"]
+
+    # 1) Missing, empty, or whitespace-only translation in a complete archive with
+    # matching OperationIdentity & raw_content cannot be marked reusable_exact,
+    # and breaks downstream exact chaining on segment 2.
+    for bad_translation in (None, "", "   "):
+        bad_archive = tmp_path / f"bad-translation-{repr(bad_translation)}.json"
+        bad_archive.write_text(
+            json.dumps(
+                {
+                    "arm": "bad-tr",
+                    "core_commit": "prior-sha",
+                    "db_sha256": seeded_manifest["db_sha256"],
+                    "documents": [
+                        {
+                            "doc_id": "CHAIN-001",
+                            "direction": "zh-en",
+                            "status": "complete",
+                            "segments": [
+                                {
+                                    "reuse_key": seg1_base["adr0020_reuse_key"],
+                                    "request_identity_sha256": seg1_base["request_identity_sha256"],
+                                    "operation_identity_sha256": seg1_base["operation_identity_sha256"],
+                                    "raw_content": "Jinhsi is ready.",
+                                    "translation": bad_translation,
+                                },
+                                {
+                                    "reuse_key": seg2_base["adr0020_reuse_key"],
+                                    "request_identity_sha256": seg2_base["request_identity_sha256"],
+                                    "operation_identity_sha256": seg2_base["operation_identity_sha256"],
+                                    "raw_content": "Jinhsi switches in with Intro Skill.",
+                                    "translation": "Jinhsi switches in with Intro Skill.",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        bad_manifest = asyncio.run(
+            manifest_mod.build_arm_manifest_async(
+                arm_name="q7-bad-tr",
+                db_path=db_path,
+                input_paths=[chain_bundle],
+                archived_paths=[bad_archive],
+            )
+        )
+        s1, s2 = bad_manifest["requests"]
+        assert s1["reuse_status"] == "must_post"
+        assert s1["reuse_reason"] == "archived_missing_valid_translation"
+        assert s2["reuse_status"] == "must_post"
+        assert s2["reuse_reason"] == "prior_segment_not_reused"
+        assert bad_manifest["summary"]["reusable_exact_segments"] == 0
+        assert bad_manifest["summary"]["non_exact_model_segments"] == 2
+
+    # 2) Valid reusable_exact seg 1 chains its archived translation into seg 2,
+    # overriding conflicting prior_translations and allowing seg 2 to be reusable_exact.
+    valid_archive = tmp_path / "valid-chain.json"
+    valid_archive.write_text(
+        json.dumps(
+            {
+                "arm": "valid-chain",
+                "core_commit": "prior-sha",
+                "db_sha256": seeded_manifest["db_sha256"],
+                "documents": [
+                    {
+                        "doc_id": "CHAIN-001",
+                        "direction": "zh-en",
+                        "status": "complete",
+                        "segments": [
+                            {
+                                "reuse_key": seg1_base["adr0020_reuse_key"],
+                                "request_identity_sha256": seg1_base["request_identity_sha256"],
+                                "operation_identity_sha256": seg1_base["operation_identity_sha256"],
+                                "raw_content": "Jinhsi is ready.",
+                                "translation": "Jinhsi is ready.",
+                            },
+                            {
+                                "reuse_key": seg2_base["adr0020_reuse_key"],
+                                "request_identity_sha256": seg2_base["request_identity_sha256"],
+                                "operation_identity_sha256": seg2_base["operation_identity_sha256"],
+                                "raw_content": "Jinhsi switches in with Intro Skill.",
+                                "translation": "Jinhsi switches in with Intro Skill.",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    exact_chain_manifest = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-exact-chain",
+            db_path=db_path,
+            input_paths=[chain_bundle],
+            archived_paths=[valid_archive],
+            prior_context_paths=[conflict_seed],
+        )
+    )
+    assert [r["reuse_status"] for r in exact_chain_manifest["requests"]] == [
+        "reusable_exact",
+        "reusable_exact",
+    ]
+    assert exact_chain_manifest["summary"]["reusable_exact_segments"] == 2
+    assert exact_chain_manifest["summary"]["non_exact_model_segments"] == 0
+
+    # Non-exact seg 1 (raw_request_only or legacy_adr0020) keeps seg 2 must_post even
+    # when diagnostic prior_translations supplies the seg 1 translation.
+    raw_seg1_archive = tmp_path / "raw-seg1.json"
+    raw_seg1_archive.write_text(
+        json.dumps(
+            {
+                "arm": "raw-seg1",
+                "core_commit": "prior-sha",
+                "db_sha256": seeded_manifest["db_sha256"],
+                "documents": [
+                    {
+                        "doc_id": "CHAIN-001",
+                        "direction": "zh-en",
+                        "status": "complete",
+                        "segments": [
+                            {
+                                "reuse_key": seg1_base["adr0020_reuse_key"],
+                                "request_identity_sha256": seg1_base["request_identity_sha256"],
+                                "operation_identity_sha256": "0" * 64,
+                                "raw_content": "Jinhsi is ready.",
+                                "translation": "Jinhsi is ready.",
+                            },
+                            {
+                                "reuse_key": seg2_base["adr0020_reuse_key"],
+                                "request_identity_sha256": seg2_base["request_identity_sha256"],
+                                "operation_identity_sha256": seg2_base["operation_identity_sha256"],
+                                "raw_content": "Jinhsi switches in with Intro Skill.",
+                                "translation": "Jinhsi switches in with Intro Skill.",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_chain_manifest = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-raw-chain",
+            db_path=db_path,
+            input_paths=[chain_bundle],
+            archived_paths=[raw_seg1_archive],
+            prior_context_paths=[real_seed],
+        )
+    )
+    r1, r2 = raw_chain_manifest["requests"]
+    assert r1["reuse_status"] == "reusable_raw_request_only"
+    assert r2["reuse_status"] == "must_post"
+    assert r2["reuse_reason"] == "prior_segment_not_reused"
+    raw_sum = raw_chain_manifest["summary"]
+    assert raw_sum["non_exact_model_segments"] == 2
+    assert (
+        raw_sum["must_post_segments"]
+        + raw_sum["reusable_raw_request_only_segments"]
+        + raw_sum["reusable_legacy_adr0020_segments"]
+        == raw_sum["non_exact_model_segments"]
+    )
+    assert raw_sum["reusable_exact_segments"] + raw_sum["non_exact_model_segments"] == raw_sum["model_call_segments"]
+
+    # 3) Exact dictionary hit uses current dictionary answer as context before.target,
+    # never stale prior_translations.
+    dict_text = "今汐\n\n" + ("测试内容" * 450)
+    dict_bundle = tmp_path / "dict-inputs.json"
+    dict_bundle.write_text(
+        json.dumps(
+            {
+                "schema": "usability-run-inputs-v1",
+                "documents": [
+                    {
+                        "doc_id": "DICT-001",
+                        "set": "D",
+                        "direction": "zh-en",
+                        "text": dict_text,
+                        "source_sha256": manifest_mod.sha256_text(dict_text),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    stale_dict_prior = tmp_path / "stale-dict-prior.json"
+    stale_dict_prior.write_text(
+        json.dumps(
+            {
+                "arm": "stale-prior",
+                "documents": [
+                    {
+                        "doc_id": "DICT-001",
+                        "direction": "zh-en",
+                        "status": "complete",
+                        "segments": [{"translation": "StaleOldName"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dict_without_prior = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-dict-clean",
+            db_path=db_path,
+            input_paths=[dict_bundle],
+        )
+    )
+    dict_with_stale_prior = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-dict-stale",
+            db_path=db_path,
+            input_paths=[dict_bundle],
+            prior_context_paths=[stale_dict_prior],
+        )
+    )
+    assert dict_without_prior["requests"][0]["reuse_status"] == "exact_dictionary_hit"
+    assert dict_without_prior["requests"][1]["request_identity_sha256"] == dict_with_stale_prior["requests"][1]["request_identity_sha256"]
+    assert dict_without_prior["summary"]["dictionary_only_segments"] == 1
+    assert dict_without_prior["summary"]["non_exact_model_segments"] == 1
+    assert (
+        dict_without_prior["summary"]["reusable_exact_segments"]
+        + dict_without_prior["summary"]["non_exact_model_segments"]
+        == dict_without_prior["summary"]["model_call_segments"]
+    )

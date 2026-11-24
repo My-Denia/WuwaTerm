@@ -214,6 +214,7 @@ def load_archived_index(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:
                 by_doc_segment[(doc_id, direction, 1)] = {
                     "status": status,
                     "has_raw_content": False,
+                    "has_valid_translation": False,
                     "reuse_key": None,
                     "request_identity_sha256": None,
                     "operation_identity_sha256": None,
@@ -233,15 +234,24 @@ def load_archived_index(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:
                 reuse_key = (
                     raw_reuse_key if isinstance(raw_reuse_key, str) and raw_reuse_key else None
                 )
-                has_raw_content = seg.get("raw_content") is not None
+                raw_content = seg.get("raw_content")
+                has_raw_content = isinstance(raw_content, str) and bool(raw_content.strip())
+                raw_translation = seg.get("translation")
+                translation = (
+                    raw_translation
+                    if isinstance(raw_translation, str) and raw_translation.strip()
+                    else None
+                )
+                has_valid_translation = translation is not None
                 entry = {
                     "status": status,
                     "has_raw_content": has_raw_content,
+                    "has_valid_translation": has_valid_translation,
                     "reuse_key": reuse_key,
                     "request_identity_sha256": req_id,
                     "operation_identity_sha256": op_id,
                     "body_sha256": call.get("body_sha256"),
-                    "translation": seg.get("translation"),
+                    "translation": translation,
                     "core_commit": data.get("core_commit"),
                     "db_sha256": data.get("db_sha256"),
                 }
@@ -253,11 +263,11 @@ def load_archived_index(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:
                         "segment_index": idx,
                         "core_commit": data.get("core_commit"),
                         "db_sha256": data.get("db_sha256"),
-                        "translation": seg.get("translation"),
+                        "translation": translation,
                         "request_identity_sha256": req_id,
                         "operation_identity_sha256": op_id,
                     }
-                    if op_id is not None:
+                    if has_valid_translation and op_id is not None:
                         by_operation_identity[op_id] = indexed
                     if req_id is not None:
                         by_request_identity[req_id] = indexed
@@ -285,7 +295,7 @@ def _seed_prior_translations(paths: Sequence[Path]) -> dict[tuple[str, str, int]
             direction = str(doc.get("direction", ""))
             for idx, seg in enumerate(doc.get("segments", []), start=1):
                 translation = seg.get("translation")
-                if isinstance(translation, str):
+                if isinstance(translation, str) and translation.strip():
                     seeded[(doc_id, direction, idx)] = translation
     return seeded
 
@@ -453,10 +463,9 @@ async def build_arm_manifest_async(
                                     "reuse_reason": "answered_by_dictionary_no_post",
                                 }
                             )
-                            seed = prior_translations.get((doc_id, direction, seg_idx), translated)
                             before = application.ContextBefore(
                                 source=core[-400:] if len(core) > 400 else core,
-                                target=seed[-400:] if len(seed) > 400 else seed,
+                                target=translated[-400:] if len(translated) > 400 else translated,
                             )
                             continue
 
@@ -564,6 +573,16 @@ async def build_arm_manifest_async(
                         elif archived_op is not None:
                             reuse_status = "reusable_exact"
                             reuse_reason = "exact_operation_identity_match"
+                        elif (
+                            archived_slot is not None
+                            and archived_slot["operation_identity_sha256"]
+                            == op_identity.operation_sha256
+                            and archived_slot["status"] == "complete"
+                            and archived_slot["has_raw_content"]
+                            and not archived_slot["has_valid_translation"]
+                        ):
+                            reuse_status = "must_post"
+                            reuse_reason = "archived_missing_valid_translation"
                         elif archived_req is not None:
                             reuse_status = "reusable_raw_request_only"
                             reuse_reason = "request_identity_match_operation_mismatch"
@@ -577,6 +596,13 @@ async def build_arm_manifest_async(
                             elif not archived_slot["has_raw_content"]:
                                 reuse_status = "must_post"
                                 reuse_reason = "archived_missing_raw_content_and_reuse_key"
+                            elif (
+                                archived_slot["operation_identity_sha256"]
+                                == op_identity.operation_sha256
+                                and not archived_slot["has_valid_translation"]
+                            ):
+                                reuse_status = "must_post"
+                                reuse_reason = "archived_missing_valid_translation"
                             else:
                                 reuse_status = "must_post"
                                 reuse_reason = "operation_and_request_identity_mismatch"
@@ -639,15 +665,15 @@ async def build_arm_manifest_async(
                                 "reuse_reason": reuse_reason,
                             }
                         )
-                        seed = (
-                            (
-                                archived_op.get("translation")
-                                if reuse_status == "reusable_exact" and archived_op is not None
-                                else None
+                        if reuse_status == "reusable_exact":
+                            assert (
+                                archived_op is not None
+                                and isinstance(archived_op["translation"], str)
+                                and archived_op["translation"].strip()
                             )
-                            or prior_translations.get((doc_id, direction, seg_idx))
-                            or translated
-                        )
+                            seed = archived_op["translation"]
+                        else:
+                            seed = prior_translations.get((doc_id, direction, seg_idx)) or translated
                         before = application.ContextBefore(
                             source=core[-400:] if len(core) > 400 else core,
                             target=seed[-400:] if len(seed) > 400 else seed,
@@ -693,6 +719,7 @@ async def build_arm_manifest_async(
             "reusable_raw_request_only_segments": reusable_raw_count,
             "reusable_legacy_adr0020_segments": reusable_legacy_count,
             "must_post_segments": must_post_count,
+            "non_exact_model_segments": len(model_rows) - reusable_count,
             "random_lock_segments": sum(1 for row in model_rows if row["has_random_locks"]),
             "scoped_skill_stem_segments": sum(
                 1 for row in model_rows if row["scoped_skill_stem_count"] > 0
