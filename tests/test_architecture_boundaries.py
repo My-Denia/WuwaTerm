@@ -705,12 +705,12 @@ def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
 
 
 def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
-    """Pure terminology modules stay decoupled from SQLite/lookup even transitively.
+    """Pure matching/text modules and pure plan/contract modules stay decoupled.
 
-    ``segmentation`` currently imports ``review`` for ``paragraph_ranges`` and
-    ``segment_core`` (and is still checked directly by Rule #11); the seven
-    pure terminology modules below must not reach ``lookup``, ``db`` or
-    ``sqlite3`` even through transitive imports.
+    All nine ``PURE_MATCHING`` modules (including ``segmentation`` and
+    ``text_spans``) plus ``translation_plan`` and ``semantic_review_contract``
+    must not reach ``review``, ``lookup``, ``db``, or ``sqlite3`` even
+    through transitive imports.
     """
     from scripts import check_architecture_boundaries as cab
 
@@ -731,17 +731,19 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
         }
         for name, path in modules.items()
     }
-    pure_term_roots = cab.PURE_MATCHING - {"segmentation"}
-    assert pure_term_roots == {
+    assert cab.PURE_MATCHING == {
         "cjk_span",
         "english_plural",
         "protected_text",
+        "segmentation",
         "skill_references",
         "term_classification",
         "term_matching",
         "term_preparation",
+        "text_spans",
     }
-    for root in sorted(pure_term_roots):
+    check_roots = cab.PURE_MATCHING | {"translation_plan", "semantic_review_contract"}
+    for root in sorted(check_roots):
         seen: set[str] = {root}
         stack = [root]
         while stack:
@@ -797,6 +799,9 @@ def test_pure_matching_module_importing_db_or_lookup_is_rejected(
     (pkg / "segmentation.py").write_text(
         "import sqlite3\n", encoding="utf-8"
     )
+    (pkg / "text_spans.py").write_text(
+        "from .review import review_pair\n", encoding="utf-8"
+    )
 
     monkeypatch.setattr(cab, "PACKAGE", pkg)
     failures = cab.check()
@@ -806,6 +811,8 @@ def test_pure_matching_module_importing_db_or_lookup_is_rejected(
     assert "term_preparation.py: pure matching module must not import storage" in joined, failures
     assert "'lookup'" in joined, failures
     assert "segmentation.py: pure matching module must not import sqlite3" in joined, failures
+    assert "text_spans.py: pure matching module must not import storage" in joined, failures
+    assert "'review'" in joined, failures
 
 
 def test_shipped_deployment_admission_manifest_is_valid():

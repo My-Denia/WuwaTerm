@@ -306,8 +306,8 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Pure matching (subset of Domain core) | `term_matching`, `term_preparation`, `cjk_span`, `protected_text`, `segmentation`, `english_plural`, `skill_references`, `term_classification` | `db`, `lookup`, `sqlite3` (including under `TYPE_CHECKING`) |
+| Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `term_matching`, `term_preparation`, `cjk_span`, `protected_text`, `segmentation`, `english_plural`, `skill_references`, `term_classification`, `text_spans` | `db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -438,7 +438,7 @@ Observed edges (static imports among shipped modules):
   them; `llm_transport` → `request_trace` for the POST stage. Both edges are
   no-ops when no HTTP request is being traced, which is the case for the bot,
   the channel adapter and the CLI.
-- `sentence` → `translation_plan` → `term_preparation`, `review`, `cjk_span`, `semantic_review_contract`, `llm_transport`;
+- `sentence` → `translation_plan` → `term_preparation`, `text_spans`, `cjk_span`, `semantic_review_contract`, `llm_transport`;
 - `sentence` → `lookup`, `normalize`, `protected_text`, `term_matching`,
   `term_preparation`, `httpx`; only its old `translate_html`,
   `translate_html_async`, and `_restore_html` methods lazily import their
@@ -468,7 +468,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
 | `sentence` → `telegram_html` | Transitional | Three lazy legacy forwarding methods remain until the Telegram product cutover; the neutral translation path has no presentation dependency |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
-| `segmentation` imports pure text helpers from `review` | Indirect coupling | `segmentation` imports only `WHITESPACE`, `segment_core`, `paragraph_ranges`, `sentence_ranges_v2` from `review`, which separately imports `lookup` → `db`; direct imports of `db`, `lookup`, and `sqlite3` from pure matching modules are forbidden |
+| `segmentation`/`translation_plan`/`sentence` imported pure text helpers from `review` | Resolved | Pure Unicode-scalar span helpers (`WHITESPACE`, `sentence_ranges`, `sentence_ranges_v2`, `review_sentence_ranges_v2`, `segment_core`, `paragraph_ranges`) live in stdlib-only `text_spans`; Rule #11 forbids `db`, `lookup`, `review`, and `sqlite3` across all pure matching/text modules (checked transitively by `tests/test_architecture_boundaries.py`), while `review` re-exports compatible public/private aliases |
 | Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |
 
 ## Request flows

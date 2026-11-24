@@ -28,8 +28,6 @@ from typing import Any, Literal, Protocol
 from . import llm_transport
 from . import request_trace
 from .cjk_span import MATCHER_REVISION
-from .review import WHITESPACE as _SEGMENT_WHITESPACE
-from .review import paragraph_ranges
 from .semantic_review_contract import PRECEDENT_WORDING
 from .term_preparation import (
     TermReference,
@@ -37,6 +35,10 @@ from .term_preparation import (
     partition_references_for_prompt,
     references_need_scope_instruction,
     validated_reference_ranges,
+)
+from .text_spans import (
+    WHITESPACE as _SEGMENT_WHITESPACE,
+    paragraph_ranges,
 )
 
 LOGGER = logging.getLogger(__name__)

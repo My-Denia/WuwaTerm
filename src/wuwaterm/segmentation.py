@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .review import (
+from .text_spans import (
     WHITESPACE,
     paragraph_ranges as _paragraph_ranges,
     segment_core as _core,
@@ -25,7 +25,8 @@ HARD_CUT_WINDOW = 200
 BOUNDARY_PUNCTUATION = "，、；：,;:"
 
 # WHITESPACE (exactly the scalars of the spec; str.isspace() has a different
-# set), _core and _paragraph_ranges are defined in review and imported above.
+# set), _core, _paragraph_ranges, and _sentence_ranges_v2 live in pure stdlib
+# text_spans so segmentation has no coupling to SQLite-backed review/lookup.
 _NATURAL = WHITESPACE | frozenset(BOUNDARY_PUNCTUATION)
 
 STATUS_READY = "ready"

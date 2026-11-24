@@ -6,7 +6,7 @@ Intended layers (must stay aligned with docs/architecture.md):
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract,
                    skill_references, term_classification, term_matching,
-                   term_preparation
+                   term_preparation, text_spans
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
@@ -61,9 +61,9 @@ nested subpackages discovered via rglob):
    cycle shape, not the only one.
 11. Pure matching modules (``term_matching``, ``term_preparation``,
    ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``,
-   ``skill_references``, ``term_classification``) must not import storage
-   ``db``, storage-coupled modules (``lookup``), or ``sqlite3`` (including
-   under ``TYPE_CHECKING``).
+   ``skill_references``, ``term_classification``, ``text_spans``) must not import
+   storage ``db``, storage-coupled modules (``lookup``, ``review``), or
+   ``sqlite3`` (including under ``TYPE_CHECKING``).
 12. Dynamic tool imports in ``scripts/deployment_admission.py`` via
    ``_tool_module`` / ``_tool_modules`` must be statically discoverable and
    listed in ``DECLARED_DYNAMIC_TOOL_DEPS``. Every declared tool must exist
@@ -117,11 +117,12 @@ DOMAIN_CORE = frozenset(
         "term_classification",
         "term_matching",
         "term_preparation",
+        "text_spans",
     }
 )
 DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semantic_review"})
 # Pure matching / text-structure modules inside DOMAIN_CORE that must remain
-# independent of storage (`db`), storage-coupled (`lookup`), and `sqlite3`.
+# independent of storage (`db`), storage-coupled (`lookup`, `review`), and `sqlite3`.
 PURE_MATCHING = frozenset(
     {
         "term_matching",
@@ -132,10 +133,11 @@ PURE_MATCHING = frozenset(
         "english_plural",
         "skill_references",
         "term_classification",
+        "text_spans",
     }
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.
-PURE_MATCHING_FORBIDDEN_STORAGE = frozenset({"db", "lookup"})
+PURE_MATCHING_FORBIDDEN_STORAGE = frozenset({"db", "lookup", "review"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
 # orchestration while sharing lower-level term and sentence primitives. This
