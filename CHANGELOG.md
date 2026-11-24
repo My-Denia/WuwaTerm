@@ -3,6 +3,66 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.12.0 - 2026-11-24
+
+### Architecture & Translation Planning
+
+- Extract `wuwaterm.translation_plan` with `TranslationPlan`, `RequestPolicy`,
+  `ProviderProfile`, `TranslationRequestSpec`, and unified v4 request/operation
+  identities (`RequestIdentity`, `OperationIdentity`) shared between runtime
+  translation and offline evaluation manifest/verification scripts (#308).
+- Remove all eight legacy module `mypy` `ignore_errors` overrides across
+  `src/wuwaterm`, `src/wuwaterm_api`, and `scripts/` (#308).
+- Document the `OperationIdentity` evidence boundary: identical single-segment
+  `OperationIdentity` establishes single-segment wire request, `RequestPolicy`,
+  `ProviderProfile`, dictionary identity, matcher revision, postprocess version,
+  and corrective prompt hash identity, and does **not** encode outer
+  `OperationExecutionBudget` caps (`max_total_calls`, `max_corrective_calls`,
+  `allow_html_fallback`) or multi-segment/channel orchestration envelopes; it
+  therefore does not by itself prove execution equivalence across different
+  outer `OperationExecutionBudget` caps.
+
+### Execution Budget, Timeout & Runtime Observability
+
+- Enforce shared execution-budget bounds via `OperationExecutionBudget` across
+  single-segment `translate_request_async` (at most 2 upstream model calls and 1
+  shared corrective slot across HTML-to-plain fallback, timeout fallback, and
+  paragraph repair), multi-segment long-text operations (capped to non-empty
+  segments plus at most one corrective call per segment), linked-channel
+  `channel_post_handler` orchestration aligned with `ChannelRuntime.reserve`,
+  `semantic_review_async`, and the `llm_transport.post_chat_completion` HTTP
+  choke point (#309, MY-483).
+- Harden Pure ASGI `TimeoutMiddleware` with an explicit `anyio.CancelScope` and
+  `_abort_if_request_deadline_expired` routing guard so an expired request
+  deadline after a budget refusal reliably exits through `TimeoutMiddleware` as
+  HTTP `504` (`request_timed_out`) instead of mapping to `503` (#309).
+- Extend bounded `RequestTrace` / `RuntimeMetrics` with fixed-vocabulary
+  `llm strategy` / fallback / budget counters (`strategy_counts`,
+  `budget_refused_counts`, `fallback_counts`) and add the offline
+  `scripts/summarize_runtime_metrics.py` log aggregator without exposing raw
+  request or user text (#309).
+
+### Pure Text Spans & Layering
+
+- Extract stdlib-only `wuwaterm.text_spans` (`split_paragraphs`,
+  `paragraph_ranges`, `sentence_ranges`, `sentence_ranges_v2`,
+  `trim_span`, `slice_leading_whitespace`), decoupling `segmentation`,
+  `translation_plan`, and `sentence` from `review` and SQLite and tightening
+  Rule #11 (`check_architecture_boundaries.py`) (#310).
+
+### Upgrade & Compatibility
+
+- Dictionary builder logic, SQLite schema (`2`), CJK matcher revision
+  (`wuwaterm-cjk-matcher-v9`), pinned game data (`9218d612`, `3.7.0 / 3.7.8 /
+  8975829`), OpenAPI/HTTP contracts (aside from `info.version` `0.12.0`),
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH` default (`omit`; `auto` remains opt-in),
+  and `zh->en` default (`disabled`) are unchanged from `v0.11.0`.
+- Deployments already running `v0.11.0` can upgrade with
+  `deploy/vps-update.sh --runtime-only` without rebuilding `terms.db`.
+- Container images continue to omit game data and databases; deploying from a
+  source checkout at the release commit or tag remains required alongside the
+  published registry images.
+
 ## 0.11.0 - 2026-11-23
 
 ### Terms
