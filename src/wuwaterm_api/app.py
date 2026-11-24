@@ -25,11 +25,13 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote
 
 import anyio
+import anyio.lowlevel
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -49,6 +51,7 @@ from wuwaterm.application import (
     ERROR_PAYLOAD_TOO_LARGE,
     ERROR_RATE_LIMITED,
     ERROR_UNAUTHORIZED,
+    KIND_ERROR,
     KIND_LLM,
     REVIEW_DENSE_MAX_FINDINGS,
     REVIEW_MAX_FINDINGS,
@@ -102,6 +105,7 @@ from wuwaterm.request_trace import (
     RuntimeMetrics,
     completion_fields,
     current as current_trace,
+    deadline_expired,
     direction_from_target,
     log_strategy_summary,
     mark_timed_out,
@@ -1333,6 +1337,38 @@ def _replay(receive: Receive, body: bytes) -> Receive:
     return replay
 
 
+_ACTIVE_REQUEST_TIMEOUT_SCOPE: ContextVar[anyio.CancelScope | None] = ContextVar(
+    "_ACTIVE_REQUEST_TIMEOUT_SCOPE", default=None
+)
+
+
+async def _abort_if_request_deadline_expired(outcome: object) -> None:
+    """Route an already-expired request deadline back to ``TimeoutMiddleware``.
+
+    ``OperationExecutionBudget`` and ``llm_transport`` check
+    ``request_trace.deadline_expired()`` synchronously before starting a
+    paid model call. If that check refuses a call in the brief window after
+    the deadline elapsed but before ``anyio``'s timer callback runs,
+    returning HTTP 503 ``llm_unavailable`` would misclassify a server-side
+    504 timeout. Cancelling the active request's ``CancelScope`` and hitting
+    a checkpoint hands control back to ``TimeoutMiddleware`` cleanly without
+    being intercepted by FastAPI's ``Exception`` handlers.
+    """
+    if not deadline_expired():
+        return
+    try:
+        diagnostic = getattr(outcome, "llm_failure", None)
+    except Exception:
+        return
+    if type(diagnostic) is not LLMFailureDiagnostic or diagnostic.reason != "timeout":
+        return
+    cancel_scope = _ACTIVE_REQUEST_TIMEOUT_SCOPE.get()
+    if cancel_scope is None:
+        return
+    cancel_scope.cancel()
+    await anyio.lowlevel.checkpoint()
+
+
 class TimeoutMiddleware:
     """Bound the wall-clock cost of a single request, and cancel what it owns.
 
@@ -1380,12 +1416,17 @@ class TimeoutMiddleware:
         # cancellation chain in between.
         set_deadline(self.timeout_seconds)
         exchange = _ResponseExchange(send)
-        try:
-            with anyio.fail_after(self.timeout_seconds):
+        with anyio.CancelScope(
+            deadline=anyio.current_time() + self.timeout_seconds
+        ) as cancel_scope:
+            token = _ACTIVE_REQUEST_TIMEOUT_SCOPE.set(cancel_scope)
+            try:
                 await self.app(scope, receive, exchange.send)
+            finally:
+                _ACTIVE_REQUEST_TIMEOUT_SCOPE.reset(token)
+        if not cancel_scope.cancelled_caught:
             return
-        except TimeoutError:
-            mark_timed_out()
+        mark_timed_out()
 
         # The total was already on the record; what it could not say is
         # WHERE the time went, which is what the request trace keeps. The
@@ -2126,6 +2167,8 @@ def _register_routes(app: FastAPI) -> None:
             # the request time budget) while it runs.
             offload=asyncio.to_thread,
         )
+        if outcome.kind == KIND_ERROR:
+            await _abort_if_request_deadline_expired(outcome)
         set_stage(STAGE_POSTPROCESS)
         LOGGER.info(
             "translation device=%s kind=%s direction=%s context=%s request_id=%s",
@@ -2401,6 +2444,8 @@ def _register_routes(app: FastAPI) -> None:
             before_llm_call=_device_llm_guard(request, device),
             offload=asyncio.to_thread,
         )
+        if outcome.error_code is not None:
+            await _abort_if_request_deadline_expired(outcome)
         set_stage(STAGE_POSTPROCESS)
         # Lengths, counts and status only: neither text is ever logged.
         LOGGER.info(

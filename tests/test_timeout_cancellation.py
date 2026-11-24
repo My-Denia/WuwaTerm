@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 
 import anyio
 import httpx
@@ -624,3 +625,45 @@ def test_a_status_line_already_in_flight_is_never_preceded_by_another():
     # The body was completed rather than left dangling: a client reading the
     # response must not be left waiting for something that will never come.
     assert committed[-1] == "http.response.body", committed
+
+
+def test_deadline_expired_during_prepare_terms_returns_504_not_503(
+    tmp_path, sample_db, monkeypatch
+):
+    """Expired server time budget caught at pre-call guard still returns 504."""
+    from wuwaterm import application as app_mod
+
+    llm_env(monkeypatch)
+    app, store = build_app(
+        tmp_path, sample_db, request_timeout_seconds=0.05, llm_max_concurrency=1
+    )
+    counting = Counter()
+    app.state.translator._llm_transport = counting.transport()
+    token = issue_token(store)
+
+    orig_dictionary_stage = app_mod._dictionary_stage
+
+    def slow_dictionary_stage(*args, **kwargs):
+        time.sleep(0.08)
+        return orig_dictionary_stage(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "_dictionary_stage", slow_dictionary_stage)
+
+    with captured_records() as recorder:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "需要翻译的一个句子"},
+                headers=bearer(token),
+            )
+        )
+
+    assert response.status_code == 504, response.text
+    assert response.json()["error"]["code"] == "internal"
+    assert counting.starts == [], counting.starts
+    [record] = timeout_records(recorder)
+    assert record["stage"] == "prepare_terms", record
+    assert record["llm_calls"] == "0", record
+    assert app.state.metrics.snapshot()["requests"]["timed_out"] == 1
