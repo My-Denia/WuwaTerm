@@ -60,7 +60,7 @@ def _is_sentence_end_v2(text: str, index: int) -> bool:
     """segmentation-v1 sentence end: only a decimal dot is not a break.
 
     This is the boundary the published contract pins (docs/segmentation-v1.md)
-    and ``segmentation`` imports it as ``sentence_ranges_v2``, so it stays
+    and ``segmentation`` imports ``sentence_ranges_v2`` from here, so it stays
     exactly the spec rule. The review-only list-label rule is a separate
     predicate (``review_sentence_ranges_v2``) that never reaches this one.
     """
