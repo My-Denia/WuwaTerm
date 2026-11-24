@@ -8,19 +8,22 @@ does not distribute generated game data or generated SQLite databases.
 ### Architecture & Translation Planning
 
 - Extract `wuwaterm.translation_plan` with `TranslationPlan`, `RequestPolicy`,
-  `ProviderProfile`, `TranslationRequestSpec`, and unified v4 request/operation
-  identities (`RequestIdentity`, `OperationIdentity`) shared between runtime
-  translation and offline evaluation manifest/verification scripts (#308).
-- Remove all eight legacy module `mypy` `ignore_errors` overrides across
-  `src/wuwaterm`, `src/wuwaterm_api`, and `scripts/` (#308).
+  `ProviderProfile`, `TranslationRequestSpec`, and unified `RequestIdentity` /
+  `OperationIdentity` models (with evaluation probe `FINGERPRINT_VERSION = 4`)
+  shared between runtime translation and offline evaluation manifest/verification
+  scripts (#308).
+- Remove all eight legacy `src/wuwaterm` `mypy` `ignore_errors` overrides and
+  expand `scripts/validate.py` `mypy` checking to cover both `src/wuwaterm` and
+  `src/wuwaterm_api` (#308).
 - Document the `OperationIdentity` evidence boundary: identical single-segment
   `OperationIdentity` establishes single-segment wire request, `RequestPolicy`,
   `ProviderProfile`, dictionary identity, matcher revision, postprocess version,
   and corrective prompt hash identity, and does **not** encode outer
   `OperationExecutionBudget` caps (`max_total_calls`, `max_corrective_calls`,
-  `allow_html_fallback`) or multi-segment/channel orchestration envelopes; it
-  therefore does not by itself prove execution equivalence across different
-  outer `OperationExecutionBudget` caps.
+  `max_corrective_calls_per_segment`, `timeout_seconds`, and cooperative
+  cancellation) or multi-segment/channel orchestration envelopes; it therefore
+  does not by itself prove execution equivalence across different outer
+  `OperationExecutionBudget` caps.
 
 ### Execution Budget, Timeout & Runtime Observability
 
@@ -35,20 +38,23 @@ does not distribute generated game data or generated SQLite databases.
 - Harden Pure ASGI `TimeoutMiddleware` with an explicit `anyio.CancelScope` and
   `_abort_if_request_deadline_expired` routing guard so an expired request
   deadline after a budget refusal reliably exits through `TimeoutMiddleware` as
-  HTTP `504` (`request_timed_out`) instead of mapping to `503` (#309).
+  HTTP `504` (`internal` / `"request exceeded the server time budget"`, logged as
+  `request timed out`) instead of mapping to `503` (#309).
 - Extend bounded `RequestTrace` / `RuntimeMetrics` with fixed-vocabulary
-  `llm strategy` / fallback / budget counters (`strategy_counts`,
-  `budget_refused_counts`, `fallback_counts`) and add the offline
-  `scripts/summarize_runtime_metrics.py` log aggregator without exposing raw
-  request or user text (#309).
+  `llm strategy` / fallback / budget counters (`configured_thinking`,
+  `initial_thinking`, `timeout_fallback`, `paragraph_regroup` /
+  `paragraph_regroup_applied`, `paragraph_repair`, `html_fallback` /
+  `html_fallback_attempts`, and `budget_exhausted` / `budget_exhausted_count`)
+  and add the offline `scripts/summarize_runtime_metrics.py` log aggregator
+  without exposing raw request or user text (#309).
 
 ### Pure Text Spans & Layering
 
-- Extract stdlib-only `wuwaterm.text_spans` (`split_paragraphs`,
-  `paragraph_ranges`, `sentence_ranges`, `sentence_ranges_v2`,
-  `trim_span`, `slice_leading_whitespace`), decoupling `segmentation`,
-  `translation_plan`, and `sentence` from `review` and SQLite and tightening
-  Rule #11 (`check_architecture_boundaries.py`) (#310).
+- Extract stdlib-only `wuwaterm.text_spans` (`WHITESPACE`, `paragraph_ranges`,
+  `segment_core`, `sentence_ranges`, `sentence_ranges_v2`,
+  `review_sentence_ranges_v2`), decoupling `segmentation`, `translation_plan`,
+  and `sentence` from `review` and SQLite and tightening Rule #11
+  (`check_architecture_boundaries.py`) (#310).
 
 ### Upgrade & Compatibility
 
