@@ -8,6 +8,8 @@ Intended layers (must stay aligned with docs/architecture.md):
                    skill_references, term_classification, term_matching,
                    term_preparation
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
+                   translation_plan (immutable plan, policy, provider profile,
+                   request/operation identity),
                    llm_transport (HTTP transport for chat completions),
                    semantic_review (semantic-review-v1 engine)
   application:     application  (protocol-neutral command/API/web pipeline;
@@ -117,7 +119,7 @@ DOMAIN_CORE = frozenset(
         "term_preparation",
     }
 )
-DOMAIN_LLM = frozenset({"sentence", "llm_transport", "semantic_review"})
+DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semantic_review"})
 # Pure matching / text-structure modules inside DOMAIN_CORE that must remain
 # independent of storage (`db`), storage-coupled (`lookup`), and `sqlite3`.
 PURE_MATCHING = frozenset(

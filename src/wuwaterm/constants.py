@@ -62,7 +62,11 @@ SOURCE_PROFILE_ENV = "WUWATERM_SOURCE_PROFILE"
 
 
 def get_source_profile(name: str | None = None) -> SourceProfile:
-    profile_name = name or os.getenv(SOURCE_PROFILE_ENV, DEFAULT_SOURCE_PROFILE_NAME)
+    if name:
+        profile_name = name
+    else:
+        env_name = os.getenv(SOURCE_PROFILE_ENV)
+        profile_name = DEFAULT_SOURCE_PROFILE_NAME if env_name is None else env_name
     try:
         return SOURCE_PROFILES[profile_name]
     except KeyError as exc:

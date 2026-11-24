@@ -122,7 +122,9 @@ NOT_REVIEWED_STREAK_STOP = 3
 TIMEOUT_STREAK_STOP = 3
 B1_SANITIZED = "work/B1-zh.sanitized.txt"
 SNAPSHOT_DB = "work/terms-3.7.snapshot.db"
-ENV_KEYS = re.compile(r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_)[A-Z_]+$")
+ENV_KEYS = re.compile(
+    r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_|WUWATERM_TRANSLATION_THINKING_)[A-Z_]+$"
+)
 
 MET = "met"
 NOT_MET = "not_met"
@@ -139,7 +141,27 @@ class Refused(RuntimeError):
     """A precondition failed; nothing further is run."""
 
 
-FINGERPRINT_VERSION = 3
+FINGERPRINT_VERSION = 4
+
+
+@dataclass(frozen=True)
+class _FingerprintContextBefore:
+    source: str
+    target: str
+
+
+@dataclass(frozen=True)
+class _FingerprintPrecedent:
+    surface: str
+    choice: str
+    rendering: str | None
+    snippet: str
+
+
+@dataclass(frozen=True)
+class _FingerprintContext:
+    before: _FingerprintContextBefore | None = None
+    precedents: tuple[_FingerprintPrecedent, ...] = ()
 
 
 def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
@@ -154,14 +176,36 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     the translation model went unnoticed. Version 2 also records the
     translation model. Version 3 also hashes the fixed translation prompt
     constants the builder pastes in; version 2 hashed the builder's source
-    only, so changing such a constant left the fingerprint unchanged. A
-    frozen hash is always checked with the version it was made with; frozen
+    only, so changing such a constant left the fingerprint unchanged.
+
+    Version 4 is a configuration-level probe fingerprint (``evidence_scope =
+    "config_probes"``), distinct from per-segment initial requests, corrective
+    retries, and full execution-result evidence. It builds representative
+    offline initial and corrective request/operation identities through
+    ``wuwaterm.translation_plan`` (covering direction fidelity rules, scoped
+    references, speaker disambiguation, paragraph-repair instructions, thinking
+    configuration, provider profile, and execution policy) plus concrete
+    semantic-review probes.
+    A frozen hash is always checked with the version it was made with; frozen
     values are never rewritten.
     """
     import inspect
 
     from wuwaterm import semantic_review, sentence
     from wuwaterm.semantic_review_contract import PRECEDENT_WORDING
+    from wuwaterm.term_preparation import TermOccurrence, TermReference
+    from wuwaterm.translation_plan import (
+        DEFAULT_PROVIDER_PROFILE,
+        RequestPolicy,
+        TranslationPlan,
+        build_paragraph_repair_request_spec,
+        build_timeout_fallback_request_spec,
+        build_translation_request_spec,
+        canonical_json,
+        resolve_request_policy_from_env,
+        sha256_bytes,
+        sha256_text,
+    )
 
     def h(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -173,6 +217,322 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     max_tokens, extra_body = semantic_review.thinking_request_options(thinking)
     json_mode = os.getenv("WUWATERM_SEMANTIC_REVIEW_JSON_MODE", "1").strip() != "0"
     base_url, _key, model = llm_transport.resolve_llm_config(semantic_review.SEMANTIC_MODEL_ENV)
+    _base, _key, translation_model = llm_transport.resolve_llm_config()
+
+    if version >= 4:
+        templates = sentence.current_prompt_templates()
+        policy_plain = resolve_request_policy_from_env(en_zh_protocol=False)
+        policy_en_zh_proto = resolve_request_policy_from_env(en_zh_protocol=True)
+        profile = DEFAULT_PROVIDER_PROFILE
+
+        en_zh_context_plan = TranslationPlan(
+            source_text="Line one.\n\nLine two.",
+            prepared_text="Line one.\n\nLine two.",
+            locked_text="Line one.\n\nLine two.",
+            locks=(),
+            references=(),
+            to_chinese=True,
+            context=_FingerprintContext(
+                before=_FingerprintContextBefore("Prev", "前段"),
+                precedents=(
+                    _FingerprintPrecedent(
+                        "Echo", "official_pair", "声骸", "Echo"
+                    ),
+                ),
+            ),
+            prompt_templates=templates,
+        )
+        en_zh_heavy_plan = TranslationPlan(
+            source_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            prepared_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            locked_text="\n\n".join(f"Paragraph {i}" for i in range(25)),
+            locks=(),
+            references=(),
+            to_chinese=True,
+            prompt_templates=templates,
+        )
+
+        probe_specs: list[tuple[str, TranslationPlan, RequestPolicy]] = [
+            (
+                "zh_en_plain",
+                TranslationPlan(
+                    source_text="测试",
+                    prepared_text="测试",
+                    locked_text="测试",
+                    locks=(),
+                    references=(
+                        TermReference(
+                            source="声骸",
+                            zh="声骸",
+                            en="Echo",
+                            category="core_term",
+                        ),
+                    ),
+                    to_chinese=False,
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+            (
+                "zh_en_locked",
+                TranslationPlan(
+                    source_text="测试__WUWA_TERM_0000000000000000_0000__",
+                    prepared_text="测试__WUWA_TERM_0000000000000000_0000__",
+                    locked_text="测试__WUWA_TERM_0000000000000000_0000__",
+                    locks=(("__WUWA_TERM_0000000000000000_0000__", "星声", "Astrite"),),
+                    references=(),
+                    to_chinese=False,
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+            (
+                "zh_en_context",
+                TranslationPlan(
+                    source_text="测试",
+                    prepared_text="测试",
+                    locked_text="测试",
+                    locks=(),
+                    references=(),
+                    to_chinese=False,
+                    context=_FingerprintContext(
+                        before=_FingerprintContextBefore("前置", "Previous"),
+                        precedents=(
+                            _FingerprintPrecedent(
+                                "漂泊者", "official_pair", "Rover", "漂泊者"
+                            ),
+                        ),
+                    ),
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+            (
+                "zh_en_scoped_speaker",
+                TranslationPlan(
+                    source_text="椿和Tuner",
+                    prepared_text="椿和Tuner",
+                    locked_text="椿和Tuner",
+                    locks=(),
+                    references=(
+                        TermReference(
+                            source="椿",
+                            zh="椿",
+                            en="Camellya",
+                            category="resonator",
+                            occurrences=(TermOccurrence(0, 1, "椿", 0, 0, 1),),
+                            reason="single_char_name_mention",
+                        ),
+                        TermReference(
+                            source="Tuner",
+                            zh="调音师",
+                            en="Tuner",
+                            category="speaker",
+                            occurrences=(TermOccurrence(2, 7, "Tuner", 0, 2, 7),),
+                        ),
+                        TermReference(
+                            source="Tuner",
+                            zh="调谐器",
+                            en="Tuner",
+                            category="item",
+                            occurrences=(TermOccurrence(2, 7, "Tuner", 0, 2, 7),),
+                        ),
+                    ),
+                    to_chinese=False,
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+            (
+                "zh_en_html",
+                TranslationPlan(
+                    source_text="测试",
+                    prepared_text="测试",
+                    locked_text="测试",
+                    locks=(),
+                    references=(),
+                    to_chinese=False,
+                    html_mode=True,
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+            (
+                "en_zh_plain_protocol",
+                TranslationPlan(
+                    source_text="Collect __WUWA_TERM_0000000000000000_0000__",
+                    prepared_text="Collect __WUWA_TERM_0000000000000000_0000__",
+                    locked_text="Collect __WUWA_TERM_0000000000000000_0000__",
+                    locks=(("__WUWA_TERM_0000000000000000_0000__", "星声", "Astrite"),),
+                    references=(
+                        TermReference(
+                            source="Jinhsi",
+                            zh="今汐",
+                            en="Jinhsi",
+                            category="resonator",
+                        ),
+                    ),
+                    to_chinese=True,
+                    prompt_templates=templates,
+                ),
+                policy_en_zh_proto,
+            ),
+            ("en_zh_context", en_zh_context_plan, policy_plain),
+            ("en_zh_heavy", en_zh_heavy_plan, policy_plain),
+            (
+                "en_zh_html",
+                TranslationPlan(
+                    source_text="Test",
+                    prepared_text="Test",
+                    locked_text="Test",
+                    locks=(),
+                    references=(),
+                    to_chinese=True,
+                    html_mode=True,
+                    prompt_templates=templates,
+                ),
+                policy_plain,
+            ),
+        ]
+
+        parts: dict[str, str] = {
+            "precedent_wording": sha256_text(PRECEDENT_WORDING),
+            "semantic_term_fact_wording": sha256_text(semantic_review.TERM_FACT_WORDING),
+            "semantic_term_facts_builder": sha256_text(
+                inspect.getsource(semantic_review.term_facts)
+            ),
+            "translation_policy": sha256_bytes(
+                canonical_json(policy_plain.to_identity_dict())
+            ),
+            "provider_profile": sha256_bytes(canonical_json(profile.to_identity_dict())),
+        }
+        for probe_name, probe_plan, probe_policy in probe_specs:
+            spec = build_translation_request_spec(
+                probe_plan,
+                policy=probe_policy,
+                provider_profile=profile,
+                model=translation_model,
+            )
+            op_id = spec.operation_identity(probe_policy, profile)
+            parts[f"translation_probe_{probe_name}_initial_request"] = op_id.request.request_sha256
+            parts[f"translation_probe_{probe_name}_operation"] = op_id.operation_sha256
+
+        timeout_fallback_spec = build_timeout_fallback_request_spec(
+            en_zh_context_plan,
+            policy=policy_plain,
+            provider_profile=profile,
+            model=translation_model,
+            timeout_override=policy_plain.timeout_fallback_timeout_seconds,
+        )
+        parts["translation_probe_en_zh_timeout_fallback_request"] = (
+            timeout_fallback_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_fallback_timeout_seconds
+            ).request_sha256
+        )
+        context_repair_spec = build_paragraph_repair_request_spec(
+            en_zh_context_plan,
+            policy=policy_plain,
+            paragraphs=2,
+            initial_thinking_mode=policy_plain.resolve_initial_thinking_mode(
+                to_chinese=True,
+                locked_text=en_zh_context_plan.locked_text,
+                lock_count=len(en_zh_context_plan.locks),
+            ),
+            provider_profile=profile,
+            model=translation_model,
+        )
+        parts["translation_probe_en_zh_context_paragraph_repair_request"] = (
+            context_repair_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_seconds
+            ).request_sha256
+        )
+        heavy_repair_spec = build_paragraph_repair_request_spec(
+            en_zh_heavy_plan,
+            policy=policy_plain,
+            paragraphs=25,
+            initial_thinking_mode=policy_plain.resolve_initial_thinking_mode(
+                to_chinese=True,
+                locked_text=en_zh_heavy_plan.locked_text,
+                lock_count=len(en_zh_heavy_plan.locks),
+            ),
+            provider_profile=profile,
+            model=translation_model,
+        )
+        parts["translation_probe_en_zh_heavy_paragraph_repair_request"] = (
+            heavy_repair_spec.request_identity(
+                effective_timeout_seconds=policy_plain.timeout_seconds
+            ).request_sha256
+        )
+
+        for probe_dir, explain_lang, job in (
+            (
+                "zh_en",
+                "en",
+                semantic_review.SemanticReviewJob(
+                    source="测试",
+                    target="Test",
+                    direction="en",
+                    explain_language="en",
+                    context_before=semantic_review.ContextBefore("前", "Before"),
+                    precedents=(
+                        semantic_review.Precedent(
+                            "漂泊者", "official_pair", "Rover", "漂泊者", 0, 0, 3
+                        ),
+                    ),
+                ),
+            ),
+            (
+                "en_zh",
+                "zh",
+                semantic_review.SemanticReviewJob(
+                    source="Test",
+                    target="测试",
+                    direction="zh",
+                    explain_language="zh",
+                    context_before=semantic_review.ContextBefore("Before", "前"),
+                    precedents=(
+                        semantic_review.Precedent(
+                            "Rover", "official_pair", "漂泊者", "Rover", 0, 0, 5
+                        ),
+                    ),
+                ),
+            ),
+        ):
+            semantic_payload: dict[str, Any] = {
+                "model": model,
+                "messages": semantic_review.build_messages(
+                    job, ['Source "x" (occurrence 1): probe fact.']
+                ),
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                **({"response_format": semantic_review.SEMANTIC_RESPONSE_FORMAT} if json_mode else {}),
+                **extra_body,
+            }
+            parts[f"semantic_probe_{probe_dir}_{explain_lang}"] = sha256_bytes(
+                canonical_json(semantic_payload)
+            )
+
+        options: dict[str, Any] = {
+            "thinking_mode": thinking,
+            "semantic_max_tokens": max_tokens,
+            "semantic_extra_body": extra_body,
+            "semantic_response_format": "json_object" if json_mode else None,
+            "model": model,
+            "translation_model": translation_model,
+            "gateway_host": httpx.URL(base_url).host if base_url else None,
+            "translation_thinking_zh_en": policy_plain.configured_thinking_zh_en,
+            "translation_thinking_en_zh": policy_plain.configured_thinking_en_zh,
+            "provider_profile": profile.name,
+        }
+        combined = sha256_bytes(canonical_json({"parts": parts, "options": options}))
+        return {
+            "config_sha256": combined,
+            "parts": parts,
+            "options": options,
+            "fingerprint_version": version,
+            "evidence_scope": "config_probes",
+        }
+
     parts = {
         "semantic_system_prompt": h(semantic_review.SYSTEM_PROMPT_TEMPLATE),
         "semantic_term_fact_wording": h(semantic_review.TERM_FACT_WORDING),
@@ -197,7 +557,6 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
             "translation_html_mode_instruction": h(sentence._HTML_MODE_INSTRUCTION),
             "translation_html_mode_instruction_zh": h(sentence._HTML_MODE_INSTRUCTION_ZH),
         })
-    _base, _key, translation_model = llm_transport.resolve_llm_config()
     options = {
         "thinking_mode": thinking,
         "semantic_max_tokens": max_tokens,

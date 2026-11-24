@@ -107,18 +107,16 @@ f-strings. Formatting is not enforced.
 The type checker is `mypy`, installed by the `dev` extra and bounded to one
 minor release (`mypy>=2.4,<2.5`) in `pyproject.toml`. The bounded range ensures
 upstream type inference improvements or standard-library stub updates cannot
-silently shift the baseline under the repository. It checks `src/wuwaterm` under
-Python 3.11 with `check_untyped_defs = true`, `warn_unused_ignores = true`, and
-`no_implicit_optional = true`. Missing third-party vendor stubs are ignored
-globally (`ignore_missing_imports = true`) rather than via per-file silences, so
-the gate reports our own type errors rather than upstream gaps. Because the
-codebase predates static typing, an explicit baseline silences eight legacy
-modules carrying existing errors under `[[tool.mypy.overrides]]` with
-`ignore_errors = true` (#208); all other modules are checked strictly, and
-cleaned-up modules must drop their override. `typing` runs under `--quick`
-alongside the other fast offline gates because it is an offline static check
-completing in sub-second time. It does not check untyped external packages or
-the silenced legacy modules until they are cleaned up.
+silently shift the baseline under the repository. It checks `src/wuwaterm` and
+`src/wuwaterm_api` under Python 3.11 with `check_untyped_defs = true`,
+`warn_unused_ignores = true`, and `no_implicit_optional = true`. Missing
+third-party vendor stubs are ignored globally (`ignore_missing_imports = true`)
+rather than via per-file silences, so the gate reports our own type errors
+rather than upstream gaps. Every shipped module under `src/wuwaterm` and
+`src/wuwaterm_api` is type-checked with no `ignore_errors` module
+overrides remaining. `typing` runs under `--quick` alongside the other fast
+offline gates because it is an offline static check completing in sub-second
+time. It does not check untyped external packages.
 
 ## Offline Validation
 
@@ -137,7 +135,7 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 .venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python scripts/check_api_contract.py
 .venv/bin/python -m ruff check .
-.venv/bin/python -m mypy src/wuwaterm
+.venv/bin/python -m mypy src/wuwaterm src/wuwaterm_api
 .venv/bin/python -m pytest
 uv lock --check
 ```

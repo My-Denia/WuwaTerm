@@ -505,7 +505,7 @@ def validate_serve_numeric_settings(settings: ApiSettings) -> None:
         ("WUWATERM_API_AUTH_MAX_CONCURRENCY", raw.auth_max_concurrency, 1, 64),
     ):
         _validate_int(name, value, minimum=minimum, maximum=maximum)
-    for name, value, minimum, maximum in (
+    for name, value, min_val, max_val in (
         ("WUWATERM_API_LLM_TIMEOUT_SECONDS", raw.llm_timeout_seconds, 0.1, 300.0),
         (
             "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
@@ -514,4 +514,4 @@ def validate_serve_numeric_settings(settings: ApiSettings) -> None:
             600.0,
         ),
     ):
-        _validate_float(name, value, minimum=minimum, maximum=maximum)
+        _validate_float(name, value, minimum=min_val, maximum=max_val)

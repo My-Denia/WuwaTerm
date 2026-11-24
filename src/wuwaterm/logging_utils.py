@@ -52,5 +52,5 @@ def safe_text_len(text: str | None) -> int:
     return len(text or "")
 
 
-def safe_error_type(exc: BaseException) -> str:
+def safe_error_type(exc: BaseException | None) -> str:
     return type(exc).__name__

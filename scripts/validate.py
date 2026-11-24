@@ -82,8 +82,8 @@ SERVER_STEPS: list[Step] = [
     ),
     Step(
         "typing",
-        "the type checker reports an error outside the baseline in pyproject.toml",
-        ["-m", "mypy", "src/wuwaterm"],
+        "the type checker reports an error under pyproject.toml",
+        ["-m", "mypy", "src/wuwaterm", "src/wuwaterm_api"],
         ROOT,
     ),
     Step(

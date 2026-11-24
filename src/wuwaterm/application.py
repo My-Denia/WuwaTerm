@@ -40,9 +40,9 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, Hashable
+from typing import Deque, Hashable, Literal, ParamSpec, Protocol, TypeVar
 
-from .lookup import TermService
+from .lookup import ReviewSnapshot, TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
 from .normalize import count_cjk as count_cjk
@@ -52,8 +52,10 @@ from .protected_text import ProtectedText as ProtectedText
 from .protected_text import ProtectedTextIntegrityError as ProtectedTextIntegrityError
 from .review import (
     MAX_SIDE_SCALARS,
+    ReviewFinding,
     ReviewReport,
     ReviewRequestError,
+    ReviewSpan,
     review_pair as _review_pair,
 )
 from . import semantic_review_contract as _semantic_contract
@@ -95,11 +97,15 @@ LOGGER = logging.getLogger(__name__)
 # Stable application outcome vocabulary
 # --------------------------------------------------------------------------
 
-KIND_NOOP = "noop"
-KIND_EXACT = "exact"
-KIND_FUZZY = "fuzzy"
-KIND_LLM = "llm"
-KIND_ERROR = "error"
+TranslationKind = Literal["noop", "exact", "fuzzy", "llm", "error"]
+TranslationDirection = Literal["en", "zh"]
+ServiceCapability = Literal["semantic-review-v1", "translation-context-v1"]
+
+KIND_NOOP: Literal["noop"] = "noop"
+KIND_EXACT: Literal["exact"] = "exact"
+KIND_FUZZY: Literal["fuzzy"] = "fuzzy"
+KIND_LLM: Literal["llm"] = "llm"
+KIND_ERROR: Literal["error"] = "error"
 
 TRANSLATION_KINDS = frozenset({KIND_NOOP, KIND_EXACT, KIND_FUZZY, KIND_LLM, KIND_ERROR})
 
@@ -130,8 +136,8 @@ TRANSLATION_ERROR_CODES = frozenset(
     }
 )
 
-DIRECTION_TO_CHINESE = "zh"
-DIRECTION_TO_ENGLISH = "en"
+DIRECTION_TO_CHINESE: Literal["zh"] = "zh"
+DIRECTION_TO_ENGLISH: Literal["en"] = "en"
 
 # Protocol-neutral pipeline messages. Adapters may replace them; the Telegram
 # adapter keeps them verbatim because they are already its published wording.
@@ -212,7 +218,7 @@ class TranslationOutcome:
     surface that (the Telegram adapter appends its bilingual flag).
     """
 
-    kind: str
+    kind: TranslationKind
     text: str
     to_chinese: bool = False
     dictionary_miss: bool = False
@@ -223,7 +229,7 @@ class TranslationOutcome:
     )
 
     @property
-    def direction(self) -> str:
+    def direction(self) -> TranslationDirection:
         return DIRECTION_TO_CHINESE if self.to_chinese else DIRECTION_TO_ENGLISH
 
     @property
@@ -250,17 +256,25 @@ class MarkupTranslation:
     fallback_to_plain: bool = False
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+class Offload(Protocol):
+    def __call__(
+        self,
+        func: Callable[_P, _R],
+        /,
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> Awaitable[_R]: ...
+
+
 MarkupTranslator = Callable[..., Awaitable[MarkupTranslation]]
 TextSplitter = Callable[[str, int], Sequence[str]]
 # Called immediately before each LLM request, after the concurrency slot is
 # held; awaitable results are awaited. Raise to refuse without an upstream call.
 LlmCallGuard = Callable[[], None | Awaitable[None]]
-# How an adapter runs the pipeline's BLOCKING stage. The dictionary stage opens
-# SQLite and, for short ASCII queries, scores every term row; an adapter with a
-# shared event loop (the HTTP server) passes ``asyncio.to_thread`` so that work
-# cannot stall unrelated requests. The Telegram adapter leaves it unset because
-# its single loop already serialises handler work.
-Offload = Callable[..., Awaitable[object]]
 
 
 # --------------------------------------------------------------------------
@@ -875,14 +889,14 @@ def review_pair(
         raise
 
 
-def _review_span_to_wire(span: object) -> dict[str, object] | None:
+def _review_span_to_wire(span: ReviewSpan | None) -> dict[str, object] | None:
     if span is None:
         return None
     return {"start": span.start, "end": span.end, "text": span.text}
 
 
 def _review_finding_to_wire(
-    finding: object, *, include_reason: bool = False
+    finding: ReviewFinding, *, include_reason: bool = False
 ) -> dict[str, object]:
     candidates_truncated = bool(finding.candidates_truncated)
     wire_candidates: list[dict[str, object]] = []
@@ -893,7 +907,7 @@ def _review_finding_to_wire(
         if len(sources) > REVIEW_MAX_SOURCES:
             candidates_truncated = True
             sources = sources[:REVIEW_MAX_SOURCES]
-        wire_candidate = {
+        wire_candidate: dict[str, object] = {
             "zh": candidate.zh,
             "en": candidate.en,
             "category": candidate.category,
@@ -990,7 +1004,7 @@ def semantic_review_enabled() -> bool:
     return os.getenv(SEMANTIC_REVIEW_ENABLED_ENV, "").strip().casefold() in _TRUTHY
 
 
-def service_capabilities() -> tuple[str, ...]:
+def service_capabilities() -> tuple[ServiceCapability, ...]:
     """Optional capabilities this process can serve right now.
 
     A capability is listed only when it actually works, so a client can turn a
@@ -1044,9 +1058,9 @@ class _SnapshotOnce:
 
     def __init__(self, service: TermService) -> None:
         self._service = service
-        self._snapshot = None
+        self._snapshot: ReviewSnapshot | None = None
 
-    def review_snapshot(self):
+    def review_snapshot(self) -> ReviewSnapshot:
         if self._snapshot is None:
             self._snapshot = self._service.review_snapshot()
         return self._snapshot

@@ -41,6 +41,7 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -135,7 +136,7 @@ def _derive(secret: str, salt: bytes) -> bytes:
     )
 
 
-def normalize_scopes(scopes: object) -> tuple[str, ...]:
+def normalize_scopes(scopes: str | Iterable[object] | None) -> tuple[str, ...]:
     if scopes is None:
         return DEFAULT_SCOPES
     if isinstance(scopes, str):
@@ -329,7 +330,11 @@ class DeviceStore:
     # -- operator commands -------------------------------------------------
 
     def issue(
-        self, device_name: str, scopes: object = None, *, secret: str
+        self,
+        device_name: str,
+        scopes: str | Iterable[object] | None = None,
+        *,
+        secret: str,
     ) -> Device:
         """Register a device for an operator-supplied secret.
 

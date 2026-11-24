@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -498,11 +499,13 @@ class TranslationReply:
     parse_mode: str | None = None
 
 
-def _parse_translation_args(args: list[str]) -> ParsedTranslationArgs:
+def _parse_translation_args(args: Sequence[str] | None) -> ParsedTranslationArgs:
     """Parse LEADING direction flags; everything after the first non-flag
     token is literal text. A "--to" inside prose ("/tr how --to convert
     files") is therefore translated, not treated as a broken flag, and
     formatting entities can be preserved for the untouched tail."""
+    if not args:
+        return ParsedTranslationArgs(text="", forced_to_chinese=None)
     forced_to_chinese: bool | None = None
     index = 0
     while index < len(args):
@@ -1150,6 +1153,8 @@ async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # always be able to close a busy/spammed public chat even when the per-chat
     # translation budget is exhausted.
     chat = update.effective_chat
+    if chat is None:
+        return
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     arg = context.args[0].strip().lower() if context.args else ""
     if arg in {"on", "open", "enable"}:
@@ -1394,7 +1399,10 @@ async def grant_command(
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
-        cid = update.effective_chat.id
+        chat = update.effective_chat
+        if chat is None:
+            return
+        cid = chat.id
         outcome = _try_persist(settings.allow, cid)
         if outcome is _PersistenceOutcome.FAILED:
             await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
@@ -1438,7 +1446,10 @@ async def revoke_command(
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
-        cid = update.effective_chat.id
+        chat = update.effective_chat
+        if chat is None:
+            return
+        cid = chat.id
         outcome = _try_persist(settings.disallow, cid)
         if outcome is _PersistenceOutcome.PERSISTED:
             note = f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid})."
@@ -1847,7 +1858,7 @@ async def _passes_delivery_gate(
     chat = update.effective_chat
     if chat is None or chat.type != "private":
         return False
-    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    config = context.application.bot_data[CONFIG_KEY]
     return _is_owner(update, config)
 
 

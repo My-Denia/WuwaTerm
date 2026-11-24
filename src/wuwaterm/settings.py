@@ -9,7 +9,7 @@ import os
 import tempfile
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 
 LOGGER = logging.getLogger(__name__)
@@ -58,11 +58,12 @@ def _file_lock(path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
+            msvcrt_mod: Any = msvcrt
             if os.fstat(fd).st_size < 1:
                 os.write(fd, b"\0")
                 os.fsync(fd)
             os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            msvcrt_mod.locking(fd, msvcrt_mod.LK_LOCK, 1)
         else:
             import fcntl
 
@@ -76,7 +77,8 @@ def _file_lock(path: Path) -> Iterator[None]:
                 if os.name == "nt":
                     import msvcrt
 
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    msvcrt_mod = msvcrt
+                    msvcrt_mod.locking(fd, msvcrt_mod.LK_UNLCK, 1)
                 else:
                     import fcntl
 

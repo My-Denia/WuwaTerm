@@ -351,14 +351,14 @@ def iter_arikatsu_records(
             if not source_id:
                 continue
             for field in spec.text_fields:
-                text_key = row.get(field)
-                if not isinstance(text_key, str) or not text_key:
+                raw_text_key = row.get(field)
+                if not isinstance(raw_text_key, str) or not raw_text_key:
                     continue
                 record = _record_for_key(
                     category=spec.category,
                     source_file=f"BinData/{spec.config_file}",
                     source_id=source_id,
-                    text_key=text_key,
+                    text_key=raw_text_key,
                     zh_map=zh_map,
                     en_map=en_map,
                 )
@@ -477,14 +477,14 @@ def iter_dimbreath_records(
             if not source_id:
                 continue
             for field in spec.text_fields:
-                text_key = row.get(field)
-                if not isinstance(text_key, str) or not text_key:
+                raw_text_key = row.get(field)
+                if not isinstance(raw_text_key, str) or not raw_text_key:
                     continue
                 record = _record_for_key(
                     category=spec.category,
                     source_file=spec.config_file,
                     source_id=source_id,
-                    text_key=text_key,
+                    text_key=raw_text_key,
                     zh_map=zh_map,
                     en_map=en_map,
                 )
@@ -651,7 +651,7 @@ def measure_free_text_zh_exclusions(
         cached = variant_cache.get(surface)
         if cached is None:
             values: set[str] = set()
-            for value in aligned_en.get(surface, ()) | {official_en}:
+            for value in set(aligned_en.get(surface, ())) | {official_en}:
                 if not value:
                     continue
                 candidates = [value]

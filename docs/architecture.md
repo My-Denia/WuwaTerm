@@ -308,7 +308,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 |-------|---------|-----------------|
 | Domain core | `lookup`, `normalize`, `models`, `review`, `cjk_span`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `skill_references`, `term_classification`, `term_matching`, `term_preparation` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Pure matching (subset of Domain core) | `term_matching`, `term_preparation`, `cjk_span`, `protected_text`, `segmentation`, `english_plural`, `skill_references`, `term_classification` | `db`, `lookup`, `sqlite3` (including under `TYPE_CHECKING`) |
-| Domain + provider | `sentence`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
+| Domain + provider | `sentence`, `translation_plan`, `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
@@ -426,6 +426,7 @@ Observed edges (static imports among shipped modules):
   them; `llm_transport` → `request_trace` for the POST stage. Both edges are
   no-ops when no HTTP request is being traced, which is the case for the bot,
   the channel adapter and the CLI.
+- `sentence` → `translation_plan` → `term_preparation`, `review`, `cjk_span`, `semantic_review_contract`, `llm_transport`;
 - `sentence` → `lookup`, `normalize`, `protected_text`, `term_matching`,
   `term_preparation`, `httpx`; only its old `translate_html`,
   `translate_html_async`, and `_restore_html` methods lazily import their

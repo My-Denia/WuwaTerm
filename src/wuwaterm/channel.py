@@ -210,9 +210,15 @@ async def send_with_flood_retry(send_callable, *, retry_gate=None):
         return await send_callable()
     except RetryAfter as exc:
         raw_delay = getattr(exc, "retry_after", None)
-        if hasattr(raw_delay, "total_seconds"):  # PTB >=23 returns timedelta
-            raw_delay = raw_delay.total_seconds()
-        requested = max(float(raw_delay) if raw_delay is not None else 1.0, 0.0)
+        total_seconds = getattr(raw_delay, "total_seconds", None)
+        if callable(total_seconds):  # PTB >=23 returns timedelta
+            raw_delay = total_seconds()
+        requested = max(
+            float(raw_delay)
+            if isinstance(raw_delay, (int, float))
+            else 1.0,
+            0.0,
+        )
         # Bounded-latency trade-off: a wait beyond the cap retries early and
         # will likely re-flood (the second RetryAfter then propagates). Log
         # both values so a log review can tell "waited fully" from "gave up".
@@ -474,6 +480,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         original_claim = claim
     try:
+        html_text: str | None
         if message.text:
             plain = message.text
             html_text = message.text_html
@@ -1391,16 +1398,16 @@ async def _edit_reply_chunks(
                     mode=mode,
                 ),
             )
-            reply_message_id = getattr(sent_message, "message_id", None)
-            if reply_message_id is not None:
-                remembered_reply_ids.append(reply_message_id)
+            sent_message_id: int | None = getattr(sent_message, "message_id", None)
+            if sent_message_id is not None:
+                remembered_reply_ids.append(sent_message_id)
                 reply_index.remember_many(
                     chat_id, message.message_id, tuple(remembered_reply_ids)
                 )
             _log_emit(
                 chat_type,
                 message,
-                reply_message_id,
+                sent_message_id,
                 mode,
                 edited=False,
                 text=chunk,
@@ -1433,7 +1440,7 @@ async def _delete_reply_chunks(
     chat_id: int,
     reply_message_ids: tuple[int, ...],
 ) -> tuple[int, ...]:
-    failed_reply_message_ids = []
+    failed_reply_message_ids: list[int] = []
     for index, reply_message_id in enumerate(reply_message_ids):
         if not _passes_final_delivery_gate(
             context,

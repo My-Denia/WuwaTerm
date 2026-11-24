@@ -26,7 +26,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 # segmentation-v1's whitespace set, so the fingerprint normalization does not
 # depend on a runtime's idea of whitespace.
@@ -34,8 +34,8 @@ from .segmentation import WHITESPACE as _WHITESPACE
 
 REVIEW_VERSION = "semantic-review-v1"
 
-CAPABILITY_SEMANTIC_REVIEW = "semantic-review-v1"
-CAPABILITY_TRANSLATION_CONTEXT = "translation-context-v1"
+CAPABILITY_SEMANTIC_REVIEW: Literal["semantic-review-v1"] = "semantic-review-v1"
+CAPABILITY_TRANSLATION_CONTEXT: Literal["translation-context-v1"] = "translation-context-v1"
 
 CATEGORIES = (
     "omission",

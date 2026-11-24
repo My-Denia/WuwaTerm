@@ -22,7 +22,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -100,6 +100,43 @@ def _safe_diagnostic_count(value: object) -> int | None:
     return None
 
 
+FailureReason = Literal[
+    "budget",
+    "rate_limit",
+    "upstream",
+    "timeout",
+    "connect",
+    "request",
+    "http",
+    "invalid_api_response",
+    "invalid_response",
+    "protected_text_integrity",
+    "html_integrity",
+    "stale_before_llm",
+    "authorization_changed_before_llm",
+    "translation_unavailable",
+    "unknown",
+]
+FailureDetail = Literal[
+    "empty_output",
+    "non_text_output",
+    "truncated_output",
+    "missing_placeholder",
+    "duplicate_placeholder",
+    "unsupported_thinking",
+    "unsupported_reasoning_effort",
+    "unspecified",
+]
+CallOutcome = Literal[
+    "ok",
+    "http_error",
+    "timeout",
+    "connect",
+    "request",
+    "invalid_api_response",
+]
+
+
 @dataclass(frozen=True)
 class LLMFailureDiagnostic:
     """Safe, bounded metadata for one failed LLM translation attempt."""
@@ -153,6 +190,7 @@ class LLMTranslationError(RuntimeError):
         # Keep the legacy attribute's original semantics. Consumers that
         # cross a logging or protocol boundary use ``diagnostic`` instead.
         self.reason = reason
+        self.failure_stage: str | None = None
 
 
 def safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
@@ -400,7 +438,7 @@ class LlmCallRecord:
     """Outcome of one attempted HTTP POST. Carries no request or response text."""
 
     purpose: str
-    outcome: str  # ok|http_error|timeout|connect|request|invalid_api_response
+    outcome: CallOutcome
     status_code: int | None
     elapsed_ms: int
 
@@ -486,7 +524,7 @@ async def post_chat_completion(
         )
     for hook in tuple(_PRE_SEND_HOOKS):
         hook(purpose)
-    outcome = "request"
+    outcome: CallOutcome = "request"
     status_code: int | None = None
     started = time.monotonic()
     # One stage mark per attempt, so a request timed out inside this window
