@@ -12,7 +12,28 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.11.0`, a dictionary
+  published tag. The latest published Core release is `v0.12.0`, a runtime
+  architecture, execution-budget, timeout-hardening and observability release
+  on top of `v0.11.0`: `wuwaterm.translation_plan` extracts `TranslationPlan`,
+  `RequestPolicy`, `ProviderProfile`, `TranslationRequestSpec`, `RequestIdentity`
+  and `OperationIdentity` shared with offline evaluation (`FINGERPRINT_VERSION =
+  4`), removes all eight legacy `src/wuwaterm` `mypy` `ignore_errors` overrides
+  and extends `scripts/validate.py` `mypy` checking to `src/wuwaterm_api`
+  (#308); `OperationIdentity` docs clarify that outer `OperationExecutionBudget`
+  caps and multi-segment/channel envelopes are outside single-segment
+  `OperationIdentity` (#311); `OperationExecutionBudget` caps upstream calls
+  across single-segment translation, long split texts, channel orchestration,
+  `semantic_review_async` and `llm_transport` (MY-483, #309); `TimeoutMiddleware`
+  adds an explicit `anyio.CancelScope` and `_abort_if_request_deadline_expired`
+  guard returning HTTP `504` (`internal`); bounded `RequestTrace`/`RuntimeMetrics`
+  and `scripts/summarize_runtime_metrics.py` record and summarize strategy metrics
+  without free text (#309); and stdlib-only `wuwaterm.text_spans` decouples
+  `segmentation`/`translation_plan`/`sentence` from `review` and SQLite under a
+  tightened Rule #11 (#310). Dictionary builder logic, schema `2`, matcher
+  `wuwaterm-cjk-matcher-v9`, pinned data `9218d612`, OpenAPI shape (except
+  `info.version` `0.12.0`) and thinking defaults (`omit` / `disabled`) are
+  unchanged from `v0.11.0`, so `v0.11.0` deployments can upgrade with
+  `--runtime-only`. Before it is `v0.11.0`, a dictionary
   and translation release on top of `v0.10.3`: the CJK matcher moves to
   `wuwaterm-cjk-matcher-v9`, which admits a single-character name only at a
   plausible right boundary and counts `有` as a particle, and the pinned `3.7`
@@ -107,7 +128,7 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.11.0` and its published asset hashes are recorded
+  target-version file. Core `0.12.0` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
@@ -122,7 +143,7 @@ release. That boundary has not moved.
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
   `docs/self-hosting.md` name the same published release: `main`, the
-  `v0.10.2`, `v0.10.3` and `v0.11.0` tags record and print `v0.4.1`, the
+  `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags record and print `v0.4.1`, the
   Telegram release that pins Core `v0.10.1`. A Core tag can only record a
   client release that already exists, so the `v0.10.1` tag, frozen
   before Telegram `v0.4.1` was published, keeps `v0.4.0` in its `products.json`
@@ -137,7 +158,7 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main`, the `v0.10.3` and `v0.11.0` tags record and install Web
+  they differ. `main`, the `v0.10.3`, `v0.11.0` and `v0.12.0` tags record and install Web
   `v0.4.3`; the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and
   install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
@@ -275,7 +296,7 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.3` and `0.11.0` pin Web `v0.4.3`
+  release carries. `0.10.3`, `0.11.0` and `0.12.0` pin Web `v0.4.3`
   (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
   (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends
