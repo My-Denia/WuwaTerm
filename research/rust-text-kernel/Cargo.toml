@@ -1,0 +1,16 @@
+[package]
+name = "wuwaterm_text_kernel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "wuwaterm_text_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wuwaterm-kernel-cli"
+path = "src/bin/wuwaterm_kernel_cli.rs"
+
+[dependencies]
