@@ -84,14 +84,15 @@ install describable later.
 A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10, and a
 clone of the v0.9.1 tag those of Telegram v0.3.0, which pins Core v0.9.0,
 because each Core release records its Telegram tag in `contracts/products.json`
-and `deploy/setup.sh` takes the recorded tag. `main` and the v0.10.2 and
-v0.10.3 tags record Telegram v0.4.1, which pins Core v0.10.1. The v0.10.1 tag
-was frozen before that Telegram release
-was published, so it records v0.4.0, which pins Core v0.10.0; a checkout of the
-v0.10.1 tag passes the newer release explicitly:
+and `deploy/setup.sh` takes the recorded tag. `main` records Telegram `v0.5.0`,
+which pins Core `v0.12.0`. The `v0.10.2`, `v0.10.3`, `v0.11.0`, and `v0.12.0`
+tags were frozen before `v0.5.0` was published, so they record `v0.4.1` (which
+pins Core `v0.10.1`), and the `v0.10.1` tag records `v0.4.0` (which pins Core
+`v0.10.0`); a checkout of any of those frozen tags passes the newer release
+explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.4.1 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.5.0 ./deploy/setup.sh --with-telegram
 ```
 
 The v0.10.0 tag was frozen even earlier and still names v0.3.1, the release the
@@ -178,8 +179,9 @@ What it does, in this order:
    prepares its checkout when `--telegram-dir` is given (below), and prints
    that product's own install steps with this installation's paths filled in.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
-   tag this checkout's `contracts/products.json` records (`v0.4.1` on `main`
-   and the `v0.10.2` and `v0.10.3` tags, `v0.4.0` on the `v0.10.1` tag,
+   tag this checkout's `contracts/products.json` records (`v0.5.0` on `main`,
+   `v0.4.1` on the `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags,
+   `v0.4.0` on the `v0.10.1` tag,
    `v0.3.1` on the `v0.10.0` and `v0.9.2` tags, `v0.3.0` on the `v0.9.1` tag,
    `v0.2.10` on the `v0.9.0` tag), falling back to
    the constant in the script when that file is absent. A
@@ -275,7 +277,7 @@ bot runs somewhere else, as long as each has the database.
 **What `--with-telegram` does.** It resolves the product, prints its install
 steps with this installation's paths filled in, and starts nothing. Add
 `--telegram-dir <checkout>` — a clone at the release tag,
-`git clone --branch v0.4.1 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
+`git clone --branch v0.5.0 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
 — and the script also copies `data/terms.db` into that checkout, creates its
 `state/` at mode `0700`, and writes its `.env` at mode `0600` from this one.
 Only the bot's settings travel: the token, the owner id, the model settings and
