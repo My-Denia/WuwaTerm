@@ -984,7 +984,17 @@ class RequestIdentity:
 
 @dataclass(frozen=True)
 class OperationIdentity:
-    """Full translation operation identity: request + policy + profile + dictionary."""
+    """Full single-segment operation identity (request + policy + profile + dictionary).
+
+    Identifies single-segment request, ``RequestPolicy``, ``ProviderProfile``,
+    dictionary identity, matcher revision, postprocess version, and corrective
+    prompt hash. Does not encode outer ``OperationExecutionBudget`` caps
+    (``max_total_calls``, ``max_corrective_calls``,
+    ``max_corrective_calls_per_segment``, ``timeout_seconds``, and cooperative
+    cancellation) or multi-segment/channel orchestration envelopes; identical single-segment
+    ``OperationIdentity`` therefore does not prove execution equivalence across
+    different outer ``OperationExecutionBudget`` caps.
+    """
 
     request: RequestIdentity
     policy_sha256: str

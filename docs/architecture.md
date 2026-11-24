@@ -366,6 +366,16 @@ to non-empty segments plus at most one corrective call per segment; linked-chann
 and `llm_transport.post_chat_completion` enforces active cancellation, deadline,
 and total-call bounds at the HTTP choke point.
 
+Evidence boundary for `translation_plan.OperationIdentity`: `OperationIdentity`
+identifies single-segment wire request, `RequestPolicy`, `ProviderProfile`,
+dictionary identity, matcher revision, postprocess version, and corrective prompt
+hash, and does not encode outer `OperationExecutionBudget` caps
+(`max_total_calls`, `max_corrective_calls`, `max_corrective_calls_per_segment`,
+`timeout_seconds`, and cooperative cancellation) or multi-segment/channel
+orchestration envelopes. Identical single-segment
+`OperationIdentity` therefore does not by itself prove execution equivalence
+across different outer `OperationExecutionBudget` caps.
+
 **The deployment-tool import direction.** The flat `scripts/` deployment tools
 are a second graph, and the same script checks it for cycles over real AST
 imports — a reverse edge written inside a function body counts, so keeping it
