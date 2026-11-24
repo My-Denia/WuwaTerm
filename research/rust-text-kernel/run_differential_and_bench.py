@@ -736,7 +736,7 @@ def run_benchmarks(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run Stage 3C differential checks and offline Aho-Corasick benchmarks."
+        description="Run differential equivalence checks and offline Aho-Corasick benchmarks for the Rust text kernel."
     )
     parser.add_argument("--skip-bench", action="store_true")
     parser.add_argument("--warmup", type=int, default=3)

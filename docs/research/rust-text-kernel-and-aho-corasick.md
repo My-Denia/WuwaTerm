@@ -29,7 +29,7 @@ Production code under `src/wuwaterm/`, `src/wuwaterm_api/`, `pyproject.toml`, an
 | `contracts/segmentation-v1.json` | `20` segment + `20` pair fixtures (incl. alignment errors) | `20/20` + `20/20` | Exact match with Python & committed fixture outputs |
 | Real corpus + Unicode fuzz (`text_spans` + `segment_text`) | `23` real manuscripts (`40,956` scalars) + `200` seeded stress texts | `223/223` | Zero drift on surrogate pairs, decimal dots, list markers, and multi-pass hard cuts |
 | Dynamic bilingual `pair_segments` | `5` real `A1`–`A5` pairs + `40` synthetic stress pairs | `45/45` | Exact status, hard-cut, and partition parity |
-| Real dictionary multi-pattern scan + interval select | `19,175` `exact_lockable_sources` (`cjk-census-3.7.db`) across `23` real docs | `775` spans, `0` mismatches | Python naive `str.find`, pure-Python AC, Rust naive `str::find`, and Rust AC all produce identical `(start, end, order)` triples |
+| Real dictionary multi-pattern scan + interval select | `19,175` `exact_lockable_sources` (`cjk-census-3.7.db`) across `23` real docs | `775` spans, `0` mismatches | Python naive `str.find`, pure-Python AC, and Rust AC produce identical `(start, end, order)` triples across all `23` docs; Rust naive `str::find` matches Rust AC on exact `RawMatch` in `cargo test` and matches the `775` selected hit count in `bench` |
 
 ### Concrete Cross-Language Pitfalls Observed
 
@@ -39,7 +39,7 @@ Production code under `src/wuwaterm/`, `src/wuwaterm_api/`, `pyproject.toml`, an
 
 ## 4. Offline Benchmark Results (`data/cjk-census-3.7.db` + `wuwaterm-real-manuscripts-20261110`)
 
-Measured offline on Linux `x86_64` (`Python 3.11.15`, `rustc 1.98.0 --release`; `11,329` terms -> `19,175` lockable surfaces; `169,387` UTF-8 trie states; `warmup=3`, `iterations=20`, median ms):
+Measured offline on Linux `x86_64` (`Python 3.11.15`, `rustc 1.98.0 --release`; `TermService` reports `11,329` terms yielding `19,175` `exact_lockable_sources` surfaces and `169,387` UTF-8 trie states; default `warmup=3`, `iterations=20`, with `warmup=1` and `iterations=3–10` for build and naive baselines, median ms):
 
 ### A. Automaton Build & `segmentation-v1`
 
@@ -62,7 +62,7 @@ Measured offline on Linux `x86_64` (`Python 3.11.15`, `rustc 1.98.0 --release`; 
 
 ### Key Analytical Takeaways
 
-1. **Rewriting without changing the algorithm does not speed up scanning**: Rust naive `str::find` (`325.1 ms` on `23` docs, `20.8 ms` on `2000ch_zh`) is slightly slower than CPython's C-implemented `str.find` loop (`236.8 ms` / `10.9 ms`) because UTF-8 scalar projection runs on every pattern pass when scanning naively.
+1. **Rewriting without changing the algorithm does not speed up scanning**: Rust naive `str::find` is `1.37x–1.90x` slower than CPython `str.find` on CJK workloads (`325.1 ms` vs `236.8 ms` on `all_docs`, `20.773 ms` vs `10.937 ms` on `2000ch_zh`) while matching CPython on English/ASCII (`12.629 ms` vs `12.422 ms` on `2000ch_en`, `64.147 ms` vs `65.278 ms` on `A3_en`). Changing implementation language without changing the scan algorithm yields no win.
 2. **Algorithm change dominates language change**: Replacing the `19,175`-pass scan with Aho–Corasick in **pure Python alone** cuts `all_docs` raw scan+select from `236.8 ms` to `4.762 ms` (`49.7x`) and single `2,000`-scalar segments from `10.9–12.4 ms` to `0.109–0.195 ms` (`56–114x`).
 3. **Downstream boundary checks are NOT a hidden bottleneck**: Across all `23` real manuscripts, `_matched_span_ok` (including jieba `crosses_cjk_word_boundary`) takes `2.654 ms` (`1.1%` of `244.0 ms`), while the `19,175`-pattern `text.find` loop consumes `228.318 ms` (`93.6%`). Eliminating repeated candidate passes captures >`90%` of CPU time even if boundary checks stay unchanged in Python.
 4. **Build cost is one-time**: Constructing the `19,175`-surface automaton takes `~96 ms` in pure Python (or `~12 ms` in Rust), so caching it per `TermService` snapshot amortizes to zero after ~9 `2,000`-char calls in Python or ~1 call in Rust.
@@ -71,4 +71,4 @@ Measured offline on Linux `x86_64` (`Python 3.11.15`, `rustc 1.98.0 --release`; 
 
 1. **Keep production on Python baseline for now (no PyO3 / cross-platform wheel matrix)**: Single-segment online translation/review spends `~12 ms` in `select_term_spans` (`< 1%` of external LLM latency). Introducing PyO3/maturin cross-platform wheel builds adds release complexity without solving a live API bottleneck.
 2. **If `select_term_spans` throughput ever matters (e.g., `builder.py` full-corpus scans or higher offline batch volume), land pure-Python Aho–Corasick first**: A lazily cached pure-Python automaton captures a `49.7x` scan speedup (`~12 ms -> ~0.4 ms` per `2,000`-scalar segment including boundary checks) with zero native build dependencies. Note that opt-in modes (`allow_plural_inflection`, `nfkc_spelling_sources`) can either feed a combined surface automaton or append candidates cleanly while preserving `exact_bounds` priority.
-3. **Strongest value for the Rust kernel is single-source cross-client reuse (`Core` + `Web` WASM + Desktop/Tauri)**: The prototype already proves `100%` differential equivalence on `segmentation-v1`, `text_spans`, `scalar <-> UTF-16` coordinates, exact multi-pattern selection, and isolates subtle host Unicode drift (such as Python 3.11 vs 3.12 `isdigit()`). Next justified milestone before production integration is a lightweight WASM (`wasm32-unknown-unknown`) + PyO3 experiment gated behind explicit multi-client ownership reduction once `WuwaTerm-Web` pure workbench state stabilizes.
+3. **Strongest value for the Rust kernel is single-source cross-client reuse (`Core` + `Web` WASM + Desktop/Tauri)**: The prototype already demonstrates `100%` differential equivalence on `segmentation-v1`, `text_spans`, Unicode predicate tables, and exact multi-pattern selection (with `scalar <-> UTF-16` roundtrips covered in `cargo test`), while isolating subtle host Unicode drift (such as Python 3.11 vs 3.12 `isdigit()`). Next justified milestone before production integration is a lightweight WASM (`wasm32-unknown-unknown`) + PyO3 experiment gated behind explicit multi-client ownership reduction once `WuwaTerm-Web` pure workbench state stabilizes.
