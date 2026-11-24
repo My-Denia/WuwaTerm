@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 
 import anyio
 import httpx
@@ -635,7 +634,7 @@ def test_deadline_expired_during_prepare_terms_returns_504_not_503(
 
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.05, llm_max_concurrency=1
+        tmp_path, sample_db, request_timeout_seconds=30.0, llm_max_concurrency=1
     )
     counting = Counter()
     app.state.translator._llm_transport = counting.transport()
@@ -643,11 +642,11 @@ def test_deadline_expired_during_prepare_terms_returns_504_not_503(
 
     orig_dictionary_stage = app_mod._dictionary_stage
 
-    def slow_dictionary_stage(*args, **kwargs):
-        time.sleep(0.08)
+    def expire_during_dictionary_stage(*args, **kwargs):
+        request_trace.set_deadline(0.0)
         return orig_dictionary_stage(*args, **kwargs)
 
-    monkeypatch.setattr(app_mod, "_dictionary_stage", slow_dictionary_stage)
+    monkeypatch.setattr(app_mod, "_dictionary_stage", expire_during_dictionary_stage)
 
     with captured_records() as recorder:
         response = run(
@@ -667,3 +666,119 @@ def test_deadline_expired_during_prepare_terms_returns_504_not_503(
     assert record["stage"] == "prepare_terms", record
     assert record["llm_calls"] == "0", record
     assert app.state.metrics.snapshot()["requests"]["timed_out"] == 1
+
+
+def test_semantic_review_deadline_expired_at_preflight_returns_504_not_503(
+    tmp_path, sample_db, monkeypatch
+):
+    """Expired server time budget on /v1/semantic-reviews preflight returns 504."""
+    from wuwaterm_api import app as api_app_mod
+
+    llm_env(monkeypatch)
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_ENABLED", "true")
+    app, store = build_app(
+        tmp_path, sample_db, request_timeout_seconds=30.0, llm_max_concurrency=1
+    )
+    counting = Counter()
+    app.state.translator._llm_transport = counting.transport()
+    token = issue_token(store)
+
+    orig_set_stage = api_app_mod.set_stage
+
+    def expire_on_prepare_terms(name: str) -> None:
+        orig_set_stage(name)
+        if name == api_app_mod.STAGE_PREPARE_TERMS:
+            request_trace.set_deadline(0.0)
+
+    monkeypatch.setattr(api_app_mod, "set_stage", expire_on_prepare_terms)
+
+    with captured_records() as recorder:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/semantic-reviews",
+                json={
+                    "source": "这是一句测试。",
+                    "target": "This is a test.",
+                    "direction": "en",
+                    "review_version": "semantic-review-v1",
+                    "explain_language": "zh",
+                },
+                headers=bearer(token),
+            )
+        )
+
+    assert response.status_code == 504, response.text
+    assert response.json()["error"]["code"] == "internal"
+    assert counting.starts == [], counting.starts
+    [record] = timeout_records(recorder)
+    assert record["stage"] == "prepare_terms", record
+    assert record["llm_calls"] == "0", record
+    assert app.state.metrics.snapshot()["requests"]["timed_out"] == 1
+
+
+def test_expired_deadline_guard_preserves_503_for_unexpired_timeout_and_hostile_diagnostic(
+    tmp_path, sample_db, monkeypatch
+):
+    """Unexpired upstream timeout and hostile diagnostic getter both keep 503."""
+    from wuwaterm.application import ERROR_LLM_UNAVAILABLE, KIND_ERROR
+    from wuwaterm_api import app as api_app_mod
+
+    llm_env(monkeypatch)
+    app, store = build_app(
+        tmp_path, sample_db, request_timeout_seconds=30.0, llm_max_concurrency=1
+    )
+    token = issue_token(store)
+
+    # Sub-case A: upstream ReadTimeout while request deadline is still valid -> 503.
+    async def upstream_timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("upstream slow", request=request)
+
+    app.state.translator._llm_transport = httpx.MockTransport(upstream_timeout)
+    with captured_records() as recorder_a:
+        res_a = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "上游超时但服务端未超时。"},
+                headers=bearer(token),
+            )
+        )
+
+    assert res_a.status_code == 503, res_a.text
+    assert res_a.json()["error"]["code"] == "llm_unavailable"
+    assert timeout_records(recorder_a) == []
+    assert app.state.metrics.snapshot()["requests"]["timed_out"] == 0
+
+    # Sub-case B: expired deadline + hostile llm_failure property -> safe 503, no crash/leak.
+    class HostileOutcome:
+        kind = KIND_ERROR
+        direction = "en"
+        error_code = ERROR_LLM_UNAVAILABLE
+
+        @property
+        def llm_failure(self):
+            raise RuntimeError(TEST_SECRET)
+
+    async def hostile_outcome(*_args, **_kwargs):
+        request_trace.set_deadline(0.0)
+        return HostileOutcome()
+
+    monkeypatch.setattr(api_app_mod, "translate_request_async", hostile_outcome)
+    with captured_records() as recorder_b:
+        res_b = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "超时且诊断属性抛异常。"},
+                headers=bearer(token),
+            )
+        )
+
+    assert res_b.status_code == 503, res_b.text
+    assert res_b.json()["error"]["code"] == "llm_unavailable"
+    assert TEST_SECRET not in res_b.text
+    assert TEST_SECRET not in "\n".join(recorder_b.messages)
