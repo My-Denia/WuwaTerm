@@ -111,50 +111,6 @@ no_implicit_optional = true
 # silences, so the gate reports our own type errors rather than upstream gaps.
 ignore_missing_imports = true
 
-# Baseline overrides for modules carrying existing type errors as of #208.
-# Only modules that fail the initial 50-error baseline are listed; all other
-# modules are checked strictly. Cleaned-up modules must drop their override.
-
-# Optional lookup key indexing dict[str, SourceProfile]
-[[tool.mypy.overrides]]
-module = "wuwaterm.constants"
-ignore_errors = true
-
-# Platform-specific msvcrt locking attributes absent on non-Windows
-[[tool.mypy.overrides]]
-module = "wuwaterm.settings"
-ignore_errors = true
-
-# Keyword argument duplication, untyped callables, and tuple/list mismatches
-[[tool.mypy.overrides]]
-module = "wuwaterm.review"
-ignore_errors = true
-
-# Dynamic dict kwargs unpacking to LLM caller helpers and optional flags
-[[tool.mypy.overrides]]
-module = "wuwaterm.sentence"
-ignore_errors = true
-
-# Optional attribute assignments to str and empty tuple set-union operand
-[[tool.mypy.overrides]]
-module = "wuwaterm.builder"
-ignore_errors = true
-
-# Untyped pipeline stage objects and candidate attribute accesses
-[[tool.mypy.overrides]]
-module = "wuwaterm.application"
-ignore_errors = true
-
-# Untyped collection initialisation, missing exception attributes, and optional timedelta
-[[tool.mypy.overrides]]
-module = "wuwaterm.channel"
-ignore_errors = true
-
-# Reused loop variable name and optional exception parameter
-[[tool.mypy.overrides]]
-module = "wuwaterm.bot"
-ignore_errors = true
-
 [tool.coverage.run]
 branch = true
 source = ["src"]

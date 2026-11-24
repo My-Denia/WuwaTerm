@@ -333,21 +333,25 @@ def _coerce_resolution_context(item: object) -> ReviewResolutionContext:
     allowed = (base, base | {"matcher_revision"})
     if not isinstance(item, dict) or set(item) not in allowed:
         raise ReviewRequestError("invalid_request", "resolution_context is not valid")
-    values = tuple(
-        item[key]
-        for key in (
-            "source_revision",
-            "rule_version",
-            "dictionary_revision",
-        )
-    )
+    source_revision = item["source_revision"]
+    rule_version = item["rule_version"]
+    dictionary_revision = item["dictionary_revision"]
     matcher = item.get("matcher_revision")
     if "matcher_revision" in item and (not isinstance(matcher, str) or not matcher):
         raise ReviewRequestError("invalid_request", "resolution_context is not valid")
-    if any(not isinstance(value, str) or not value for value in values):
+    if (
+        not isinstance(source_revision, str)
+        or not source_revision
+        or not isinstance(rule_version, str)
+        or not rule_version
+        or not isinstance(dictionary_revision, str)
+        or not dictionary_revision
+    ):
         raise ReviewRequestError("invalid_request", "resolution_context is not valid")
     return ReviewResolutionContext(
-        *values,
+        source_revision=source_revision,
+        rule_version=rule_version,
+        dictionary_revision=dictionary_revision,
         matcher_revision=matcher if isinstance(matcher, str) else None,
     )
 
@@ -498,7 +502,7 @@ def _collect_mentions(
     source: str,
     surfaces: dict[str, list[TermEntry]],
     *,
-    eligible: object = None,
+    eligible: Callable[[int, int, str, Sequence[TermEntry]], bool] | None = None,
     allow_plural_inflection: bool = False,
     excluded_sources: frozenset[str] = frozenset(),
 ) -> list[_TermSpan]:
@@ -588,17 +592,19 @@ def _candidates_for(
         source = ReviewSource(source_file=entry.source_file, source_id=entry.source_id)
         if source not in sources:
             sources.append(source)
-    candidates = []
+    candidates: list[ReviewCandidate] = []
     for zh, en, category in grouped:
-        sources = tuple(grouped[(zh, en, category)])
+        candidate_sources = tuple(grouped[(zh, en, category)])
         candidates.append(
             ReviewCandidate(
                 zh=zh,
                 en=en,
                 category=category,
-                sources=sources,
+                sources=candidate_sources,
                 candidate_id=(
-                    _candidate_id(zh, en, category, sources) if include_id else None
+                    _candidate_id(zh, en, category, candidate_sources)
+                    if include_id
+                    else None
                 ),
             )
         )
@@ -1228,8 +1234,13 @@ class _OccurrenceModel:
             for form in forms:
                 asserted.update(finder(target, form))
         self._asserted = _ContainmentIndex(asserted)
+        frozenset_forms = (
+            dictionary_forms
+            if isinstance(dictionary_forms, frozenset)
+            else frozenset(dictionary_forms)
+        )
         self._dictionary = _ContainmentIndex(
-            _find_dictionary_spans(target, dictionary_forms)
+            _find_dictionary_spans(target, frozenset_forms)
         )
         self._own: dict[str, _ContainmentIndex] = {}
         self._cache: dict[
@@ -1715,7 +1726,8 @@ def _allocate_occurrences(
     # conflict test one binary search instead of a scan of every taken span.
     taken: list[tuple[int, int]] = []
     starts: list[int] = []
-    best = [0, list(assigned)]
+    best_count = 0
+    best_assigned: list[tuple[int, int] | None] = list(assigned)
     nodes = 0
 
     def conflicts(span: tuple[int, int]) -> bool:
@@ -1725,15 +1737,15 @@ def _allocate_occurrences(
         return position < len(taken) and taken[position][0] < span[1]
 
     def place(position: int, count: int) -> bool:
-        nonlocal nodes
+        nonlocal nodes, best_count, best_assigned
         remaining = len(order) - position
         # Even assigning every mention still to come would not beat the best
         # partial assignment already recorded, so this subtree cannot matter.
-        if count + remaining <= best[0]:
+        if count + remaining <= best_count:
             return False
-        if count > best[0]:
-            best[0] = count
-            best[1] = list(assigned)
+        if count > best_count:
+            best_count = count
+            best_assigned = list(assigned)
         if remaining == 0:
             # Every position is decided: only placing all of them is the
             # complete assignment the search is looking for.
@@ -1760,7 +1772,7 @@ def _allocate_occurrences(
         return place(position + 1, count)
 
     if not place(0, 0):
-        return None if nodes > budget else best[1]
+        return None if nodes > budget else best_assigned
     return assigned
 
 
@@ -2035,8 +2047,8 @@ def _review_pair_v1(
     for mention in mentions:
         candidates = _candidates_for(surfaces[mention.source])
         finding_id = mention_id(mention.start, mention.end, mention.source)
-        resolution = by_id.get(finding_id)
-        if resolution is not None:
+        mention_resolution = by_id.get(finding_id)
+        if mention_resolution is not None:
             seen_resolution_ids.add(finding_id)
         findings.append(
             _judge_mention(
@@ -2048,7 +2060,7 @@ def _review_pair_v1(
                 source_sentences=source_sentences,
                 target_sentences=target_sentences,
                 used_target=used_target,
-                resolution=resolution,
+                resolution=mention_resolution,
             )
         )
 
@@ -2324,8 +2336,8 @@ def _review_pair_v2(
     for index, mention in enumerate(mentions):
         candidates = candidates_by_surface[mention.source]
         finding_id = _span_mention_id(source, mention.start, mention.end)
-        resolution = by_id.get(finding_id)
-        if resolution is not None:
+        mention_resolution = by_id.get(finding_id)
+        if mention_resolution is not None:
             seen_resolution_ids.add(finding_id)
         findings.append(
             _judge_mention_v2(
@@ -2336,7 +2348,7 @@ def _review_pair_v2(
                 candidates=candidates,
                 corresponding=regions[index],
                 assigned=assigned[index],
-                resolution=resolution,
+                resolution=mention_resolution,
                 occurrence_model=occurrence_model,
                 automatic_term_excluded=mention.source in automatic_exclusions,
                 ambiguous_repeat=index in ambiguous,

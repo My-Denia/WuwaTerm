@@ -588,11 +588,54 @@ def test_fingerprint_v3_hashes_the_prompt_language_names(ev, monkeypatch):
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
     monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
-    v2_a, v3_a = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    v2_a, v3_a, v4_a = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint(4)
     monkeypatch.setitem(semantic_review._LANGUAGE_NAMES, "zh", "Mandarin")
-    v2_b, v3_b = ev.config_fingerprint(2), ev.config_fingerprint(3)
+    v2_b, v3_b, v4_b = ev.config_fingerprint(2), ev.config_fingerprint(3), ev.config_fingerprint(4)
     assert v2_b["config_sha256"] == v2_a["config_sha256"]
     assert v3_b["config_sha256"] != v3_a["config_sha256"]
+    assert v4_b["config_sha256"] != v4_a["config_sha256"]
+
+
+def test_fingerprint_v4_tracks_fidelity_scoped_prompts_and_thinking_config(ev, monkeypatch):
+    from wuwaterm import sentence
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "never-sent")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "translation-a")
+    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", raising=False)
+    monkeypatch.delenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", raising=False)
+
+    base = ev.config_fingerprint()
+    assert base["fingerprint_version"] == 4
+    assert base["options"]["translation_thinking_zh_en"] == "disabled"
+    assert base["options"]["translation_thinking_en_zh"] == "omit"
+
+    # Changing _ZH_EN_FIDELITY_INSTRUCTION was a v3 blind spot; v4 catches it.
+    for attr in (
+        "_ZH_EN_FIDELITY_INSTRUCTION",
+        "_SCOPED_REFERENCE_INSTRUCTION",
+        "_SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION",
+    ):
+        original = getattr(sentence, attr)
+        monkeypatch.setattr(sentence, attr, original + "changed\n")
+        assert ev.config_fingerprint()["config_sha256"] != base["config_sha256"]
+        monkeypatch.setattr(sentence, attr, original)
+
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "auto")
+    auto_fp = ev.config_fingerprint()
+    assert auto_fp["config_sha256"] != base["config_sha256"]
+    assert auto_fp["options"]["translation_thinking_en_zh"] == "auto"
+
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_EN_ZH", "disabled")
+    disabled_fp = ev.config_fingerprint()
+    assert disabled_fp["config_sha256"] != auto_fp["config_sha256"]
+    assert disabled_fp["config_sha256"] != base["config_sha256"]
+
+    monkeypatch.setenv("WUWATERM_TRANSLATION_THINKING_ZH_EN", "low")
+    zh_en_low_fp = ev.config_fingerprint()
+    assert zh_en_low_fp["config_sha256"] != disabled_fp["config_sha256"]
+    assert zh_en_low_fp["options"]["translation_thinking_zh_en"] == "low"
 
 
 def _mprime_inputs(ev, tmp_path):

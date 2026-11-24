@@ -49,7 +49,6 @@ from wuwaterm.application import (
     ERROR_PAYLOAD_TOO_LARGE,
     ERROR_RATE_LIMITED,
     ERROR_UNAUTHORIZED,
-    KIND_ERROR,
     KIND_LLM,
     REVIEW_DENSE_MAX_FINDINGS,
     REVIEW_MAX_FINDINGS,
@@ -2122,10 +2121,11 @@ def _register_routes(app: FastAPI) -> None:
             "off" if body.context is None else "on",
             _request_id(request),
         )
-        if outcome.kind == KIND_ERROR:
+        kind = outcome.kind
+        if kind == "error":
             _log_llm_failure_diagnostic(request, outcome)
             raise ApiError(outcome.error_code or ERROR_INTERNAL)
-        if outcome.kind == KIND_LLM and not llm_configured():
+        if kind == KIND_LLM and not llm_configured():
             # With no model configured the pipeline returns the source text
             # with official terms substituted. That is a reasonable chat
             # fallback, but over HTTP it would look like a successful
@@ -2141,7 +2141,7 @@ def _register_routes(app: FastAPI) -> None:
         # the completed translation (a definitive revocation still 401s).
         await _require_active_device(request, device, serve_on_store_error=True)
         return TranslationResponseBody(
-            kind=outcome.kind,
+            kind=kind,
             text=outcome.text,
             direction=outcome.direction,
             dictionary_miss=outcome.dictionary_miss,
@@ -2290,10 +2290,11 @@ def _register_routes(app: FastAPI) -> None:
         )
         if not use_matcher_basis:
             projected.pop("matcher_revision", None)
+        findings = projected["findings"]
         LOGGER.info(
             "review device=%s findings=%s truncated=%s request_id=%s",
             redact_id(device.device_id),
-            len(projected["findings"]),
+            len(findings) if isinstance(findings, list) else 0,
             projected["truncated"],
             _request_id(request),
         )

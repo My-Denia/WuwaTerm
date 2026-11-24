@@ -94,6 +94,10 @@ def test_build_arm_manifest_captures_reuse_keys_and_forbids_random_lock_reuse(tm
     assert zh_row["has_random_locks"] is False
     assert zh_row["scoped_skill_stem_count"] == 1
     assert zh_row["reuse_status"] == "must_post"
+    assert len(zh_row["request_identity_sha256"]) == 64
+    assert len(zh_row["normalized_request_identity_sha256"]) == 64
+    assert len(zh_row["operation_identity_sha256"]) == 64
+    assert zh_row["request_identity_sha256"] == zh_row["normalized_request_identity_sha256"]
 
     assert en_row["doc_id"] == "SYN-002"
     assert en_row["direction"] == "en-zh"
@@ -103,6 +107,8 @@ def test_build_arm_manifest_captures_reuse_keys_and_forbids_random_lock_reuse(tm
     assert en_row["lock_count"] == 1
     assert en_row["reuse_status"] == "must_post"
     assert en_row["reuse_reason"] == "random_lock_placeholder_nonce"
+    assert len(en_row["request_identity_sha256"]) == 64
+    assert len(en_row["operation_identity_sha256"]) == 64
 
     # Build a synthetic archived output matching both adr0020_reuse_key values.
     # SYN-001 (no random lock) must become reusable_exact; SYN-002 (random lock)
@@ -170,3 +176,39 @@ def test_build_arm_manifest_captures_reuse_keys_and_forbids_random_lock_reuse(tm
 def test_paragraph_group_ranges_for_d009_diagnostic_split():
     assert manifest_mod.paragraph_group_ranges(30, 10) == [[1, 10], [11, 20], [21, 30]]
     assert manifest_mod.paragraph_group_ranges(25, 10) == [[1, 10], [11, 20], [21, 25]]
+
+
+def test_build_arm_manifest_identities_reflect_thinking_and_policy_changes(tmp_path: Path):
+    db_path = _build_synthetic_db(tmp_path)
+    inputs_path = _write_inputs(tmp_path)
+
+    omit_manifest = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-omit",
+            db_path=db_path,
+            input_paths=[inputs_path],
+            en_zh_thinking="omit",
+            deterministic_placeholder_hex="0123456789abcdef",
+        )
+    )
+    auto_manifest = asyncio.run(
+        manifest_mod.build_arm_manifest_async(
+            arm_name="q7-auto",
+            db_path=db_path,
+            input_paths=[inputs_path],
+            en_zh_thinking="auto",
+            deterministic_placeholder_hex="0123456789abcdef",
+        )
+    )
+
+    assert omit_manifest["policy_sha256"] != auto_manifest["policy_sha256"]
+    assert omit_manifest["provider_profile_sha256"] == auto_manifest["provider_profile_sha256"]
+
+    zh_omit, en_omit = omit_manifest["requests"]
+    zh_auto, en_auto = auto_manifest["requests"]
+    assert zh_omit["request_identity_sha256"] == zh_auto["request_identity_sha256"]
+    assert zh_omit["operation_identity_sha256"] == zh_auto["operation_identity_sha256"]
+    assert en_omit["request_identity_sha256"] != en_auto["request_identity_sha256"]
+    assert en_omit["operation_identity_sha256"] != en_auto["operation_identity_sha256"]
+    assert "变奏入场" not in json.dumps(auto_manifest, ensure_ascii=False)
+    assert "Collect Astrite" not in json.dumps(auto_manifest, ensure_ascii=False)

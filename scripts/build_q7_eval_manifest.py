@@ -18,11 +18,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
+import dataclasses
 import json
 import logging
 import os
-import re
 import secrets
 import socket
 import sys
@@ -37,8 +36,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-_TERM_PLACEHOLDER_RE = re.compile(r"__WUWA_TERM_[0-9a-f]{16}_([0-9]{4,}__)")
-_NORMALIZED_PLACEHOLDER = r"__WUWA_TERM_0000000000000000_\1"
+from wuwaterm.translation_plan import (  # noqa: E402
+    DEFAULT_PROVIDER_PROFILE,
+    canonical_json,
+    normalize_term_placeholders as normalize_placeholders,
+    sha256_bytes,
+    sha256_text,
+)
+
 _WS = set("\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
 
 DEFAULT_MODEL = "deepseek-flash"
@@ -46,23 +51,6 @@ DEFAULT_TIMEOUT_SECONDS = 45.0
 DEFAULT_ZH_EN_THINKING = "disabled"
 DEFAULT_EN_ZH_THINKING = "omit"
 DEFAULT_D009_GROUP_SIZE = 10
-
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def sha256_text(text: str) -> str:
-    return sha256_bytes(text.encode("utf-8"))
-
-
-def canonical_json(obj: Any) -> bytes:
-    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def normalize_placeholders(text: str) -> str:
-    """Replace random 16-hex placeholder prefixes with a fixed sentinel for diffing."""
-    return _TERM_PLACEHOLDER_RE.sub(_NORMALIZED_PLACEHOLDER, text)
 
 
 def split_paragraphs(text: str) -> list[str]:
@@ -340,6 +328,15 @@ async def build_arm_manifest_async(
             llm_transport=httpx.MockTransport(mock_handler),
             en_zh_protocol=True,
         )
+        zh_en_policy = translator.request_policy(to_chinese=False)
+        en_zh_policy = translator.request_policy(to_chinese=True)
+        overall_policy = translator.request_policy(to_chinese=None)
+        manifest_policy_sha = sha256_bytes(
+            canonical_json(overall_policy.to_identity_dict())
+        )
+        manifest_profile_sha = sha256_bytes(
+            canonical_json(DEFAULT_PROVIDER_PROFILE.to_identity_dict())
+        )
         try:
             for input_path in input_paths:
                 raw_input = input_path.read_bytes()
@@ -362,6 +359,7 @@ async def build_arm_manifest_async(
                     if "source_sha256" in doc and sha256_text(text) != doc["source_sha256"]:
                         raise ValueError(f"source_sha256 mismatch for {doc_id}")
                     to_chinese = direction == "en-zh"
+                    doc_policy = en_zh_policy if to_chinese else zh_en_policy
                     cores = [
                         text[seg.core_start : seg.core_end]
                         for seg in segment_text(text)
@@ -370,26 +368,36 @@ async def build_arm_manifest_async(
                     before = None
                     prior_chain_reused = True
                     for seg_idx, core in enumerate(cores, start=1):
-                        prepared = translator.prepare_text_keeping_paragraphs(core)
-                        locked = translator._lock_terms_with_references(
-                            prepared,
+                        seg_context = application.TranslationContext(before=before)
+                        _exact, plan = translator.plan_translation(
+                            core,
                             to_chinese=to_chinese,
-                            allow_plural_inflection=to_chinese,
-                            allow_nfkc_spelling=True,
+                            context=seg_context,
+                            dictionary_identity=db_sha,
                         )
-                        refs_tuples = [
-                            [ref.source, ref.zh, ref.en, ref.category]
-                            for ref in locked.references
-                        ]
-                        scoped_skill_count = sum(
-                            1 for ref in locked.references if ref.origin == "scoped_skill_stem"
-                        )
+                        if plan is not None:
+                            planned_spec = translator.build_request_spec(
+                                plan, policy=doc_policy, model=model
+                            )
+                            refs_tuples = [
+                                [ref.source, ref.zh, ref.en, ref.category]
+                                for ref in plan.references
+                            ]
+                            scoped_skill_count = sum(
+                                1 for ref in plan.references if ref.origin == "scoped_skill_stem"
+                            )
+                            lock_count = len(plan.locks)
+                        else:
+                            planned_spec = None
+                            refs_tuples = []
+                            scoped_skill_count = 0
+                            lock_count = 0
                         captured.clear()
                         translated = await translator.translate_async(
                             core,
                             to_chinese=to_chinese,
                             propagate_errors=True,
-                            context=application.TranslationContext(before=before),
+                            context=seg_context,
                         )
                         model_called = len(captured) == 1
                         if not model_called:
@@ -416,30 +424,60 @@ async def build_arm_manifest_async(
                             )
                             continue
 
+                        if planned_spec is None or plan is None:
+                            raise RuntimeError(
+                                f"plan_translation returned None for model-called segment {doc_id}#{seg_idx}"
+                            )
+
                         wire = captured[0]
                         body = wire["body"]
-                        system_text = wire["system_text"]
                         user_text = wire["user_text"]
                         thinking_field = body.get("thinking", "omitted")
                         thinking_setting = zh_en_thinking if not to_chinese else en_zh_thinking
-                        has_random_locks = bool(locked.locks) or ("__WUWA_TERM_" in user_text)
+                        has_random_locks = plan.has_random_locks or ("__WUWA_TERM_" in user_text)
 
-                        sys_sha = sha256_text(system_text)
-                        usr_sha = sha256_text(user_text)
-                        norm_sys_sha = sha256_text(normalize_placeholders(system_text))
-                        norm_usr_sha = sha256_text(normalize_placeholders(user_text))
-
-                        wire_body_sha = sha256_bytes(wire["raw_bytes"])
-                        payload_sha = sha256_bytes(canonical_json(body))
-                        norm_body = dict(body)
-                        norm_body["messages"] = [
+                        norm_wire_body = dict(body)
+                        norm_wire_body["messages"] = [
                             {
                                 "role": msg["role"],
                                 "content": normalize_placeholders(msg["content"]),
                             }
                             for msg in body["messages"]
                         ]
-                        norm_payload_sha = sha256_bytes(canonical_json(norm_body))
+                        if canonical_json(planned_spec.normalized_wire_payload()) != canonical_json(
+                            norm_wire_body
+                        ):
+                            raise RuntimeError(
+                                f"TranslationRequestSpec drifted from transport wire body at {doc_id}#{seg_idx}"
+                            )
+                        if not has_random_locks and canonical_json(
+                            planned_spec.wire_payload()
+                        ) != canonical_json(body):
+                            raise RuntimeError(
+                                f"Exact TranslationRequestSpec drifted from wire body at {doc_id}#{seg_idx}"
+                            )
+
+                        wire_spec = dataclasses.replace(
+                            planned_spec,
+                            messages=tuple(
+                                {"role": msg["role"], "content": msg["content"]}
+                                for msg in body["messages"]
+                            ),
+                            has_random_locks=has_random_locks,
+                        )
+                        op_identity = wire_spec.operation_identity(
+                            doc_policy, DEFAULT_PROVIDER_PROFILE
+                        )
+                        req_identity = op_identity.request
+
+                        sys_sha = req_identity.system_prompt_sha256
+                        usr_sha = req_identity.user_prompt_sha256
+                        norm_sys_sha = req_identity.normalized_system_prompt_sha256
+                        norm_usr_sha = req_identity.normalized_user_prompt_sha256
+
+                        wire_body_sha = sha256_bytes(wire["raw_bytes"])
+                        payload_sha = req_identity.payload_sha256
+                        norm_payload_sha = req_identity.normalized_payload_sha256
 
                         manifest_key = compute_manifest_reuse_key(
                             model=body["model"],
@@ -517,9 +555,9 @@ async def build_arm_manifest_async(
                                 "thinking": thinking_setting,
                                 "thinking_wire": thinking_field,
                                 "timeout_seconds": float(timeout_seconds),
-                                "lock_count": len(locked.locks),
+                                "lock_count": lock_count,
                                 "has_random_locks": has_random_locks,
-                                "reference_count": len(locked.references),
+                                "reference_count": len(plan.references),
                                 "scoped_skill_stem_count": scoped_skill_count,
                                 "system_prompt_sha256": sys_sha,
                                 "user_prompt_sha256": usr_sha,
@@ -528,6 +566,11 @@ async def build_arm_manifest_async(
                                 "normalized_system_prompt_sha256": norm_sys_sha,
                                 "normalized_user_prompt_sha256": norm_usr_sha,
                                 "normalized_request_payload_sha256": norm_payload_sha,
+                                "request_identity_sha256": req_identity.request_sha256,
+                                "normalized_request_identity_sha256": req_identity.normalized_request_sha256,
+                                "operation_identity_sha256": op_identity.operation_sha256,
+                                "policy_sha256": op_identity.policy_sha256,
+                                "provider_profile_sha256": op_identity.provider_profile_sha256,
                                 "reuse_key": manifest_key,
                                 "normalized_reuse_key": norm_manifest_key,
                                 "adr0020_reuse_key": adr_key,
@@ -560,6 +603,8 @@ async def build_arm_manifest_async(
         "live_llm_calls": 0,
         "db_sha256": db_sha,
         "matcher_revision": MATCHER_REVISION,
+        "policy_sha256": manifest_policy_sha,
+        "provider_profile_sha256": manifest_profile_sha,
         "settings": {
             "model": model,
             "timeout_seconds": float(timeout_seconds),
