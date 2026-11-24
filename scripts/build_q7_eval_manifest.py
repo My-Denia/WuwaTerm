@@ -596,13 +596,6 @@ async def build_arm_manifest_async(
                             elif not archived_slot["has_raw_content"]:
                                 reuse_status = "must_post"
                                 reuse_reason = "archived_missing_raw_content_and_reuse_key"
-                            elif (
-                                archived_slot["operation_identity_sha256"]
-                                == op_identity.operation_sha256
-                                and not archived_slot["has_valid_translation"]
-                            ):
-                                reuse_status = "must_post"
-                                reuse_reason = "archived_missing_valid_translation"
                             else:
                                 reuse_status = "must_post"
                                 reuse_reason = "operation_and_request_identity_mismatch"

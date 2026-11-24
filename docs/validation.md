@@ -113,7 +113,7 @@ silently shift the baseline under the repository. It checks `src/wuwaterm` and
 third-party vendor stubs are ignored globally (`ignore_missing_imports = true`)
 rather than via per-file silences, so the gate reports our own type errors
 rather than upstream gaps. Every shipped module under `src/wuwaterm` and
-`src/wuwaterm_api` is type-checked strictly with no `ignore_errors` module
+`src/wuwaterm_api` is type-checked with no `ignore_errors` module
 overrides remaining. `typing` runs under `--quick` alongside the other fast
 offline gates because it is an offline static check completing in sub-second
 time. It does not check untyped external packages.
@@ -135,7 +135,7 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 .venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python scripts/check_api_contract.py
 .venv/bin/python -m ruff check .
-.venv/bin/python -m mypy src/wuwaterm
+.venv/bin/python -m mypy src/wuwaterm src/wuwaterm_api
 .venv/bin/python -m pytest
 uv lock --check
 ```
