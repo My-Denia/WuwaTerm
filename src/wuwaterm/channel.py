@@ -31,7 +31,7 @@ from .runtime_keys import (
 )
 from .lookup import TermService, preferred_exact_entry
 from .logging_utils import redact_id, safe_error_type, safe_text_len
-from .normalize import count_cjk, count_latin
+from .normalize import count_cjk, count_latin, strip_telegram_wrapper_noise
 from .sentence import (
     LLMTranslationError,
     TRANSLATION_UNAVAILABLE_NOTICE,
@@ -517,6 +517,13 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text_len=safe_text_len(plain),
             )
             html_text = None
+        # Core translation keeps prose verbatim, so Telegram wrapper markers
+        # (spoiler tags, version tags, quote bars) are removed here, once, for
+        # every plain stage: plain-only posts, the plain fallback after a failed
+        # HTML attempt, and the over-limit split. The call reservation and the
+        # chunking below both read this same text. The HTML attempt keeps
+        # ``html_text`` as written because stripping would desync the markup.
+        pipeline_plain = strip_telegram_wrapper_noise(plain, keep_paragraphs=True)
         # Direction by script: enough Chinese -> translate to English (default);
         # no Chinese but enough Latin letters -> translate to Chinese. Anything
         # else (emoji / links / numbers only) is not worth translating -> skip.
@@ -623,16 +630,16 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # fallback token is only reserved when the budget allows it and the
         # fallback only runs when its token was actually reserved. The plain
         # routes need exactly one call per chunk.
-        if len(plain) <= LLM_INPUT_CHAR_LIMIT:
+        if len(pipeline_plain) <= LLM_INPUT_CHAR_LIMIT:
             required_calls = (
                 min(2, runtime.llm_calls_per_minute) if html_text else 1
             )
         else:
             required_calls = len(
-                split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT)
+                split_telegram_text(pipeline_plain, limit=LLM_INPUT_CHAR_LIMIT)
             )
         allow_plain_fallback = (
-            len(plain) <= LLM_INPUT_CHAR_LIMIT
+            len(pipeline_plain) <= LLM_INPUT_CHAR_LIMIT
             and bool(html_text)
             and required_calls >= 2
         )
@@ -765,7 +772,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         translated_mode,
                     ) = await _translate_channel_input(
                         translator,
-                        plain,
+                        pipeline_plain,
                         html_text,
                         to_chinese=to_chinese,
                         before_llm_call=mark_channel_llm_call_started,

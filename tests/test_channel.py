@@ -555,6 +555,139 @@ def test_channel_no_html_dictionary_hit_still_exact(monkeypatch, sample_db):
     assert llm_calls == []
 
 
+def enable_directional_mock_llm(monkeypatch, calls, response_factory):
+    """Like ``enable_mock_llm`` but also records the translation direction."""
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+        references=(),
+    ):
+        calls.append(
+            {
+                "locked_text": locked_text,
+                "html_mode": html_mode,
+                "to_chinese": to_chinese,
+            }
+        )
+        return response_factory(locked_text, locks)
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+
+
+@pytest.mark.parametrize(
+    ("post_text", "expected_llm_input", "leaked_markers"),
+    [
+        ("#剧透：这是一段需要翻译的频道文本", CN_TEXT, ("#", "剧透")),
+        ("[Wuthering Waves 3.7] 短句测试", "短句测试", ("[", "3.7")),
+        (
+            "> 这是一段需要翻译的频道文本\n> 第二行文字",
+            f"{CN_TEXT}\n第二行文字",
+            (">",),
+        ),
+    ],
+    ids=["spoiler-marker", "version-tag-short-chinese", "quote-bar"],
+)
+def test_channel_plain_path_strips_telegram_wrapper_before_llm(
+    monkeypatch, sample_db, post_text, expected_llm_input, leaked_markers
+):
+    calls = []
+    enable_directional_mock_llm(
+        monkeypatch, calls, lambda _locked_text, _locks: "Translated."
+    )
+    update, message = channel_update(text=post_text, text_html="", message_id=4027)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(calls) == 1
+    assert calls[0]["html_mode"] is False
+    assert calls[0]["to_chinese"] is False
+    assert calls[0]["locked_text"] == expected_llm_input
+    assert not any(marker in calls[0]["locked_text"] for marker in leaked_markers)
+    assert message.replies == [("Translated.", None, 4027)]
+
+
+def test_channel_split_decision_uses_text_without_wrapper(monkeypatch, sample_db):
+    calls = []
+    enable_directional_mock_llm(
+        monkeypatch,
+        calls,
+        lambda _locked_text, _locks: f"chunk-{len(calls)}",
+    )
+    # Raw length is over the input limit only because of the wrapper marker;
+    # the body fits in one chunk. Reservation and execution must agree on it.
+    body = "测" * (LLM_INPUT_CHAR_LIMIT - 1)
+    update, message = channel_update(
+        text=f"#剧透：{body}", text_html="", message_id=4028
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert [call["locked_text"] for call in calls] == [body]
+    assert [call["html_mode"] for call in calls] == [False]
+    assert message.replies == [("chunk-1", None, 4028)]
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    assert len(runtime._budget_tokens) == 1
+
+
+def test_channel_input_split_strips_wrapper_before_chunking(monkeypatch, sample_db):
+    calls = []
+    enable_directional_mock_llm(
+        monkeypatch,
+        calls,
+        lambda _locked_text, _locks: f"chunk-{len(calls)}",
+    )
+    body = "测" * (LLM_INPUT_CHAR_LIMIT + 500)
+    update, message = channel_update(text=f"#剧透：{body}", message_id=4029)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(calls) == 2
+    assert "".join(call["locked_text"] for call in calls) == body
+    assert all(call["html_mode"] is False for call in calls)
+    assert message.replies == [("chunk-1\nchunk-2", None, 4029)]
+
+
+def test_channel_plain_fallback_strips_wrapper_but_html_attempt_is_untouched(
+    monkeypatch, sample_db
+):
+    calls = []
+
+    def response(_locked_text, _locks):
+        if len(calls) == 1:
+            # First (HTML) call loses every structural placeholder.
+            return "placeholders all gone"
+        return "Fallback translation."
+
+    enable_directional_mock_llm(monkeypatch, calls, response)
+    update, message = channel_update(
+        text="[Wuthering Waves 3.7] 短句测试",
+        text_html="<b>[Wuthering Waves 3.7]</b> 短句测试",
+        message_id=4030,
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert [call["html_mode"] for call in calls] == [True, False]
+    # The HTML attempt keeps the post's markup and wording as written ...
+    assert "3.7" in calls[0]["locked_text"]
+    # ... only the plain stage drops the Telegram wrapper.
+    assert calls[1]["locked_text"] == "短句测试"
+    assert calls[1]["to_chinese"] is False
+    assert message.replies == [("Fallback translation.", None, 4030)]
+
+
 def test_channel_send_retries_once_after_flood_wait(monkeypatch, sample_db, caplog):
     calls = []
 
