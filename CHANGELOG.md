@@ -17,9 +17,10 @@ does not distribute generated game data or generated SQLite databases.
   Each side is at most 2,000 Unicode scalars and 20,000 across the request
   (`input_too_long`, 422); at most 16 findings per segment are returned.
 - `GET /v1/capabilities` always lists `structure-check-v1`. Without a model it
-  now answers `["structure-check-v1"]` instead of `[]`.
+  now answers `["ambiguous-mention-v1", "structure-check-v1"]`.
 - `POST /v1/reviews` and `POST /v1/semantic-reviews` are unchanged; a test pins
-  the `/v1/reviews` schemas and response bytes to Core 0.13.0.
+  the `/v1/reviews` schemas and response bytes to what main served before this
+  endpoint.
 
 ## 0.13.0 - 2026-11-26
 

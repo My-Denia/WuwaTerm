@@ -54,6 +54,7 @@ from wuwaterm.application import (
     KIND_ERROR,
     KIND_LLM,
     REVIEW_DENSE_MAX_FINDINGS,
+    REVIEW_FEATURE_AMBIGUOUS_MENTION,
     REVIEW_MAX_FINDINGS,
     REVIEW_MAX_SIDE_SCALARS,
     SEMANTIC_CATEGORIES,
@@ -157,7 +158,9 @@ AUTH_STATUS_RESPONSE_HEADERS = {
 REVIEW_FEATURES_HEADER = "X-WuwaTerm-Review-Features"
 REVIEW_FEATURE_DENSE = "dense-128"
 REVIEW_FEATURE_REASON = "reason-v1"
-REVIEW_FEATURES = frozenset({REVIEW_FEATURE_DENSE, REVIEW_FEATURE_REASON})
+REVIEW_FEATURES = frozenset(
+    {REVIEW_FEATURE_DENSE, REVIEW_FEATURE_REASON, REVIEW_FEATURE_AMBIGUOUS_MENTION}
+)
 
 
 def _review_features(request: Request, review_version: str) -> frozenset[str]:
@@ -172,6 +175,8 @@ def _review_features(request: Request, review_version: str) -> frozenset[str]:
     duplicated token or an unknown one is `invalid_request`, because a caller
     must never be left believing it switched something on. Any header at all on
     `review-v1` is refused, since that protocol has none of these features.
+    `ambiguous-mention-v1` without `reason-v1` is refused too: its findings are
+    told apart from other `not_evaluated` findings only by their reason.
     """
     values = request.headers.getlist(REVIEW_FEATURES_HEADER)
     if not values:
@@ -192,6 +197,10 @@ def _review_features(request: Request, review_version: str) -> frozenset[str]:
     unknown = set(tokens) - REVIEW_FEATURES
     if unknown:
         raise ApiError(ERROR_INVALID_REQUEST, "review feature is not supported")
+    if REVIEW_FEATURE_AMBIGUOUS_MENTION in tokens and REVIEW_FEATURE_REASON not in tokens:
+        raise ApiError(
+            ERROR_INVALID_REQUEST, "ambiguous-mention-v1 requires reason-v1"
+        )
     return frozenset(tokens)
 
 
@@ -578,7 +587,10 @@ class ReviewResponseBody(BaseModel):
 # --------------------------------------------------------------------------
 
 CapabilityName = Literal[
-    "semantic-review-v1", "structure-check-v1", "translation-context-v1"
+    "ambiguous-mention-v1",
+    "semantic-review-v1",
+    "structure-check-v1",
+    "translation-context-v1",
 ]
 SemanticCategory = Literal[SEMANTIC_CATEGORIES]  # type: ignore[valid-type]
 SemanticConfidence = Literal[SEMANTIC_CONFIDENCES]  # type: ignore[valid-type]
@@ -2410,8 +2422,15 @@ def _register_routes(app: FastAPI) -> None:
         `X-WuwaTerm-Review-Features` header, comma separated: `dense-128`
         raises the finding page from 32 to 128 (still bounded by the 64 KiB
         JSON ceiling), and `reason-v1` adds a `reason` to each `not_evaluated`
-        finding. Without the header the response is byte-identical to the
-        published 32-finding, seven-key document.
+        finding. `ambiguous-mention-v1` (requires `reason-v1`; listed by
+        `GET /v1/capabilities`) also reports a one-character resonator name
+        the matcher could not settle, but whose surrounding source text gives
+        at least two independent kinds of evidence, as a `not_evaluated`
+        finding with reason `ambiguous_mention` and its official candidates.
+        Such a finding is judged only after the caller resolves it, sorts after
+        every other finding and is the first to go when the page is full.
+        Without the header the response is byte-identical to the published
+        32-finding, seven-key document.
         """
         await _require_active_device(request, device)
         matcher_basis = request.headers.get("X-WuwaTerm-Matcher-Basis")
@@ -2452,6 +2471,7 @@ def _register_routes(app: FastAPI) -> None:
                 alignments=alignments,
                 resolution_context=resolution_context,
                 require_matcher_revision=use_matcher_basis,
+                ambiguous_mentions=REVIEW_FEATURE_AMBIGUOUS_MENTION in features,
             )
         except ReviewRequestError as exc:
             raise ApiError(exc.code, exc.message)

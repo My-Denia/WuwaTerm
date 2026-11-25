@@ -1,7 +1,7 @@
 """HTTP surface of POST /v1/structure-checks (structure-check-v1).
 
 The last test pins `/v1/reviews`: its published schemas and its response bytes
-are fixed to what Core 0.13.0 served before this endpoint existed.
+are fixed to what main served before this endpoint existed.
 """
 
 from __future__ import annotations
@@ -205,13 +205,15 @@ def test_structure_check_logs_counts_and_never_text(tmp_path, sample_db, caplog)
 # /v1/reviews is untouched
 # --------------------------------------------------------------------------
 
-# Recorded on Core 0.13.0 (e5b7f1a) before structure checks were added. A
-# legitimate change to /v1/reviews updates these together with its own tests.
-REVIEW_CONTRACT_SHA256 = "75ad601b8dc7b5127e7cf2da17304cd43e3fd7fbf0670f56efd99b3970485f7d"
+# Recorded on main 6e096e1, without structure checks. review-v1, review-v2 and
+# the 400 are also what Core 0.13.0 (e5b7f1a) served; the schemas and the
+# matcher-basis response moved with ambiguous-mention-v1 and matcher v11 (#325).
+# A legitimate change to /v1/reviews updates these together with its own tests.
+REVIEW_CONTRACT_SHA256 = "cc7bdd22147b44bf73813118d2f2b697a707bed6c4d57de02acec4aaa625886f"
 REVIEW_RESPONSE_SHA256 = {
     "review-v1": "e05fbb6238692bc470837dc1d138d386b06a293863f1f8cc186be00c1f480b91",
     "review-v2": "9360a29eef240a97050c7d4f43b1187fca4df20faa1ecda6ee918d1201017e78",
-    "review-v2-basis-features": "bac1f254604a006dafaa341d9b5b7b90b712dc16e31cf10ca3295192f66adfc4",
+    "review-v2-basis-features": "955ebad4548ab50d6727f3a43adb2b1cdc6fd848f3eae9e05784c82685a5103b",
     "invalid": "ab443ded6062379594904b9c323234d2aecb7a61d422b658c7e6607b6d338b8a",
 }
 _REVIEW_SCHEMAS = (

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from .cjk_span import (
     MATCHER_REVISION,
+    SINGLE_CHAR_AMBIGUOUS_MENTION,
     SINGLE_CHAR_NAME_MENTION,
     classify_single_character_mention,
     crosses_cjk_word_boundary,
@@ -34,6 +35,11 @@ from .exclusion_metadata import (
 )
 from .lookup import TermService, derived_reference_only_sources
 from .models import TermEntry
+from .single_char_context import (
+    ContextEntity,
+    RequestContextIndex,
+    evaluate_ambiguous_mention,
+)
 from .text_spans import (
     WHITESPACE as WHITESPACE,
     paragraph_ranges as paragraph_ranges,
@@ -66,6 +72,13 @@ REASON_ORDINARY_WORD = "ordinary_word"
 REASON_NO_TARGET_REGION = "no_target_region"
 REASON_FOUND_OUTSIDE_REGION = "found_outside_region"
 REASON_AMBIGUOUS_REPEAT = "ambiguous_repeat"
+# A one-character resonator name the classifier could not settle
+# (``ambiguous_mention``) whose request-local evidence met the
+# ``single_char_context`` threshold. review-v2 reports it only when the caller
+# asks for ``ambiguous-mention-v1``; it is never judged unless the caller
+# resolves it, so it can never become a verified constraint or a conflict on
+# its own.
+REASON_AMBIGUOUS_MENTION = "ambiguous_mention"
 _SURROGATE_MIN = "\ud800"
 _SURROGATE_MAX = "\udfff"
 
@@ -500,6 +513,101 @@ def _v2_one_character_eligible(
         and classify_single_character_mention(text, start, end)
         == SINGLE_CHAR_NAME_MENTION
     )
+
+
+def _winning_entry(entries: Sequence[TermEntry]) -> TermEntry:
+    return min(entries, key=lambda entry: CATEGORY_ORDER.get(entry.category, 999))
+
+
+def _context_entities(
+    mentions: Sequence[_TermSpan],
+    surfaces: dict[str, list[TermEntry]],
+    excluded_sources: frozenset[str],
+) -> tuple[ContextEntity, ...]:
+    """The review's own admitted, non-derived dictionary mentions as entities.
+
+    These are the source mentions review-v2 judges, one-character name
+    mentions included, minus every surface it already treats as prose (an
+    ordinary-word exclusion or a derived name). An ambiguous mention is never
+    among them, so one uncertain character cannot vouch for another.
+    """
+    entities: list[ContextEntity] = []
+    for mention in mentions:
+        if mention.source in excluded_sources:
+            continue
+        winner = _winning_entry(surfaces[mention.source])
+        entities.append(
+            ContextEntity(
+                start=mention.start,
+                end=mention.end,
+                source=mention.source,
+                zh=winner.zh,
+                en=winner.en,
+                category=winner.category,
+            )
+        )
+    return tuple(entities)
+
+
+def _ambiguous_mention_spans(
+    source: str,
+    surfaces: dict[str, list[TermEntry]],
+    mentions: Sequence[_TermSpan],
+    excluded_sources: frozenset[str],
+) -> list[_TermSpan]:
+    """One-character names that are ``ambiguous_mention`` yet well supported.
+
+    The surfaces are the ones ``_v2_one_character_eligible`` would admit (the
+    winning record is the surface's own Chinese resonator name) at positions
+    the classifier calls ``ambiguous_mention`` instead of ``name_mention``,
+    outside every selected mention. A position is kept only when
+    ``single_char_context`` finds at least two independent kinds of evidence
+    in this source text, one of them an entity kind. Nothing read here comes
+    from outside the submitted source.
+    """
+    found: list[tuple[_TermSpan, str]] = []
+    for order, surface in enumerate(surfaces):
+        if (
+            len(surface) != 1
+            or not _is_cjk_character(surface)
+            or surface in excluded_sources
+        ):
+            continue
+        winner = _winning_entry(surfaces[surface])
+        if surface != winner.zh or winner.category != "resonator":
+            continue
+        start = source.find(surface)
+        while start != -1:
+            end = start + 1
+            if not any(
+                mention.start < end and start < mention.end for mention in mentions
+            ) and (
+                classify_single_character_mention(source, start, end)
+                == SINGLE_CHAR_AMBIGUOUS_MENTION
+            ):
+                found.append(
+                    (
+                        _TermSpan(start=start, end=end, source=surface, order=order),
+                        winner.en,
+                    )
+                )
+            start = source.find(surface, start + 1)
+    if not found:
+        return []
+    index = RequestContextIndex(
+        source,
+        paragraphs=paragraph_ranges(source),
+        entities=_context_entities(mentions, surfaces, excluded_sources),
+    )
+    admitted = [
+        span
+        for span, official_en in found
+        if evaluate_ambiguous_mention(
+            index, span.start, span.end, source=span.source, en=official_en
+        ).admitted_as_low_constraint
+    ]
+    admitted.sort(key=lambda item: (item.start, -item.end, item.source))
+    return admitted
 
 
 def _collect_mentions(
@@ -1804,10 +1912,20 @@ def review_pair(
     alignments: object = None,
     resolution_context: object = None,
     require_matcher_revision: bool = True,
+    ambiguous_mentions: bool = False,
 ) -> ReviewReport:
-    """Review a pair under the explicitly selected additive protocol."""
+    """Review a pair under the explicitly selected additive protocol.
+
+    ``ambiguous_mentions`` is the ``ambiguous-mention-v1`` opt-in of review-v2.
+    Off (the default) the report is exactly the one review-v2 gave before the
+    feature existed.
+    """
     if review_version == RULE_VERSION:
-        if alignments is not None or resolution_context is not None:
+        if (
+            alignments is not None
+            or resolution_context is not None
+            or ambiguous_mentions
+        ):
             raise ReviewRequestError(
                 "invalid_request", "review-v1 does not accept v2 request fields"
             )
@@ -1822,6 +1940,7 @@ def review_pair(
             alignments=alignments,
             resolution_context=resolution_context,
             require_matcher_revision=require_matcher_revision,
+            ambiguous_mentions=ambiguous_mentions,
         )
     raise ReviewRequestError("invalid_request", "review_version is not supported")
 
@@ -1913,6 +2032,7 @@ def _review_pair_v2(
     alignments: object,
     resolution_context: object,
     require_matcher_revision: bool,
+    ambiguous_mentions: bool = False,
 ) -> ReviewReport:
     source = _validate_side("source", source)
     target = _validate_side("target", target)
@@ -2009,6 +2129,29 @@ def _review_pair_v2(
                 "invalid_request", "duplicate resolution mention_id"
             )
         by_id[resolution.mention_id] = resolution
+
+    # ambiguous-mention-v1: a well-supported ambiguous name is reported as
+    # not_evaluated with its candidates. Only an explicit resolution moves it
+    # into the judged set, where it is checked exactly like any other mention;
+    # left alone it asserts nothing, claims nothing and reserves nothing.
+    unresolved_ambiguous: list[_TermSpan] = []
+    if ambiguous_mentions:
+        resolved_ambiguous: list[_TermSpan] = []
+        for candidate_span in _ambiguous_mention_spans(
+            source, surfaces, mentions, automatic_exclusions
+        ):
+            candidate_id = _span_mention_id(
+                source, candidate_span.start, candidate_span.end
+            )
+            if candidate_id in by_id:
+                resolved_ambiguous.append(candidate_span)
+            else:
+                unresolved_ambiguous.append(candidate_span)
+        if resolved_ambiguous:
+            mentions = sorted(
+                [*mentions, *resolved_ambiguous],
+                key=lambda item: (item.start, -item.end, item.source),
+            )
 
     candidates_by_surface = {
         mention.source: _candidates_for(surfaces[mention.source], include_id=True)
@@ -2162,6 +2305,23 @@ def _review_pair_v2(
                 occurrence_model=occurrence_model,
                 automatic_term_excluded=mention.source in automatic_exclusions,
                 ambiguous_repeat=index in ambiguous,
+            )
+        )
+
+    # Reported after every judged mention, so a page that has to drop
+    # findings drops these first.
+    for unresolved in unresolved_ambiguous:
+        findings.append(
+            ReviewFinding(
+                id=_span_mention_id(source, unresolved.start, unresolved.end),
+                verdict=VERDICT_NOT_EVALUATED,
+                rule_id=RULE_TERM_PAIR,
+                source_span=_span_at(source, unresolved.start, unresolved.end),
+                target_span=None,
+                candidates=_candidates_for(
+                    surfaces[unresolved.source], include_id=True
+                ),
+                reason=REASON_AMBIGUOUS_MENTION,
             )
         )
 

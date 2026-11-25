@@ -28,8 +28,9 @@ Layer 1 deterministic structure checks are a third, separate track:
 
 1. **Separate tracks.** `/v1/reviews` and `/v1/semantic-reviews` do not change:
    not their requests, not their responses, not their bytes. A test pins the
-   `/v1/reviews` schemas and response bytes to what Core 0.13.0 served. A
-   client that wants structure findings calls this endpoint as well.
+   `/v1/reviews` schemas and response bytes to what main served before this
+   endpoint. A client that wants structure findings calls this endpoint as
+   well.
 2. **Deterministic and stateless.** No model, no storage, no network. The same
    segments always produce the same findings. Nothing is written into a
    manuscript format; the client decides what to show.
@@ -120,8 +121,8 @@ section records the rules a schema cannot express.
 ## Consequences
 
 - Without a model, `GET /v1/capabilities` now answers
-  `["structure-check-v1"]` instead of `[]`. ADR 0018's sentence that it "lists
-  nothing" describes the state before this ADR. The Web client at
+  `["ambiguous-mention-v1", "structure-check-v1"]`. ADR 0018's sentence that it
+  "lists nothing" describes the state before either feature. The Web client at
   `contracts/web-ref.txt` keeps only the capability names it knows, and the
   Windows client at `contracts/windows-ref.txt` keeps unknown names, so neither
   changes behaviour.

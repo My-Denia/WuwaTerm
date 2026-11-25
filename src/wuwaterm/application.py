@@ -52,6 +52,7 @@ from .protected_text import ProtectedText as ProtectedText
 from .protected_text import ProtectedTextIntegrityError as ProtectedTextIntegrityError
 from .review import (
     MAX_SIDE_SCALARS,
+    REASON_AMBIGUOUS_MENTION,
     ReviewFinding,
     ReviewReport,
     ReviewRequestError,
@@ -102,7 +103,10 @@ LOGGER = logging.getLogger(__name__)
 TranslationKind = Literal["noop", "exact", "fuzzy", "llm", "error"]
 TranslationDirection = Literal["en", "zh"]
 ServiceCapability = Literal[
-    "semantic-review-v1", "structure-check-v1", "translation-context-v1"
+    "ambiguous-mention-v1",
+    "semantic-review-v1",
+    "structure-check-v1",
+    "translation-context-v1",
 ]
 
 KIND_NOOP: Literal["noop"] = "noop"
@@ -906,7 +910,8 @@ REVIEW_MAX_JSON_BYTES = 65536
 REVIEW_MAX_SIDE_SCALARS = MAX_SIDE_SCALARS
 # The only reasons review-v2 can attach to a not_evaluated finding, as wire
 # literals. A client that opts into reason-v1 receives one of these; every
-# evaluated verdict keeps the seven-key finding shape.
+# evaluated verdict keeps the seven-key finding shape. ``ambiguous_mention``
+# exists only on a review that also asked for ambiguous-mention-v1.
 REVIEW_WIRE_REASONS = frozenset(
     {
         "not_a_term",
@@ -914,7 +919,14 @@ REVIEW_WIRE_REASONS = frozenset(
         "no_target_region",
         "found_outside_region",
         "ambiguous_repeat",
+        REASON_AMBIGUOUS_MENTION,
     }
+)
+# review-v2 feature: report well-supported ambiguous one-character names as
+# not_evaluated findings with reason ``ambiguous_mention``. It needs only the
+# dictionary, so every server that knows it lists it as a capability.
+REVIEW_FEATURE_AMBIGUOUS_MENTION: Literal["ambiguous-mention-v1"] = (
+    "ambiguous-mention-v1"
 )
 
 
@@ -929,6 +941,7 @@ def review_pair(
     alignments: object = None,
     resolution_context: object = None,
     require_matcher_revision: bool = True,
+    ambiguous_mentions: bool = False,
 ) -> ReviewReport:
     """Unique application entry for pair review. Adapters must not import review."""
     try:
@@ -942,6 +955,7 @@ def review_pair(
             alignments=alignments,
             resolution_context=resolution_context,
             require_matcher_revision=require_matcher_revision,
+            ambiguous_mentions=ambiguous_mentions,
         )
     except ReviewRequestError:
         raise
@@ -1130,18 +1144,21 @@ def service_capabilities() -> tuple[ServiceCapability, ...]:
     """Optional capabilities this process can serve right now, sorted by name.
 
     A capability is listed only when it actually works, so a client can turn a
-    feature on from this list alone. ``structure-check-v1`` calls no model and
-    is always listed. ``translation-context-v1`` needs a configured model;
+    feature on from this list alone. ``ambiguous-mention-v1`` needs only the
+    dictionary and ``structure-check-v1`` calls no model, so both are always
+    listed. ``translation-context-v1`` needs a configured model;
     ``semantic-review-v1`` also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
     """
     if not llm_configured():
-        return (CAPABILITY_STRUCTURE_CHECK,)
+        return (REVIEW_FEATURE_AMBIGUOUS_MENTION, CAPABILITY_STRUCTURE_CHECK)
     if not semantic_review_enabled():
         return (
+            REVIEW_FEATURE_AMBIGUOUS_MENTION,
             CAPABILITY_STRUCTURE_CHECK,
             _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
         )
     return (
+        REVIEW_FEATURE_AMBIGUOUS_MENTION,
         _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
         CAPABILITY_STRUCTURE_CHECK,
         _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
@@ -1308,10 +1325,19 @@ def project_review_report(
     features: the default page and the seven-key finding stay exactly as
     published, so a client that sends no feature header cannot observe the
     larger page or the extra reason key.
+
+    An ``ambiguous_mention`` finding (only present under ambiguous-mention-v1)
+    sorts after every other finding, so both the finding cap and the byte
+    ceiling drop it before they drop any judged term.
     """
     ordered = sorted(
         report.findings,
-        key=lambda item: (item.source_span.start, -item.source_span.end, item.id),
+        key=lambda item: (
+            item.reason == REASON_AMBIGUOUS_MENTION,
+            item.source_span.start,
+            -item.source_span.end,
+            item.id,
+        ),
     )
     truncated = bool(report.truncated)
     if len(ordered) > max_findings:

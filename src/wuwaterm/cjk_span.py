@@ -125,6 +125,16 @@ reference admission and review-v2 keep exact ``name_mention`` gating while
 distinguishing settled compounds and middle-dot terms from uncertain everyday or
 unknown continuations; ``single_character_name_mention_at`` remains as a
 compatibility predicate.
+
+wuwaterm-cjk-matcher-v11 changes no matcher input. Every matcher function, the
+lexicon slice and the single-character name sets are the v10 ones. review-v2
+gains the opt-in ``ambiguous-mention-v1`` feature: an ``ambiguous_mention``
+one-character resonator name whose request-local evidence meets the
+``single_char_context`` threshold is reported as a ``not_evaluated`` finding,
+and a resolution may now name it. A review that does not ask for the feature
+gives the v10 report, but the same request can now give a different report, so
+stored resolution contexts and saved manuscript segment results carrying v10
+go stale by the existing freshness rule and are re-reviewed.
 """
 
 from __future__ import annotations
@@ -66675,7 +66685,7 @@ _WORDS = frozenset(
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
         [
-            "wuwaterm-cjk-matcher-v10",
+            "wuwaterm-cjk-matcher-v11",
             JIEBA_COMMIT,
             LEXICON_FILTER,
             sorted(words),
