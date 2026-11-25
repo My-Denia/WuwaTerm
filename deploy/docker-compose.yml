@@ -70,6 +70,16 @@ services:
     image: ${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}
     container_name: wuwaterm-api
     restart: unless-stopped
+    # The API is small (tens of MiB resident) and latency-sensitive: under
+    # memory pressure from other services on the same host, a zero reservation
+    # let the kernel push its pages to swap, and one /v1/capabilities call took
+    # 11.2 s against an 8 s client timeout. The soft reservation keeps that
+    # working set resident; the negative OOM score makes it the last victim.
+    # Neither is a hard limit, so the container is not capped. These live in
+    # this file because deploy/vps-update.sh recreates from it alone; an
+    # override file would not be read.
+    mem_reservation: 96m
+    oom_score_adj: -500
     network_mode: host
     env_file:
       - ${WUWATERM_STATE_ROOT:-..}/.env
