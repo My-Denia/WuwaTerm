@@ -83,10 +83,14 @@ services:
     # daemons such as dockerd usually sit at or below it.
     #
     # Both live in this file because deploy/vps-update.sh recreates from it
-    # alone; an override file would not be read. A container adopted after this
-    # change has both recorded, and updates keep and replay them; a deployment
-    # adopted earlier keeps its existing record, which lacks them, until it is
-    # adopted again.
+    # alone; an override file would not be read. A container adopted by a
+    # release that records these fields has both recorded, and updates keep and
+    # replay them. A deployment adopted earlier keeps its existing record,
+    # which lacks them: an update copies the running container's host
+    # configuration and keeps that record, so a container recreated through
+    # Compose or `docker update` with these settings is reported as "observed
+    # container recipe differs". `adopt` refuses an already adopted deployment,
+    # so there is no migration path for the old record yet.
     mem_reservation: 96m
     oom_score_adj: -500
     network_mode: host

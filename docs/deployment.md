@@ -138,9 +138,14 @@ The Compose file has two image roles across three services:
   host-wide reclaim when every non-root ancestor cgroup, such as `system.slice`,
   also sets `MemoryLow`. The OOM score makes the OOM killer pick the API only
   after ordinary processes. Both live in the Compose file because the updater
-  recreates from that file alone. A container adopted after this change has
-  both recorded, and updates keep and replay them; a deployment adopted earlier
-  keeps its existing record, which lacks them, until it is adopted again.
+  recreates from that file alone. A container adopted by a release that records
+  these fields has both recorded, and updates keep and replay them. A
+  deployment adopted earlier keeps its existing record, which lacks them: an
+  update copies the running container's host configuration and keeps that
+  record, so a container recreated through Compose or `docker update` with
+  these settings is reported as `observed container recipe differs`. `adopt`
+  refuses an already adopted deployment, so there is no migration path for the
+  old record yet.
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
