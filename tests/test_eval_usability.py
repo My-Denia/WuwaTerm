@@ -1322,3 +1322,594 @@ def test_unwritable_audit_path_exits_2_before_any_output(scan, tmp_path):
     path = scan.file("in.txt", SEALED_SRC)
     res = scan.run(*scan.sealed(), "--input", path, "--audit-out", str(tmp_path / "missing" / "audit.jsonl"))
     assert res.code == 2 and res.out == "" and "cannot write audit file" in res.err
+
+
+# -------------------------------------------------------------- paired-compare
+
+
+PairedResult = namedtuple("PairedResult", "code report out err")
+
+
+def arm_unit(
+    unit_id,
+    doc_id,
+    direction="zh->en",
+    genre="guide",
+    source_scalars=100,
+    *,
+    grade="A",
+    naturalness="natural",
+    critical_errors=(),
+    names=None,
+    community_names=None,
+    minor_term_errors=None,
+    misleading_term_errors=None,
+    run_failed=False,
+    post_edit_distance=None,
+    translation=None,
+    post_edited_reference=None,
+):
+    unit = {
+        "unit_id": unit_id,
+        "doc_id": doc_id,
+        "direction": direction,
+        "genre": genre,
+        "source_scalars": source_scalars,
+        "run_failed": run_failed,
+    }
+    if not run_failed:
+        unit["grade"] = grade
+        unit["naturalness"] = naturalness
+        if critical_errors:
+            unit["critical_errors"] = list(critical_errors) if isinstance(critical_errors, (list, tuple)) else critical_errors
+        if names is not None:
+            unit["names"] = names
+        if community_names is not None:
+            unit["community_names"] = community_names
+        if minor_term_errors is not None:
+            unit["minor_term_errors"] = minor_term_errors
+        if misleading_term_errors is not None:
+            unit["misleading_term_errors"] = misleading_term_errors
+        if post_edit_distance is not None:
+            unit["post_edit_distance"] = post_edit_distance
+        if translation is not None:
+            unit["translation"] = translation
+        if post_edited_reference is not None:
+            unit["post_edited_reference"] = post_edited_reference
+    return unit
+
+
+def arm_doc(arm, units, telemetry=None):
+    payload = {"schema": "usability-arm-scores-v1", "arm": arm, "units": units}
+    if telemetry is not None:
+        payload["telemetry"] = telemetry
+    return payload
+
+
+@pytest.fixture()
+def paired(ev, tmp_path, capsys):
+    counter = iter(range(10_000))
+
+    def write(name, content):
+        path = tmp_path / f"{next(counter)}-{name}"
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def run(arm_a, arm_b, *, seed=42, bootstrap_samples=None, to_json_out=False):
+        argv = [
+            "paired-compare",
+            "--arm-a",
+            write("arm_a.json", arm_a),
+            "--arm-b",
+            write("arm_b.json", arm_b),
+            "--seed",
+            str(seed),
+        ]
+        if bootstrap_samples is not None:
+            argv += ["--bootstrap-samples", str(bootstrap_samples)]
+        out_path = tmp_path / f"{next(counter)}-paired.json"
+        if to_json_out:
+            argv += ["--json-out", str(out_path)]
+        code = call(ev, argv)
+        captured = capsys.readouterr()
+        text = out_path.read_text(encoding="utf-8") if (to_json_out and out_path.exists()) else captured.out
+        report = json.loads(text) if (code == 0 and text.strip()) else None
+        return PairedResult(code, report, captured.out, captured.err)
+
+    return run
+
+
+def test_paired_compare_seed_reproducibility_and_default_bootstrap(paired):
+    units_a = [
+        arm_unit(
+            f"u{i}",
+            f"d{i // 2}",
+            "zh->en",
+            "guide",
+            30 + i * 7,
+            grade="B" if i % 2 == 0 else "C",
+            naturalness="stiff",
+        )
+        for i in range(20)
+    ]
+    units_b = [
+        arm_unit(
+            f"u{i}",
+            f"d{i // 2}",
+            "zh->en",
+            "guide",
+            30 + i * 7,
+            grade="A" if i % 3 != 0 else "B",
+            naturalness="natural",
+        )
+        for i in range(20)
+    ]
+    a_doc = arm_doc("raw_baseline", units_a)
+    b_doc = arm_doc("wuwaterm_prod", units_b)
+
+    r1 = paired(a_doc, b_doc, seed=12345)
+    r2 = paired(a_doc, b_doc, seed=12345)
+    assert r1.code == 0 and r2.code == 0
+    assert r1.out == r2.out
+    assert r1.report["bootstrap_samples"] == 10_000
+
+    r3 = paired(a_doc, b_doc, seed=12345, bootstrap_samples=40)
+    r4 = paired(a_doc, b_doc, seed=99999, bootstrap_samples=40)
+    assert r3.code == 0 and r4.code == 0
+    assert r3.report["directions"]["zh->en"]["mqm_cost"]["per_1000_source_scalars_diff_ci95"] != (
+        r4.report["directions"]["zh->en"]["mqm_cost"]["per_1000_source_scalars_diff_ci95"]
+    )
+
+
+def test_paired_compare_cluster_bootstrap_differs_from_iid_and_stratifies_by_genre(paired):
+    # 10 docs x 10 units = 100 units in one genre; outcomes are 100% correlated within each doc:
+    # 5 docs are all wins (+1), 5 docs are all losses (-1). Point estimate delta = 0.
+    # Unit-level iid bootstrap SE = 1/sqrt(100) = 0.10 (CI width ~0.39).
+    # Doc-cluster bootstrap SE = 1/sqrt(10) ~ 0.316 (CI width ~1.20), >2.5x wider.
+    units_a = []
+    units_b = []
+    for d in range(10):
+        win_doc = d < 5
+        for k in range(10):
+            uid = f"d{d}#u{k}"
+            units_a.append(
+                arm_unit(
+                    uid,
+                    f"d{d}",
+                    "zh->en",
+                    "guide",
+                    40,
+                    grade="C" if win_doc else "A",
+                    naturalness="stiff" if win_doc else "natural",
+                )
+            )
+            units_b.append(
+                arm_unit(
+                    uid,
+                    f"d{d}",
+                    "zh->en",
+                    "guide",
+                    40,
+                    grade="A" if win_doc else "C",
+                    naturalness="natural" if win_doc else "stiff",
+                )
+            )
+    res = paired(arm_doc("raw", units_a), arm_doc("prod", units_b), seed=7, bootstrap_samples=4000)
+    assert res.code == 0
+    ci = res.report["directions"]["zh->en"]["a_rate"]["ci95"]
+    width = ci[1] - ci[0]
+    assert width > 0.9
+
+    # Stratification check: 1 doc in guide (+1) and 1 doc in story (-1).
+    # Stratified resampling draws 1 doc from each stratum on every draw -> delta is always 0.0.
+    strat_a = [
+        arm_unit("g1", "doc_g", "en->zh", "guide", 50, grade="C", naturalness="stiff"),
+        arm_unit("s1", "doc_s", "en->zh", "story", 50, grade="A", naturalness="natural"),
+    ]
+    strat_b = [
+        arm_unit("g1", "doc_g", "en->zh", "guide", 50, grade="A", naturalness="natural"),
+        arm_unit("s1", "doc_s", "en->zh", "story", 50, grade="C", naturalness="stiff"),
+    ]
+    strat_res = paired(arm_doc("raw", strat_a), arm_doc("prod", strat_b), seed=11, bootstrap_samples=500)
+    assert strat_res.code == 0
+    assert strat_res.report["directions"]["en->zh"]["a_rate"]["ci95"] == [0.0, 0.0]
+
+
+def test_paired_compare_six_critical_categories_and_mqm_weights(paired):
+    # Verify every MQM weight and 6-category critical error mapping:
+    # u0: A + natural -> 0 MQM
+    # u1: A + natural + 1 minor_term (not_official, misleading=False) -> 2 MQM
+    # u2: B + natural -> 1 MQM
+    # u3: B + stiff -> 1 MQM (B/stiff applied at most once)
+    # u4: C + stiff + 0 critical (e.g. minor_term=1) -> 1 + 2 = 3 MQM
+    # u5: C + disfluent + 1 omission + 1 addition + 1 meaning_shift + 1 negation + 1 number + 1 reference + 1 misleading name
+    #     -> disfluent(5) [subsumes stiff/B] + 6*10(60) + misleading(5) = 70 MQM
+    # u6: run_failed -> excluded from MQM points and source_scalars, counted separately
+    units_a = [
+        arm_unit("u0", "d0", "zh->en", "announcement", 100, grade="A", naturalness="natural"),
+        arm_unit(
+            "u1",
+            "d0",
+            "zh->en",
+            "announcement",
+            100,
+            grade="A",
+            naturalness="natural",
+            names=[nm("o1", "not_official", "Minor", False)],
+        ),
+        arm_unit("u2", "d1", "zh->en", "guide", 100, grade="B", naturalness="natural"),
+        arm_unit("u3", "d1", "zh->en", "guide", 100, grade="B", naturalness="stiff"),
+        arm_unit("u4", "d2", "zh->en", "story", 100, grade="C", naturalness="stiff", minor_term_errors=1),
+        arm_unit(
+            "u5",
+            "d2",
+            "zh->en",
+            "story",
+            100,
+            grade="C",
+            naturalness="disfluent",
+            critical_errors=[
+                err("omission", 1),
+                err("addition", 1),
+                err("meaning_shift", 1),
+                err("negation", 1),
+                err("number", 1),
+                err("reference", 1),
+            ],
+            community_names=[nm("c1", "not_official", "Bad", True)],
+        ),
+        arm_unit("u6", "d2", "zh->en", "story", 100, run_failed=True),
+    ]
+    # Arm B fixes everything to A+natural (except u6 stays A+natural too -> run_failed_diff = -1)
+    units_b = [
+        arm_unit(
+            u["unit_id"],
+            u["doc_id"],
+            u["direction"],
+            u["genre"],
+            u["source_scalars"],
+            grade="A",
+            naturalness="natural",
+        )
+        for u in units_a
+    ]
+    # Add post_edit_distance on two non-failed units (one precomputed, one via Levenshtein)
+    units_a[0]["post_edit_distance"] = 0.5
+    units_b[0]["post_edit_distance"] = 0.1
+    units_a[2]["translation"] = "abcd"
+    units_a[2]["post_edited_reference"] = "abef"  # dist 2 / 4 = 0.5
+    units_b[2]["translation"] = "abef"
+    units_b[2]["post_edited_reference"] = "abef"  # dist 0 / 4 = 0.0
+
+    res = paired(arm_doc("raw", units_a), arm_doc("prod", units_b), seed=5, bootstrap_samples=200)
+    assert res.code == 0
+    zh = res.report["directions"]["zh->en"]
+
+    crit = zh["critical_errors"]
+    assert crit["arm_a"]["total"] == 7
+    assert crit["arm_a"]["source_scalars"] == 600  # u6 run_failed excluded
+    assert crit["arm_a"]["per_1000_source_scalars"] == pytest.approx(7 * 1000 / 600)
+    assert crit["arm_b"]["total"] == 0
+    assert crit["arm_b"]["source_scalars"] == 700
+    assert crit["net_reduction_total"] == 7
+    assert crit["categories"] == {
+        "accuracy": {"arm_a": 2, "arm_b": 0, "net_reduction": 2},
+        "negation": {"arm_a": 1, "arm_b": 0, "net_reduction": 1},
+        "number": {"arm_a": 1, "arm_b": 0, "net_reduction": 1},
+        "reference": {"arm_a": 1, "arm_b": 0, "net_reduction": 1},
+        "omission": {"arm_a": 1, "arm_b": 0, "net_reduction": 1},
+        "term": {"arm_a": 1, "arm_b": 0, "net_reduction": 1},
+    }
+
+    mqm = zh["mqm_cost"]
+    assert mqm["weights"] == {"A": 0, "B_or_stiff": 1, "minor_term": 2, "disfluent_or_misleading": 5, "critical": 10}
+    assert mqm["arm_a"]["total_points"] == 0 + 2 + 1 + 1 + 3 + 70
+    assert mqm["arm_a"]["run_failed_count"] == 1
+    assert mqm["arm_b"]["total_points"] == 0
+    assert mqm["arm_b"]["run_failed_count"] == 0
+    assert mqm["delta_total_points"] == -77
+    assert mqm["net_reduction_total_points"] == 77
+    assert mqm["run_failed_diff"] == -1
+    assert mqm["arm_a"]["per_1000_source_scalars"] == pytest.approx(77 * 1000 / 600)
+
+    pe = zh["post_edit_distance"]
+    assert pe["units_evaluated"] == 2
+    assert pe["arm_a_mean"] == pytest.approx(0.5)
+    assert pe["arm_b_mean"] == pytest.approx(0.05)
+    assert pe["delta_b_minus_a"] == pytest.approx(-0.45)
+    assert pe["net_reduction"] == pytest.approx(0.45)
+
+
+def test_paired_compare_unit_improvement_cost_not_computable_when_ci_crosses_zero(paired):
+    # 4 docs: 2 wins, 2 losses -> delta = 0, CI crosses 0 -> not_computable (delta_not_significant)
+    units_a = [
+        arm_unit("u0", "d0", "zh->en", "guide", 100, grade="C", naturalness="stiff", critical_errors=[err("omission")]),
+        arm_unit("u1", "d1", "zh->en", "guide", 100, grade="C", naturalness="stiff", critical_errors=[err("omission")]),
+        arm_unit("u2", "d2", "zh->en", "guide", 100, grade="A", naturalness="natural"),
+        arm_unit("u3", "d3", "zh->en", "guide", 100, grade="A", naturalness="natural"),
+    ]
+    units_b = [
+        arm_unit("u0", "d0", "zh->en", "guide", 100, grade="A", naturalness="natural"),
+        arm_unit("u1", "d1", "zh->en", "guide", 100, grade="A", naturalness="natural"),
+        arm_unit("u2", "d2", "zh->en", "guide", 100, grade="C", naturalness="stiff", critical_errors=[err("omission")]),
+        arm_unit("u3", "d3", "zh->en", "guide", 100, grade="C", naturalness="stiff", critical_errors=[err("omission")]),
+    ]
+    tel_a = {"zh->en": {"posts": 10, "tokens": 1000, "latency_seconds": 10.0, "cost_usd": 0.02}}
+    tel_b = {"zh->en": {"posts": 15, "tokens": 2000, "latency_seconds": 20.0, "cost_usd": 0.05}}
+
+    res = paired(arm_doc("raw", units_a, tel_a), arm_doc("prod", units_b, tel_b), seed=1, bootstrap_samples=1000)
+    assert res.code == 0
+    zh = res.report["directions"]["zh->en"]
+    assert zh["a_rate"]["ci95"][0] <= 0.0 <= zh["a_rate"]["ci95"][1]
+    assert zh["a_rate"]["verdict"] == "indistinguishable"
+    assert zh["critical_errors"]["verdict"] == "indistinguishable"
+
+    uic = zh["unit_improvement_cost"]
+    for key in ("per_net_a_unit", "per_net_critical_error_reduction"):
+        assert uic[key]["computable"] is False
+        assert uic[key]["status"] == "not_computable (delta_not_significant)"
+        assert uic[key]["posts"] == "not_computable (delta_not_significant)"
+        assert uic[key]["tokens"] == "not_computable (delta_not_significant)"
+        assert uic[key]["latency_seconds"] == "not_computable (delta_not_significant)"
+        assert uic[key]["cost"] == "not_computable (delta_not_significant)"
+
+
+def test_paired_compare_unit_improvement_cost_when_significant_and_worse_verdict(paired):
+    # Significant gain in zh->en (all 6 docs improve from C+1 omission to A),
+    # Significant regression (worse) in en->zh (all 4 docs regress from A to C+1 omission).
+    units_a = [
+        *[arm_unit(f"z{i}", f"zd{i}", "zh-en", "guide", 100, grade="C", naturalness="stiff", critical_errors=[err("omission")]) for i in range(6)],
+        *[arm_unit(f"e{i}", f"ed{i}", "en-zh", "story", 100, grade="A", naturalness="natural") for i in range(4)],
+    ]
+    units_b = [
+        *[arm_unit(f"z{i}", f"zd{i}", "zh->en", "guide", 100, grade="A", naturalness="natural") for i in range(6)],
+        *[arm_unit(f"e{i}", f"ed{i}", "en->zh", "story", 100, grade="C", naturalness="stiff", critical_errors=[err("number")]) for i in range(4)],
+    ]
+    tel_a = {
+        "zh-en": {"posts": 10, "tokens": 1000, "latency_seconds": 12.0, "cost_usd": 0.02},
+        "en-zh": {"posts": 8, "tokens": 800, "latency_seconds": 8.0, "cost_usd": 0.01},
+    }
+    tel_b = {
+        "zh->en": {"posts": 16, "tokens": 2200, "latency_seconds": 24.0, "cost_usd": 0.08},
+        "en->zh": {"posts": 12, "tokens": 1600, "latency_seconds": 16.0, "cost_usd": 0.05},
+    }
+    res = paired(
+        arm_doc("raw", units_a, tel_a),
+        arm_doc("prod", units_b, tel_b),
+        seed=3,
+        bootstrap_samples=500,
+        to_json_out=True,
+    )
+    assert res.code == 0 and res.out == ""
+
+    zh = res.report["directions"]["zh->en"]
+    assert zh["a_rate"]["delta"] == pytest.approx(1.0)
+    assert zh["a_rate"]["ci95"] == [1.0, 1.0]
+    assert zh["a_rate"]["wins"] == 6 and zh["a_rate"]["losses"] == 0 and zh["a_rate"]["ties"] == 0
+    assert zh["a_rate"]["verdict"] == "gain"
+    assert zh["arms"]["arm_a"]["a_wilson95"] == pytest.approx(list(score_wilson(0, 6)))
+    assert zh["arms"]["arm_b"]["a_wilson95"] == pytest.approx(list(score_wilson(6, 6)))
+
+    uic_zh = zh["unit_improvement_cost"]
+    assert uic_zh["per_net_a_unit"]["computable"] is True
+    assert uic_zh["per_net_a_unit"]["posts"] == pytest.approx(1.0)
+    assert uic_zh["per_net_a_unit"]["tokens"] == pytest.approx(200.0)
+    assert uic_zh["per_net_a_unit"]["latency_seconds"] == pytest.approx(2.0)
+    assert uic_zh["per_net_a_unit"]["cost"] == pytest.approx(0.01)
+    assert uic_zh["per_net_critical_error_reduction"]["computable"] is True
+    assert uic_zh["per_net_critical_error_reduction"]["posts"] == pytest.approx(1.0)
+
+    en = res.report["directions"]["en->zh"]
+    assert en["a_rate"]["delta"] == pytest.approx(-1.0)
+    assert en["a_rate"]["ci95"] == [-1.0, -1.0]
+    assert en["a_rate"]["wins"] == 0 and en["a_rate"]["losses"] == 4 and en["a_rate"]["ties"] == 0
+    assert en["a_rate"]["verdict"] == "worse"
+    assert en["unit_improvement_cost"]["per_net_a_unit"]["status"] == "not_computable (delta_not_significant)"
+    assert en["unit_improvement_cost"]["per_net_critical_error_reduction"]["status"] == "not_computable (delta_not_significant)"
+
+
+def test_paired_compare_wins_losses_ties_and_empty_direction(paired):
+    units_a = [
+        arm_unit("u0", "d0", "zh->en", "mixed", 30, grade="B", naturalness="natural"),
+        arm_unit("u1", "d0", "zh->en", "mixed", 30, grade="A", naturalness="natural"),
+        arm_unit("u2", "d1", "zh->en", "mixed", 30, grade="A", naturalness="natural"),
+        arm_unit("u3", "d1", "zh->en", "mixed", 30, grade="C", naturalness="disfluent"),
+    ]
+    units_b = [
+        arm_unit("u0", "d0", "zh->en", "mixed", 30, grade="A", naturalness="natural"),  # A win, usable tie
+        arm_unit("u1", "d0", "zh->en", "mixed", 30, grade="B", naturalness="natural"),  # A loss, usable tie
+        arm_unit("u2", "d1", "zh->en", "mixed", 30, grade="A", naturalness="natural"),  # A tie (both A)
+        arm_unit("u3", "d1", "zh->en", "mixed", 30, grade="B", naturalness="stiff"),    # A tie (neither A), usable win
+    ]
+    res = paired(arm_doc("raw", units_a), arm_doc("prod", units_b), seed=9, bootstrap_samples=200)
+    assert res.code == 0
+    zh = res.report["directions"]["zh->en"]
+    assert zh["a_rate"]["wins"] == 1
+    assert zh["a_rate"]["losses"] == 1
+    assert zh["a_rate"]["ties"] == 2
+    assert zh["a_rate"]["ties_both_a"] == 1
+    assert zh["a_rate"]["ties_both_not_a"] == 1
+    assert zh["usable_rate"]["wins"] == 1
+    assert zh["usable_rate"]["losses"] == 0
+    assert zh["usable_rate"]["ties"] == 3
+    assert res.report["directions"]["en->zh"]["n"] == 0
+    assert res.report["directions"]["en->zh"]["a_rate"] is None
+
+
+def test_paired_compare_mismatch_and_invalid_inputs_exit_2(paired):
+    base_a = [
+        arm_unit("u0", "d0", "zh->en", "guide", 50),
+        arm_unit("u1", "d0", "zh->en", "guide", 60),
+    ]
+    base_b = [
+        arm_unit("u0", "d0", "zh->en", "guide", 50),
+        arm_unit("u1", "d0", "zh->en", "guide", 60),
+    ]
+
+    # Missing unit in arm_b
+    res = paired(arm_doc("a", base_a), arm_doc("b", base_b[:1]))
+    assert res.code == 2 and res.out == "" and "do not match 1:1" in res.err
+
+    # Extra unit in arm_b
+    extra_b = [*base_b, arm_unit("u2", "d0", "zh->en", "guide", 40)]
+    res = paired(arm_doc("a", base_a), arm_doc("b", extra_b))
+    assert res.code == 2 and res.out == "" and "do not match 1:1" in res.err
+
+    # Metadata mismatches across arms
+    for field, val in [("doc_id", "d99"), ("direction", "en->zh"), ("genre", "story"), ("source_scalars", 999)]:
+        bad_b = [dict(base_b[0]), {**base_b[1], field: val}]
+        res = paired(arm_doc("a", base_a), arm_doc("b", bad_b))
+        assert res.code == 2 and res.out == "" and "metadata mismatch" in res.err
+
+    # Duplicate unit_id within one arm
+    dup_a = [dict(base_a[0]), dict(base_a[0])]
+    res = paired(arm_doc("a", dup_a), arm_doc("b", base_b))
+    assert res.code == 2 and res.out == "" and "duplicate unit_id" in res.err
+
+    # Conflicting genres in same doc_id
+    conflict_a = [base_a[0], {**base_a[1], "genre": "story"}]
+    conflict_b = [base_b[0], {**base_b[1], "genre": "story"}]
+    res = paired(arm_doc("a", conflict_a), arm_doc("b", conflict_b))
+    assert res.code == 2 and res.out == "" and "conflicting genres" in res.err
+
+    # Pending unit
+    pend_a = [base_a[0], {**base_a[1], "pending": True}]
+    res = paired(arm_doc("a", pend_a), arm_doc("b", base_b))
+    assert res.code == 2 and res.out == "" and "pending" in res.err
+
+    # Invalid bootstrap-samples
+    res = paired(arm_doc("a", base_a), arm_doc("b", base_b), bootstrap_samples=0)
+    assert res.code == 2 and res.out == "" and "--bootstrap-samples" in res.err
+
+    # Empty units
+    res = paired(arm_doc("a", []), arm_doc("b", []))
+    assert res.code == 2 and res.out == "" and "no scored units" in res.err
+
+
+def test_paired_compare_cli_subprocess_reproducible_across_pythonhashseed(tmp_path):
+    a_path = tmp_path / "arm_a.json"
+    b_path = tmp_path / "arm_b.json"
+    units_a = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="B", naturalness="stiff") for i in range(6)]
+    units_b = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="A" if i < 4 else "B", naturalness="natural") for i in range(6)]
+    a_path.write_text(json.dumps(arm_doc("raw", units_a)), encoding="utf-8")
+    b_path.write_text(json.dumps(arm_doc("prod", units_b)), encoding="utf-8")
+
+    outputs = []
+    for hash_seed in ("1", "987654"):
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "paired-compare",
+                "--arm-a",
+                str(a_path),
+                "--arm-b",
+                str(b_path),
+                "--seed",
+                "2026",
+                "--bootstrap-samples",
+                "500",
+            ],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0
+        outputs.append(done.stdout)
+    assert outputs[0] == outputs[1]
+
+
+def test_paired_compare_telemetry_unknown_part_keeps_tokens_none_and_rejects_conflict(paired):
+    units_a = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="B", naturalness="stiff") for i in range(6)]
+    units_b = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="A", naturalness="natural") for i in range(6)]
+
+    # Arm A has completion_tokens="unknown" alongside prompt_tokens=1000: must NOT sum partial parts to 1000.
+    tel_a_unknown = {
+        "zh->en": {"posts": 6, "prompt_tokens": 1000, "completion_tokens": "unknown", "latency_seconds": 6.0}
+    }
+    tel_b_known = {"zh->en": {"posts": 12, "prompt_tokens": 500, "completion_tokens": 400, "latency_seconds": 12.0}}
+    res = paired(arm_doc("raw", units_a, tel_a_unknown), arm_doc("prod", units_b, tel_b_known), seed=1, bootstrap_samples=200)
+    assert res.code == 0
+    uic = res.report["directions"]["zh->en"]["unit_improvement_cost"]
+    assert uic["extra_telemetry"]["tokens"] is None
+    assert uic["per_net_a_unit"]["computable"] is True
+    assert uic["per_net_a_unit"]["tokens"] is None
+    assert uic["per_net_a_unit"]["posts"] == pytest.approx(1.0)
+
+    # Co-occurring tokens and total_tokens must exit 2
+    tel_conflict = {"zh->en": {"posts": 6, "tokens": 100, "total_tokens": 200}}
+    bad = paired(arm_doc("raw", units_a, tel_conflict), arm_doc("prod", units_b, tel_b_known))
+    assert bad.code == 2 and bad.out == "" and "cannot specify both tokens and total_tokens" in bad.err
+
+
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        {"grade": "A"},
+        {"naturalness": "natural"},
+        {"critical_errors": [err("omission")]},
+        {"critical_errors": {"omission": 1}},
+        {"names": [nm("o1")]},
+        {"community_names": [nm("c1")]},
+        {"minor_term_errors": 1},
+        {"misleading_term_errors": 1},
+        {"post_edit_distance": 0.1},
+        {"post_edited_reference": "ref"},
+    ],
+)
+def test_paired_compare_run_failed_with_judgment_fields_exits_2(paired, extra_fields):
+    units_a = [{**arm_unit("u0", "d0", "zh->en", "guide", 50, run_failed=True), **extra_fields}]
+    units_b = [arm_unit("u0", "d0", "zh->en", "guide", 50, grade="A", naturalness="natural")]
+    res = paired(arm_doc("a", units_a), arm_doc("b", units_b))
+    assert res.code == 2 and res.out == "" and "run_failed" in res.err
+
+
+def test_paired_compare_zero_deltas_never_serialize_negative_zero(paired):
+    import math
+
+    units_a = [
+        arm_unit(
+            f"u{i}",
+            f"d{i}",
+            "zh->en",
+            "guide",
+            50,
+            grade="B",
+            naturalness="stiff",
+            post_edit_distance=0.2,
+        )
+        for i in range(4)
+    ]
+    units_b = [
+        arm_unit(
+            f"u{i}",
+            f"d{i}",
+            "zh->en",
+            "guide",
+            50,
+            grade="B",
+            naturalness="stiff",
+            post_edit_distance=0.2,
+        )
+        for i in range(4)
+    ]
+    res = paired(arm_doc("a", units_a), arm_doc("b", units_b), seed=1, bootstrap_samples=200)
+    assert res.code == 0
+    assert "-0.0" not in res.out
+    zh = res.report["directions"]["zh->en"]
+    mqm = zh["mqm_cost"]
+    pe = zh["post_edit_distance"]
+    for val in (
+        mqm["per_1000_source_scalars_diff"],
+        mqm["per_1000_source_scalars_net_reduction"],
+        *mqm["per_1000_source_scalars_diff_ci95"],
+        *mqm["per_1000_source_scalars_net_reduction_ci95"],
+        pe["delta_b_minus_a"],
+        pe["net_reduction"],
+        *pe["delta_b_minus_a_ci95"],
+        *pe["net_reduction_ci95"],
+    ):
+        assert val == 0.0
+        assert math.copysign(1.0, val) == 1.0
