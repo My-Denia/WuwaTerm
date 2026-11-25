@@ -88,9 +88,10 @@ services:
     # replay them. A deployment adopted earlier keeps its existing record,
     # which lacks them: an update copies the running container's host
     # configuration and keeps that record, so a container recreated through
-    # Compose or `docker update` with these settings is reported as "observed
-    # container recipe differs". `adopt` refuses an already adopted deployment,
-    # so there is no migration path for the old record yet.
+    # Compose with these settings, or given a memory reservation with
+    # `docker update` (which cannot set the OOM score), is reported as
+    # "observed container recipe differs". `adopt` refuses an already adopted
+    # deployment, so there is no migration path for the old record yet.
     mem_reservation: 96m
     oom_score_adj: -500
     network_mode: host

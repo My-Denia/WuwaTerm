@@ -142,10 +142,11 @@ The Compose file has two image roles across three services:
   these fields has both recorded, and updates keep and replay them. A
   deployment adopted earlier keeps its existing record, which lacks them: an
   update copies the running container's host configuration and keeps that
-  record, so a container recreated through Compose or `docker update` with
-  these settings is reported as `observed container recipe differs`. `adopt`
-  refuses an already adopted deployment, so there is no migration path for the
-  old record yet.
+  record, so a container recreated through Compose with these settings, or
+  given a memory reservation with `docker update` (which cannot set the OOM
+  score), is reported as `observed container recipe differs`. `adopt` refuses
+  an already adopted deployment, so there is no migration path for the old
+  record yet.
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
