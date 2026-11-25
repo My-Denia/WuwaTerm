@@ -5,6 +5,12 @@ report and the HTTP bytes it had before the feature existed. The snapshot
 below was produced on ``main`` 486312d, before any review change, from the
 cases in ``_review_snapshot``. Only the matcher revision value is normalized:
 the label is expected to move, nothing else is.
+
+With the feature, a one-character resonator name the matcher calls
+``ambiguous_mention`` and whose request-local evidence meets the
+``single_char_context`` threshold is reported as ``not_evaluated`` with reason
+``ambiguous_mention``. It is judged only when the caller resolves it, it never
+changes another finding, and it is the first to go when a page is full.
 """
 
 from __future__ import annotations
@@ -14,10 +20,38 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.test_api import bearer, build_client_app, call, issue_device, run
-from wuwaterm.application import project_review_report, review_pair
+from wuwaterm.application import (
+    REVIEW_FEATURE_AMBIGUOUS_MENTION,
+    REVIEW_MAX_JSON_BYTES,
+    ReviewRequestError,
+    project_review_report,
+    review_pair,
+    service_capabilities,
+)
 from wuwaterm.cjk_span import MATCHER_REVISION
 from wuwaterm.lookup import TermService
+from wuwaterm.review import (
+    REASON_AMBIGUOUS_MENTION,
+    RULE_TERM_PAIR,
+    VERDICT_CONFLICT,
+    VERDICT_NEEDS_REVIEW,
+    VERDICT_NOT_EVALUATED,
+    VERDICT_VERIFIED,
+    ReviewCandidate,
+    ReviewCoverage,
+    ReviewDictionary,
+    ReviewFinding,
+    ReviewReport,
+    ReviewSource,
+    ReviewSpan,
+)
+
+# The v10 label's revision. A resolution context that still carries it is
+# stale once the label moves.
+MATCHER_V10 = "57428b88978597d95840f56ba0080a4f8fb11d4860fe8ea5532d3c1e7c6a918a"
 
 MATCHER_PLACEHOLDER = "<matcher-revision>"
 REQUEST_ID = "req-snapshot"
@@ -300,6 +334,451 @@ def test_review_without_the_feature_matches_the_frozen_main_snapshot(tmp_path, s
     assert http.keys() == frozen.keys()
     for key in sorted(http):
         assert http[key] == frozen[key], key
+
+
+# ---------------------------------------------------------------------------
+# The feature itself
+# ---------------------------------------------------------------------------
+
+
+def _case(name: str) -> tuple[str, str, str]:
+    for case_name, source, target, direction in REVIEW_CASES:
+        if case_name == name:
+            return source, target, direction
+    raise KeyError(name)
+
+
+def _v2(service, source, target, direction="en", resolutions=(), **kwargs):
+    return review_pair(
+        service, source, target, direction, resolutions, review_version="review-v2", **kwargs
+    )
+
+
+def _ambiguous(report) -> list[ReviewFinding]:
+    return [f for f in report.findings if f.reason == REASON_AMBIGUOUS_MENTION]
+
+
+def _context(report) -> dict[str, object]:
+    return {
+        "source_revision": report.source_revision,
+        "rule_version": "review-v2",
+        "dictionary_revision": report.dictionary.revision,
+        "matcher_revision": MATCHER_REVISION,
+    }
+
+
+def test_matcher_revision_is_v11():
+    assert MATCHER_REVISION == "286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664"
+    assert MATCHER_REVISION != MATCHER_V10
+
+
+def test_a_v10_resolution_context_is_stale(sample_db):
+    service = TermService(sample_db)
+    source, target, direction = _case("enumeration")
+    base = _v2(service, source, target, direction)
+    jinhsi = next(f for f in base.findings if f.source_span.text == "今汐")
+    resolution = {
+        "mention_id": jinhsi.id,
+        "choice": "official_pair",
+        "candidate_id": jinhsi.candidates[0].candidate_id,
+    }
+    with pytest.raises(ReviewRequestError, match="resolution_context is stale"):
+        _v2(
+            service,
+            source,
+            target,
+            direction,
+            (resolution,),
+            resolution_context={**_context(base), "matcher_revision": MATCHER_V10},
+        )
+
+
+def test_supported_ambiguous_name_is_reported_unassessed_after_judged_findings(sample_db):
+    service = TermService(sample_db)
+    source, target, direction = _case("enumeration")
+    off = _v2(service, source, target, direction)
+    on = _v2(service, source, target, direction, ambiguous_mentions=True)
+
+    assert [f.source_span.text for f in off.findings] == ["今汐", "守岸人"]
+    assert on.findings[: len(off.findings)] == off.findings
+    [finding] = _ambiguous(on)
+    assert on.findings[-1] is finding
+    assert finding.id == f"{source.index('椿姐')}:{source.index('椿姐') + 1}:椿"
+    assert finding.verdict == VERDICT_NOT_EVALUATED
+    assert finding.rule_id == RULE_TERM_PAIR
+    assert finding.target_span is None
+    assert [(c.zh, c.en, c.category) for c in finding.candidates] == [
+        ("椿", "Camellya", "resonator")
+    ]
+    assert finding.candidates[0].candidate_id is not None
+    # Not counted as a problem: evaluated is unchanged, not_evaluated grows.
+    assert on.coverage.evaluated == off.coverage.evaluated == 2
+    assert on.coverage.not_evaluated == off.coverage.not_evaluated + 1
+
+
+def test_feature_never_judges_and_never_moves_another_finding(sample_db):
+    service = TermService(sample_db)
+    seen = 0
+    for name, source, target, direction in REVIEW_CASES:
+        off = _v2(service, source, target, direction)
+        on = _v2(service, source, target, direction, ambiguous_mentions=True)
+        extra = _ambiguous(on)
+        seen += len(extra)
+        assert on.findings == off.findings + tuple(extra), name
+        assert all(f.verdict == VERDICT_NOT_EVALUATED for f in extra), name
+        assert all(f.target_span is None for f in extra), name
+        assert on.coverage.evaluated == off.coverage.evaluated, name
+        assert on.coverage.not_evaluated == off.coverage.not_evaluated + len(extra), name
+        assert on.matcher_revision == off.matcher_revision == MATCHER_REVISION, name
+    assert seen == 16
+
+
+@pytest.mark.parametrize(
+    ("name", "unreported"),
+    (
+        # 红椿蕊 alone: no evidence at all.
+        ("compound_alone", "红椿蕊"),
+        # The title 椿姐 has only its title position; 今汐 is in another paragraph.
+        ("topic_title", "椿姐配队攻略"),
+        # 今汐 is both the paragraph entity and the co-occurring resonator:
+        # one span, so one piece of evidence.
+        ("no_target_region", "今汐出发。椿姐也在。"),
+    ),
+)
+def test_ambiguous_name_below_the_threshold_is_not_reported(sample_db, name, unreported):
+    service = TermService(sample_db)
+    source, target, direction = _case(name)
+    on = _v2(service, source, target, direction, ambiguous_mentions=True)
+    lo = source.index(unreported)
+    hi = lo + len(unreported)
+    assert not any(lo <= f.source_span.start < hi for f in _ambiguous(on))
+
+
+def _resolved(service, name, choice):
+    source, target, direction = _case(name)
+    base = _v2(service, source, target, direction, ambiguous_mentions=True)
+    [finding] = _ambiguous(base)
+    resolution: dict[str, object] = {"mention_id": finding.id, "choice": choice}
+    if choice == "official_pair":
+        resolution["candidate_id"] = finding.candidates[0].candidate_id
+    return finding, _v2(
+        service,
+        source,
+        target,
+        direction,
+        (resolution,),
+        resolution_context=_context(base),
+        ambiguous_mentions=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "choice", "verdict", "reason"),
+    (
+        ("enumeration", "official_pair", VERDICT_VERIFIED, None),
+        ("mismatch", "official_pair", VERDICT_CONFLICT, None),
+        ("enumeration", "not_a_term", VERDICT_NOT_EVALUATED, "not_a_term"),
+    ),
+)
+def test_only_a_resolution_judges_an_ambiguous_name(sample_db, name, choice, verdict, reason):
+    service = TermService(sample_db)
+    finding, report = _resolved(service, name, choice)
+    [judged] = [f for f in report.findings if f.id == finding.id]
+    assert judged.verdict == verdict
+    assert judged.reason == reason
+    assert _ambiguous(report) == []
+    # A resolved mention is an ordinary finding again and sorts by position.
+    assert [f.source_span.start for f in report.findings] == sorted(
+        f.source_span.start for f in report.findings
+    )
+
+
+def test_resolution_aimed_at_an_ambiguous_name_needs_the_feature(sample_db):
+    service = TermService(sample_db)
+    source, target, direction = _case("enumeration")
+    base = _v2(service, source, target, direction)
+    resolution = {"mention_id": _ambiguous_mention_id(source), "choice": "not_a_term"}
+    with pytest.raises(ReviewRequestError, match="does not match a finding"):
+        _v2(service, source, target, direction, (resolution,), resolution_context=_context(base))
+
+
+def test_resolution_aimed_at_an_unreported_ambiguous_name_is_refused(sample_db):
+    service = TermService(sample_db)
+    source, target, direction = _case("compound_alone")
+    base = _v2(service, source, target, direction, ambiguous_mentions=True)
+    resolution = {"mention_id": f"{source.index('椿')}:{source.index('椿') + 1}:椿", "choice": "not_a_term"}
+    with pytest.raises(ReviewRequestError, match="does not match a finding"):
+        _v2(
+            service,
+            source,
+            target,
+            direction,
+            (resolution,),
+            resolution_context=_context(base),
+            ambiguous_mentions=True,
+        )
+
+
+def test_review_v1_has_no_ambiguous_mention_feature(sample_db):
+    service = TermService(sample_db)
+    with pytest.raises(ReviewRequestError, match="review-v1 does not accept"):
+        review_pair(
+            service, "今汐、椿姐。", "Jinhsi, Camellya.", "en", ambiguous_mentions=True
+        )
+
+
+# ---------------------------------------------------------------------------
+# Projection: order and truncation
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_finding(
+    index: int, verdict: str, reason: str | None, *, sources: int = 1, pad: int = 0
+):
+    start = index * 2
+    candidate = ReviewCandidate(
+        zh="今汐",
+        en="Jinhsi",
+        category="resonator",
+        sources=tuple(
+            ReviewSource(source_file=f"RoleInfo.json/{'N' * pad}{n}", source_id=f"Role_{index}_{n}")
+            for n in range(sources)
+        ),
+        candidate_id="ab" * 32,
+    )
+    return ReviewFinding(
+        id=f"{start}:{start + 1}:x{index}",
+        verdict=verdict,
+        rule_id=RULE_TERM_PAIR,
+        source_span=ReviewSpan(start=start, end=start + 1, text="x"),
+        target_span=None,
+        candidates=(candidate,),
+        reason=reason,
+    )
+
+
+def _synthetic_report(findings) -> ReviewReport:
+    evaluated = sum(1 for f in findings if f.verdict != VERDICT_NOT_EVALUATED)
+    return ReviewReport(
+        source_revision="0" * 64,
+        target_revision="1" * 64,
+        rule_version="review-v2",
+        matcher_revision=MATCHER_REVISION,
+        dictionary=ReviewDictionary(
+            schema_version="2", source_commit="fixture", term_count=1, revision="2" * 64
+        ),
+        coverage=ReviewCoverage(
+            evaluated=evaluated,
+            not_evaluated=1 + len(findings) - evaluated,
+            rules=("review.term_pair", "review.sentence_meaning"),
+        ),
+        findings=tuple(findings),
+    )
+
+
+def test_truncation_keeps_all_128_judged_findings_and_drops_the_5_ambiguous_ones():
+    """128 judged + 5 ambiguous on a 128-finding page: exactly the 128 judged stay."""
+    verdicts = (VERDICT_VERIFIED, VERDICT_CONFLICT, VERDICT_NEEDS_REVIEW)
+    findings = []
+    # The ambiguous findings come first in the source, where a positional sort
+    # alone would put them on the page and push judged terms off it.
+    for index in range(5):
+        findings.append(_synthetic_finding(index, VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_MENTION))
+    judged = [
+        _synthetic_finding(5 + index, verdicts[index % 3], None) for index in range(128)
+    ]
+    findings.extend(judged)
+    report = _synthetic_report(findings)
+
+    body = project_review_report(report, REQUEST_ID, max_findings=128, include_reason=True)
+
+    assert len(_projection_bytes(body)) <= REVIEW_MAX_JSON_BYTES
+    page = body["findings"]
+    assert isinstance(page, list)
+    assert len(page) == 128
+    assert [item["id"] for item in page] == [f.id for f in judged]
+    assert all("reason" not in item for item in page)
+    assert body["truncated"] is True
+    assert body["coverage"] == {
+        "evaluated": 128,
+        "not_evaluated": 6,
+        "rules": ["review.term_pair", "review.sentence_meaning"],
+    }
+
+
+def test_ambiguous_findings_follow_every_other_finding_on_the_page():
+    findings = [
+        _synthetic_finding(0, VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_MENTION),
+        _synthetic_finding(1, VERDICT_NOT_EVALUATED, "ambiguous_repeat"),
+        _synthetic_finding(2, VERDICT_VERIFIED, None),
+        _synthetic_finding(3, VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_MENTION),
+        _synthetic_finding(4, VERDICT_NOT_EVALUATED, "no_target_region"),
+    ]
+    body = project_review_report(_synthetic_report(findings), REQUEST_ID, include_reason=True)
+    page = body["findings"]
+    assert isinstance(page, list)
+    assert [item.get("reason") for item in page] == [
+        "ambiguous_repeat",
+        None,
+        "no_target_region",
+        REASON_AMBIGUOUS_MENTION,
+        REASON_AMBIGUOUS_MENTION,
+    ]
+    assert body["truncated"] is False
+
+
+def test_the_byte_ceiling_drops_ambiguous_findings_before_judged_ones():
+    judged = [
+        _synthetic_finding(10 + index, VERDICT_VERIFIED, None, sources=8, pad=200)
+        for index in range(20)
+    ]
+    ambiguous = [
+        _synthetic_finding(
+            index, VERDICT_NOT_EVALUATED, REASON_AMBIGUOUS_MENTION, sources=8, pad=200
+        )
+        for index in range(10)
+    ]
+    report = _synthetic_report([*ambiguous, *judged])
+    body = project_review_report(report, REQUEST_ID, max_findings=128, include_reason=True)
+    assert len(_projection_bytes(body)) <= REVIEW_MAX_JSON_BYTES
+    page = body["findings"]
+    assert isinstance(page, list)
+    # The ceiling bites: not every finding fits, and every judged one does.
+    assert len(page) < len(judged) + len(ambiguous)
+    assert [item["id"] for item in page[: len(judged)]] == [f.id for f in judged]
+    assert body["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+
+def _http_review(app, token, source, target, *, features, direction="en", extra=None):
+    headers = {**bearer(token), "X-WuwaTerm-Matcher-Basis": "1"}
+    if features is not None:
+        headers["X-WuwaTerm-Review-Features"] = features
+    return run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": source,
+                "target": target,
+                "direction": direction,
+                **(extra or {}),
+            },
+            headers=headers,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "features",
+    ("ambiguous-mention-v1", "dense-128,ambiguous-mention-v1"),
+)
+def test_http_ambiguous_mention_requires_reason_v1(tmp_path, sample_db, features):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    source, target, _direction = _case("enumeration")
+    response = _http_review(app, token, source, target, features=features)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "X-WuwaTerm-Review-Features" not in response.headers
+
+
+def test_http_ambiguous_mention_on_review_v1_is_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"review_version": "review-v1", "source": "今汐。", "target": "Jinhsi.", "direction": "en"},
+            headers={**bearer(token), "X-WuwaTerm-Review-Features": "ambiguous-mention-v1,reason-v1"},
+        )
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_http_full_default_page_keeps_judged_findings_and_drops_ambiguous_ones(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    _, token = issue_device(store, "owner desktop")
+    source, target, _direction = _case("page_overflow")
+
+    without = _http_review(app, token, source, target, features="reason-v1")
+    page = _http_review(app, token, source, target, features="ambiguous-mention-v1,reason-v1")
+    assert page.status_code == 200, page.text
+    assert page.headers["X-WuwaTerm-Review-Features"] == "ambiguous-mention-v1,reason-v1"
+    body = page.json()
+    # 36 judged findings fill the 32-finding page before any ambiguous one.
+    assert [item["id"] for item in body["findings"]] == [
+        item["id"] for item in without.json()["findings"]
+    ]
+    assert body["truncated"] is True
+    assert body["coverage"]["evaluated"] == without.json()["coverage"]["evaluated"] == 36
+    assert body["coverage"]["not_evaluated"] == without.json()["coverage"]["not_evaluated"] + 5
+
+    dense = _http_review(
+        app, token, source, target, features="dense-128,reason-v1,ambiguous-mention-v1"
+    )
+    assert dense.status_code == 200, dense.text
+    assert dense.headers["X-WuwaTerm-Review-Features"] == "ambiguous-mention-v1,dense-128,reason-v1"
+    findings = dense.json()["findings"]
+    assert len(findings) == 41
+    assert [item.get("reason") for item in findings[36:]] == [REASON_AMBIGUOUS_MENTION] * 5
+    assert all(item.get("reason") != REASON_AMBIGUOUS_MENTION for item in findings[:36])
+    assert all(item["verdict"] == "not_evaluated" for item in findings[36:])
+    assert dense.json()["truncated"] is False
+
+
+def test_http_resolution_judges_an_ambiguous_name(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    source, target, _direction = _case("mismatch")
+    features = "ambiguous-mention-v1,reason-v1"
+    first = _http_review(app, token, source, target, features=features).json()
+    [finding] = [f for f in first["findings"] if f.get("reason") == REASON_AMBIGUOUS_MENTION]
+    resolved = _http_review(
+        app,
+        token,
+        source,
+        target,
+        features=features,
+        extra={
+            "resolutions": [
+                {
+                    "mention_id": finding["id"],
+                    "choice": "official_pair",
+                    "candidate_id": finding["candidates"][0]["candidate_id"],
+                }
+            ],
+            "resolution_context": {
+                "source_revision": first["source_revision"],
+                "rule_version": "review-v2",
+                "dictionary_revision": first["dictionary"]["revision"],
+                "matcher_revision": first["matcher_revision"],
+            },
+        },
+    )
+    assert resolved.status_code == 200, resolved.text
+    [judged] = [f for f in resolved.json()["findings"] if f["id"] == finding["id"]]
+    assert judged["verdict"] == "confirmed_conflict"
+    assert "reason" not in judged
+
+
+def test_capabilities_always_list_ambiguous_mention(tmp_path, sample_db, monkeypatch):
+    for name in ("WUWATERM_OPENAI_BASE_URL", "WUWATERM_OPENAI_API_KEY", "WUWATERM_OPENAI_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    assert service_capabilities() == (REVIEW_FEATURE_AMBIGUOUS_MENTION,)
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    response = run(call(app, "GET", "/v1/capabilities", headers=bearer(token)))
+    assert response.status_code == 200, response.text
+    assert response.json()["capabilities"] == ["ambiguous-mention-v1"]
 
 
 # fmt: off

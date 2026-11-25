@@ -454,9 +454,10 @@ Observed edges (static imports among shipped modules):
   `translate_html_async`, and `_restore_html` methods lazily import their
   matching Telegram compatibility functions.
 - `term_preparation` → `term_matching`, `cjk_span`, `protected_text`,
-  `single_char_context`, `skill_references`; `single_char_context` →
-  `cjk_span` (request-local evidence for ambiguous one-character mentions;
-  standard library otherwise); `term_matching` → `cjk_span`, `constants`,
+  `single_char_context`, `skill_references`; `review` → `single_char_context`
+  (only for the opt-in `review-v2` feature `ambiguous-mention-v1`);
+  `single_char_context` → `cjk_span` (request-local evidence for ambiguous
+  one-character mentions; standard library otherwise); `term_matching` → `cjk_span`, `constants`,
   `english_plural`, `models`, `term_classification` (no `lookup` or `db`);
   `term_classification` → `constants`, `models`, `normalize`;
   `skill_references` → `cjk_span`, `models`;

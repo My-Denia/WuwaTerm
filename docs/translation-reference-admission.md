@@ -86,16 +86,34 @@ to `wuwaterm-cjk-matcher-v9`, hashing `_SINGLE_NAME_HONORIFICS` and
 `_SINGLE_NAME_PARTICLES` alongside the existing inputs so stored `v8`
 resolution contexts go stale by the existing freshness contract.
 
-The current matcher is `wuwaterm-cjk-matcher-v10` (#319). It puts the same
-right-boundary rule behind `classify_single_character_mention`, which answers
-`name_mention`, `ambiguous_mention` or `ordinary_word`. Translation reference
-admission (`term_matching`, `term_preparation`) and `review-v2` admit a
-one-character name only on `name_mention`, so an `ambiguous_mention` is withheld
-exactly as the boolean predicate `single_character_name_mention_at` (kept for
-compatibility) withheld it under `v9`. No admission outcome changes from `v9`;
-the `MATCHER_REVISION` label moves to `57428b88…`. Stored `v9` resolution
-contexts and saved manuscript results go stale by the same freshness contract
-and are re-reviewed with the same outcome.
+`wuwaterm-cjk-matcher-v10` (#319) put the same right-boundary rule behind
+`classify_single_character_mention`, which answers `name_mention`,
+`ambiguous_mention` or `ordinary_word`. Translation reference admission
+(`term_matching`, `term_preparation`) and `review-v2` admit a one-character
+name only on `name_mention`, so an `ambiguous_mention` is withheld exactly as
+the boolean predicate `single_character_name_mention_at` (kept for
+compatibility) withheld it under `v9`. No admission outcome changed from `v9`;
+the `MATCHER_REVISION` label moved to `57428b88…`, and stored `v9` resolution
+contexts and saved manuscript results went stale by the same freshness
+contract and were re-reviewed with the same outcome.
+
+The current matcher is `wuwaterm-cjk-matcher-v11` (`286d29e8…`). Its matcher
+inputs are the `v10` ones; the label moves because `review-v2` gained the
+opt-in `ambiguous-mention-v1` feature (`X-WuwaTerm-Review-Features`, together
+with `reason-v1`, and listed by `GET /v1/capabilities`). With it, a
+one-character resonator name that the classifier calls `ambiguous_mention`, and
+whose evidence from the submitted source alone meets the `single_char_context`
+threshold (two independent kinds, one of them an entity kind), is reported as
+a `not_evaluated` finding with reason `ambiguous_mention` and its official
+candidates. It becomes `verified_constraint` or `confirmed_conflict` only after
+the user resolves it with `official_pair`. It never changes another finding,
+does not count as evaluated, sorts after every other finding and is the first
+to be dropped when the finding page or the byte ceiling is reached. A review
+that does not ask for the feature returns the `v10` report and bytes; the
+translation side still admits only `name_mention`, and its ambiguous-mention
+exposure stays off by default. Because the same request can now yield a
+different report, stored `v10` resolution contexts and saved manuscript
+results go stale by the same freshness contract and are re-reviewed.
 
 ## Closed-class skill stem references (`zh->en` only)
 
