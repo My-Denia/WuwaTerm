@@ -22,6 +22,12 @@ does not distribute generated game data or generated SQLite databases.
   the `/v1/reviews` schemas and response bytes to what main served before this
   endpoint.
 
+### Installer
+
+- `deploy/setup.sh` defaults the installer to Telegram `v0.6.0` (pinning Core
+  `v0.13.0`) and Web `v0.4.5`, the releases `contracts/products.json` now
+  records.
+
 ## 0.13.0 - 2026-11-26
 
 ### Translation Direction & Prose Preservation
