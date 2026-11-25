@@ -381,7 +381,7 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 | `WUWATERM_DB_PATH` | The terminology database the service reads. Default `data/terms.db`. |
 | `WUWATERM_API_PORT` | The loopback port. Default `8788`. Under Compose the bind address itself is fixed in the Compose file and is deliberately not an environment knob. |
 | `WUWATERM_API_STATE_DIR` | Where the device credential store lives. Default `state-api`, a **sibling** of the bot's state directory and never a child of it, because the bot mounts its own state directory writable. |
-| `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds. They are not shared with the bot; the documented worst case is the sum of the two processes. |
+| `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS` defaults to `90` s, leaving headroom above Core's `45` s LLM and `75` s semantic timeouts while Web BFF and Windows clients default to `100` s; see [timeout ladder](privacy-and-llm.md#llm-configuration)). They are not shared with the bot; the documented worst case is the sum of the two processes. |
 
 **For sentence translation (optional, shared by both surfaces):**
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,

@@ -1,9 +1,12 @@
 # q8 Translation Quality Candidate Plan & Frozen Offline Scope
 
-- Status: **Stage 3 complete — `q8r1` passed every frozen gate and is the
-  adopted candidate.** Stage 1 Run #1 (`515 -> 521`), Phase 1 (`540 -> 545`) and
-  the Phase 3 full run (`568/569`, 23 POSTs) have all been executed and read;
-  the ledger has `1` POST left and no further run is planned.
+- Status: **Adopted and verified on full `R` (`v0.11.0`, `602/606` ledger).**
+  Stage 1 Run #1 (`515 -> 521`), Phase 1 (`540 -> 545`), Phase 3 (`568/569`,
+  23 POSTs, recorded historically in Section 7), and the subsequent authorized
+  `v0.11.0` full `34/34` `R` verification (`568 -> 602` / `606`, 34 POSTs,
+  recorded in Section 8 alongside production `auto` adoption) have all
+  completed; the frozen `q8` plan budget table below records the pre-Section-8
+  Phase 3 ceiling.
 - Branch: `feat/q8-quality-candidate`
 - Development base: `main` (`0c6fa4b`, Core `v0.10.3`, including PR #299's
   `contracts/products.json` and `docs/products.md`, which this branch leaves

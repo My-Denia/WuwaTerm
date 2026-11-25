@@ -99,6 +99,12 @@ Optional LLM environment variables:
 - `WUWATERM_OPENAI_API_KEY`.
 - `WUWATERM_OPENAI_MODEL`.
 - `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`, finite range `0.1..300`.
+  Timeout ladder across components: Core single-call LLM timeout `45 s`, Core
+  semantic review timeout `75 s` (`SEMANTIC_TIMEOUT_SECONDS`), Core HTTP API
+  request deadline `90 s` (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS`), Web BFF
+  proxy `100 s` for translation/semantic (`30 s` for review, `8 s` for
+  lookup/health/capabilities), and Windows client `100 s`
+  (`DEFAULT_TRANSLATE_TIMEOUT_SECONDS`; `10 s` for lookup/status).
 - `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`, range `1..64`; max
   in-flight LLM calls.
 - `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into

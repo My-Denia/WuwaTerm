@@ -13,10 +13,10 @@ from contextlib import contextmanager
 import inspect
 import logging
 import re
-from collections.abc import Callable, Coroutine, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import httpx
 
@@ -143,41 +143,6 @@ SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
 )
 
 LlmCallGuard = Callable[[], object]
-
-
-class AsyncLlmCaller(Protocol):
-    def __call__(
-        self,
-        locked_text: str,
-        locks: tuple[tuple[str, str, str], ...],
-        html_mode: bool = False,
-        to_chinese: bool = False,
-        timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
-        transport: httpx.AsyncBaseTransport | None = None,
-        client: httpx.AsyncClient | None = None,
-        en_zh_protocol: bool = False,
-        references: Sequence[TermReference] = (),
-        context: TranslationContextProtocol | None = None,
-        thinking_mode: ConcreteThinkingMode | None = None,
-        prompt_suffix: str = "",
-        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
-        attempt_kind: AttemptKind = "initial",
-    ) -> Coroutine[Any, Any, str]: ...
-
-
-class SyncLlmCaller(Protocol):
-    def __call__(
-        self,
-        locked_text: str,
-        locks: tuple[tuple[str, str, str], ...],
-        html_mode: bool = False,
-        to_chinese: bool = False,
-        timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
-        en_zh_protocol: bool = False,
-        references: Sequence[TermReference] = (),
-        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> str: ...
 
 
 def _resolve_operation_budget(
@@ -874,10 +839,6 @@ class SentenceTranslator:
             raise failure
         if not _is_timeout_failure(failure):
             raise failure
-        # A replacement transport that predates the knob would send the same
-        # reasoning fields again, so the retry could only time out once more.
-        if not _async_llm_supports_param("thinking_mode"):
-            raise failure
         if budget is not None and not budget.can_use_corrective_call:
             request_trace.note_budget_exhausted()
             raise failure
@@ -962,10 +923,6 @@ class SentenceTranslator:
         if len(source_layout) < 2:
             return None
         if len(_paragraph_line_counts(regrouped)) == len(source_layout):
-            return None
-        # A retry that cannot carry the paragraph-count sentence has no reason to
-        # run: it would ask the same question again and double the wait.
-        if not _async_llm_supports_param("prompt_suffix"):
             return None
         if budget is not None and not budget.can_use_corrective_call:
             request_trace.note_budget_exhausted()
@@ -1147,11 +1104,7 @@ class SentenceTranslator:
         async with request_trace.llm_slot(self._current_llm_slots()):
             if op_budget is not None:
                 op_budget.check_can_continue()
-            client = (
-                await self._current_llm_client()
-                if _async_llm_supports_param("client")
-                else None
-            )
+            client = await self._current_llm_client()
             if before_llm_call is not None:
                 guarded = before_llm_call()
                 if inspect.isawaitable(guarded):
@@ -1162,7 +1115,7 @@ class SentenceTranslator:
                 else timeout_seconds
             )
             if op_budget is None:
-                return await _invoke_async_llm(
+                return await _call_llm_async(
                     locked_text,
                     locks,
                     html_mode=html_mode,
@@ -1181,7 +1134,7 @@ class SentenceTranslator:
             if own_rem is not None:
                 attempt_timeout = min(attempt_timeout, max(0.05, own_rem))
             with _maybe_activate_budget(op_budget), op_budget.call_attempt():
-                return await _invoke_async_llm(
+                return await _call_llm_async(
                     locked_text,
                     locks,
                     html_mode=html_mode,
@@ -1266,7 +1219,7 @@ class SentenceTranslator:
         to_chinese: bool = False,
         references: Sequence[TermReference] = (),
     ) -> str:
-        return _invoke_sync_llm(
+        return _call_llm(
             locked_text,
             locks,
             html_mode=html_mode,
@@ -1570,38 +1523,19 @@ def _call_llm(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
-    if _call_llm_async is _DEFAULT_CALL_LLM_ASYNC:
-        return asyncio.run(
-            _DEFAULT_CALL_LLM_ASYNC(
-                locked_text,
-                locks,
-                html_mode=html_mode,
-                to_chinese=to_chinese,
-                timeout_seconds=timeout_seconds,
-                transport=transport,
-                en_zh_protocol=en_zh_protocol,
-                references=references,
-                provider_profile=provider_profile,
-            )
+    return asyncio.run(
+        _call_llm_async(
+            locked_text,
+            locks,
+            html_mode=html_mode,
+            to_chinese=to_chinese,
+            timeout_seconds=timeout_seconds,
+            transport=transport,
+            en_zh_protocol=en_zh_protocol,
+            references=references,
+            provider_profile=provider_profile,
         )
-    # Tests and embedders replace the async transport with a callable that may
-    # predate term references or provider profiles; only pass accepted keywords.
-    supported = inspect.signature(_call_llm_async).parameters
-    kwargs: dict[str, Any] = {
-        "html_mode": html_mode,
-        "to_chinese": to_chinese,
-        "timeout_seconds": timeout_seconds,
-    }
-    if "references" in supported:
-        kwargs["references"] = references
-    if en_zh_protocol:
-        kwargs["en_zh_protocol"] = True
-    if "provider_profile" in supported:
-        kwargs["provider_profile"] = provider_profile
-    if transport is not None and "transport" in supported:
-        kwargs["transport"] = transport
-    legacy_caller: Callable[..., Coroutine[Any, Any, str]] = _call_llm_async
-    return asyncio.run(legacy_caller(locked_text, locks, **kwargs))
+    )
 
 
 async def _call_llm_async(
@@ -1662,115 +1596,6 @@ async def _call_llm_async(
             provider_profile=provider_profile,
             attempt_kind=attempt_kind,
         )
-
-
-_DEFAULT_CALL_LLM: SyncLlmCaller = _call_llm
-_DEFAULT_CALL_LLM_ASYNC: AsyncLlmCaller = _call_llm_async
-
-
-def _async_llm_supports_param(name: str) -> bool:
-    if _call_llm_async is _DEFAULT_CALL_LLM_ASYNC:
-        return True
-    return name in inspect.signature(_call_llm_async).parameters
-
-
-async def _invoke_async_llm(
-    locked_text: str,
-    locks: tuple[tuple[str, str, str], ...],
-    *,
-    html_mode: bool,
-    to_chinese: bool,
-    timeout_seconds: float,
-    client: httpx.AsyncClient | None,
-    en_zh_protocol: bool,
-    references: Sequence[TermReference],
-    context: TranslationContextProtocol | None,
-    thinking_mode: ConcreteThinkingMode | None,
-    prompt_suffix: str,
-    provider_profile: ProviderProfile,
-    attempt_kind: AttemptKind = "initial",
-) -> str:
-    """Single compatibility adapter between SentenceTranslator and monkeypatched callers."""
-    if _call_llm_async is _DEFAULT_CALL_LLM_ASYNC:
-        return await _DEFAULT_CALL_LLM_ASYNC(
-            locked_text,
-            locks,
-            html_mode=html_mode,
-            to_chinese=to_chinese,
-            timeout_seconds=timeout_seconds,
-            client=client,
-            en_zh_protocol=en_zh_protocol,
-            references=references,
-            context=context,
-            thinking_mode=thinking_mode,
-            prompt_suffix=prompt_suffix,
-            provider_profile=provider_profile,
-            attempt_kind=attempt_kind,
-        )
-    supported = inspect.signature(_call_llm_async).parameters
-    kwargs: dict[str, Any] = {}
-    for name, value in (
-        ("html_mode", html_mode),
-        ("to_chinese", to_chinese),
-        ("references", references),
-        ("en_zh_protocol", en_zh_protocol),
-        ("timeout_seconds", timeout_seconds),
-        ("client", client),
-        ("thinking_mode", thinking_mode),
-        ("prompt_suffix", prompt_suffix),
-        ("provider_profile", provider_profile),
-        ("attempt_kind", attempt_kind),
-    ):
-        if name in supported:
-            kwargs[name] = value
-    # Only an opted-in request passes ``context``, so a replacement
-    # transport that predates it keeps working for every other call.
-    if context is not None and "context" in supported:
-        kwargs["context"] = context
-    legacy_caller: Callable[..., Coroutine[Any, Any, str]] = _call_llm_async
-    return await legacy_caller(locked_text, locks, **kwargs)
-
-
-def _invoke_sync_llm(
-    locked_text: str,
-    locks: tuple[tuple[str, str, str], ...],
-    *,
-    html_mode: bool,
-    to_chinese: bool,
-    timeout_seconds: float,
-    en_zh_protocol: bool,
-    references: Sequence[TermReference],
-    provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> str:
-    if _call_llm is _DEFAULT_CALL_LLM:
-        return _DEFAULT_CALL_LLM(
-            locked_text,
-            locks,
-            html_mode=html_mode,
-            to_chinese=to_chinese,
-            timeout_seconds=timeout_seconds,
-            en_zh_protocol=en_zh_protocol,
-            references=references,
-            provider_profile=provider_profile,
-            transport=transport,
-        )
-    supported = inspect.signature(_call_llm).parameters
-    kwargs: dict[str, Any] = {}
-    for name, value in (
-        ("html_mode", html_mode),
-        ("to_chinese", to_chinese),
-        ("references", references),
-        ("en_zh_protocol", en_zh_protocol),
-        ("timeout_seconds", timeout_seconds),
-        ("provider_profile", provider_profile),
-    ):
-        if name in supported:
-            kwargs[name] = value
-    if transport is not None and "transport" in supported:
-        kwargs["transport"] = transport
-    legacy_caller: Callable[..., str] = _call_llm
-    return legacy_caller(locked_text, locks, **kwargs)
 
 
 def _is_timeout_failure(failure: LLMTranslationError) -> bool:
