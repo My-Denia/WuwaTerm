@@ -50,6 +50,7 @@ from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_
 from .channel_runtime import ChannelRuntime
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
+from .normalize import strip_telegram_wrapper_noise
 from .sentence import (
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -1688,7 +1689,10 @@ def translate_query(
     outcome = translate_request(
         service,
         translator,
-        TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
+        TranslationJob(
+            text=strip_telegram_wrapper_noise(query, keep_paragraphs=True),
+            forced_to_chinese=forced_to_chinese,
+        ),
     )
     return _telegram_text(outcome)
 
@@ -1704,7 +1708,10 @@ async def translate_query_async(
     outcome = await translate_request_async(
         service,
         translator,
-        TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
+        TranslationJob(
+            text=strip_telegram_wrapper_noise(query, keep_paragraphs=True),
+            forced_to_chinese=forced_to_chinese,
+        ),
         splitter=_telegram_llm_splitter,
         # The dictionary stage (exact + full-table fuzzy over sqlite) is
         # synchronous; keep it off the event loop like the API does.
@@ -1721,11 +1728,16 @@ async def telegram_translation_reply(
     input_limit: int = LLM_INPUT_CHAR_LIMIT,
 ) -> TranslationReply:
     """Run the shared pipeline with the Telegram markup and splitter hooks."""
+    text = (
+        strip_telegram_wrapper_noise(request.text, keep_paragraphs=True)
+        if request.html is None
+        else request.text
+    )
     outcome = await translate_request_async(
         service,
         translator,
         TranslationJob(
-            text=request.text,
+            text=text,
             markup=request.html,
             forced_to_chinese=request.forced_to_chinese,
         ),

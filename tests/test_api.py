@@ -959,8 +959,7 @@ def test_schema_only_limits_preserve_preparation_and_strip_order(
     app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
     _, translate_token = issue_device(store, "owner translate")
     _, meta_token = issue_device(store, "owner meta", [SCOPE_META])
-    source = "[spoiler]\n" * (LLM_INPUT_CHAR_LIMIT // len("[spoiler]\n") + 1)
-    source += "声骸"
+    source = "   \n" * (LLM_INPUT_CHAR_LIMIT // len("   \n") + 1) + "声骸"
     padded_query = f"  {'x' * TERM_QUERY_MAX_LENGTH}  "
 
     assert len(source) > LLM_INPUT_CHAR_LIMIT
@@ -990,6 +989,49 @@ def test_schema_only_limits_preserve_preparation_and_strip_order(
     assert terms.status_code == 200
     assert terms.json()["query"] == "x" * TERM_QUERY_MAX_LENGTH
     assert terms.json()["matches"] == []
+
+
+def test_api_translations_preserve_prose_comparators_hashtags_and_headers(
+    tmp_path, sample_db, monkeypatch
+):
+    captured: list[str] = []
+
+    async def fake_llm(locked_text, locks, **_kwargs):
+        captured.append(locked_text)
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_llm)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    _, translate_token = issue_device(store, "owner translate")
+
+    for text in (
+        ">50% Energy Regen",
+        "#spoilersafe Please do not reveal the ending.",
+        "[Wuthering Waves 3.7]\n\nBody text.",
+    ):
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={
+                    "text": text,
+                    "to": "zh",
+                    "context": {"before": None, "precedents": []},
+                },
+                headers=bearer(translate_token),
+            )
+        )
+        assert response.status_code == 200
+        assert response.json()["text"] == text
+    assert captured == [
+        ">50% Energy Regen",
+        "#spoilersafe Please do not reveal the ending.",
+        "[Wuthering Waves 3.7]\n\nBody text.",
+    ]
 
 
 def test_terms_preserves_backend_category_order_and_limit(tmp_path, sample_db):

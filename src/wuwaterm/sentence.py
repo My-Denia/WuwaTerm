@@ -47,7 +47,7 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
 )
 from .lookup import TermService, preferred_exact_entry
 from .models import TermEntry
-from .normalize import normalize_text, normalize_user_text
+from .normalize import normalize_prose_text, normalize_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
 from .text_spans import (
     WHITESPACE as _SEGMENT_WHITESPACE,
@@ -423,7 +423,7 @@ class SentenceTranslator:
         )
 
     def prepare_text(self, text: str) -> str:
-        text = normalize_user_text(text)
+        text = normalize_prose_text(text)
         if not text:
             return ""
         return "\n".join(self._resolve_speaker_prefix(line) for line in text.splitlines())
