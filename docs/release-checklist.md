@@ -12,7 +12,25 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.12.0`, a runtime
+  published tag. The latest published Core release is `v0.13.0`, a
+  translation-direction, prose-preservation and terms release on top of
+  `v0.12.0`: with no `forced_to_chinese` the direction is read from the
+  normalized user text and CJK text translates to Chinese only when its Latin
+  letters outnumber its CJK characters more than four to one (#319); Core keeps
+  the user's text verbatim apart from NFKC, line endings and whitespace, so
+  `SentenceTranslator.prepare_text` no longer deletes spoiler tags, version tags
+  or quote bars, `wuwaterm.normalize.strip_telegram_wrapper_noise` carries the
+  wrapper cleanup the Telegram adapters now call, and `channel_post_handler`
+  strips the markers once for every plain stage (#318, #322);
+  `wuwaterm-cjk-matcher-v10` adds `classify_single_character_mention` without
+  changing which mentions are admitted, so manuscript-v3/v4 results saved under
+  `wuwaterm-cjk-matcher-v9` are re-reviewed once; stdlib-only
+  `wuwaterm.structural_checks` is extracted and the `inspect.signature`
+  compatibility bridges leave `sentence.py` (#319, #320). Dictionary builder
+  logic, schema `2`, pinned data `9218d612`, OpenAPI shape (except
+  `info.version` `0.13.0`) and thinking defaults (`omit` / `disabled`) are
+  unchanged from `v0.12.0`, so `v0.12.0` deployments can upgrade with
+  `--runtime-only`. Before it is `v0.12.0`, a runtime
   architecture, execution-budget, timeout-hardening and observability release
   on top of `v0.11.0`: `wuwaterm.translation_plan` extracts `TranslationPlan`,
   `RequestPolicy`, `ProviderProfile`, `TranslationRequestSpec`, `RequestIdentity`
@@ -128,29 +146,31 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.12.0` and its published asset hashes are recorded
+  target-version file. Core `0.13.0` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
   `products.telegram` entry on its published release.
-  `products.telegram` records the published Telegram `v0.5.0`, because the
+  `products.telegram` records the published Telegram `v0.6.0`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.4.4`, because the installer
+  `products.web` records the published Web `v0.4.5`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.5`.
+  published Windows `v0.6.6`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
   `docs/self-hosting.md` name the same published release: `main` records and
-  prints `v0.5.0`, the Telegram release that pins Core `v0.12.0`, while the
-  `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags record `v0.4.1` (pinning
-  Core `v0.10.1`). A Core tag can only record a
-  client release that already exists, so the `v0.10.2`–`v0.12.0` tags, frozen
-  before Telegram `v0.5.0` was published, keep `v0.4.1` in their `products.json`
-  and `setup.sh`, and the `v0.10.1` tag keeps `v0.4.0` (which pins Core
+  prints `v0.6.0`, the Telegram release that pins Core `v0.13.0`, while the
+  `v0.13.0` tag records `v0.5.0` (pinning Core `v0.12.0`) and the `v0.10.2`,
+  `v0.10.3`, `v0.11.0` and `v0.12.0` tags record `v0.4.1` (pinning Core
+  `v0.10.1`). A Core tag can only record a
+  client release that already exists, so the `v0.13.0` tag, frozen before
+  Telegram `v0.6.0` was published, keeps `v0.5.0` in its `products.json` and
+  `setup.sh`, the `v0.10.2`–`v0.12.0` tags, frozen before `v0.5.0` was
+  published, keep `v0.4.1`, and the `v0.10.1` tag keeps `v0.4.0` (which pins Core
   `v0.10.0`). An install from those frozen tags
-  therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.5.0`) or runs
+  therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.6.0`) or runs
   from `main`. The `v0.10.0` tag, frozen before Telegram `v0.4.0` was published,
   keeps `v0.3.1`; that is what the `v0.9.2` tag records too, which pins Core
   `v0.9.1`. Clones of `v0.9.1` and `v0.9.0` record `v0.3.0` (pinning Core
@@ -160,16 +180,17 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` records and installs Web `v0.4.4`, while the `v0.10.3`,
-  `v0.11.0` and `v0.12.0` tags record and install Web `v0.4.3`; the `v0.10.1` and
+  they differ. `main` records and installs Web `v0.4.5`, the `v0.13.0` tag records and
+  installs Web `v0.4.4`, and the `v0.10.3`, `v0.11.0` and `v0.12.0` tags record
+  and install Web `v0.4.3`; the `v0.10.1` and
   `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.4.4` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.4.5` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.5](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.5), released independently.
+- Windows product: [v0.6.6](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.6), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -298,7 +319,7 @@ The 0.8.0 capability checks still apply to this release:
   hard cut no longer inserts a `\n`.
 - The Core CI's `API to Web contract` and `API to Windows contract` jobs pass
   against the pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`) this
-  release carries. `0.10.3`, `0.11.0` and `0.12.0` pin Web `v0.4.3`
+  release carries. `0.10.3`, `0.11.0`, `0.12.0` and `0.13.0` pin Web `v0.4.3`
   (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
   (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`), the two consumers of the
   `wuwaterm-manuscript-v4` format, which sends
@@ -313,8 +334,8 @@ The 0.8.0 capability checks still apply to this release:
   (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), and `0.10.3` moved them to the
   two revisions above, together with the installer's default Web release.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
-  own lock is moved and released. Telegram 0.5.0 pins the published Core
-  `v0.12.0` wheel and is deployed, so the 0.12.0 library reaches Telegram users
+  own lock is moved and released. Telegram 0.6.0 pins the published Core
+  `v0.13.0` wheel and is deployed, so the 0.13.0 library reaches Telegram users
   through that product's own release. A later Core release reaches Telegram
   users only after WuwaTerm-Telegram moves its lock to the new tag and
   releases, which this checklist does not assume.
