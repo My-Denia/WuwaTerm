@@ -28,8 +28,10 @@ does not distribute generated game data or generated SQLite databases.
   as written). `normalize_user_text` remains as an alias. The spoiler pattern now
   needs a boundary after the keyword, so `#spoilersafe`, `#spoiler-free` and
   `#剧透警告` are kept while `#spoiler- 今汐` and `#剧透：今汐` are still
-  stripped, and the quote-bar pattern only consumes horizontal whitespace, so a
-  blank paragraph separator before a quoted line survives.
+  stripped. The quote-bar pattern only consumes horizontal whitespace, so a
+  blank paragraph separator before a quoted line survives, and a `>` now has to
+  be followed by whitespace or the end of the line to count as a quote bar, so
+  a comparator such as `>50%` stays intact.
 - Linked-channel plain pipeline (#322): `channel_post_handler` strips the
   wrapper markers once for every plain stage (plain-only posts, the plain
   fallback after a failed HTML attempt, and over-limit split chunks), and the
@@ -49,9 +51,13 @@ does not distribute generated game data or generated SQLite databases.
   `ambiguous_mention` or `ordinary_word` (#319). Translation reference
   admission and `review-v2` still admit exactly `name_mention`, and
   `single_character_name_mention_at` stays as a compatibility predicate. The
-  judgment itself did not change: compared with `v0.12.0` over 935,611 CJK
-  positions the two matchers differ at none, so only the revision label that
-  records the basis moves.
+  judgment itself did not change: every branch of the `v0.12.0` predicate
+  `single_character_name_mention_at` is preserved in
+  `classify_single_character_mention(...) == "name_mention"`. The classifier
+  adds one guard, that the span is a CJK character, and all three callers
+  (`term_matching`, `term_preparation` and `review`) already check for a CJK
+  character first, so no admission decision changes. Only the revision label
+  that records the basis moves.
 - Because the label moves, a manuscript-v3 or manuscript-v4 segment result that
   the Web or Windows client saved under `wuwaterm-cjk-matcher-v9` becomes stale
   after the upgrade and is re-reviewed. The re-review spends review quota and
@@ -64,9 +70,12 @@ does not distribute generated game data or generated SQLite databases.
   `regroup_lines_into_source_paragraphs` and the merge/split guards) moved there
   from `sentence` and `translation_plan` with unchanged logic, and
   `translation_plan.paragraph_line_counts` stays importable. The module also
-  adds numeric-token, placeholder-integrity and paragraph-structure check
-  helpers that no translation path or HTTP endpoint calls yet. It is registered
-  with the pure-matching modules in `check_architecture_boundaries.py`.
+  adds numeric-token and placeholder-integrity check helpers that no
+  translation path or HTTP endpoint calls yet;
+  `check_paragraph_structure` now backs
+  `regroup_lines_into_source_paragraphs` and reaches the same regroup decision
+  as `v0.12.0`. It is registered with the pure-matching modules in
+  `check_architecture_boundaries.py`.
 - Remove the `inspect.signature` compatibility bridges (`AsyncLlmCaller`,
   `SyncLlmCaller`, `_async_llm_supports_param` and the `_DEFAULT_CALL_LLM*`
   switches) from `sentence.py`; the test-only adapter now lives in

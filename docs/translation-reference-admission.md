@@ -93,8 +93,9 @@ admission (`term_matching`, `term_preparation`) and `review-v2` admit a
 one-character name only on `name_mention`, so an `ambiguous_mention` is withheld
 exactly as the boolean predicate `single_character_name_mention_at` (kept for
 compatibility) withheld it under `v9`. No admission outcome changes from `v9`;
-the `MATCHER_REVISION` label moves to `57428b88…`. Stored `v9` resolution contexts and saved manuscript results go
-stale by the same freshness contract and are re-reviewed with the same outcome.
+the `MATCHER_REVISION` label moves to `57428b88…`. Stored `v9` resolution
+contexts and saved manuscript results go stale by the same freshness contract
+and are re-reviewed with the same outcome.
 
 ## Closed-class skill stem references (`zh->en` only)
 
