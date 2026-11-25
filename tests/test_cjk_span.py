@@ -85,7 +85,7 @@ def test_lexicon_is_the_pinned_jieba_slice():
         assert word in _WORDS
     payload = json.dumps(
         [
-            "wuwaterm-cjk-matcher-v10",
+            "wuwaterm-cjk-matcher-v11",
             JIEBA_COMMIT,
             LEXICON_FILTER,
             sorted(_WORDS),

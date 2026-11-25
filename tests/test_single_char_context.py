@@ -3,7 +3,8 @@
 ``single_char_context`` records evidence for ``ambiguous_mention`` occurrences
 of one-character resonator/speaker surfaces. The default translation path must
 stay byte-identical to the pre-B2a ``main`` snapshot frozen below; the
-evaluation is state only, never a lock, never a reference, never review input.
+evaluation is state only, never a lock and never a reference. review-v2 runs
+its own evaluation only for the opt-in ``ambiguous-mention-v1`` feature.
 """
 
 from __future__ import annotations
@@ -144,7 +145,14 @@ def _entity(text: str, surface: str, category: str, en: str, *, nth: int = 0) ->
 # Values were produced on origin/main 25ce314 before any B2a change, with the
 # fixtures in ``_default_path_snapshot``. Equality proves locked_text, locks,
 # references, prompt bytes and OperationIdentity are unchanged (I2).
+#
+# OperationIdentity hashes the matcher label, which has since moved from v10
+# to v11 without any matcher input changing. The snapshot therefore recomputes
+# the operation hash under the v10 label it was frozen with, and checks the
+# live label separately.
 # ---------------------------------------------------------------------------
+
+MATCHER_V10_REVISION = "57428b88978597d95840f56ba0080a4f8fb11d4860fe8ea5532d3c1e7c6a918a"
 
 PLAIN_CASES = (
     ("p1_zh_en_compound", "红椿蕊很漂亮。", False, None),
@@ -199,6 +207,8 @@ def _default_path_snapshot(sample_db, monkeypatch) -> dict[str, object]:
         assert exact is None and plan is not None, name
         spec = translator.build_request_spec(plan, policy=policy, model="fixture")
         op = spec.operation_identity(policy)
+        assert op.matcher_revision == MATCHER_REVISION, name
+        op = replace(spec, matcher_revision=MATCHER_V10_REVISION).operation_identity(policy)
         out[name] = {
             "terms": _terms_repr(plan.locked_text, plan.locks, plan.references),
             "system_sha256": _sha(spec.system_prompt),
@@ -684,12 +694,18 @@ def test_single_char_context_has_no_path_to_translation_context():
 # ---------------------------------------------------------------------------
 
 
-def test_review_does_not_consume_ambiguous_state():
-    """I4: review.py is untouched by B2a and no verified/conflict state exists."""
+def test_review_does_not_consume_translation_ambiguous_state():
+    """I4: review never reads the translation side's ambiguous state.
+
+    review-v2 runs its own request-local evaluation for ambiguous-mention-v1
+    (see tests/test_review_ambiguous_mention.py); it imports the evaluation
+    module, never ``term_preparation`` or its ``AmbiguousMention``, and neither
+    evidence module can produce a verified or conflicting judgment.
+    """
     review_tree = ast.parse((ROOT / "src/wuwaterm/review.py").read_text(encoding="utf-8"))
     for node in ast.walk(review_tree):
         if isinstance(node, ast.ImportFrom):
-            assert node.module not in {"single_char_context", "wuwaterm.single_char_context"}
+            assert node.module not in {"term_preparation", "wuwaterm.term_preparation"}
             assert not any(alias.name == "AmbiguousMention" for alias in node.names)
     for name in ("single_char_context.py", "term_preparation.py"):
         source = (ROOT / "src/wuwaterm" / name).read_text(encoding="utf-8")
@@ -697,11 +713,15 @@ def test_review_does_not_consume_ambiguous_state():
         assert "confirmed_conflict" not in source
 
 
-def test_matcher_revision_stays_v10():
-    """I5: the classifier and MATCHER_REVISION are unchanged (v11 is B2b)."""
-    assert MATCHER_REVISION == "57428b88978597d95840f56ba0080a4f8fb11d4860fe8ea5532d3c1e7c6a918a"
+def test_matcher_revision_is_v11_with_v10_matcher_inputs():
+    """I5: the classifier is unchanged; only the basis label moved to v11.
+
+    The label moved because review-v2's opt-in ambiguous-mention-v1 lets the
+    same request give a different report; no matcher input changed.
+    """
+    assert MATCHER_REVISION == "286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664"
     source = (ROOT / "src/wuwaterm/cjk_span.py").read_text(encoding="utf-8")
-    assert '"wuwaterm-cjk-matcher-v10",' in source
+    assert '"wuwaterm-cjk-matcher-v11",' in source
 
 
 @pytest.mark.parametrize("text", ["红椿·蕾", "香椿拌豆腐", "红椿·蕾和香椿拌豆腐"])

@@ -12,6 +12,7 @@
             "description": "Optional capabilities this server can serve right now. A client turns a feature on only when it is listed. A server that predates this endpoint answers 404; treat that as an empty list.",
             "items": {
               "enum": [
+                "ambiguous-mention-v1",
                 "semantic-review-v1",
                 "translation-context-v1"
               ],
@@ -2001,7 +2002,7 @@
     },
     "/v1/reviews": {
       "post": {
-        "description": "Review a submitted source/target pair against dictionary constraints.\n\n`review-v2` callers may opt into additive review features with the\n`X-WuwaTerm-Review-Features` header, comma separated: `dense-128`\nraises the finding page from 32 to 128 (still bounded by the 64 KiB\nJSON ceiling), and `reason-v1` adds a `reason` to each `not_evaluated`\nfinding. Without the header the response is byte-identical to the\npublished 32-finding, seven-key document.",
+        "description": "Review a submitted source/target pair against dictionary constraints.\n\n`review-v2` callers may opt into additive review features with the\n`X-WuwaTerm-Review-Features` header, comma separated: `dense-128`\nraises the finding page from 32 to 128 (still bounded by the 64 KiB\nJSON ceiling), and `reason-v1` adds a `reason` to each `not_evaluated`\nfinding. `ambiguous-mention-v1` (requires `reason-v1`; listed by\n`GET /v1/capabilities`) also reports a one-character resonator name\nthe matcher could not settle, but whose surrounding source text gives\nat least two independent kinds of evidence, as a `not_evaluated`\nfinding with reason `ambiguous_mention` and its official candidates.\nSuch a finding is judged only after the caller resolves it, sorts after\nevery other finding and is the first to go when the page is full.\nWithout the header the response is byte-identical to the published\n32-finding, seven-key document.",
         "operationId": "create_review_v1_reviews_post",
         "requestBody": {
           "content": {
