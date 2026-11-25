@@ -1819,3 +1819,97 @@ def test_paired_compare_cli_subprocess_reproducible_across_pythonhashseed(tmp_pa
         assert done.returncode == 0
         outputs.append(done.stdout)
     assert outputs[0] == outputs[1]
+
+
+def test_paired_compare_telemetry_unknown_part_keeps_tokens_none_and_rejects_conflict(paired):
+    units_a = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="B", naturalness="stiff") for i in range(6)]
+    units_b = [arm_unit(f"u{i}", f"d{i}", "zh->en", "guide", 50, grade="A", naturalness="natural") for i in range(6)]
+
+    # Arm A has completion_tokens="unknown" alongside prompt_tokens=1000: must NOT sum partial parts to 1000.
+    tel_a_unknown = {
+        "zh->en": {"posts": 6, "prompt_tokens": 1000, "completion_tokens": "unknown", "latency_seconds": 6.0}
+    }
+    tel_b_known = {"zh->en": {"posts": 12, "prompt_tokens": 500, "completion_tokens": 400, "latency_seconds": 12.0}}
+    res = paired(arm_doc("raw", units_a, tel_a_unknown), arm_doc("prod", units_b, tel_b_known), seed=1, bootstrap_samples=200)
+    assert res.code == 0
+    uic = res.report["directions"]["zh->en"]["unit_improvement_cost"]
+    assert uic["extra_telemetry"]["tokens"] is None
+    assert uic["per_net_a_unit"]["computable"] is True
+    assert uic["per_net_a_unit"]["tokens"] is None
+    assert uic["per_net_a_unit"]["posts"] == pytest.approx(1.0)
+
+    # Co-occurring tokens and total_tokens must exit 2
+    tel_conflict = {"zh->en": {"posts": 6, "tokens": 100, "total_tokens": 200}}
+    bad = paired(arm_doc("raw", units_a, tel_conflict), arm_doc("prod", units_b, tel_b_known))
+    assert bad.code == 2 and bad.out == "" and "cannot specify both tokens and total_tokens" in bad.err
+
+
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        {"grade": "A"},
+        {"naturalness": "natural"},
+        {"critical_errors": [err("omission")]},
+        {"critical_errors": {"omission": 1}},
+        {"names": [nm("o1")]},
+        {"community_names": [nm("c1")]},
+        {"minor_term_errors": 1},
+        {"misleading_term_errors": 1},
+        {"post_edit_distance": 0.1},
+        {"post_edited_reference": "ref"},
+    ],
+)
+def test_paired_compare_run_failed_with_judgment_fields_exits_2(paired, extra_fields):
+    units_a = [{**arm_unit("u0", "d0", "zh->en", "guide", 50, run_failed=True), **extra_fields}]
+    units_b = [arm_unit("u0", "d0", "zh->en", "guide", 50, grade="A", naturalness="natural")]
+    res = paired(arm_doc("a", units_a), arm_doc("b", units_b))
+    assert res.code == 2 and res.out == "" and "run_failed" in res.err
+
+
+def test_paired_compare_zero_deltas_never_serialize_negative_zero(paired):
+    import math
+
+    units_a = [
+        arm_unit(
+            f"u{i}",
+            f"d{i}",
+            "zh->en",
+            "guide",
+            50,
+            grade="B",
+            naturalness="stiff",
+            post_edit_distance=0.2,
+        )
+        for i in range(4)
+    ]
+    units_b = [
+        arm_unit(
+            f"u{i}",
+            f"d{i}",
+            "zh->en",
+            "guide",
+            50,
+            grade="B",
+            naturalness="stiff",
+            post_edit_distance=0.2,
+        )
+        for i in range(4)
+    ]
+    res = paired(arm_doc("a", units_a), arm_doc("b", units_b), seed=1, bootstrap_samples=200)
+    assert res.code == 0
+    assert "-0.0" not in res.out
+    zh = res.report["directions"]["zh->en"]
+    mqm = zh["mqm_cost"]
+    pe = zh["post_edit_distance"]
+    for val in (
+        mqm["per_1000_source_scalars_diff"],
+        mqm["per_1000_source_scalars_net_reduction"],
+        *mqm["per_1000_source_scalars_diff_ci95"],
+        *mqm["per_1000_source_scalars_net_reduction_ci95"],
+        pe["delta_b_minus_a"],
+        pe["net_reduction"],
+        *pe["delta_b_minus_a_ci95"],
+        *pe["net_reduction_ci95"],
+    ):
+        assert val == 0.0
+        assert math.copysign(1.0, val) == 1.0

@@ -1154,6 +1154,8 @@ def parse_telemetry_block(raw: Any, where: str) -> dict[str, ArmTelemetry]:
         if entry.get("posts") is not None:
             posts = get_int(entry, "posts", entry_where, minimum=0)
 
+        if "tokens" in entry and "total_tokens" in entry:
+            fail(entry_where, "cannot specify both tokens and total_tokens")
         tokens: int | None = None
         if "tokens" in entry and entry["tokens"] is not None:
             if entry["tokens"] != "unknown":
@@ -1162,13 +1164,18 @@ def parse_telemetry_block(raw: Any, where: str) -> dict[str, ArmTelemetry]:
             if entry["total_tokens"] != "unknown":
                 tokens = get_int(entry, "total_tokens", entry_where, minimum=0)
         else:
-            token_parts = [
-                get_int(entry, k, entry_where, minimum=0)
-                for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
-                if entry.get(k) is not None and entry.get(k) != "unknown"
-            ]
-            if token_parts:
-                tokens = sum(token_parts)
+            part_keys = ("prompt_tokens", "completion_tokens", "reasoning_tokens")
+            present_parts = [entry[k] for k in part_keys if entry.get(k) is not None]
+            if present_parts:
+                for k in part_keys:
+                    if entry.get(k) is not None and entry.get(k) != "unknown":
+                        get_int(entry, k, entry_where, minimum=0)
+                if "unknown" not in present_parts:
+                    tokens = sum(
+                        get_int(entry, k, entry_where, minimum=0)
+                        for k in part_keys
+                        if entry.get(k) is not None
+                    )
 
         latency_seconds: float | None = None
         if entry.get("latency_seconds") is not None:
@@ -1336,6 +1343,22 @@ def load_arm_scores(path: str) -> ArmScores:
         if run_failed:
             if row.get("grade") is not None:
                 fail(where, "a run_failed unit has no grade")
+            if row.get("naturalness") is not None:
+                fail(where, "a run_failed unit has no naturalness")
+            if row.get("critical_errors") not in (None, [], {}):
+                fail(where, "a run_failed unit has no critical_errors")
+            if row.get("names") not in (None, []):
+                fail(where, "a run_failed unit has no names")
+            if row.get("community_names") not in (None, []):
+                fail(where, "a run_failed unit has no community_names")
+            if row.get("minor_term_errors") is not None:
+                fail(where, "a run_failed unit has no minor_term_errors")
+            if row.get("misleading_term_errors") is not None:
+                fail(where, "a run_failed unit has no misleading_term_errors")
+            if row.get("post_edit_distance") is not None:
+                fail(where, "a run_failed unit has no post_edit_distance")
+            if row.get("post_edited_reference") is not None:
+                fail(where, "a run_failed unit has no post_edited_reference")
             units[unit_id] = ScoredUnit(
                 unit_id=unit_id,
                 doc_id=doc_id,
@@ -1492,14 +1515,18 @@ def pair_units(
     return by_direction
 
 
+def clean_zero(val: float) -> float:
+    return 0.0 if val == 0.0 else val
+
+
 def percentile(sorted_vals: Sequence[float], q: float) -> float:
     pos = q * (len(sorted_vals) - 1)
     lo = int(math.floor(pos))
     hi = int(math.ceil(pos))
     if lo == hi:
-        return float(sorted_vals[lo])
+        return clean_zero(float(sorted_vals[lo]))
     frac = pos - lo
-    return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
+    return clean_zero(float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac))
 
 
 def bootstrap_ci(vals: list[float]) -> list[float] | None:
@@ -1662,10 +1689,10 @@ def stratified_cluster_bootstrap(
         delta_u_reps.append((u_b - u_a) / n_tot)
         crit_total_red_reps.append(float(c_a - c_b))
         if s_a > 0 and s_b > 0:
-            crit_rate_red_reps.append((c_a * 1000.0 / s_a) - (c_b * 1000.0 / s_b))
-            mqm_diff = (m_b * 1000.0 / s_b) - (m_a * 1000.0 / s_a)
+            crit_rate_red_reps.append(clean_zero((c_a * 1000.0 / s_a) - (c_b * 1000.0 / s_b)))
+            mqm_diff = clean_zero((m_b * 1000.0 / s_b) - (m_a * 1000.0 / s_a))
             mqm_rate_diff_reps.append(mqm_diff)
-            mqm_rate_red_reps.append(-mqm_diff)
+            mqm_rate_red_reps.append(clean_zero(-mqm_diff))
 
     pe_strata: list[list[tuple[float, float, float]]] = []
     for genre in GENRES:
@@ -1686,9 +1713,9 @@ def stratified_cluster_bootstrap(
                     cnt += doc_pe[0]
                     sum_a += doc_pe[1]
                     sum_b += doc_pe[2]
-            diff = (sum_b - sum_a) / cnt
+            diff = clean_zero((sum_b - sum_a) / cnt)
             pe_diff_reps.append(diff)
-            pe_red_reps.append(-diff)
+            pe_red_reps.append(clean_zero(-diff))
 
     return {
         "delta_a_ci95": bootstrap_ci(delta_a_reps),
@@ -1820,11 +1847,11 @@ def compare_direction(
     mqm_rate_a = mqm_a["per_1000_source_scalars"]
     mqm_rate_b = mqm_b["per_1000_source_scalars"]
     mqm_rate_diff = (
-        (mqm_rate_b - mqm_rate_a)
+        clean_zero(mqm_rate_b - mqm_rate_a)
         if mqm_rate_a is not None and mqm_rate_b is not None
         else None
     )
-    mqm_rate_red = -mqm_rate_diff if mqm_rate_diff is not None else None
+    mqm_rate_red = clean_zero(-mqm_rate_diff) if mqm_rate_diff is not None else None
 
     pe_pairs = [
         (ua.post_edit_distance, ub.post_edit_distance)
@@ -1843,9 +1870,9 @@ def compare_direction(
             "units_evaluated": len(pe_pairs),
             "arm_a_mean": pe_a_mean,
             "arm_b_mean": pe_b_mean,
-            "delta_b_minus_a": pe_b_mean - pe_a_mean,
+            "delta_b_minus_a": clean_zero(pe_b_mean - pe_a_mean),
             "delta_b_minus_a_ci95": boot["post_edit_diff_ci95"],
-            "net_reduction": pe_a_mean - pe_b_mean,
+            "net_reduction": clean_zero(pe_a_mean - pe_b_mean),
             "net_reduction_ci95": boot["post_edit_reduction_ci95"],
         }
     else:
