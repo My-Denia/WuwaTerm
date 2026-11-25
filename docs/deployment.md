@@ -133,10 +133,12 @@ The Compose file has two image roles across three services:
   loopback only, and that bind is fixed in the Compose file rather than read
   from `.env`: with host networking, an environment knob would turn a public
   exposure into a one-line edit. It also sets `mem_reservation: 96m` and
-  `oom_score_adj: -500`, so on a small host under memory pressure its working
-  set stays out of swap and it is the last OOM victim. Both live in the Compose
-  file because the updater recreates from that file alone; neither is a hard
-  memory cap.
+  `oom_score_adj: -500`. The reservation is a soft container-level request
+  (cgroup v2 `memory.low`), not a cap; it only protects the working set during
+  host-wide reclaim when every non-root ancestor cgroup, such as `system.slice`,
+  also sets `MemoryLow`. The OOM score makes the OOM killer pick the API only
+  after ordinary processes. Both live in the Compose file because the updater
+  recreates from that file alone, and adoption and updates replay them.
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.

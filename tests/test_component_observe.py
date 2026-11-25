@@ -3,11 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts import component_observe as observe
+from scripts import component_operations as operations
+from scripts import product_manifest as manifest
 
 
 ID = "a" * 64
@@ -17,7 +21,7 @@ PRIVATE = "secret-for-test-only-6391"
 
 
 def observation() -> dict:
-    host = {**{name: 0 for name in observe._ZERO_FIELDS},
+    host = {**{name: 0 for name in observe._ZERO_FIELDS | observe._RESOURCE_FIELDS},
             **{name: "" for name in observe._EMPTY_STRING_FIELDS},
             **{name: [] for name in observe._EMPTY_ARRAY_FIELDS}}
     host.update({
@@ -199,3 +203,68 @@ def test_real_docker_container_inspection_and_wrong_binding() -> None:
     args["project"] = "incorrect"
     with pytest.raises(observe.ObservationError, match="identity"):
         observe.observe_container(container_id, **args)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _compose_api_resources(state_root: Path) -> dict:
+    """The resource settings Compose renders for the real wuwaterm-api service."""
+    if shutil.which("docker") is None:
+        pytest.skip("docker is not installed")
+    (state_root / ".env").write_text("", encoding="utf-8")
+    process = subprocess.run(
+        ["docker", "compose", "-f", str(ROOT / "deploy" / "docker-compose.yml"), "--env-file", os.devnull,
+         "config", "--no-env-resolution", "--format", "json"],
+        env={**os.environ, "WUWATERM_STATE_ROOT": str(state_root)},
+        capture_output=True, text=True, check=False, timeout=60)
+    assert process.returncode == 0, process.stderr[-300:]
+    services = json.loads(process.stdout)["services"]
+    assert "mem_reservation" not in services["wuwaterm"] and "oom_score_adj" not in services["wuwaterm"]
+    return services["wuwaterm-api"]
+
+
+def test_api_service_resource_settings_are_observed_and_replayed(monkeypatch, tmp_path) -> None:
+    """Adopting or updating the Compose-run API must neither refuse nor drop its protection.
+
+    deploy/docker-compose.yml gives wuwaterm-api a memory reservation and a
+    negative OOM score adjustment. Observation used to refuse any non-default
+    value, which would have broken adoption and inspection of that container.
+    """
+    service = _compose_api_resources(tmp_path)
+    reservation, score = int(service["mem_reservation"]), int(service["oom_score_adj"])
+    assert reservation > 0 and score < 0
+
+    raw = observation()
+    raw["HostConfig"].update(MemoryReservation=reservation, OomScoreAdj=score)
+    recipe = extract(raw)["recipe"]
+    assert recipe["runtime_options"]["memory_reservation"] == reservation
+    assert recipe["runtime_options"]["oom_score_adj"] == score
+
+    snapshot = {**recipe, "schema_version": 1, "image_id": IMAGE, "env_files": [], "environment_overrides": []}
+    manifest.validate_recipe_snapshot(snapshot)
+
+    # Replay: the container recreated from the snapshot carries both settings.
+    created: list[dict] = []
+    monkeypatch.setattr(operations.observe, "_inspect", lambda identifier: raw)
+    monkeypatch.setattr(operations, "_docker", lambda method, path, body=None, **kw: (
+        created.append(body) or {"Id": "d" * 64}))
+    journal = {"transaction_id": "t" * 16, "before": {"containers": {"api": {"id": ID}}}}
+    operations._create_from_snapshot(journal, snapshot, {}, "api")
+    assert created[0]["HostConfig"]["MemoryReservation"] == reservation
+    assert created[0]["HostConfig"]["OomScoreAdj"] == score
+
+
+def test_default_resource_settings_keep_the_recipe_unchanged() -> None:
+    recipe = extract(observation())["recipe"]
+    assert "memory_reservation" not in recipe["runtime_options"]
+    assert "oom_score_adj" not in recipe["runtime_options"]
+
+
+@pytest.mark.parametrize("field,value", [("MemoryReservation", -1), ("MemoryReservation", True),
+                                         ("OomScoreAdj", 1001), ("OomScoreAdj", "0")])
+def test_invalid_resource_settings_are_refused(field, value) -> None:
+    raw = observation()
+    raw["HostConfig"][field] = value
+    with pytest.raises(observe.ObservationError, match="resource settings"):
+        extract(raw)

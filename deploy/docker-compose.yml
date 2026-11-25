@@ -70,14 +70,21 @@ services:
     image: ${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}
     container_name: wuwaterm-api
     restart: unless-stopped
-    # The API is small (tens of MiB resident) and latency-sensitive: under
-    # memory pressure from other services on the same host, a zero reservation
-    # let the kernel push its pages to swap, and one /v1/capabilities call took
-    # 11.2 s against an 8 s client timeout. The soft reservation keeps that
-    # working set resident; the negative OOM score makes it the last victim.
-    # Neither is a hard limit, so the container is not capped. These live in
-    # this file because deploy/vps-update.sh recreates from it alone; an
-    # override file would not be read.
+    # The API is small (tens of MiB resident) and latency-sensitive. With a
+    # zero reservation and a zero OOM score, memory pressure from other
+    # services on the same host paged part of it out, and one /v1/capabilities
+    # call took 11.2 s against an 8 s client timeout.
+    #
+    # mem_reservation is a soft request (cgroup v2 memory.low), not a cap. It
+    # only shields the container during host-wide reclaim when every non-root
+    # ancestor cgroup (for example system.slice) also sets MemoryLow; set that
+    # on the host if the working set should stay out of swap. oom_score_adj
+    # -500 makes the OOM killer pick it only after ordinary processes; system
+    # daemons such as dockerd usually sit at or below it.
+    #
+    # Both live in this file because deploy/vps-update.sh recreates from it
+    # alone; an override file would not be read. component_observe.py records
+    # both, so adoption and updates replay them.
     mem_reservation: 96m
     oom_score_adj: -500
     network_mode: host

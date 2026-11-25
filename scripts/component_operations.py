@@ -1344,6 +1344,9 @@ def _create_from_snapshot(journal: dict[str, Any], snapshot: dict[str, Any],
                                 ("security_opt", "SecurityOpt"), ("dns", "Dns"), ("extra_hosts", "ExtraHosts")):
         if options[source] is not None:
             host[destination] = options[source]
+    for source, destination in (("memory_reservation", "MemoryReservation"), ("oom_score_adj", "OomScoreAdj")):
+        if source in options:
+            host[destination] = options[source]
     ports: dict[str, list[dict[str, str]]] = {}
     for port in snapshot["ports"]:
         key = f'{port["container_port"]}/{port["protocol"]}'

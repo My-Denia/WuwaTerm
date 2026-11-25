@@ -1317,26 +1317,6 @@ def test_compose_api_service_is_loopback_only_with_separate_state():
     assert "/app/state\n" not in api_section
 
 
-def test_compose_api_service_keeps_memory_and_oom_protection():
-    """The tiny API must stay resident and be the last OOM victim.
-
-    Production once pushed 74 MiB of it to swap under memory pressure from
-    other services and /v1/capabilities took 11.2 s against an 8 s timeout.
-    The updater recreates from this file alone, so an override file cannot
-    carry the protection; it has to stay here, on the API service only.
-    """
-    text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
-    api_section = text.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
-    bot_section = text.split("  wuwaterm:", 1)[1].split("  wuwaterm-api:", 1)[0]
-
-    assert "    mem_reservation: 96m\n" in api_section
-    assert "    oom_score_adj: -500\n" in api_section
-    # The deprecated bot is the larger process; it must not be shielded ahead
-    # of the API.
-    assert "oom_score_adj" not in bot_section
-    assert "mem_reservation" not in bot_section
-
-
 def test_env_example_covers_the_api_surface():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
