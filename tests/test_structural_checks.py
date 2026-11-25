@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 
 import pytest
 
@@ -128,6 +129,7 @@ def findings(source: str, target: str) -> list[tuple[str, str | None]]:
         ("面积10m²", "Area of 10 square meters"),
         ("100，200", "100, 200"),
         ("100,200", "100、200"),
+        ("１００,２００．５", "100、200.5"),
         ("凌晨4:00刷新", "Resets at 4 AM"),
         ("<size=20>文本</size>", "<size=20>Text</size>"),
         ("<te href=123>链接</te>", "<te href=123>link</te>"),
@@ -169,6 +171,11 @@ def test_structure_checks_accept_equivalent_pairs(source, target):
             "<b><i>x</b></i>",
             [("tag_unbalanced", "<b>"), ("tag_unbalanced", "</b>")],
         ),
+        (
+            "<a>x</a><a name='n'/>",
+            "</a>x<a><a name='n'/>",
+            [("tag_unbalanced", "</a>"), ("tag_unbalanced", "<a>")],
+        ),
         ("第一段\n\n第二段", "One paragraph only.", [("paragraph_count_mismatch", None)]),
         ("一行\n两行", "One line.", [("line_count_mismatch", None)]),
         ("原文 5 {0}", " \u200b\u3000", [("empty_target", None)]),
@@ -187,6 +194,14 @@ def test_structure_checks_accept_equivalent_pairs(source, target):
 )
 def test_structure_checks_report_breaks_in_a_fixed_order(source, target, expected):
     assert findings(source, target) == expected
+
+
+def test_printf_zero_run_is_read_in_linear_time():
+    # An ambiguous printf pattern took about 1 s at 24 zeros and doubled per zero.
+    text = "%" + "0" * 40 + "z"
+    started = time.perf_counter()
+    assert check_segment_structure(text, text).findings == ()
+    assert time.perf_counter() - started < 1.0
 
 
 def test_structure_layout_counts_paragraphs_and_lines():

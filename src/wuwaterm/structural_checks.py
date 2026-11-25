@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections import Counter, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 import re
 import statistics
 from typing import Literal
@@ -326,18 +326,29 @@ _GENDER_SWITCH_RE = re.compile(
     r"(?:;[A-Za-z_][A-Za-z0-9_]*=[^{};<>\n]{0,64})+\}"
 )
 _SWITCH_KEY_RE = re.compile(r"(?:^\{|;)([A-Za-z_][A-Za-z0-9_]*)=")
-_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9_-]{0,31})(?:[ =][^<>\n]{0,96})?\s*(/?)>")
+# One bounded attribute run and no separate trailing `\s*`/`/?`, so nothing in
+# the pattern can match the same character two ways; `/>` is read from the text.
+_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9_-]{0,31})(?:[ =/][^<>\n]{0,96})?>")
 _MARKUP_RE = re.compile(
     r"__WUWA_(?:TERM|HTML)_[0-9a-f]{16}_[0-9]{4,}__"
     r"|\{\{[^{}\s]{1,64}\}\}"
     rf"|{_GENDER_SWITCH_RE.pattern}"
     r"|\{[^{}\s]{1,64}\}"
     rf"|{_TAG_RE.pattern}"
-    r"|(?<![A-Za-z0-9])%(?:\d+\$)?(?:[0+\-#]|\.\d|\d)*[diouxXeEfFgGcrs](?![A-Za-z0-9])"
+    # printf: position, flags, zero padding, width, precision, conversion. Each
+    # part takes characters no neighbour can, so a long run of `0` after a `%`
+    # fails in linear time instead of trying every way to split it.
+    r"|(?<![A-Za-z0-9])%(?:\d+\$)?[+\-#]*0*(?:[1-9]\d*)?(?:\.\d+)?"
+    r"[diouxXeEfFgGcrs](?![A-Za-z0-9])"
 )
 
 _DIGIT_NUMBER_RE = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+(?![0-9])|[0-9]+)(?:\.[0-9]+)*")
 _EN_SCALE_AFTER_RE = re.compile(r"[ \t]*(thousand|million|billion)\b", re.IGNORECASE)
+# Spelled numbers past this are not quantities a translation carries; skipping
+# them also keeps `亿亿亿…` from building an integer too long to print.
+_MAX_WORD_NUMBER = 10**20
+# Exact decimal arithmetic for every digit count a 2,000-scalar side can hold.
+_EXACT = Context(prec=10_000)
 _LIST_LABEL_OPENERS = frozenset({"", "(", "[", "【"})
 _LIST_LABEL_CLOSERS = frozenset({".", ")", "]", "、", "】"})
 _HORIZONTAL_SPACE = " \t\u3000"
@@ -356,6 +367,7 @@ _CN_NUMERAL_RE = re.compile(
 # A digit number followed by one of these also reads as that multiple:
 # `1.5万` is 15,000 and `3千` is 3,000.
 _CN_MULTIPLIERS = {**_CN_UNITS, **_CN_MYRIADS}
+_CN_MULTIPLIER_AFTER_RE = re.compile(rf"[ \t]*([{''.join(_CN_MULTIPLIERS)}])")
 
 _EN_NUMBER_WORDS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
@@ -413,6 +425,8 @@ class _Token:
     span: StructureSpan
     values: frozenset[str]
     key: str = ""
+    # A digit number as read in the NFKC view (`１００,２００．５` → `100,200.5`).
+    folded: str = ""
 
 
 def is_blank(text: str) -> bool:
@@ -421,10 +435,13 @@ def is_blank(text: str) -> bool:
 
 
 def _canonical(value: Decimal | int | float) -> str:
+    """Plain decimal text: no exponent, no trailing zeros, no leading zeros.
+
+    Formatted by ``decimal`` alone. Converting through ``int`` would hit
+    Python's integer-to-string digit limit on a long enough digit run.
+    """
     number = Decimal(str(value)) if isinstance(value, float) else Decimal(value)
-    if number == number.to_integral_value():
-        return str(int(number))
-    return format(number.normalize(), "f")
+    return format(_EXACT.normalize(number), "f")
 
 
 def _digit_values(token: str) -> tuple[str, Decimal | None]:
@@ -438,10 +455,13 @@ def _digit_values(token: str) -> tuple[str, Decimal | None]:
     return _canonical(number), number
 
 
-def _chinese_numeral_value(run: str) -> str:
+def _chinese_numeral_value(run: str) -> str | None:
+    """Value of a Chinese numeral run, or None past :data:`_MAX_WORD_NUMBER`."""
     integer, _, fraction = run.partition("点")
     if integer and all(char in _CN_DIGITS for char in integer) and len(integer) > 1:
         # 二〇二四: a digit-by-digit reading, as years and codes are written.
+        if len(integer) > len(str(_MAX_WORD_NUMBER)):
+            return None
         value = Decimal("".join(str(_CN_DIGITS[char]) for char in integer))
     else:
         total = section = number = 0
@@ -457,6 +477,8 @@ def _chinese_numeral_value(run: str) -> str:
             else:
                 total = (total + section + number or 1) * _CN_MYRIADS[char]
                 section = number = 0
+            if max(total, section) > _MAX_WORD_NUMBER:
+                return None
         value = Decimal(total + section + number)
     if fraction:
         value += Decimal("0." + "".join(str(_CN_DIGITS[char]) for char in fraction))
@@ -472,7 +494,7 @@ def _english_number_runs(text: str) -> list[str]:
 
     def close() -> None:
         nonlocal total, current, active
-        if active:
+        if active and total + current <= _MAX_WORD_NUMBER:
             values.append(_canonical(total + current))
         total = current = 0
         active = False
@@ -488,12 +510,16 @@ def _english_number_runs(text: str) -> list[str]:
             if not joined:
                 close()
             active = True
+            # Clamped just past the limit so `hundred hundred …` stays small;
+            # close() then drops the run.
             if word in _EN_NUMBER_WORDS:
                 current += _EN_NUMBER_WORDS[word]
             elif _EN_SCALES[word] == 100:
-                current = (current or 1) * 100
+                current = min((current or 1) * 100, _MAX_WORD_NUMBER + 1)
             else:
-                total += (current or 1) * _EN_SCALES[word]
+                total = min(
+                    total + (current or 1) * _EN_SCALES[word], _MAX_WORD_NUMBER + 1
+                )
                 current = 0
         else:
             close()
@@ -576,13 +602,14 @@ def _number_tokens(
         canonical, number = _digit_values(token)
         values = {canonical}
         if number is not None:
-            rest = view[end:]
-            stripped = rest.lstrip(" \t")
-            if stripped[:1] in _CN_MULTIPLIERS:
-                values.add(_canonical(number * _CN_MULTIPLIERS[stripped[0]]))
-            scale = _EN_SCALE_AFTER_RE.match(rest)
+            multiplier = _CN_MULTIPLIER_AFTER_RE.match(view, end)
+            if multiplier:
+                factor = _CN_MULTIPLIERS[multiplier.group(1)]
+                values.add(_canonical(_EXACT.multiply(number, Decimal(factor))))
+            scale = _EN_SCALE_AFTER_RE.match(view, end)
             if scale:
-                values.add(_canonical(number * _EN_SCALES[scale.group(1).casefold()]))
+                factor = _EN_SCALES[scale.group(1).casefold()]
+                values.add(_canonical(_EXACT.multiply(number, Decimal(factor))))
         source_start = origin[start]
         source_end = origin[end - 1] + 1
         span = StructureSpan(source_start, source_end, text[source_start:source_end])
@@ -593,9 +620,13 @@ def _number_tokens(
         if label or clock_zero:
             excuses.append(frozenset(values))
             continue
-        reportable.append(_Token(span=span, values=frozenset(values), key=canonical))
+        reportable.append(
+            _Token(span=span, values=frozenset(values), key=canonical, folded=token)
+        )
     for match in _CN_NUMERAL_RE.finditer(view):
-        excuses.append(frozenset({_chinese_numeral_value(match.group())}))
+        value = _chinese_numeral_value(match.group())
+        if value is not None:
+            excuses.append(frozenset({value}))
     excuses.extend(frozenset({value}) for value in _english_number_runs(view))
     return reportable, [values for values in excuses if values]
 
@@ -647,10 +678,10 @@ def _pair_tokens(left: list[_Token], right: list[_Token]) -> tuple[list[bool], l
     ):
         pool = _Pool([token.values for token in other], other_used)
         for position, token in enumerate(grouped):
-            if grouped_used[position] or "," not in token.span.text:
+            if grouped_used[position] or "," not in token.folded:
                 continue
             held: set[int] = set()
-            for part in token.span.text.split(","):
+            for part in token.folded.split(","):
                 match = pool.take(_digit_values(part)[0], frozenset(held))
                 if match is None:
                     break
@@ -721,7 +752,11 @@ def _unbalanced_tags(tokens: list[_Token], closing_names: frozenset[str]) -> lis
     offending: list[_Token] = []
     for token in tokens:
         tag = _TAG_RE.fullmatch(token.span.text)
-        if tag is None or tag.group(3) or tag.group(2) not in closing_names:
+        if (
+            tag is None
+            or token.span.text.endswith("/>")
+            or tag.group(2) not in closing_names
+        ):
             continue
         name = tag.group(2)
         if not tag.group(1):

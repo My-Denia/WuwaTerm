@@ -104,6 +104,15 @@ def test_structure_check_caps_findings_per_segment(tmp_path, sample_db):
     ]
 
 
+def test_structure_check_answers_numerals_too_large_to_print(tmp_path, sample_db):
+    # 亿 repeated multiplies by 10**8 each time; 538 of them used to build an
+    # integer past Python's digit limit for str() and answer 500.
+    app, _, token = structure_app(tmp_path, sample_db)
+    response = check(app, token, [{"source": "亿" * 600, "target": "test"}])
+    assert response.status_code == 200, response.text
+    assert response.json()["segments"][0]["findings"] == []
+
+
 def test_structure_check_needs_the_translate_scope_and_spends_the_allowance(
     tmp_path, sample_db
 ):
