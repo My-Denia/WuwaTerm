@@ -132,7 +132,21 @@ The Compose file has two image roles across three services:
   bot's credentials blanked, because they are not its business. It binds
   loopback only, and that bind is fixed in the Compose file rather than read
   from `.env`: with host networking, an environment knob would turn a public
-  exposure into a one-line edit.
+  exposure into a one-line edit. It also sets `mem_reservation: 96m` and
+  `oom_score_adj: -500`. The reservation is a soft container-level request
+  (cgroup v2 `memory.low`), not a cap; it only protects the working set during
+  host-wide reclaim when every non-root ancestor cgroup, such as `system.slice`,
+  also sets `MemoryLow`. The OOM score makes the OOM killer pick the API only
+  after ordinary processes. Both live in the Compose file because the updater
+  recreates from that file alone. A container adopted by a release that records
+  these fields has both recorded, and updates keep and replay them. A
+  deployment adopted earlier keeps its existing record, which lacks them: an
+  update copies the running container's host configuration and keeps that
+  record, so a container recreated through Compose with these settings, or
+  given a memory reservation with `docker update` (which cannot set the OOM
+  score), is reported as `observed container recipe differs`. `adopt` refuses
+  an already adopted deployment, so there is no migration path for the old
+  record yet.
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.

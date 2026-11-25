@@ -169,8 +169,11 @@ def _environment(value: Any, working_dir: str | None, key: bytes) -> tuple[dict[
 _ZERO_FIELDS = frozenset({
     "BlkioWeight", "CpuCount", "CpuPercent", "CpuPeriod", "CpuQuota",
     "CpuRealtimePeriod", "CpuRealtimeRuntime", "CpuShares", "IOMaximumBandwidth",
-    "IOMaximumIOps", "Memory", "MemoryReservation", "MemorySwap", "NanoCpus", "OomScoreAdj",
+    "IOMaximumIOps", "Memory", "MemorySwap", "NanoCpus",
 })
+# Replayed explicitly: the recipe carries them when they differ from Docker's
+# default of 0 (see runtime_options.memory_reservation / oom_score_adj).
+_RESOURCE_FIELDS = frozenset({"MemoryReservation", "OomScoreAdj"})
 _EMPTY_STRING_FIELDS = frozenset({
     "Cgroup", "CgroupParent", "ContainerIDFile", "CpusetCpus", "CpusetMems", "Isolation",
     "UTSMode", "UsernsMode", "VolumeDriver",
@@ -195,10 +198,14 @@ _SUPPORTED_FIELDS = frozenset({
 
 
 def _check_unsupported(host: dict[str, Any]) -> None:
-    known = _ZERO_FIELDS | _EMPTY_STRING_FIELDS | _EMPTY_ARRAY_FIELDS | _SUPPORTED_FIELDS
+    known = _ZERO_FIELDS | _RESOURCE_FIELDS | _EMPTY_STRING_FIELDS | _EMPTY_ARRAY_FIELDS | _SUPPORTED_FIELDS
     if set(host) - known or (known - {"Tmpfs", "Mounts"}) - set(host):
         raise ObservationError("Docker host configuration contains unknown or missing fields")
     if any(type(host[k]) is not int or host[k] != 0 for k in _ZERO_FIELDS):
+        raise ObservationError("container resource settings cannot be replayed")
+    reservation, score = host["MemoryReservation"], host["OomScoreAdj"]
+    if (type(reservation) is not int or not 0 <= reservation <= 2**53
+            or type(score) is not int or not -1000 <= score <= 1000):
         raise ObservationError("container resource settings cannot be replayed")
     if any(host[k] != "" for k in _EMPTY_STRING_FIELDS):
         raise ObservationError("container namespace settings cannot be replayed")
@@ -399,6 +406,9 @@ def _extract(raw: dict[str, Any], *, container_id: str, expected_image_id: str, 
             "extra_hosts": _sequence(host["ExtraHosts"]),
         },
     }
+    for field, option in (("MemoryReservation", "memory_reservation"), ("OomScoreAdj", "oom_score_adj")):
+        if host[field]:
+            recipe["runtime_options"][option] = host[field]
     # Env-file references and persistent overrides cannot be recovered from
     # inspect. The validation placeholders are never returned as observations.
     snapshot = {**recipe, "schema_version": 1, "image_id": expected_image_id,

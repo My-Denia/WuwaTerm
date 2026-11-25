@@ -317,6 +317,14 @@ def _recipe(value: Any, where: str) -> dict[str, Any]:
     return recipe
 
 
+_BASE_RUNTIME_OPTIONS = frozenset({
+    "read_only_root", "privileged", "init", "pid_mode", "ipc_mode",
+    "cap_add", "cap_drop", "security_opt", "dns", "extra_hosts",
+})
+# Bytes for Docker's soft memory reservation; Docker's OOM score adjustment.
+_RESOURCE_OPTIONS = frozenset({"memory_reservation", "oom_score_adj"})
+
+
 def validate_recipe_snapshot(value: Any) -> dict[str, Any]:
     snapshot = _object(value, set(_RECIPE_FIELDS) | {
         "schema_version", "image_id", "environment_overrides", "runtime_options",
@@ -357,10 +365,17 @@ def validate_recipe_snapshot(value: Any) -> dict[str, Any]:
                     _fail("recipe snapshot: invalid polling health flag")
             elif value.lower() not in ("true", "false", "1", "0", "yes", "no", "on", "off"):
                 _fail("recipe snapshot: invalid API web flag")
-    options = _object(snapshot["runtime_options"], {
-        "read_only_root", "privileged", "init", "pid_mode", "ipc_mode",
-        "cap_add", "cap_drop", "security_opt", "dns", "extra_hosts",
-    }, "recipe snapshot.runtime_options")
+    # The two resource fields are optional and canonical: a container whose
+    # Docker values are the defaults (0) records neither, so every snapshot
+    # written before they existed still validates and still compares equal to
+    # a fresh observation of the same container.
+    options = snapshot["runtime_options"]
+    present = set(options) & _RESOURCE_OPTIONS if isinstance(options, dict) else set()
+    options = _object(options, _BASE_RUNTIME_OPTIONS | present, "recipe snapshot.runtime_options")
+    for key, low, high in (("memory_reservation", 1, 2**53), ("oom_score_adj", -1000, 1000)):
+        if key in options and (type(options[key]) is not int or not low <= options[key] <= high
+                               or options[key] == 0):
+            _fail(f"recipe snapshot.runtime_options.{key}: invalid value")
     _boolean(options["read_only_root"], "recipe snapshot.runtime_options.read_only_root")
     _boolean(options["privileged"], "recipe snapshot.runtime_options.privileged")
     if options["init"] is not None:
