@@ -1341,6 +1341,7 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/v1/meta",
         "/v1/reviews",
         "/v1/semantic-reviews",
+        "/v1/structure-checks",
         "/v1/terms",
         "/v1/translations",
     ]

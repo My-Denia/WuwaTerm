@@ -207,26 +207,30 @@ def read_capabilities(app, token):
     return body["capabilities"]
 
 
-def test_capabilities_lists_both_when_a_model_is_configured(tmp_path, sample_db, monkeypatch):
+def test_capabilities_lists_all_four_when_a_model_is_configured(
+    tmp_path, sample_db, monkeypatch
+):
     configure_llm(monkeypatch)
     app, _, token = semantic_app(tmp_path, sample_db)
 
     assert read_capabilities(app, token) == [
         "ambiguous-mention-v1",
         "semantic-review-v1",
+        "structure-check-v1",
         "translation-context-v1",
     ]
 
 
-def test_capabilities_list_only_the_dictionary_feature_without_a_model(
+def test_capabilities_list_only_model_free_features_without_a_model(
     tmp_path, sample_db, monkeypatch
 ):
     # ambiguous-mention-v1 is a review-v2 feature that needs only the
-    # dictionary, so it is listed even when no model is configured.
+    # dictionary, and structure-check-v1 calls no model, so both are listed
+    # even when no model is configured.
     unconfigure_llm(monkeypatch)
     app, _, token = semantic_app(tmp_path, sample_db)
 
-    assert read_capabilities(app, token) == ["ambiguous-mention-v1"]
+    assert read_capabilities(app, token) == ["ambiguous-mention-v1", "structure-check-v1"]
 
 
 def test_capabilities_needs_meta_scope_and_spares_the_business_allowance(tmp_path, sample_db):
@@ -1029,7 +1033,11 @@ def test_semantic_review_is_off_by_default_but_translation_context_stays(
     app, _, token = semantic_app(tmp_path, sample_db, model)
 
     caps = run(call(app, "GET", "/v1/capabilities", headers=bearer(token))).json()
-    assert caps["capabilities"] == ["ambiguous-mention-v1", "translation-context-v1"]
+    assert caps["capabilities"] == [
+        "ambiguous-mention-v1",
+        "structure-check-v1",
+        "translation-context-v1",
+    ]
 
     response = review(app, token)
     assert_error(response, 503, "llm_unavailable")
@@ -1051,6 +1059,7 @@ def test_enabled_semantic_review_is_listed_and_served(tmp_path, sample_db, monke
     assert caps["capabilities"] == [
         "ambiguous-mention-v1",
         "semantic-review-v1",
+        "structure-check-v1",
         "translation-context-v1",
     ]
     body = review(app, token).json()

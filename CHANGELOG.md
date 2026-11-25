@@ -3,6 +3,25 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Structure Checks
+
+- `POST /v1/structure-checks` (`structure-check-v1`, MY-490,
+  [ADR 0022](docs/adr/0022-deterministic-structure-checks.md)): Layer 1
+  deterministic structure checks for 1 to 64 paired segments. Each segment is
+  checked for an empty target, numbers, placeholders and markup tags, and
+  paragraph and line layout. No model is called and nothing is stored. Numbers
+  are compared after NFKC with thousands separators removed; Chinese numerals,
+  spelled English numbers and list labels are never reported on their own.
+  Each side is at most 2,000 Unicode scalars and 20,000 across the request
+  (`input_too_long`, 422); at most 16 findings per segment are returned.
+- `GET /v1/capabilities` always lists `structure-check-v1`. Without a model it
+  now answers `["ambiguous-mention-v1", "structure-check-v1"]`.
+- `POST /v1/reviews` and `POST /v1/semantic-reviews` are unchanged; a test pins
+  the `/v1/reviews` schemas and response bytes to what main served before this
+  endpoint.
+
 ## 0.13.0 - 2026-11-26
 
 ### Translation Direction & Prose Preservation

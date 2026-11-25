@@ -275,7 +275,7 @@ translation logic of its own.
 
 | Presentation | Responsibility | Module |
 |--------------|----------------|--------|
-| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/v1/reviews`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
+| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/v1/capabilities`, `/v1/reviews`, `/v1/semantic-reviews`, `/v1/structure-checks`, `/v1/auth/status`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
 | Middleware | Server-minted request id, body size/arrival cap, request time budget | `src/wuwaterm_api/app.py` |
 | Identity | Device store, scopes, revocation, credential pool | `src/wuwaterm_api/auth.py` |
 | Error vocabulary | Enumerated codes and their HTTP statuses | `src/wuwaterm_api/errors.py` |
@@ -554,7 +554,7 @@ Channel path is always auto-detected direction; it does not accept command
 |------|-----|
 | Exact dictionary hit (`lookup_exact` + early returns in the shared pipeline, channel exact branch) | Official string from SQLite |
 | Fuzzy dictionary short answers (`_fuzzy_dictionary_answer`) | DB-only |
-| `GET /v1/terms`, `GET /v1/meta`, `GET /v1/capabilities`, `POST /v1/reviews`, `/healthz`, `/readyz` | Dictionary reads, deterministic pair review, and probes only |
+| `GET /v1/terms`, `GET /v1/meta`, `GET /v1/capabilities`, `POST /v1/reviews`, `POST /v1/structure-checks`, `/healthz`, `/readyz` | Dictionary reads, deterministic pair review and structure checks ([ADR 0022](adr/0022-deterministic-structure-checks.md)), and probes only |
 | Invalid leading `--to` | Usage reply only |
 | Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
@@ -574,6 +574,10 @@ Channel path is always auto-detected direction; it does not accept command
 the model, costs nothing per request, and returns the same report for the same
 input and dictionary. Model findings never become a `verified_constraint`; the
 two kinds of result are separate tracks that a client requests separately.
+Structure checks (`POST /v1/structure-checks`, `structure-check-v1`) are a
+third deterministic track for numbers, placeholders and tags, paragraph layout
+and empty targets; they leave both review responses unchanged
+([ADR 0022](adr/0022-deterministic-structure-checks.md)).
 
 The response contract of the model path lives in
 `semantic_review_contract` (domain core, no model code): field limits, display
