@@ -306,6 +306,8 @@ def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypa
     async def fake_call(locked_text, locks, html_mode=False, to_chinese=False,
                         timeout_seconds=30.0, transport=None, references=(), context=None):
         seen.append((locked_text, context))
+        if "\n\n" in locked_text:
+            return f"  T{len(seen)}a\n\nT{len(seen)}b\n"
         return f"  T{len(seen)}\n"  # stray whitespace must not leak into the output
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -319,15 +321,12 @@ def test_long_text_keeps_every_separator_and_sends_the_previous_segment(monkeypa
         )
     )
 
-    assert outcome.text == "T1\n\nT2"
+    assert outcome.text == "T1\n\nT2a\n\nT2b"
     assert [locked for locked, _ in seen] == ["甲" * 1000, "乙" * 1000 + "\n\n" + "丙" * 300]
     assert seen[0][1].before is None
     assert seen[1][1].before.source == "甲" * 400
     assert seen[1][1].before.target == "T1"
-    # Two cores, two calls: the second core is two paragraphs and the mock
-    # answers it as one line, but this replacement transport predates the extra
-    # instruction a paragraph-count repair needs to carry, so the repair is
-    # skipped rather than sent without its one reason for existing.
+    # Two cores, two calls: the second core preserves its two-paragraph structure.
     assert len(seen) == 2
 
 

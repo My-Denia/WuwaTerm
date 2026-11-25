@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
+from functools import wraps
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -167,3 +170,70 @@ def sample_db(tmp_path: Path, sample_data_dir: Path) -> Path:
         ),
     )
     return db_path
+
+
+def _filter_supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only keyword arguments accepted by narrow legacy test stubs."""
+    params = inspect.signature(callable_obj).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {name: value for name, value in kwargs.items() if name in params}
+
+
+def _wrap_llm_caller(fn: Any, *, async_caller: bool) -> Any:
+    if async_caller:
+
+        @wraps(fn)
+        async def _async_shim(*args: Any, **kwargs: Any) -> Any:
+            result = fn(*args, **_filter_supported_kwargs(fn, kwargs))
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        return _async_shim
+
+    @wraps(fn)
+    def _sync_shim(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **_filter_supported_kwargs(fn, kwargs))
+
+    return _sync_shim
+
+
+@pytest.fixture(autouse=True)
+def _adapt_legacy_llm_monkeypatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow tests patching _call_llm / _call_llm_async with narrower signatures."""
+    import wuwaterm.sentence as sentence_mod
+
+    orig_setattr = monkeypatch.setattr
+
+    def wrapped_setattr(
+        target: Any,
+        name: Any,
+        value: Any = ...,
+        raising: bool = True,
+    ) -> None:
+        is_string_form = isinstance(target, str) and value is ...
+        if is_string_form:
+            target_path = target
+            attr_value = name
+            is_target = target_path in (
+                "wuwaterm.sentence._call_llm",
+                "wuwaterm.sentence._call_llm_async",
+            )
+            attr_name = target_path.rsplit(".", 1)[-1]
+        else:
+            attr_value = value
+            is_target = target is sentence_mod and name in ("_call_llm", "_call_llm_async")
+            attr_name = name if isinstance(name, str) else ""
+
+        if is_target and callable(attr_value):
+            attr_value = _wrap_llm_caller(
+                attr_value, async_caller=(attr_name == "_call_llm_async")
+            )
+
+        if is_string_form:
+            orig_setattr(target, attr_value, raising=raising)
+        else:
+            orig_setattr(target, name, attr_value, raising=raising)
+
+    orig_setattr(monkeypatch, "setattr", wrapped_setattr)

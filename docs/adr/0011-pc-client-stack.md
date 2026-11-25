@@ -198,7 +198,9 @@ path. The wording scanners that once policed this were retired in 2026-11;
 
 - Two configurable timeouts (`config.py`): `request_timeout_seconds`
   (default 10 s) for lookups and status, `translate_timeout_seconds`
-  (default 60 s) for `POST /v1/translations`. Values from the dialog or a
+  (originally 60 s at ADR acceptance) for `POST /v1/translations` *(Updated
+  2026-11-25: raised to 100 s in `WuwaTerm-Windows` so the client timeout sits
+  above Core's 90 s request budget)*. Values from the dialog or a
   hand-edited file are clamped to 1-600 s, with non-finite JSON numbers
   rejected (`_sane_timeout`;
   `client/tests/test_config.py::test_a_hand_edited_timeout_is_clamped_rather_than_trusted`,

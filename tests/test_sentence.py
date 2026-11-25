@@ -4308,40 +4308,30 @@ def test_an_explicit_disabled_keeps_its_mode_through_a_paragraph_repair(
     assert "paragraphs separated by blank lines" not in posts[0]["system"]
 
 
-def test_a_replacement_transport_that_predates_the_knobs_gets_no_extra_call(
-    monkeypatch, sample_db
-):
-    """Neither corrective call is worth making if the transport cannot carry it.
+def test_sentence_llm_callers_expose_no_runtime_reflection_bridge():
+    """Production sentence module has no signature-inspection test bridge."""
+    import inspect
 
-    A retry that cannot turn thinking off, or that cannot carry the
-    paragraph-count sentence, would ask the same question that already failed or
-    already lost the paragraph. Both are skipped, so such a transport sees the
-    exact calls it saw before this change.
-    """
-    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
-    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
-    # `auto` so the only thing standing between this transport and a corrective
-    # call is the two knobs it does not accept.
-    monkeypatch.setenv(EN_ZH_THINKING, "auto")
-    seen: list[str] = []
+    import wuwaterm.sentence as sentence_module
 
-    async def legacy_call(
-        locked_text, locks, html_mode=False, to_chinese=False,
-        timeout_seconds=30.0, transport=None, references=(), context=None,
+    for removed in (
+        "_DEFAULT_CALL_LLM",
+        "_DEFAULT_CALL_LLM_ASYNC",
+        "_async_llm_supports_param",
+        "_invoke_async_llm",
+        "_invoke_sync_llm",
     ):
-        seen.append(locked_text)
-        if len(seen) == 1 and to_chinese and "A short English line." in locked_text:
-            raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout")
-        return MERGED_ANSWER
+        assert not hasattr(sentence_module, removed)
 
-    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", legacy_call)
-    translator = SentenceTranslator(sample_db)
-
-    with pytest.raises(LLMTranslationError):
-        _translate_plain(translator, "A short English line.", to_chinese=True)
-    assert len(seen) == 1
-
-    translator = SentenceTranslator(sample_db)
-    assert _translate_context(translator, SMALL_SOURCE, to_chinese=True) == MERGED_ANSWER
-    assert len(seen) == 2
+    params = inspect.signature(sentence_module._call_llm_async).parameters
+    for required_param in (
+        "thinking_mode",
+        "prompt_suffix",
+        "client",
+        "en_zh_protocol",
+        "references",
+        "context",
+        "provider_profile",
+        "attempt_kind",
+    ):
+        assert required_param in params

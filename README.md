@@ -59,7 +59,7 @@ A general-purpose translator sees game names as ordinary words, so an official n
 | --- | --- | --- |
 | Public web beta | Lookup, translation, review, manuscript files | A browser |
 | Telegram bot | Lookup, translation, auto-translating a linked channel | Your own server and bot token |
-| Windows client | Lookup, translation | A server address and device token |
+| Windows client | Lookup, translation, review, manuscript files | A server address and device token |
 | HTTP API | Lookup, translation, review | Your own server |
 
 <sub>Outside the public beta, sentence translation also needs an OpenAI-compatible model configured on the server.</sub>
@@ -97,14 +97,15 @@ still carries; that became an explicit `--with-legacy-bot`.
 
 A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10
 and a clone of the v0.9.1 tag those of Telegram v0.3.0 (which pins Core
-v0.9.0), the release each tag records. `main` and the v0.10.2 and v0.10.3 tags
-record Telegram v0.4.1, which pins Core v0.10.1. The v0.10.1 tag was frozen
-before that Telegram release was published, so its own `contracts/products.json`
-and `deploy/setup.sh` still name v0.4.0, which pins Core v0.10.0; a checkout of
-that tag names the newer release, or runs from `main`, to install it:
+v0.9.0), the release each tag records. `main` records Telegram v0.5.0, which
+pins Core v0.12.0; the historical `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0`
+tags record Telegram v0.4.1 (pinning Core v0.10.1), while the `v0.10.1` tag was
+frozen before v0.4.1 shipped and still records v0.4.0 (pinning Core v0.10.0).
+A checkout of those earlier tags can either run from `main` or pass the newer
+release explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.4.1 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.5.0 ./deploy/setup.sh --with-telegram
 ```
 
 The v0.10.0 tag predates both and still names v0.3.1, which is what the v0.9.2
