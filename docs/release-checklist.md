@@ -135,9 +135,9 @@ release. That boundary has not moved.
   `products.telegram` entry on its published release.
   `products.telegram` records the published Telegram `v0.5.0`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.4.3`, because the installer
+  `products.web` records the published Web `v0.4.4`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.6.4`.
+  published Windows `v0.6.5`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
@@ -160,16 +160,16 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main`, the `v0.10.3`, `v0.11.0` and `v0.12.0` tags record and install Web
-  `v0.4.3`; the `v0.10.1` and `v0.10.2` tags' frozen snapshots record and
-  install `v0.4.1`,
+  they differ. `main` records and installs Web `v0.4.4`, while the `v0.10.3`,
+  `v0.11.0` and `v0.12.0` tags record and install Web `v0.4.3`; the `v0.10.1` and
+  `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.4.3` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.4.4` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.6.4](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.4), released independently.
+- Windows product: [v0.6.5](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.6.5), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`

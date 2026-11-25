@@ -102,13 +102,13 @@ The variable names a published tag; there is no `latest`.
 
 The Web release also defaults to the one the checkout records: a clone of the
 v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and the
-v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` and the v0.10.3 tag
-record Web v0.4.3, and the v0.10.1 and v0.10.2 tags record Web v0.4.1, which
-reads and writes manuscript v4, so a checkout of either earlier tag passes the
-release it lacks explicitly:
+v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.4.4,
+the v0.10.3, v0.11.0 and v0.12.0 tags record Web v0.4.3, and the v0.10.1 and
+v0.10.2 tags record Web v0.4.1, which reads and writes manuscript v4, so a
+checkout of any earlier tag passes the release it lacks explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.4.3 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.4.4 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 For the source path, create the environment with the Bot, API, and builder
