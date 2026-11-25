@@ -114,6 +114,7 @@ DOMAIN_CORE = frozenset(
         "segmentation",
         "semantic_review_contract",
         "skill_references",
+        "structural_checks",
         "term_classification",
         "term_matching",
         "term_preparation",
@@ -132,6 +133,7 @@ PURE_MATCHING = frozenset(
         "segmentation",
         "english_plural",
         "skill_references",
+        "structural_checks",
         "term_classification",
         "text_spans",
     }

@@ -17,9 +17,10 @@ from dataclasses import dataclass
 
 from .cjk_span import (
     MATCHER_REVISION,
+    SINGLE_CHAR_NAME_MENTION,
+    classify_single_character_mention,
     crosses_cjk_word_boundary,
     single_character_compound_at,
-    single_character_name_mention_at,
 )
 from .constants import (
     CATEGORY_ORDER,
@@ -496,7 +497,8 @@ def _v2_one_character_eligible(
         surface == winner.zh
         and winner.category == "resonator"
         and _is_cjk_character(surface)
-        and single_character_name_mention_at(text, start, end)
+        and classify_single_character_mention(text, start, end)
+        == SINGLE_CHAR_NAME_MENTION
     )
 
 

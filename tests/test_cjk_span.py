@@ -16,11 +16,15 @@ from wuwaterm.cjk_span import (
     LEXICON_FILTER,
     MATCHER_REVISION,
     MAX_WORD_LEN,
+    SINGLE_CHAR_AMBIGUOUS_MENTION,
+    SINGLE_CHAR_NAME_MENTION,
+    SINGLE_CHAR_ORDINARY_WORD,
     _EVERYDAY_STANDALONE_CHARS,
     _SINGLE_NAME_COMPOUNDS,
     _SINGLE_NAME_HONORIFICS,
     _SINGLE_NAME_PARTICLES,
     _WORDS,
+    classify_single_character_mention,
     crosses_cjk_word_boundary,
     single_character_compound_at,
     single_character_name_context_ok,
@@ -81,7 +85,7 @@ def test_lexicon_is_the_pinned_jieba_slice():
         assert word in _WORDS
     payload = json.dumps(
         [
-            "wuwaterm-cjk-matcher-v9",
+            "wuwaterm-cjk-matcher-v10",
             JIEBA_COMMIT,
             LEXICON_FILTER,
             sorted(_WORDS),
@@ -265,3 +269,39 @@ def test_honorific_and_boundary_rule_share_one_admission():
 def test_span_inside_known_word_guards_longer_ordinary_words():
     assert span_inside_known_word("音乐家使用变奏曲并入场。", 5, 7) is True
     assert span_inside_known_word("切换角色触发变奏入场。", 6, 8) is False
+
+
+@pytest.mark.parametrize(
+    ("text", "target", "expected"),
+    [
+        ("欢迎椿来到。", "椿", SINGLE_CHAR_NAME_MENTION),
+        ("椿大人，请。", "椿", SINGLE_CHAR_NAME_MENTION),
+        ("心大人来了。", "心", SINGLE_CHAR_NAME_MENTION),
+        ("心，你回来了。", "心", SINGLE_CHAR_NAME_MENTION),
+        ("椿", "椿", SINGLE_CHAR_NAME_MENTION),
+        ("心很重要。", "心", SINGLE_CHAR_AMBIGUOUS_MENTION),
+        ("她的心很痛。", "心", SINGLE_CHAR_AMBIGUOUS_MENTION),
+        ("红椿蕊很强。", "椿", SINGLE_CHAR_AMBIGUOUS_MENTION),
+        ("心里想着今汐。", "心", SINGLE_CHAR_ORDINARY_WORD),
+        ("香椿拌豆腐。", "椿", SINGLE_CHAR_ORDINARY_WORD),
+        ("心情不错。", "心", SINGLE_CHAR_ORDINARY_WORD),
+        ("红椿·蕾很强。", "椿", SINGLE_CHAR_ORDINARY_WORD),
+        ("心·蕾", "心", SINGLE_CHAR_ORDINARY_WORD),
+    ],
+)
+def test_classify_single_character_mention_three_way(text, target, expected):
+    start = text.index(target)
+    end = start + 1
+    assert classify_single_character_mention(text, start, end) == expected
+    assert single_character_name_mention_at(text, start, end) is (
+        expected == SINGLE_CHAR_NAME_MENTION
+    )
+
+
+def test_ambiguous_and_ordinary_single_char_stay_out_of_review_v2(sample_db):
+    service = TermService(sample_db)
+    for text in ("心很重要。", "红椿蕊很强。", "香椿拌豆腐。"):
+        report = review_pair(
+            service, text, "Ordinary translation.", "en", review_version=RULE_VERSION_V2
+        )
+        assert report.findings == ()

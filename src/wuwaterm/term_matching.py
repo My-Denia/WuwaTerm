@@ -11,9 +11,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .cjk_span import (
+    SINGLE_CHAR_NAME_MENTION,
+    classify_single_character_mention,
     crosses_cjk_word_boundary,
     single_character_name_context_ok,
-    single_character_name_mention_at,
 )
 from .constants import CATEGORY_ORDER
 from .english_plural import plural_suffix_candidates as _plural_suffix_candidates
@@ -50,9 +51,10 @@ def reference_span_admitted(
     return (
         len(span.source) != 1
         or not is_cjk_character(span.source)
-        or single_character_name_mention_at(
+        or classify_single_character_mention(
             context_text, context_offset + span.start, context_offset + span.end
         )
+        == SINGLE_CHAR_NAME_MENTION
     )
 
 

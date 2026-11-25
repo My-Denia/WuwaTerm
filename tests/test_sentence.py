@@ -3424,9 +3424,9 @@ def test_relative_line_shares_cancel_source_length_variation():
     # One source row twice the length of another, rendered faithfully, yields
     # the same ratio: the measure the guard reads is how many lines' worth of
     # text a line carries, not how long the source line was.
-    from wuwaterm.sentence import _line_share_ratios
+    from wuwaterm.structural_checks import line_share_ratios
 
-    ratios = _line_share_ratios([10, 20, 30, 40], [19, 38, 57, 76])
+    ratios = line_share_ratios([10, 20, 30, 40], [19, 38, 57, 76])
 
     assert ratios == pytest.approx([1.0, 1.0, 1.0, 1.0])
 
@@ -3437,16 +3437,16 @@ def test_regrouping_refuses_layouts_whose_paragraph_breaks_cross():
     # (source cuts at 1 and 3, answer cuts at 2), so no grouping of the
     # answer's four lines reproduces the source's paragraph cuts.
     from wuwaterm.sentence import (
-        _cumulative_cuts,
         _paragraph_line_counts,
         _regroup_lines_into_source_paragraphs,
     )
+    from wuwaterm.structural_checks import cumulative_cuts
 
     source = "a1\n\na2\na3\n\nb1"
     answer = "A1\nA2\n\nA3\nB1"
 
-    source_cuts = _cumulative_cuts(_paragraph_line_counts(source))
-    answer_cuts = _cumulative_cuts(_paragraph_line_counts(answer))
+    source_cuts = cumulative_cuts(_paragraph_line_counts(source))
+    answer_cuts = cumulative_cuts(_paragraph_line_counts(answer))
     assert source_cuts == frozenset({1, 3})
     assert answer_cuts == frozenset({2})
     assert not (answer_cuts <= source_cuts or source_cuts <= answer_cuts)
