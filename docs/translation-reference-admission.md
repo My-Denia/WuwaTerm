@@ -106,9 +106,10 @@ whose evidence from the submitted source alone meets the `single_char_context`
 threshold (two independent kinds, one of them an entity kind), is reported as
 a `not_evaluated` finding with reason `ambiguous_mention` and its official
 candidates. It becomes `verified_constraint` or `confirmed_conflict` only after
-the user resolves it with `official_pair`. It never changes another finding,
-does not count as evaluated, sorts after every other finding and is the first
-to be dropped when the finding page or the byte ceiling is reached. A review
+the user resolves it with `official_pair`. While unresolved it changes no
+other finding; it never counts as evaluated, sorts after every other finding
+and is the first to be dropped when the finding page or the byte ceiling is
+reached. A review
 that does not ask for the feature returns the `v10` report and bytes; the
 translation side still admits only `name_mention`, and its ambiguous-mention
 exposure stays off by default. Because the same request can now yield a
