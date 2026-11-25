@@ -13,6 +13,7 @@
             "items": {
               "enum": [
                 "semantic-review-v1",
+                "structure-check-v1",
                 "translation-context-v1"
               ],
               "type": "string"
@@ -1267,6 +1268,267 @@
         "title": "SemanticTermBasisBody",
         "type": "object"
       },
+      "StructureCheckRequestBody": {
+        "additionalProperties": false,
+        "properties": {
+          "check_version": {
+            "const": "structure-check-v1",
+            "title": "Check Version",
+            "type": "string"
+          },
+          "segments": {
+            "description": "1 to 64 paired segments, at most 20,000 Unicode scalars across all sources and targets together.",
+            "items": {
+              "$ref": "#/components/schemas/StructureCheckSegmentBody"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Segments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "check_version",
+          "segments"
+        ],
+        "title": "StructureCheckRequestBody",
+        "type": "object"
+      },
+      "StructureCheckResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "check_version": {
+            "const": "structure-check-v1",
+            "title": "Check Version",
+            "type": "string"
+          },
+          "checks": {
+            "items": {
+              "enum": [
+                "empty_target",
+                "numbers",
+                "placeholders",
+                "paragraphs"
+              ],
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/StructureSegmentResultBody"
+            },
+            "title": "Segments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "check_version",
+          "checks",
+          "segments"
+        ],
+        "title": "StructureCheckResponseBody",
+        "type": "object"
+      },
+      "StructureCheckSegmentBody": {
+        "additionalProperties": false,
+        "properties": {
+          "segment_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional client label, echoed back. Unique within a request.",
+            "title": "Segment Id"
+          },
+          "source": {
+            "description": "Source text of one paired segment. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "description": "The translation of that segment. At most 2,000 Unicode scalars. A blank target for a non-blank source is reported as empty_target.",
+            "maxLength": 2000,
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "StructureCheckSegmentBody",
+        "type": "object"
+      },
+      "StructureFindingBody": {
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": {
+            "enum": [
+              "empty_target",
+              "paragraph_count_mismatch",
+              "line_count_mismatch",
+              "placeholder_missing",
+              "placeholder_unexpected",
+              "tag_unbalanced",
+              "number_missing",
+              "number_unexpected"
+            ],
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "source_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StructureSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set for number_missing and placeholder_missing."
+          },
+          "target_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StructureSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set for number_unexpected, placeholder_unexpected and tag_unbalanced."
+          }
+        },
+        "required": [
+          "rule_id",
+          "source_span",
+          "target_span"
+        ],
+        "title": "StructureFindingBody",
+        "type": "object"
+      },
+      "StructureLayoutBody": {
+        "additionalProperties": false,
+        "properties": {
+          "source_lines": {
+            "description": "Non-blank lines.",
+            "minimum": 0.0,
+            "title": "Source Lines",
+            "type": "integer"
+          },
+          "source_paragraphs": {
+            "minimum": 0.0,
+            "title": "Source Paragraphs",
+            "type": "integer"
+          },
+          "target_lines": {
+            "minimum": 0.0,
+            "title": "Target Lines",
+            "type": "integer"
+          },
+          "target_paragraphs": {
+            "minimum": 0.0,
+            "title": "Target Paragraphs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_paragraphs",
+          "target_paragraphs",
+          "source_lines",
+          "target_lines"
+        ],
+        "title": "StructureLayoutBody",
+        "type": "object"
+      },
+      "StructureSegmentResultBody": {
+        "additionalProperties": false,
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/StructureFindingBody"
+            },
+            "maxItems": 16,
+            "title": "Findings",
+            "type": "array"
+          },
+          "index": {
+            "description": "Position of the segment in the request.",
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "layout": {
+            "$ref": "#/components/schemas/StructureLayoutBody"
+          },
+          "omitted_findings": {
+            "description": "Findings past the per-segment limit of 16, not returned.",
+            "minimum": 0.0,
+            "title": "Omitted Findings",
+            "type": "integer"
+          },
+          "segment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Id"
+          }
+        },
+        "required": [
+          "index",
+          "segment_id",
+          "findings",
+          "omitted_findings",
+          "layout"
+        ],
+        "title": "StructureSegmentResultBody",
+        "type": "object"
+      },
+      "StructureSpanBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "Half-open end in Unicode scalars.",
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "description": "Half-open start in Unicode scalars of the side as submitted, before any normalization.",
+            "title": "Start",
+            "type": "integer"
+          },
+          "text": {
+            "description": "The submitted side sliced at [start, end).",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "text"
+        ],
+        "title": "StructureSpanBody",
+        "type": "object"
+      },
       "TermMatchBody": {
         "properties": {
           "category": {
@@ -2248,6 +2510,133 @@
           }
         ],
         "summary": "Create Semantic Review",
+        "tags": [
+          "review"
+        ]
+      }
+    },
+    "/v1/structure-checks": {
+      "post": {
+        "description": "Deterministic structure checks for paired segments (structure-check-v1).\n\nSeparate from `/v1/reviews`, whose request and response are unchanged,\nand from `/v1/semantic-reviews`: no model is called, nothing is stored,\nand the same segments always yield the same findings. Each segment is\nchecked for an empty target, numbers, placeholders and markup tags, and\nparagraph and line layout. Numbers are compared after NFKC with\nthousands separators removed; Chinese numerals, spelled English numbers\nand list labels are never reported on their own and only account for a\ndigit number on the other side.\n\n1 to 64 segments; each side at most 2,000 Unicode scalars and 20,000\nacross all sides, otherwise `input_too_long` (422). Any other malformed\nbody, a repeated `segment_id` or an isolated surrogate is\n`invalid_request` (400). At most 16 findings per segment, in a fixed\norder; `omitted_findings` counts the rest. Listed in\n`GET /v1/capabilities` as `structure-check-v1`; counted against the same\nper-device limit as `/v1/reviews`.",
+        "operationId": "create_structure_check_v1_structure_checks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StructureCheckRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructureCheckResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Structure Check",
         "tags": [
           "review"
         ]

@@ -23,9 +23,10 @@ records are intentionally absent.
 | [0015](0015-desktop-manuscript-workflow.md) | 桌面稿件审校与保存 | Accepted; import rule partly superseded by manuscript v3 |
 | [0016](0016-desktop-resonance-workbench.md) | 以双语稿件为中心的桌面工作台 | Accepted direction; implementation subject to validation |
 | [0017](0017-contextual-term-references.md) | Contextual term references on the model path | Accepted; amends 0006 |
-| [0018](0018-semantic-review.md) | Semantic review keeps model findings and dictionary constraints apart | Accepted (contract); engine pending |
+| [0018](0018-semantic-review.md) | Semantic review keeps model findings and dictionary constraints apart | Accepted (contract and engine); experimental and off by default |
 | [0019](0019-document-context-and-human-precedents.md) | Document context and human precedents for model calls | Accepted (contract); supplements 0017 |
 | [0020](0020-held-out-usability-evaluation.md) | Held-out usability evaluation of translations | Accepted (evaluation protocol) |
 | [0021](0021-local-user-termbase.md) | Local user termbase (`wuwaterm-termbase-v1`) and Core engine next-step research | Proposed (architecture and format spec; pending implementation) |
+| [0022](0022-deterministic-structure-checks.md) | Deterministic structure checks are a separate review track | Accepted (contract and engine) |
 
 Maintainer map: [Architecture](../architecture.md).

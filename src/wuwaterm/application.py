@@ -75,6 +75,7 @@ from .semantic_review import (
     semantic_timeout_seconds as _semantic_timeout_seconds,
     thinking_request_options as _thinking_request_options,
 )
+from . import structural_checks as _structural_checks
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -100,7 +101,9 @@ LOGGER = logging.getLogger(__name__)
 
 TranslationKind = Literal["noop", "exact", "fuzzy", "llm", "error"]
 TranslationDirection = Literal["en", "zh"]
-ServiceCapability = Literal["semantic-review-v1", "translation-context-v1"]
+ServiceCapability = Literal[
+    "semantic-review-v1", "structure-check-v1", "translation-context-v1"
+]
 
 KIND_NOOP: Literal["noop"] = "noop"
 KIND_EXACT: Literal["exact"] = "exact"
@@ -1017,6 +1020,70 @@ def _trim_finding_payload(finding: dict[str, object]) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Structure checks (structure-check-v1; deterministic, no LLM, ADR 0022)
+# --------------------------------------------------------------------------
+
+CAPABILITY_STRUCTURE_CHECK: Literal["structure-check-v1"] = (
+    _structural_checks.STRUCTURE_CHECK_VERSION
+)
+STRUCTURE_CHECK_VERSION = _structural_checks.STRUCTURE_CHECK_VERSION
+STRUCTURE_CHECKS = _structural_checks.STRUCTURE_CHECKS
+STRUCTURE_RULES = _structural_checks.STRUCTURE_RULES
+STRUCTURE_CHECK_MAX_SEGMENTS = 64
+STRUCTURE_CHECK_MAX_SIDE_SCALARS = MAX_SIDE_SCALARS
+# Every side of every segment together. The body limit bounds a request too,
+# but it is an operator setting; this keeps the work per request fixed.
+STRUCTURE_CHECK_MAX_TOTAL_SCALARS = 20_000
+# Per segment. A segment with more findings than this is broken as a whole,
+# and the cap keeps a 64-segment response within a few hundred KiB.
+STRUCTURE_CHECK_MAX_FINDINGS = 16
+
+StructureFinding = _structural_checks.StructureFinding
+StructureLayout = _structural_checks.StructureLayout
+StructureSpan = _structural_checks.StructureSpan
+
+
+@dataclass(frozen=True)
+class StructureCheckSegment:
+    segment_id: str | None
+    source: str
+    target: str
+
+
+@dataclass(frozen=True)
+class StructureCheckResult:
+    index: int
+    segment_id: str | None
+    findings: tuple[StructureFinding, ...]
+    omitted_findings: int
+    layout: StructureLayout
+
+
+def check_structure(
+    segments: Sequence[StructureCheckSegment],
+) -> tuple[StructureCheckResult, ...]:
+    """Layer 1 structure checks for each paired segment, in request order.
+
+    Stateless and deterministic: nothing is stored, nothing is sent anywhere.
+    Adapters enforce the request limits above before calling this.
+    """
+    results: list[StructureCheckResult] = []
+    for index, segment in enumerate(segments):
+        report = _structural_checks.check_segment_structure(segment.source, segment.target)
+        kept = report.findings[:STRUCTURE_CHECK_MAX_FINDINGS]
+        results.append(
+            StructureCheckResult(
+                index=index,
+                segment_id=segment.segment_id,
+                findings=kept,
+                omitted_findings=len(report.findings) - len(kept),
+                layout=report.layout,
+            )
+        )
+    return tuple(results)
+
+
+# --------------------------------------------------------------------------
 # Optional capabilities and semantic review (contract only; ADR 0018)
 # --------------------------------------------------------------------------
 
@@ -1060,18 +1127,23 @@ def semantic_review_enabled() -> bool:
 
 
 def service_capabilities() -> tuple[ServiceCapability, ...]:
-    """Optional capabilities this process can serve right now.
+    """Optional capabilities this process can serve right now, sorted by name.
 
     A capability is listed only when it actually works, so a client can turn a
-    feature on from this list alone. Both need a configured model; semantic
-    review also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
+    feature on from this list alone. ``structure-check-v1`` calls no model and
+    is always listed. ``translation-context-v1`` needs a configured model;
+    ``semantic-review-v1`` also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
     """
     if not llm_configured():
-        return ()
+        return (CAPABILITY_STRUCTURE_CHECK,)
     if not semantic_review_enabled():
-        return (_semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,)
+        return (
+            CAPABILITY_STRUCTURE_CHECK,
+            _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
+        )
     return (
         _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
+        CAPABILITY_STRUCTURE_CHECK,
         _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
     )
 

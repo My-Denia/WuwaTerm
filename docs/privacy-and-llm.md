@@ -48,8 +48,10 @@ see [Public Beta Site](sites.md) and the live
 
 ## Semantic Review Sends Both Texts
 
-Pair review (`POST /v1/reviews`, `review-v1`/`review-v2`) is dictionary-only:
-nothing leaves the process. Semantic review (`POST /v1/semantic-reviews`,
+Pair review (`POST /v1/reviews`, `review-v1`/`review-v2`) is dictionary-only
+and structure checks (`POST /v1/structure-checks`, `structure-check-v1`) read
+only the submitted segments: for both, nothing leaves the process and nothing is
+stored. The structure-check log line carries counts only, never text. Semantic review (`POST /v1/semantic-reviews`,
 `semantic-review-v1`, [ADR 0018](adr/0018-semantic-review.md)) is a separate,
 model-backed path, and it sends more than translation does:
 
@@ -71,7 +73,8 @@ send; segments that are blank, unpaired or need a manual split are never sent
 Semantic review is experimental and off by default
 (`WUWATERM_SEMANTIC_REVIEW_ENABLED`). A server lists `semantic-review-v1` in
 `GET /v1/capabilities` only when it is switched on and a model is configured;
-`translation-context-v1` needs only a model. While semantic review is off the
+`translation-context-v1` needs only a model, and `structure-check-v1` is always
+listed. While semantic review is off the
 endpoint validates the request and answers `llm_unavailable` without calling a
 model or sending any text anywhere.
 

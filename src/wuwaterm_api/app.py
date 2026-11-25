@@ -74,6 +74,12 @@ from wuwaterm.application import (
     SEMANTIC_PRECEDENT_SCOPES,
     SEMANTIC_REVIEW_VERSION,
     SEMANTIC_TERM_EFFECTS,
+    STRUCTURE_CHECK_MAX_FINDINGS,
+    STRUCTURE_CHECK_MAX_SEGMENTS,
+    STRUCTURE_CHECK_MAX_SIDE_SCALARS,
+    STRUCTURE_CHECK_MAX_TOTAL_SCALARS,
+    STRUCTURE_CHECKS,
+    STRUCTURE_RULES,
     ContextBefore,
     LLMFailureDiagnostic,
     LlmCallBudget,
@@ -83,9 +89,12 @@ from wuwaterm.application import (
     LlmCallGuard,
     ReviewRequestError,
     SlidingWindowRateLimiter,
+    StructureCheckSegment,
+    StructureSpan,
     TranslationJob,
     build_term_service,
     build_translator,
+    check_structure,
     llm_configured,
     lookup_terms,
     probe_database,
@@ -568,7 +577,9 @@ class ReviewResponseBody(BaseModel):
 # Optional capabilities and semantic review (semantic-review-v1, ADR 0018)
 # --------------------------------------------------------------------------
 
-CapabilityName = Literal["semantic-review-v1", "translation-context-v1"]
+CapabilityName = Literal[
+    "semantic-review-v1", "structure-check-v1", "translation-context-v1"
+]
 SemanticCategory = Literal[SEMANTIC_CATEGORIES]  # type: ignore[valid-type]
 SemanticConfidence = Literal[SEMANTIC_CONFIDENCES]  # type: ignore[valid-type]
 SemanticTermEffect = Literal[SEMANTIC_TERM_EFFECTS]  # type: ignore[valid-type]
@@ -807,6 +818,115 @@ class SemanticReviewResponseBody(BaseModel):
     truncated: bool
     truncated_reason: Literal["issue_limit", "byte_limit"] | None
     omitted_issues: int = Field(ge=0)
+
+
+# --------------------------------------------------------------------------
+# Structure checks (structure-check-v1, ADR 0022)
+# --------------------------------------------------------------------------
+
+StructureCheckName = Literal[STRUCTURE_CHECKS]  # type: ignore[valid-type]
+StructureRuleId = Literal[STRUCTURE_RULES]  # type: ignore[valid-type]
+
+
+class StructureCheckSegmentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    segment_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9._:-]{1,128}$",
+        description="Optional client label, echoed back. Unique within a request.",
+    )
+    source: str = Field(
+        description="Source text of one paired segment. At most 2,000 Unicode scalars.",
+        json_schema_extra={"maxLength": STRUCTURE_CHECK_MAX_SIDE_SCALARS},
+    )
+    target: str = Field(
+        description=(
+            "The translation of that segment. At most 2,000 Unicode scalars. A"
+            " blank target for a non-blank source is reported as empty_target."
+        ),
+        json_schema_extra={"maxLength": STRUCTURE_CHECK_MAX_SIDE_SCALARS},
+    )
+
+
+class StructureCheckRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    check_version: Literal["structure-check-v1"]
+    segments: list[StructureCheckSegmentBody] = Field(
+        min_length=1,
+        max_length=STRUCTURE_CHECK_MAX_SEGMENTS,
+        description=(
+            "1 to 64 paired segments, at most 20,000 Unicode scalars across all"
+            " sources and targets together."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> "StructureCheckRequestBody":
+        labels = [item.segment_id for item in self.segments if item.segment_id is not None]
+        if len(set(labels)) != len(labels):
+            raise ValueError("segment_id is repeated")
+        if any(
+            _has_isolated_surrogate(item.source) or _has_isolated_surrogate(item.target)
+            for item in self.segments
+        ):
+            raise ValueError("text contains an isolated surrogate")
+        return self
+
+
+class StructureSpanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: int = Field(
+        description=(
+            "Half-open start in Unicode scalars of the side as submitted, before"
+            " any normalization."
+        )
+    )
+    end: int = Field(description="Half-open end in Unicode scalars.")
+    text: str = Field(description="The submitted side sliced at [start, end).")
+
+
+class StructureFindingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rule_id: StructureRuleId
+    source_span: StructureSpanBody | None = Field(
+        description="Set for number_missing and placeholder_missing."
+    )
+    target_span: StructureSpanBody | None = Field(
+        description="Set for number_unexpected, placeholder_unexpected and tag_unbalanced."
+    )
+
+
+class StructureLayoutBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_paragraphs: int = Field(ge=0)
+    target_paragraphs: int = Field(ge=0)
+    source_lines: int = Field(ge=0, description="Non-blank lines.")
+    target_lines: int = Field(ge=0)
+
+
+class StructureSegmentResultBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    index: int = Field(ge=0, description="Position of the segment in the request.")
+    segment_id: str | None
+    findings: list[StructureFindingBody] = Field(max_length=STRUCTURE_CHECK_MAX_FINDINGS)
+    omitted_findings: int = Field(
+        ge=0, description="Findings past the per-segment limit of 16, not returned."
+    )
+    layout: StructureLayoutBody
+
+
+class StructureCheckResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    check_version: Literal["structure-check-v1"]
+    checks: list[StructureCheckName]
+    segments: list[StructureSegmentResultBody]
+
+
+def _structure_span(span: StructureSpan | None) -> StructureSpanBody | None:
+    if span is None:
+        return None
+    return StructureSpanBody(start=span.start, end=span.end, text=span.text)
 
 
 TranslationRequestBody.model_rebuild()
@@ -2469,3 +2589,98 @@ def _register_routes(app: FastAPI) -> None:
         # The engine measured these exact bytes against the byte budget, so
         # they are served as they are rather than re-encoded.
         return Response(content=outcome.data, media_type="application/json")
+
+    @app.post(
+        f"{prefix}/structure-checks",
+        response_model=StructureCheckResponseBody,
+        tags=["review"],
+        responses=ERROR_RESPONSES,
+    )
+    async def create_structure_check(
+        request: Request,
+        body: StructureCheckRequestBody,
+        device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
+    ) -> StructureCheckResponseBody:
+        """Deterministic structure checks for paired segments (structure-check-v1).
+
+        Separate from `/v1/reviews`, whose request and response are unchanged,
+        and from `/v1/semantic-reviews`: no model is called, nothing is stored,
+        and the same segments always yield the same findings. Each segment is
+        checked for an empty target, numbers, placeholders and markup tags, and
+        paragraph and line layout. Numbers are compared after NFKC with
+        thousands separators removed; Chinese numerals, spelled English numbers
+        and list labels are never reported on their own and only account for a
+        digit number on the other side.
+
+        1 to 64 segments; each side at most 2,000 Unicode scalars and 20,000
+        across all sides, otherwise `input_too_long` (422). Any other malformed
+        body, a repeated `segment_id` or an isolated surrogate is
+        `invalid_request` (400). At most 16 findings per segment, in a fixed
+        order; `omitted_findings` counts the rest. Listed in
+        `GET /v1/capabilities` as `structure-check-v1`; counted against the same
+        per-device limit as `/v1/reviews`.
+        """
+        total = 0
+        for segment in body.segments:
+            for name, text in (("source", segment.source), ("target", segment.target)):
+                if len(text) > STRUCTURE_CHECK_MAX_SIDE_SCALARS:
+                    raise ApiError(
+                        ERROR_INPUT_TOO_LONG,
+                        f"{name} exceeds {STRUCTURE_CHECK_MAX_SIDE_SCALARS} Unicode scalars",
+                    )
+                total += len(text)
+        if total > STRUCTURE_CHECK_MAX_TOTAL_SCALARS:
+            raise ApiError(
+                ERROR_INPUT_TOO_LONG,
+                f"segments exceed {STRUCTURE_CHECK_MAX_TOTAL_SCALARS} Unicode scalars"
+                " in total",
+            )
+        await _require_active_device(request, device)
+        results = await asyncio.to_thread(
+            check_structure,
+            tuple(
+                StructureCheckSegment(
+                    segment_id=item.segment_id, source=item.source, target=item.target
+                )
+                for item in body.segments
+            ),
+        )
+        # Counts only: neither text is ever logged.
+        LOGGER.info(
+            "structure check device=%s segments=%s scalars=%s findings=%s"
+            " omitted=%s request_id=%s",
+            redact_id(device.device_id),
+            len(results),
+            total,
+            sum(len(result.findings) for result in results),
+            sum(result.omitted_findings for result in results),
+            _request_id(request),
+        )
+        await _require_active_device(request, device, serve_on_store_error=True)
+        return StructureCheckResponseBody(
+            request_id=_request_id(request),
+            check_version="structure-check-v1",
+            checks=list(STRUCTURE_CHECKS),
+            segments=[
+                StructureSegmentResultBody(
+                    index=result.index,
+                    segment_id=result.segment_id,
+                    findings=[
+                        StructureFindingBody(
+                            rule_id=finding.rule_id,
+                            source_span=_structure_span(finding.source_span),
+                            target_span=_structure_span(finding.target_span),
+                        )
+                        for finding in result.findings
+                    ],
+                    omitted_findings=result.omitted_findings,
+                    layout=StructureLayoutBody(
+                        source_paragraphs=result.layout.source_paragraphs,
+                        target_paragraphs=result.layout.target_paragraphs,
+                        source_lines=result.layout.source_lines,
+                        target_lines=result.layout.target_lines,
+                    ),
+                )
+                for result in results
+            ],
+        )

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import secrets
 
+import pytest
+
 from wuwaterm.structural_checks import (
     ParagraphStructureReport,
+    StructureLayout,
     check_paragraph_structure,
+    check_segment_structure,
     check_placeholder_integrity,
     cumulative_cuts,
     extract_numbers,
@@ -90,3 +94,104 @@ def test_placeholder_extraction_and_integrity():
     assert check_placeholder_integrity(source, reordered_template) is True
     assert check_placeholder_integrity(source, reordered_html) is False
     assert check_placeholder_integrity("Cost %s", "Cost") is False
+
+
+def findings(source: str, target: str) -> list[tuple[str, str | None]]:
+    report = check_segment_structure(source, target)
+    result = []
+    for finding in report.findings:
+        span = finding.source_span or finding.target_span
+        side = source if finding.source_span else target
+        if span is not None:
+            assert side[span.start : span.end] == span.text
+        result.append((finding.rule_id, None if span is None else span.text))
+    return result
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        ("获得１,０００星声", "Obtain 1000 Astrite"),
+        ("Costs 1,000.50", "花费1000.5"),
+        ("获得1.5万星声", "Obtain 15,000 Astrite"),
+        ("获得10万", "Get 100,000"),
+        ("1.5 million", "150万"),
+        ("获得三个", "Get 3"),
+        ("二〇二四年", "in 2024"),
+        ("百分之五十", "50%"),
+        ("Get twenty-one items", "获得21个"),
+        ("two hundred and five", "205"),
+        ("Hit twice", "命中2次"),
+        ("1. 第一项\n2. 第二项", "• First\n• Second"),
+        ("(1) 第一项", "First item"),
+        ("①攻击 ②防御", "Attack, defend"),
+        ("面积10m²", "Area of 10 square meters"),
+        ("100，200", "100, 200"),
+        ("100,200", "100、200"),
+        ("凌晨4:00刷新", "Resets at 4 AM"),
+        ("<size=20>文本</size>", "<size=20>Text</size>"),
+        ("<te href=123>链接</te>", "<te href=123>link</te>"),
+        ("<color=#ffd700>金</color>", "<color=#ffd700>Gold</color>"),
+        ("{0}个", "{0} items"),
+        ("{Male=他;Female=她}来了", "{Male=He;Female=She} is here"),
+        ("今汐", "Jinhsi"),
+        ("", "Anything 5"),
+    ],
+)
+def test_structure_checks_accept_equivalent_pairs(source, target):
+    assert findings(source, target) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "expected"),
+    [
+        (
+            "造成300点伤害",
+            "Deals 30 damage",
+            [("number_missing", "300"), ("number_unexpected", "30")],
+        ),
+        ("Gain 250 and 250", "获得250", [("number_missing", "250")]),
+        ("消耗三个", "Consume 4", [("number_unexpected", "4")]),
+        ("提升１２％", "Increase by 13%", [("number_missing", "１２"), ("number_unexpected", "13")]),
+        (
+            "<color=Highlight>今汐</color>",
+            "Jinhsi",
+            [("placeholder_missing", "<color=Highlight>"), ("placeholder_missing", "</color>")],
+        ),
+        (
+            "{PlayerName}来了",
+            "{Player} is here",
+            [("placeholder_missing", "{PlayerName}"), ("placeholder_unexpected", "{Player}")],
+        ),
+        ("%1$s获得%d", "%1$s gained", [("placeholder_missing", "%d")]),
+        (
+            "<b><i>x</i></b>",
+            "<b><i>x</b></i>",
+            [("tag_unbalanced", "<b>"), ("tag_unbalanced", "</b>")],
+        ),
+        ("第一段\n\n第二段", "One paragraph only.", [("paragraph_count_mismatch", None)]),
+        ("一行\n两行", "One line.", [("line_count_mismatch", None)]),
+        ("原文 5 {0}", " \u200b\u3000", [("empty_target", None)]),
+        (
+            "第一段 {0}\n\n第二段 5",
+            "Only {1} paragraph 6",
+            [
+                ("paragraph_count_mismatch", None),
+                ("placeholder_missing", "{0}"),
+                ("placeholder_unexpected", "{1}"),
+                ("number_missing", "5"),
+                ("number_unexpected", "6"),
+            ],
+        ),
+    ],
+)
+def test_structure_checks_report_breaks_in_a_fixed_order(source, target, expected):
+    assert findings(source, target) == expected
+
+
+def test_structure_layout_counts_paragraphs_and_lines():
+    report = check_segment_structure("a\r\nb\r\n\r\nc", "A\nB\n\nC")
+    assert report.findings == ()
+    assert report.layout == StructureLayout(
+        source_paragraphs=2, target_paragraphs=2, source_lines=3, target_lines=3
+    )

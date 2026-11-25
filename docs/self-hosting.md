@@ -617,7 +617,8 @@ docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api device issu
 ```
 
 Both accept `--scopes translate,meta`, which is also the default: `translate`
-admits `POST /v1/translations` and `POST /v1/reviews`, `meta` admits
+admits `POST /v1/translations`, `POST /v1/reviews`, `POST /v1/semantic-reviews`
+and `POST /v1/structure-checks`, `meta` admits
 `GET /v1/terms` and `GET /v1/meta`. The command prints the device id, the name, the scopes and the
 creation time — nothing secret. The token you hand to the desktop client is:
 
@@ -1121,7 +1122,7 @@ schema version travels with the source.
 | `verify-db` fails on a fresh build | The upstream checkout is not the pinned commit, or its version-provenance file does not say the expected version | This is fail-closed by design. Re-run `refresh-data`; if it still fails, the profile in `src/wuwaterm/constants.py` and the upstream repository have diverged and the pin has to be updated deliberately, not worked around. |
 | `refresh-data` fails | Same fail-closed check, or the fetch from the upstream repository failed or was interrupted | Read the message: it names which check failed. A network failure part-way through **does** leave a partial `data/wutheringdata/` behind, and re-running the same command **resumes** that checkout instead of starting over — that is deliberate, and it is why a retry after a transient failure is usually fast. A partial directory is still never consumed as data: `build-db` re-runs the same provenance inspection and refuses a checkout that is not at the pinned commit with the expected version file. |
 | `401` with `unauthorized` from `/v1` | No token, a malformed token, or a revoked device | The header is `Authorization: Bearer wtd1.<device id>.<secret>`. Run `device list` to see whether that device is still active. |
-| `403` with `forbidden` from `/v1` | The device has the wrong scopes | `translate` admits `POST /v1/translations` and `POST /v1/reviews`; `meta` admits `GET /v1/terms` and `GET /v1/meta`. Issue a device with both. |
+| `403` with `forbidden` from `/v1` | The device has the wrong scopes | `translate` admits `POST /v1/translations`, `POST /v1/reviews`, `POST /v1/semantic-reviews` and `POST /v1/structure-checks`; `meta` admits `GET /v1/terms` and `GET /v1/meta`. Issue a device with both. |
 | `429` with `rate_limited` | Two different bounds answer with this code. One is the per-device request limiter. The other is credential-verification admission: verification is deliberately expensive, so a bounded number of them may run at once and a request that finds every slot taken is refused **before** it is authenticated | If the completion record for that request carries no device principal, it was refused at verification admission and raising `WUWATERM_API_RATE_LIMIT_PER_MINUTE` will not help — raise `WUWATERM_API_AUTH_MAX_CONCURRENCY`, or reduce how many unauthenticated requests arrive at once. If it does name a device, it is the per-device limiter. |
 | `503` with `llm_unavailable` | No model configured, or the model call failed or timed out | If you configured none, this is the documented behaviour. If you did, check the endpoint, the key and `WUWATERM_API_LLM_TIMEOUT_SECONDS`. |
 | `503` with `llm_budget_exhausted` | The per-minute model call budget for that process | Raise `WUWATERM_API_LLM_CALLS_PER_MINUTE`, or wait. Budgets are per process and are not shared between the bot and the API. |
