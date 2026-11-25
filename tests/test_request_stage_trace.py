@@ -57,6 +57,13 @@ TIMEOUT_FIELDS = (
 # whole file stays well under a second of real waiting.
 HOLD_SECONDS = 0.15
 POST_SECONDS = 0.03
+# The request budget for tests that need the request to REACH a stage before the
+# budget ends. The budget starts at the middleware, so authentication, body read
+# and pipeline set-up spend it first; under CPU contention that set-up alone has
+# outlasted 200 ms and the request timed out at ``init``, never reaching the
+# stage under test. One second keeps a wide margin and still only waits for the
+# one deadline.
+REQUEST_BUDGET_SECONDS = 1.0
 
 
 # --------------------------------------------------------------------------
@@ -311,7 +318,10 @@ def test_a_timed_out_request_reports_the_stage_it_was_in(
     """Lowest budget, marker text: the record names the stage, not the text."""
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.2, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
     app.state.translator._llm_transport = answering_transport()
     _, token = issue_device(store)
@@ -319,10 +329,10 @@ def test_a_timed_out_request_reports_the_stage_it_was_in(
 
     async def scenario():
         # The only slot is held by somebody else, so the request under test can
-        # only be QUEUED. The slot is released just after the budget expires:
-        # ASGITransport does not return until the whole application call has
-        # unwound, and a handler queued for a slot that is never released would
-        # keep this test waiting for it.
+        # only be QUEUED. It is held until the request has ended: ASGITransport
+        # does not return until the whole application call has unwound, which
+        # the deadline guarantees by cancelling the queued waiter. Releasing the
+        # slot on a timer instead would race the budget.
         slots = app.state.translator._current_llm_slots()
         await slots.acquire()
         task = asyncio.create_task(
@@ -332,12 +342,9 @@ def test_a_timed_out_request_reports_the_stage_it_was_in(
             )
         )
         try:
-            await asyncio.sleep(0.35)
-        finally:
-            slots.release()
-        try:
             return await asyncio.wait_for(task, 10)
         finally:
+            slots.release()
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(BaseException):
@@ -358,7 +365,7 @@ def test_a_timed_out_request_reports_the_stage_it_was_in(
     assert record["llm_calls"] == "0"
     assert record["llm_post_ms"] == "0.0"
     assert record["direction"] == "zh->en"
-    assert float(record["elapsed_ms"]) >= 190
+    assert float(record["elapsed_ms"]) >= REQUEST_BUDGET_SECONDS * 1000 * 0.95
     # A wait with no acquisition still records the time waited, and it is inside
     # the elapsed time rather than beside it.
     waited = float(record["slot_wait_ms"])
@@ -377,11 +384,16 @@ def test_a_request_waiting_for_the_provider_reports_the_post_stage(
     """The in-flight POST counts, so the record says where the time is."""
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.2, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
-    # Answered late, not never: the handler keeps running after the 504 is
-    # produced, and an unanswered POST would outlive the test.
-    app.state.translator._llm_transport = hanging_transport(0.6)
+    # Answered late, not never: an unanswered POST would outlive the test if
+    # the deadline failed to cancel it.
+    app.state.translator._llm_transport = hanging_transport(
+        REQUEST_BUDGET_SECONDS * 5
+    )
     _, token = issue_device(store)
     source = "这是另一句绝不能出现在日志里的句子。"
 
@@ -411,7 +423,7 @@ def test_a_request_waiting_for_the_provider_reports_the_post_stage(
     assert float(record["slot_wait_ms"]) == 0.0, record
     assert float(record["llm_post_ms"]) > 0.0, record
     assert float(record["llm_post_ms"]) <= float(record["elapsed_ms"]), record
-    assert float(record["elapsed_ms"]) >= 190
+    assert float(record["elapsed_ms"]) >= REQUEST_BUDGET_SECONDS * 1000 * 0.95
 
     stream = "\n".join(recorder.messages)
     for forbidden in (source, TEST_SECRET, token, API_KEY):
