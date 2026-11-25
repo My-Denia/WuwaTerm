@@ -149,7 +149,7 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core is deployed on production VPS API r13 by deploy/vps-update.sh --runtime-only. The .deploy_commit is 486312df532a3757f367d523d6f7a7cdd5735f96, a main commit that holds v0.13.0 (e5b7f1a8) plus the offline-only evaluation change #321 and #323, whose request-local ambiguous-mention evidence is off by default and leaves responses byte-identical; the host does not run the bare v0.13.0 tag commit. /openapi.json reports info.version 0.13.0, data/terms.db keeps sha256 9ddee819… and rollback point r12 (Core v0.12.0, 6fb4d8a4) is retained.",
+      "adoption_note": "Core is deployed on production VPS API r13 by deploy/vps-update.sh --runtime-only. The .deploy_commit is 486312df532a3757f367d523d6f7a7cdd5735f96, a main commit that holds v0.13.0 (e5b7f1a8) plus the offline-only evaluation change #321 and #323, whose request-local ambiguous-mention evidence is off by default and leaves prompts and request identity byte-identical; the host does not run the bare v0.13.0 tag commit. /openapi.json reports info.version 0.13.0, data/terms.db keeps sha256 9ddee819…. The wuwaterm-api container runs with RestartCount 0, a sanitized error-log scan found 0 errors, .env and state-api/devices.db keep mode 0600, deploy_smoke.py reported Bot API getMe ok, and no staging or run containers remain. Rollback point r12 (Core v0.12.0, 6fb4d8a4) and its runtime image wuwaterm-runtime:rollback-runtime-486312df532a-847483 (08fba41a88f3…) are retained.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8/docs/self-hosting.md",
@@ -236,7 +236,7 @@
         },
         "note": "v0.5.0 upgrades the Core pin to published Core 0.12.0 (wheel SHA-256 b243fa064bc1090ecdabb70130775449c73fa53f85b6800cad72f889d43803ad, core_source_commit 6fb4d8a44b26f170a7b1c8e23f00f75b2bbfd2b8, declared compatibility exact; OCI index sha256:5e1f71128f08dbe241067632faa3f19ad4527835ea533a3ac132f59c70914621, manifest sha256:3768175e8c2eb8aefc5817df69612266ec5a7760f044d07f7a16a57298e6cd44, config sha256:fd91e9b023c773889f1c9d5a6f7e150d51b0f2d5fed839a814d17f44d726b425, built by release run 45391931037). PR #45 updates core-lock.json and pyproject.toml (wuwaterm==0.12.0, wuwaterm-telegram==0.5.0), verifies OperationExecutionBudget and wuwaterm.llm_transport.current_execution_budget plus execution_budget parameters in core_compat.py, scopes channel.py and telegram_html.py to ChannelRuntime.reserve(...) with allow_plain_fallback restricted to single-segment posts (<= LLM_INPUT_CHAR_LIMIT) and max_corrective_calls=0 on split chunks, binds a run-scoped OperationExecutionBudget(max_total_calls=len(ready), max_corrective_calls=0, max_corrective_calls_per_segment=0) with gate/CancelledError cancellation and operation_budget->llm_budget_exhausted / cancelled->aborted mapping in review_flow.py and review_backend.py, preserves zh->en=disabled and en->zh=omit defaults while documenting opt-in auto, updates placeholder_for to TermReference in tests, adds real-Core 0.12.0 budget and cancellation tests in tests/test_core_012_budgets.py, and passed 905 tests in both editable and clean-wheel --installed runs plus ruff. All seven published assets were anonymously downloaded and verified via sha256sum -c SHA256SUMS. Kept as history after v0.6.0; v0.5.0 and earlier remain published."
       },
-      "adoption_note": "Standalone Telegram 0.6.0 on Core 0.13.0 is deployed on the owner VPS after the v0.6.0 release was published. wuwaterm_telegram.operations identity reports Telegram 0.6.0 and Core 0.13.0, operations health reports ready, and the container's RestartCount is 0. The previous 0.5.0 runtime image and the state backup taken before the cutover are retained as the rollback."
+      "adoption_note": "Standalone Telegram 0.6.0 on Core 0.13.0 is deployed on the owner VPS on 2026-11-25 (UTC), after the v0.6.0 release was published. wuwaterm_telegram.operations identity reports Telegram 0.6.0 and Core 0.13.0, operations health reports ready, ERROR_SCAN_COUNT is 0 and the container's RestartCount is 0. The previous 0.5.0 runtime image wuwaterm-telegram:rollback-0.5.0-local (489a4161f54c…) and the state backup taken before the cutover (mode 0700) are retained as the rollback."
     },
     {
       "id": "windows",
@@ -246,7 +246,7 @@
         "commit": "05304ea3c3962c7aa555951bc990f8343321c396",
         "tree": "d4ceb362e7986cf93334531a01e78331f3622682",
         "status": "success",
-        "status_note": "The v0.6.6 release source (#49, chore(release): align contracts to Core 0.13.0 / Web 0.4.5 and prepare Windows 0.6.6), which is also this repository's main. Main CI push run 45689068139, Dependency audit run 45689067421 and release build run 45693339755 all passed on this commit."
+        "status_note": "The v0.6.6 release source (#49, chore(release): align contracts to Core 0.13.0 / Web 0.4.5 and prepare Windows 0.6.6). Main CI push run 45689068139, Dependency audit run 45689067421 and release build run 45693339755 all passed on this commit. This repository's main has since moved on (#50)."
       },
       "release": {
         "version": "0.6.6",
@@ -314,7 +314,7 @@
         "commit": "6d1084fe1589854324f34b5e9501760ad670b435",
         "tree": "362435d47b66b82e392976dbe6707d8d03a847f4",
         "status": "success",
-        "status_note": "The v0.4.5 release source (#65, chore(release): prepare Web 0.4.5). Web CI run 45680704815, Dependency audit run 45680704908 and CodeQL run 45680704830 passed on this commit, and self-host candidate runs 45681892351 (root) and 45681897300 (prefix /private) plus self-host release publication run 45683111898 passed. This repository's main has since moved on (#66)."
+        "status_note": "The v0.4.5 release source (#65, chore(release): prepare Web 0.4.5). Web CI run 45680704815, Dependency audit run 45680704908 and CodeQL run 45680704830 passed on this commit, and self-host candidate runs 45681892351 (root) and 45681897300 (prefix /private) plus self-host release publication run 45683111898 passed. This repository's main has since moved on (#64, #66, #67 and later)."
       },
       "source_version": "0.4.5",
       "release": {

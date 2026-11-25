@@ -12,11 +12,14 @@ deployed them. Security reports are read and handled best-effort — please read
 Fixes are made on `main` and ship in the next release. Only the latest published
 release line receives them; earlier tags are historical and get nothing.
 
-The latest published release is v0.10.3; 0.10.x is the currently supported line.
+The latest published release is v0.13.0; 0.13.x is the currently supported line.
 
 | Version | Supported |
 |---|---|
-| 0.10.x | Yes |
+| 0.13.x | Yes |
+| 0.12.x | No |
+| 0.11.x | No |
+| 0.10.x | No |
 | 0.9.x | No |
 | 0.8.x | No |
 | 0.7.x | No |
