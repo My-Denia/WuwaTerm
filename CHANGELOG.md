@@ -3,6 +3,103 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.13.0 - 2026-11-26
+
+### Translation Direction & Prose Preservation
+
+- Automatic direction (#319): when the caller passes no `forced_to_chinese`,
+  the direction is now read from the normalized user text before speaker
+  prefixes are rewritten to English names. Text with no CJK character still
+  translates to Chinese. Text with CJK characters translates to Chinese only
+  when its Latin letters outnumber its CJK characters more than four to one;
+  `v0.12.0` translated to English whenever any CJK character was present. An
+  English paragraph with an incidental Chinese term therefore now resolves to
+  `en->zh`, and Chinese speaker dialogue keeps `zh->en`. An explicit
+  `forced_to_chinese` is unaffected.
+- Prose preservation (#318): Core translation keeps the user's text verbatim
+  apart from Unicode NFKC, line endings and whitespace
+  (`normalize_prose_text`). `SentenceTranslator.prepare_text` no longer deletes
+  spoiler tags, version tags or quote bars, so `>50%`, `#spoilersafe` and
+  `[Wuthering Waves 3.7]` reach the model unchanged through the HTTP API, the
+  Web client and the Windows client. Wrapper cleanup moved to
+  `wuwaterm.normalize.strip_telegram_wrapper_noise`, which the Telegram adapters
+  in `bot.py` now call explicitly on plain text (`translate_query`,
+  `translate_query_async`, `telegram_translation_reply`; the HTML path is left
+  as written). `normalize_user_text` remains as an alias. The spoiler pattern now
+  needs a boundary after the keyword, so `#spoilersafe`, `#spoiler-free` and
+  `#剧透警告` are kept while `#spoiler- 今汐` and `#剧透：今汐` are still
+  stripped, and the quote-bar pattern only consumes horizontal whitespace, so a
+  blank paragraph separator before a quoted line survives.
+- Linked-channel plain pipeline (#322): `channel_post_handler` strips the
+  wrapper markers once for every plain stage (plain-only posts, the plain
+  fallback after a failed HTML attempt, and over-limit split chunks), and the
+  call reservation and the chunking read that same stripped text. The HTML
+  attempt keeps `html_text` as written.
+- The two direction and preservation changes interact: wrapper markers left in
+  a text count as Latin letters, so a short Chinese message such as
+  `[Wuthering Waves 3.7] 今汐` that reaches Core unstripped now resolves to
+  `en->zh`. Strip the wrapper first or pass `forced_to_chinese`.
+
+### Terms
+
+- `wuwaterm-cjk-matcher-v10` (`MATCHER_REVISION =
+  57428b88978597d95840f56ba0080a4f8fb11d4860fe8ea5532d3c1e7c6a918a`) turns the
+  single-character mention judgment into the explicit classifier
+  `classify_single_character_mention`, returning `name_mention`,
+  `ambiguous_mention` or `ordinary_word` (#319). Translation reference
+  admission and `review-v2` still admit exactly `name_mention`, and
+  `single_character_name_mention_at` stays as a compatibility predicate. The
+  judgment itself did not change: compared with `v0.12.0` over 935,611 CJK
+  positions the two matchers differ at none, so only the revision label that
+  records the basis moves.
+- Because the label moves, a manuscript-v3 or manuscript-v4 segment result that
+  the Web or Windows client saved under `wuwaterm-cjk-matcher-v9` becomes stale
+  after the upgrade and is re-reviewed. The re-review spends review quota and
+  returns the same conclusions.
+
+### Code Layout
+
+- Extract stdlib-only `wuwaterm.structural_checks` (#319). The paragraph
+  regrouping helpers (`paragraph_line_counts`,
+  `regroup_lines_into_source_paragraphs` and the merge/split guards) moved there
+  from `sentence` and `translation_plan` with unchanged logic, and
+  `translation_plan.paragraph_line_counts` stays importable. The module also
+  adds numeric-token, placeholder-integrity and paragraph-structure check
+  helpers that no translation path or HTTP endpoint calls yet. It is registered
+  with the pure-matching modules in `check_architecture_boundaries.py`.
+- Remove the `inspect.signature` compatibility bridges (`AsyncLlmCaller`,
+  `SyncLlmCaller`, `_async_llm_supports_param` and the `_DEFAULT_CALL_LLM*`
+  switches) from `sentence.py`; the test-only adapter now lives in
+  `tests/conftest.py` (#320). The same change aligns the README, `docs/products.md`,
+  `docs/eval/q8-candidate-plan.md`, `docs/privacy-and-llm.md` (timeout ladder)
+  and `docs/self-hosting.md` with `contracts/products.json`.
+
+### Evaluation & Research
+
+- Harden `scripts/eval_semantic.py` resume, locking and scoring (MY-229, #316).
+- Add ADR 0021 (local user termbase, proposed) and the H3 / raw-baseline
+  evaluation protocol (#317); both are documents.
+- Add the std-only Rust text-kernel prototype and the offline Aho-Corasick study
+  under `research/rust-text-kernel/` (#314); no runtime path uses them.
+
+### Upgrade & Compatibility
+
+- Dictionary builder logic, SQLite schema (`2`), pinned game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`), the `terms.db` contents, every `wuwaterm_api` route
+  and the OpenAPI/HTTP contracts (aside from `info.version` `0.13.0`), the
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH` default (`omit`; `auto` remains opt-in)
+  and the `zh->en` default (`disabled`) are unchanged from `v0.12.0`.
+- Deployments already running `v0.12.0` can upgrade with
+  `deploy/vps-update.sh --runtime-only`; there is no need to rebuild `terms.db`.
+- A library consumer that relied on Core to delete spoiler tags, version tags or
+  quote bars (the standalone Telegram product is one) must now call
+  `strip_telegram_wrapper_noise` itself before it hands text to Core.
+- `deploy/setup.sh` defaults the installer to Telegram `v0.5.0` and Web
+  `v0.4.4` (#313, #315).
+- Container images continue to omit game data and databases; deploying from a
+  source checkout at the release commit or tag remains required alongside the
+  published registry images.
+
 ## 0.12.0 - 2026-11-24
 
 ### Architecture & Translation Planning

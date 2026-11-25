@@ -86,6 +86,16 @@ to `wuwaterm-cjk-matcher-v9`, hashing `_SINGLE_NAME_HONORIFICS` and
 `_SINGLE_NAME_PARTICLES` alongside the existing inputs so stored `v8`
 resolution contexts go stale by the existing freshness contract.
 
+The current matcher is `wuwaterm-cjk-matcher-v10` (#319). It puts the same
+right-boundary rule behind `classify_single_character_mention`, which answers
+`name_mention`, `ambiguous_mention` or `ordinary_word`. Translation reference
+admission (`term_matching`, `term_preparation`) and `review-v2` admit a
+one-character name only on `name_mention`, so an `ambiguous_mention` is withheld
+exactly as the boolean predicate `single_character_name_mention_at` (kept for
+compatibility) withheld it under `v9`. No admission outcome changes from `v9`;
+the `MATCHER_REVISION` label moves to `57428b88…`. Stored `v9` resolution contexts and saved manuscript results go
+stale by the same freshness contract and are re-reviewed with the same outcome.
+
 ## Closed-class skill stem references (`zh->en` only)
 
 For Chinese-to-English requests only (`to_chinese is False`),
