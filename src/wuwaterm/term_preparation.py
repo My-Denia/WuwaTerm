@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from .cjk_span import SINGLE_CHAR_NAME_MENTION, classify_single_character_mention
+from .cjk_span import (
+    SINGLE_CHAR_AMBIGUOUS_MENTION,
+    SINGLE_CHAR_NAME_MENTION,
+    classify_single_character_mention,
+)
 from .protected_text import ProtectedText
+from .single_char_context import (
+    ContextEntity,
+    ContextEvaluation,
+    RequestContextIndex,
+    evaluate_ambiguous_mention,
+)
 from .skill_references import SkillReference, skill_occurrences
 from .term_matching import (
     ReferenceCandidates,
@@ -100,10 +110,40 @@ Reference = TermReference
 
 
 @dataclass(frozen=True)
+class AmbiguousMention:
+    """A one-character name surface whose occurrence is ``ambiguous_mention``.
+
+    It records state only: it is never a placeholder lock, never a
+    ``TermReference``, and never evidence for selective locking or for
+    paragraph-level derived gating. ``occurrence`` carries the same visible and
+    model-text coordinates as a reference occurrence; ``evaluation`` holds the
+    request-local evidence from ``single_char_context``.
+    """
+
+    source: str
+    zh: str
+    en: str
+    category: str
+    occurrence: TermOccurrence
+    evaluation: ContextEvaluation
+
+    def shifted_model(self, delta: int) -> AmbiguousMention:
+        return AmbiguousMention(
+            source=self.source,
+            zh=self.zh,
+            en=self.en,
+            category=self.category,
+            occurrence=self.occurrence.shifted_model(delta),
+            evaluation=self.evaluation,
+        )
+
+
+@dataclass(frozen=True)
 class PreparedTerms:
     locked_text: str
     locks: tuple[Lock, ...]
     references: tuple[TermReference, ...]
+    ambiguous: tuple[AmbiguousMention, ...] = ()
 
 
 def new_placeholder_prefix(source_text: str) -> str:
@@ -624,6 +664,130 @@ def _paragraphs_with_official_terms(
     return frozenset(qualifying)
 
 
+def _span_category(
+    source: str, official: tuple[str, str], categories: dict[str, str]
+) -> str:
+    zh, en = official
+    return categories.get(source) or categories.get(en) or categories.get(zh) or ""
+
+
+def _context_entities(
+    context_text: str,
+    *,
+    lockable: Lockable,
+    categories: dict[str, str],
+    reference_only: frozenset[str],
+    allow_plural_inflection: bool,
+    nfkc_spelling_sources: frozenset[str],
+    preselected: Sequence[TermSpan] | None = None,
+) -> tuple[ContextEntity, ...]:
+    """Admitted, non-derived official entities in the visible request text.
+
+    The same admission ``_paragraphs_with_official_terms`` counts: primary
+    dictionary spans outside ``reference_only`` plus one-character
+    resonator/speaker occurrences that are ``name_mention``. An
+    ``ambiguous_mention`` is never an entity, so no uncertain character can
+    vouch for another.
+    """
+    if preselected is not None:
+        primary_spans = list(preselected)
+    else:
+        primary_spans = [
+            span
+            for span in select_term_spans(
+                context_text,
+                lockable,
+                context_text,
+                0,
+                allow_plural_inflection=allow_plural_inflection,
+                nfkc_spelling_sources=nfkc_spelling_sources,
+            )
+            if reference_span_admitted(span, context_text, 0)
+        ]
+    entities: list[ContextEntity] = [
+        ContextEntity(
+            start=span.start,
+            end=span.end,
+            source=span.source,
+            zh=span.official[0],
+            en=span.official[1],
+            category=_span_category(span.source, span.official, categories),
+        )
+        for span in primary_spans
+        if span.source not in reference_only
+    ]
+    for source, official in lockable:
+        if len(source) != 1 or not is_cjk_character(source):
+            continue
+        category = categories.get(source, "")
+        if category not in CONTEXTUAL_REFERENCE_CATEGORIES:
+            continue
+        start = context_text.find(source)
+        while start != -1:
+            end = start + 1
+            if not any(span.start <= start < span.end for span in primary_spans) and (
+                classify_single_character_mention(context_text, start, end)
+                == SINGLE_CHAR_NAME_MENTION
+            ):
+                entities.append(
+                    ContextEntity(
+                        start=start,
+                        end=end,
+                        source=source,
+                        zh=official[0],
+                        en=official[1],
+                        category=category,
+                    )
+                )
+            start = context_text.find(source, start + 1)
+    return tuple(entities)
+
+
+def _has_ambiguous_single_char_candidate(
+    context_text: str, lockable: Lockable, categories: dict[str, str]
+) -> bool:
+    for source, _official in lockable:
+        if len(source) != 1 or not is_cjk_character(source):
+            continue
+        if categories.get(source, "") not in CONTEXTUAL_REFERENCE_CATEGORIES:
+            continue
+        start = context_text.find(source)
+        while start != -1:
+            if (
+                classify_single_character_mention(context_text, start, start + 1)
+                == SINGLE_CHAR_AMBIGUOUS_MENTION
+            ):
+                return True
+            start = context_text.find(source, start + 1)
+    return False
+
+
+def _ambiguous_context_index(
+    context_text: str,
+    para_spans: Sequence[tuple[int, int]],
+    *,
+    lockable: Lockable,
+    categories: dict[str, str],
+    reference_only: frozenset[str],
+    allow_plural_inflection: bool,
+    nfkc_spelling_sources: frozenset[str],
+    preselected: Sequence[TermSpan] | None = None,
+) -> RequestContextIndex:
+    return RequestContextIndex(
+        context_text,
+        paragraphs=para_spans,
+        entities=_context_entities(
+            context_text,
+            lockable=lockable,
+            categories=categories,
+            reference_only=reference_only,
+            allow_plural_inflection=allow_plural_inflection,
+            nfkc_spelling_sources=nfkc_spelling_sources,
+            preselected=preselected,
+        ),
+    )
+
+
 def _span_decision(
     span: TermSpan,
     categories: dict[str, str],
@@ -766,6 +930,136 @@ def _collect_additional_name_references(
             start = text.find(source, start + 1)
 
 
+def _collect_ambiguous_mentions(
+    text: str,
+    context_text: str,
+    context_offset: int,
+    lockable: Lockable,
+    categories: dict[str, str],
+    selected: list[TermSpan],
+    replacements: list[tuple[int, int]],
+    context_index: Callable[[], RequestContextIndex],
+    *,
+    segment_index: int = 0,
+) -> tuple[AmbiguousMention, ...]:
+    """Record one-character name surfaces whose occurrence is ambiguous.
+
+    The positions are exactly the ones ``_collect_additional_name_references``
+    rejects as ``ambiguous_mention`` (红椿蕊, 椿姐, 心很重要). Each gets a
+    request-local evaluation; none becomes a lock or a reference.
+    """
+    found: list[AmbiguousMention] = []
+    for source, official in lockable:
+        if len(source) != 1 or not is_cjk_character(source):
+            continue
+        category = categories.get(source, "")
+        if category not in CONTEXTUAL_REFERENCE_CATEGORIES:
+            continue
+        start = text.find(source)
+        while start != -1:
+            end = start + 1
+            context_start = context_offset + start
+            if not any(span.start <= start < span.end for span in selected) and (
+                classify_single_character_mention(
+                    context_text, context_start, context_start + 1
+                )
+                == SINGLE_CHAR_AMBIGUOUS_MENTION
+            ):
+                model_pos = start + sum(
+                    delta for edge, delta in replacements if edge <= start
+                )
+                found.append(
+                    AmbiguousMention(
+                        source=source,
+                        zh=official[0],
+                        en=official[1],
+                        category=category,
+                        occurrence=TermOccurrence(
+                            start=start,
+                            end=end,
+                            matched_text=text[start:end],
+                            segment_index=segment_index,
+                            model_start=model_pos,
+                            model_end=model_pos + 1,
+                        ),
+                        evaluation=evaluate_ambiguous_mention(
+                            context_index(),
+                            context_start,
+                            context_start + 1,
+                            source=source,
+                            en=official[1],
+                        ),
+                    )
+                )
+            start = text.find(source, start + 1)
+    found.sort(key=lambda item: (item.occurrence.start, item.source))
+    return tuple(found)
+
+
+def _shift_ambiguous_after_locks(
+    ambiguous: Sequence[AmbiguousMention], deltas: Sequence[tuple[int, int]]
+) -> tuple[AmbiguousMention, ...]:
+    """Move ambiguous model coordinates past placeholders added by selective locking."""
+    if not deltas:
+        return tuple(ambiguous)
+    shifted: list[AmbiguousMention] = []
+    for mention in ambiguous:
+        model_start = mention.occurrence.model_start
+        if type(model_start) is not int:
+            shifted.append(mention)
+            continue
+        shift = sum(delta for edge, delta in deltas if edge <= model_start)
+        shifted.append(mention.shifted_model(shift))
+    return tuple(shifted)
+
+
+def format_ambiguous_mention_lines(
+    locked_text: str,
+    ambiguous: Sequence[AmbiguousMention],
+    *,
+    to_chinese: bool,
+    radius: int = SCOPED_SNIPPET_RADIUS,
+) -> tuple[str, ...]:
+    """Render low-constraint lines for ambiguous mentions that met the threshold.
+
+    Only ``evaluation.admitted_as_low_constraint`` entries are rendered. Every
+    rendered coordinate is checked against ``locked_text`` (the exact model
+    input) first and a mismatch raises ``ValueError`` before any request is
+    sent. Nothing here adds a lock or a ``TermReference``.
+    """
+    grouped: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+    for mention in ambiguous:
+        if not mention.evaluation.admitted_as_low_constraint:
+            continue
+        start = mention.occurrence.model_start
+        end = mention.occurrence.model_end
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or start < 0
+            or end <= start
+            or end > len(locked_text)
+            or locked_text[start:end] != mention.source
+        ):
+            raise ValueError("ambiguous mention range does not match the model input")
+        target = mention.zh if to_chinese else mention.en
+        grouped.setdefault((mention.source, target, mention.category), []).append(
+            (start, end)
+        )
+    lines: list[str] = []
+    for (source, target, category), spans in grouped.items():
+        snippets = list(
+            dict.fromkeys(
+                _local_context_snippet(locked_text, start, end, radius=radius)
+                for start, end in sorted(set(spans))
+            )
+        )
+        lines.append(
+            f"{source} = {target} ({category}) — POSSIBLY at: {'; '.join(snippets)}"
+        )
+    return tuple(lines)
+
+
 def _collect_scoped_skill_references(
     text: str,
     context_text: str,
@@ -855,6 +1149,27 @@ def _lock_mixed_single_char_names(
     placeholder_prefix: str,
     placeholder_offset: int = 0,
 ) -> tuple[str, tuple[Lock, ...], tuple[TermReference, ...]]:
+    """Selectively lock mixed one-character names; see the ``_with_deltas`` core."""
+    text_after, locks_after, refs_after, _deltas = _lock_mixed_single_char_names_with_deltas(
+        locked_text,
+        locks,
+        references,
+        placeholder_prefix=placeholder_prefix,
+        placeholder_offset=placeholder_offset,
+    )
+    return text_after, locks_after, refs_after
+
+
+def _lock_mixed_single_char_names_with_deltas(
+    locked_text: str,
+    locks: Sequence[Lock],
+    references: Sequence[TermReference],
+    *,
+    placeholder_prefix: str,
+    placeholder_offset: int = 0,
+) -> tuple[
+    str, tuple[Lock, ...], tuple[TermReference, ...], tuple[tuple[int, int], ...]
+]:
     """Selectively lock admitted single-char CJK names when mixed with unadmitted ones.
 
     On ``zh->en``, when an admitted single-character resonator/speaker name
@@ -934,7 +1249,7 @@ def _lock_mixed_single_char_names(
             spans_to_lock.append((start, end, ref.zh, ref.en))
 
     if not spans_to_lock:
-        return locked_text, tuple(locks), tuple(references)
+        return locked_text, tuple(locks), tuple(references), ()
 
     spans_to_lock.sort(key=lambda item: (item[0], item[1]))
     new_parts: list[str] = []
@@ -984,7 +1299,7 @@ def _lock_mixed_single_char_names(
                 reason=ref.reason,
             )
         )
-    return updated_text, tuple(new_locks), tuple(updated_refs)
+    return updated_text, tuple(new_locks), tuple(updated_refs), tuple(deltas)
 
 
 def prepare_term_segment(
@@ -1009,8 +1324,15 @@ def prepare_term_segment(
     single_newline_paragraphs: bool = False,
     skill_refs: tuple[SkillReference, ...] = (),
     defer_mixed_single_char_locking: bool = False,
+    ambiguous_context_index: RequestContextIndex | None = None,
 ) -> PreparedTerms:
-    """Prepare one visible segment; offsets refer to its full visible context."""
+    """Prepare one visible segment; offsets refer to its full visible context.
+
+    ``ambiguous_context_index`` lets a multi-segment caller evaluate ambiguous
+    one-character mentions against the whole request once; without it the
+    index is built lazily from ``context_text`` the first time an ambiguous
+    occurrence is found.
+    """
     candidates = reference_candidates if (to_chinese is not None and reference_candidates) else {}
     if soft_sources is None:
         if to_chinese is not None and candidates:
@@ -1034,6 +1356,7 @@ def prepare_term_segment(
             for span in selected
             if reference_span_admitted(span, context_text, context_offset)
         ]
+    primary_selected = selected
 
     # Paragraph-level non-derived official term context gates both derived
     # common-noun references (context_gated_reference_only) and derived
@@ -1209,18 +1532,73 @@ def prepare_term_segment(
             index_by_key,
             segment_index=segment_index,
         )
+    ambiguous_mentions: tuple[AmbiguousMention, ...] = ()
+    if to_chinese is not None:
+        index_cache: list[RequestContextIndex] = (
+            [ambiguous_context_index] if ambiguous_context_index is not None else []
+        )
+
+        def context_index() -> RequestContextIndex:
+            if not index_cache:
+                index_cache.append(
+                    _ambiguous_context_index(
+                        context_text,
+                        (
+                            paragraph_spans
+                            if paragraph_spans is not None
+                            else _paragraph_spans(
+                                context_text,
+                                single_newline_paragraphs=single_newline_paragraphs,
+                            )
+                        ),
+                        lockable=lockable,
+                        categories=categories,
+                        reference_only=reference_only,
+                        allow_plural_inflection=allow_plural_inflection,
+                        nfkc_spelling_sources=(
+                            nfkc_spelling_sources if context_text == text else frozenset()
+                        ),
+                        preselected=(
+                            primary_selected
+                            if context_text == text and context_offset == 0
+                            else None
+                        ),
+                    )
+                )
+            return index_cache[0]
+
+        ambiguous_mentions = _collect_ambiguous_mentions(
+            text,
+            context_text,
+            context_offset,
+            lockable,
+            categories,
+            selected,
+            replacements,
+            context_index,
+            segment_index=segment_index,
+        )
     parts.append(text[index:])
     assembled_text = "".join(parts)
     if to_chinese is False and not defer_mixed_single_char_locking:
-        final_text, final_locks, final_refs = _lock_mixed_single_char_names(
-            assembled_text,
-            locks,
-            references,
-            placeholder_prefix=placeholder_prefix,
-            placeholder_offset=placeholder_offset,
+        final_text, final_locks, final_refs, deltas = (
+            _lock_mixed_single_char_names_with_deltas(
+                assembled_text,
+                locks,
+                references,
+                placeholder_prefix=placeholder_prefix,
+                placeholder_offset=placeholder_offset,
+            )
         )
-        return PreparedTerms(final_text, final_locks, final_refs)
-    return PreparedTerms(assembled_text, tuple(locks), tuple(references))
+        return PreparedTerms(
+            final_text,
+            final_locks,
+            final_refs,
+            _shift_ambiguous_after_locks(ambiguous_mentions, deltas),
+        )
+    return PreparedTerms(
+        assembled_text, tuple(locks), tuple(references), ambiguous_mentions
+    )
 
 
 def prepare_protected_terms(
@@ -1276,9 +1654,24 @@ def prepare_protected_terms(
                 nfkc_spelling_sources=frozenset(),
             )
 
+    ambiguous_index: RequestContextIndex | None = None
+    if to_chinese is not None and _has_ambiguous_single_char_candidate(
+        context_text, lockable, categories
+    ):
+        ambiguous_index = _ambiguous_context_index(
+            context_text,
+            para_spans if para_spans is not None else _paragraph_spans(context_text),
+            lockable=lockable,
+            categories=categories,
+            reference_only=reference_only,
+            allow_plural_inflection=allow_plural_inflection,
+            nfkc_spelling_sources=frozenset(),
+        )
+
     locked_segments: list[str] = []
     locks: list[Lock] = []
     references: list[TermReference] = []
+    ambiguous: list[AmbiguousMention] = []
     index_by_key: dict[tuple[str, str, str, str], int] = {}
     model_offset = 0
     placeholder_lengths = protected.placeholder_lengths
@@ -1304,9 +1697,13 @@ def prepare_protected_terms(
             paragraph_spans=para_spans,
             skill_refs=skill_refs,
             defer_mixed_single_char_locking=True,
+            ambiguous_context_index=ambiguous_index,
         )
         locked_segments.append(prepared.locked_text)
         locks.extend(prepared.locks)
+        ambiguous.extend(
+            mention.shifted_model(model_offset) for mention in prepared.ambiguous
+        )
         for reference in prepared.references:
             shifted = tuple(occ.shifted_model(model_offset) for occ in reference.occurrences)
             key = reference.dedupe_key()
@@ -1341,12 +1738,19 @@ def prepare_protected_terms(
 
     assembled = protected.for_model(tuple(locked_segments))
     if to_chinese is False:
-        final_text, final_locks, final_refs = _lock_mixed_single_char_names(
-            assembled,
-            locks,
-            references,
-            placeholder_prefix=placeholder_prefix,
-            placeholder_offset=0,
+        final_text, final_locks, final_refs, deltas = (
+            _lock_mixed_single_char_names_with_deltas(
+                assembled,
+                locks,
+                references,
+                placeholder_prefix=placeholder_prefix,
+                placeholder_offset=0,
+            )
         )
-        return PreparedTerms(final_text, final_locks, final_refs)
-    return PreparedTerms(assembled, tuple(locks), tuple(references))
+        return PreparedTerms(
+            final_text,
+            final_locks,
+            final_refs,
+            _shift_ambiguous_after_locks(ambiguous, deltas),
+        )
+    return PreparedTerms(assembled, tuple(locks), tuple(references), tuple(ambiguous))

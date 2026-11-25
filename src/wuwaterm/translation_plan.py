@@ -30,7 +30,9 @@ from . import request_trace
 from .cjk_span import MATCHER_REVISION
 from .semantic_review_contract import PRECEDENT_WORDING
 from .term_preparation import (
+    AmbiguousMention,
     TermReference,
+    format_ambiguous_mention_lines,
     format_scoped_reference_lines,
     partition_references_for_prompt,
     references_need_scope_instruction,
@@ -45,6 +47,11 @@ ConcreteThinkingMode = Literal["disabled", "low", "high", "omit"]
 ConfiguredThinkingMode = Literal["disabled", "low", "high", "omit", "auto"]
 AttemptKind = Literal["initial", "timeout_fallback", "paragraph_repair"]
 ThinkingProtocol = Literal["deepseek_thinking_and_reasoning_effort", "omit_all"]
+AmbiguousMentionExposure = Literal["off", "scoped_alternative"]
+AMBIGUOUS_MENTION_EXPOSURES: tuple[AmbiguousMentionExposure, ...] = (
+    "off",
+    "scoped_alternative",
+)
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
@@ -119,6 +126,17 @@ SCOPED_REFERENCE_INSTRUCTION = (
     "or compounds.\n"
 )
 SCOPED_REFERENCE_HEADER = "Scoped term references:\n"
+# Offline/experimental only (RequestPolicy.ambiguous_mention_exposure). Not a
+# PromptTemplates field: the default prompt bytes and template identity stay
+# exactly as they are while exposure is "off".
+AMBIGUOUS_MENTION_INSTRUCTION = (
+    "Low-confidence name candidates below are NOT confirmed names. At each "
+    "listed spot the character may be an ordinary word or part of a longer "
+    "word. Use the listed official name only when that occurrence clearly "
+    "refers to the character in this text; otherwise translate its ordinary "
+    "meaning. Never apply a candidate outside its 'POSSIBLY at:' contexts.\n"
+)
+AMBIGUOUS_MENTION_HEADER = "Low-confidence name candidates:\n"
 SPEAKER_LABEL_DISAMBIGUATION_INSTRUCTION = (
     "When a term has both a (speaker) meaning and another meaning such as "
     "(item) or (core_term), use the (speaker) translation ONLY for a dialogue "
@@ -348,6 +366,18 @@ class RequestPolicy:
     retry_budget_headroom_seconds: float = RETRY_BUDGET_HEADROOM_SECONDS
     paragraph_regroup_enabled: bool = True
     paragraph_repair_enabled: bool = True
+    # "off" (default) keeps ambiguous one-character mentions out of the prompt
+    # and out of the policy identity entirely. "scoped_alternative" is for
+    # offline tests and future experiments only; production never sets it.
+    ambiguous_mention_exposure: AmbiguousMentionExposure = "off"
+
+    def __post_init__(self) -> None:
+        if self.ambiguous_mention_exposure not in AMBIGUOUS_MENTION_EXPOSURES:
+            raise ValueError(
+                "ambiguous_mention_exposure must be one of "
+                f"{AMBIGUOUS_MENTION_EXPOSURES}, "
+                f"got {self.ambiguous_mention_exposure!r}"
+            )
 
     def configured_mode(self, *, to_chinese: bool) -> ConfiguredThinkingMode:
         return (
@@ -439,6 +469,13 @@ class RequestPolicy:
         return True, timeout
 
     def to_identity_dict(self, *, to_chinese: bool | None = None) -> dict[str, Any]:
+        payload = self._base_identity_dict(to_chinese=to_chinese)
+        if self.ambiguous_mention_exposure != "off":
+            # Absent while "off" so every existing policy hash is unchanged.
+            payload["ambiguous_mention_exposure"] = self.ambiguous_mention_exposure
+        return payload
+
+    def _base_identity_dict(self, *, to_chinese: bool | None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "timeout_seconds": float(self.timeout_seconds),
             "max_corrective_calls": self.max_corrective_calls,
@@ -752,6 +789,10 @@ class TranslationPlan:
     dictionary_identity: str | None = None
     matcher_revision: str = MATCHER_REVISION
     prompt_templates: PromptTemplates = DEFAULT_PROMPT_TEMPLATES
+    # Ambiguous one-character mentions recorded by term preparation. They are
+    # rendered only under ``ambiguous_mention_exposure="scoped_alternative"``
+    # and only from this precomputed state, never re-evaluated from ``context``.
+    ambiguous: tuple[AmbiguousMention, ...] = ()
 
     @property
     def direction(self) -> Direction:
@@ -830,8 +871,17 @@ def build_translation_messages(
     *,
     en_zh_protocol: bool = False,
     prompt_suffix: str = "",
+    ambiguous_mention_exposure: AmbiguousMentionExposure = "off",
 ) -> tuple[dict[str, str], ...]:
-    """Assemble the exact system/user message pair for ``plan``."""
+    """Assemble the exact system/user message pair for ``plan``.
+
+    With ``ambiguous_mention_exposure="off"`` (the default) ``plan.ambiguous``
+    is not read and the messages are byte-identical to a plan without it.
+    """
+    if ambiguous_mention_exposure not in AMBIGUOUS_MENTION_EXPOSURES:
+        raise ValueError(
+            f"unknown ambiguous_mention_exposure {ambiguous_mention_exposure!r}"
+        )
     coerced_refs = tuple(coerce_term_reference(item) for item in plan.references)
     global_refs, scoped_refs = partition_references_for_prompt(
         plan.locked_text, coerced_refs
@@ -909,6 +959,17 @@ def build_translation_messages(
             prefix = "\n" if reference_lines else ""
             system_content += (
                 prefix + templates.scoped_reference_header + "\n".join(scoped_lines)
+            )
+    if ambiguous_mention_exposure == "scoped_alternative" and plan.ambiguous:
+        ambiguous_lines = format_ambiguous_mention_lines(
+            plan.locked_text, plan.ambiguous, to_chinese=plan.to_chinese
+        )
+        if ambiguous_lines:
+            system_content += (
+                "\n"
+                + AMBIGUOUS_MENTION_INSTRUCTION
+                + AMBIGUOUS_MENTION_HEADER
+                + "\n".join(ambiguous_lines)
             )
     if plan.context is not None:
         system_content += render_context_instruction(
@@ -1196,6 +1257,7 @@ def build_translation_request_spec(
         plan,
         en_zh_protocol=policy.en_zh_protocol,
         prompt_suffix=prompt_suffix,
+        ambiguous_mention_exposure=policy.ambiguous_mention_exposure,
     )
     thinking_mode = (
         thinking_mode_override
