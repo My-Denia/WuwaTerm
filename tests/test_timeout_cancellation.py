@@ -47,6 +47,14 @@ TEST_SECRET = "unguessable-material-for-tests-0123456789abcdef"
 HANG_SECONDS = 30.0
 # How long a test waits after the 504 before deciding nothing else happened.
 SETTLE_SECONDS = 0.3
+# The request budget for tests that need the request to REACH a stage (slot
+# queue, model POST) before the budget ends. The budget starts at the
+# middleware, so authentication, body read and pipeline set-up all spend it
+# first; under CPU contention that set-up alone has outlasted 100-200 ms and the
+# request timed out at ``init`` before reaching the stage under test. One second
+# keeps a wide margin over that set-up while the test still only waits for the
+# one deadline it is about.
+REQUEST_BUDGET_SECONDS = 1.0
 
 
 def build_app(tmp_path, db_path, **overrides):
@@ -179,7 +187,10 @@ def test_a_request_timed_out_waiting_for_a_slot_never_starts_a_call(
     """
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.15, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
     counting = Counter()
     app.state.translator._llm_transport = counting.transport()
@@ -221,7 +232,7 @@ def test_a_request_timed_out_waiting_for_a_slot_never_starts_a_call(
     assert record["llm_calls"] == "0", record
     assert record["llm_post_ms"] == "0.0", record
     assert float(record["slot_wait_ms"]) > 0.0, record
-    assert float(record["elapsed_ms"]) >= 140, record
+    assert float(record["elapsed_ms"]) >= REQUEST_BUDGET_SECONDS * 1000 * 0.95, record
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +254,10 @@ def test_a_request_timed_out_during_the_post_cancels_it_and_frees_the_slot(
     """
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.2, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
     counting = Counter()
     app.state.translator._llm_transport = counting.transport()
@@ -271,7 +285,7 @@ def test_a_request_timed_out_during_the_post_cancels_it_and_frees_the_slot(
     assert record["llm_calls"] == "1", record
     assert float(record["llm_post_ms"]) > 0.0, record
     assert float(record["llm_post_ms"]) <= float(record["elapsed_ms"]), record
-    assert float(record["elapsed_ms"]) >= 190, record
+    assert float(record["elapsed_ms"]) >= REQUEST_BUDGET_SECONDS * 1000 * 0.95, record
 
     # The permit is back without anything else having to time out for it: the
     # next request acquires the slot and answers.
@@ -301,9 +315,13 @@ def test_a_post_still_running_when_the_deadline_arrives_is_not_left_to_finish(
     """
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.15, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
-    counting = Counter(delay=0.6)
+    # Would wake up on its own well after the deadline.
+    counting = Counter(delay=REQUEST_BUDGET_SECONDS + 0.4)
     app.state.translator._llm_transport = counting.transport()
     token = issue_token(store)
 
@@ -344,14 +362,17 @@ def test_a_failing_post_across_the_deadline_starts_no_retry_or_fallback(
     """
     llm_env(monkeypatch)
     app, store = build_app(
-        tmp_path, sample_db, request_timeout_seconds=0.15, llm_max_concurrency=1
+        tmp_path,
+        sample_db,
+        request_timeout_seconds=REQUEST_BUDGET_SECONDS,
+        llm_max_concurrency=1,
     )
     attempts: list[float] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         attempts.append(asyncio.get_running_loop().time())
         # Outlives the deadline, then fails as a transient error would.
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(REQUEST_BUDGET_SECONDS + 0.25)
         raise httpx.ConnectError("provider went away", request=request)
 
     app.state.translator._llm_transport = httpx.MockTransport(handler)
@@ -401,9 +422,9 @@ def test_a_long_text_timed_out_mid_way_does_not_translate_its_next_segment(
     async def scenario():
         request_trace.start()
         try:
-            request_trace.set_deadline(0.2)
+            request_trace.set_deadline(REQUEST_BUDGET_SECONDS)
             with pytest.raises(TimeoutError):
-                with anyio.fail_after(0.2):
+                with anyio.fail_after(REQUEST_BUDGET_SECONDS):
                     await translate_request_async(
                         service,
                         translator,

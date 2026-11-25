@@ -33,6 +33,13 @@ EXPECTED_COMPLETION_STAGE = EXPECTED_COMPLETION_BASE | {
 }
 
 
+# The budget starts when the request enters the API, so request set-up spends it
+# before the handler runs. A budget near the set-up cost (100 ms) timed out at
+# ``init`` under CPU contention, before the model POST this test is about; one
+# second keeps a wide margin and still only waits for the one deadline.
+TIMEOUT_BUDGET_SECONDS = 1.0
+
+
 class _ListHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
@@ -144,12 +151,13 @@ def test_api_runtime_metrics_and_strategy_summary_end_to_end(
 
         # 6. Dedicated tight-timeout app to exercise 504 request timeout accounting.
         timeout_app, timeout_token = _make_app(
-            tmp_path / "timeout", sample_db, request_timeout=0.1
+            tmp_path / "timeout", sample_db, request_timeout=TIMEOUT_BUDGET_SECONDS
         )
         timeout_headers = {"Authorization": f"Bearer {timeout_token}"}
 
         async def slow_handler(_request: httpx.Request) -> httpx.Response:
-            await asyncio.sleep(0.35)
+            # Answers long after the budget; the deadline cancels it first.
+            await asyncio.sleep(TIMEOUT_BUDGET_SECONDS * 5)
             return httpx.Response(200, json={"choices": [{"message": {"content": "late"}}]})
 
         timeout_app.state.translator._llm_transport = httpx.MockTransport(slow_handler)
