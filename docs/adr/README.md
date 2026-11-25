@@ -26,5 +26,6 @@ records are intentionally absent.
 | [0018](0018-semantic-review.md) | Semantic review keeps model findings and dictionary constraints apart | Accepted (contract); engine pending |
 | [0019](0019-document-context-and-human-precedents.md) | Document context and human precedents for model calls | Accepted (contract); supplements 0017 |
 | [0020](0020-held-out-usability-evaluation.md) | Held-out usability evaluation of translations | Accepted (evaluation protocol) |
+| [0021](0021-local-user-termbase.md) | Local user termbase (`wuwaterm-termbase-v1`) and Core engine next-step research | Proposed (architecture and format spec; pending implementation) |
 
 Maintainer map: [Architecture](../architecture.md).
