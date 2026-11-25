@@ -67,6 +67,7 @@ from wuwaterm import llm_transport  # noqa: E402
 from wuwaterm.review import VERDICT_VERIFIED, review_pair  # noqa: E402
 from wuwaterm.segmentation import WHITESPACE, pair_segments, segment_text  # noqa: E402
 from wuwaterm.semantic_review import (  # noqa: E402
+    SEMANTIC_MODEL_ENV,
     Precedent,
     SemanticReviewJob,
 )
@@ -1596,6 +1597,19 @@ async def legacy_translate_plain(
     return out
 
 
+def _review_pair_complete(review: Any) -> bool:
+    if not isinstance(review, Mapping):
+        return False
+    if review.get("skipped"):
+        return True
+    if review.get("error_code") or review.get("timeout"):
+        return False
+    body = review.get("body")
+    if not isinstance(body, Mapping):
+        return False
+    return body.get("status") != "not_reviewed"
+
+
 def result_complete(data: Mapping[str, Any]) -> bool:
     """Whether a saved result needs no retry, child results included.
 
@@ -1603,7 +1617,9 @@ def result_complete(data: Mapping[str, Any]) -> bool:
     ``without_precedent``; an M document keeps its reviews in ``reviews``.
     A failure in any of them makes the whole result unfinished.
     """
-    if data.get("error_code"):
+    if not isinstance(data, Mapping):
+        return False
+    if data.get("error_code") or data.get("timeout"):
         return False
     if data.get("layer") == "direct_baseline":
         return (
@@ -1613,11 +1629,20 @@ def result_complete(data: Mapping[str, Any]) -> bool:
         )
     if data.get("layer") == "Mprime":
         return all(
-            not (data.get(name) or {}).get("error_code") and (data.get(name) or {}).get("text")
+            isinstance(data.get(name), Mapping)
+            and not data[name].get("error_code")
+            and not data[name].get("timeout")
+            and bool(data[name].get("text"))
             for name in ("with_precedent", "without_precedent")
         )
     if data.get("layer") == "M":
-        return all(review.get("skipped") or not review.get("error_code") for review in data.get("reviews", []))
+        reviews = data.get("reviews")
+        if not isinstance(reviews, list):
+            return False
+        new_part = data.get("new")
+        if isinstance(new_part, Mapping) and new_part.get("segments") and not reviews:
+            return False
+        return all(_review_pair_complete(review) for review in reviews)
     return True
 
 
@@ -1639,7 +1664,11 @@ class Runner:
         path = self.out_dir / rel
         if not (self.resume and path.is_file()):
             return False
-        return result_complete(load_json(path))
+        try:
+            data = load_json(path)
+        except (OSError, ValueError, TypeError):
+            return False
+        return result_complete(data)
 
     def save(self, rel: str, data: Any) -> None:
         write_json_atomic(self.out_dir / rel, data)
@@ -1754,17 +1783,36 @@ class Runner:
 
     # -- M ----------------------------------------------------------------
     async def run_m(self) -> None:
+        _base_url, _api_key, raw_m_model = llm_transport.resolve_llm_config()
+        current_m_model = _normalize_valid_model(raw_m_model)
+        _s_base, _s_key, raw_review_model = llm_transport.resolve_llm_config(SEMANTIC_MODEL_ENV)
+        current_review_model = _normalize_valid_model(raw_review_model)
         for doc in self.inputs.m_gold["docs"]:
             if self.done(f"M/{doc}.json"):
                 continue
             raw = self.inputs.doc_text(doc)
+            m_source_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
             # The old path prepares the whole text (blank lines folded away);
             # the new path cuts the text as written, like Core does.
             prepared = self.translator.prepare_text(raw)
             partial_rel = f"M/{doc}.translations.json"
-            if self.resume and (self.out_dir / partial_rel).is_file():
-                # Translations finished in an earlier attempt are reused, not re-bought.
-                partial = load_json(self.out_dir / partial_rel)
+            partial_path = self.out_dir / partial_rel
+            if self.resume and partial_path.is_file():
+                # Translations finished in an earlier attempt are reused after verifying identity.
+                try:
+                    partial = load_json(partial_path)
+                except (OSError, ValueError, TypeError) as exc:
+                    raise Refused(f"corrupt M translation cache in {partial_rel}: {exc}") from exc
+                if not isinstance(partial, Mapping):
+                    raise Refused(f"invalid M translation cache in {partial_rel}")
+                cached_hash = partial.get("source_text_hash")
+                if cached_hash is not None and cached_hash != m_source_hash:
+                    raise Refused(f"M translation cache source hash mismatch in {doc}")
+                cached_model = _normalize_valid_model(partial.get("model"))
+                if (cached_model is not None or current_m_model is not None) and cached_model != current_m_model:
+                    raise Refused(
+                        f"M translation cache model mismatch in {doc}: cached {cached_model!r} != {current_m_model!r}"
+                    )
                 old_pairs = [(c["source"], c["translation"]) for c in partial["old"]["chunks"]]
                 old_latency = partial["old"]["latency_s"]
                 segments_out = partial["new"]["segments"]
@@ -1821,9 +1869,6 @@ class Runner:
                 if outcome.error_code is not None:
                     raise Refused(f"new-path translation failed in {doc}: {outcome.error_code}")
                 new_text = outcome.text
-                _base_url, _api_key, raw_m_model = llm_transport.resolve_llm_config()
-                m_model = _normalize_valid_model(raw_m_model)
-                m_source_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                 m_provenance = {
                     "case_id": f"M:{doc}",
                     "direction": "zh->en",
@@ -1831,10 +1876,10 @@ class Runner:
                     "source_text_hash": m_source_hash,
                     "source_length": len(raw),
                 }
-                if m_model is not None:
-                    m_provenance["model"] = m_model
+                if current_m_model is not None:
+                    m_provenance["model"] = current_m_model
                     m_provenance["request_params"] = {
-                        "model": m_model,
+                        "model": current_m_model,
                         "direction": "zh->en",
                         "to_chinese": False,
                         "temperature": 0.0,
@@ -1855,6 +1900,37 @@ class Runner:
             # client pairs a manuscript (segmentation-v1 bilingual pairing):
             # an English translation of 1,800 Chinese scalars is often longer
             # than one review side may be.
+            reviews_partial_rel = f"M/{doc}.reviews.partial.json"
+            cached_reviews: dict[tuple[int, int, str, str], dict[str, Any]] = {}
+            if self.resume:
+                for seed_rel in (f"M/{doc}.json", reviews_partial_rel):
+                    seed_path = self.out_dir / seed_rel
+                    if not seed_path.is_file():
+                        continue
+                    with contextlib.suppress(OSError, ValueError, TypeError):
+                        seed = load_json(seed_path)
+                        if not isinstance(seed, Mapping):
+                            continue
+                        seed_hash = seed.get("source_text_hash")
+                        if seed_hash is not None and seed_hash != m_source_hash:
+                            continue
+                        seed_rmodel = _normalize_valid_model(seed.get("review_model"))
+                        if seed_rmodel != current_review_model:
+                            continue
+                        for existing_review in seed.get("reviews") or ():
+                            if (
+                                _review_pair_complete(existing_review)
+                                and not existing_review.get("skipped")
+                                and isinstance(existing_review.get("segment"), int)
+                                and isinstance(existing_review.get("pair"), int)
+                            ):
+                                key_tuple = (
+                                    existing_review["segment"],
+                                    existing_review["pair"],
+                                    str(existing_review.get("pair_source", "")),
+                                    str(existing_review.get("pair_target", "")),
+                                )
+                                cached_reviews[key_tuple] = dict(existing_review)
             reviews = []
             for index, seg in enumerate(segments_out):
                 core = raw[seg["core_start"] : seg["core_end"]]
@@ -1872,6 +1948,10 @@ class Runner:
                     if pair.status != "ready":
                         reviews.append({**entry, "skipped": True})
                         continue
+                    cached_pair = cached_reviews.get((index, pair.index, pair_source, pair_target))
+                    if cached_pair is not None:
+                        reviews.append(cached_pair)
+                        continue
                     result = await self.review(
                         f"M:{doc}:seg{index}:pair{pair.index}",
                         SemanticReviewJob(
@@ -1882,27 +1962,38 @@ class Runner:
                         ),
                     )
                     reviews.append({**entry, **result})
-            self.save(
-                f"M/{doc}.json",
-                {
-                    "layer": "M",
-                    "doc": doc,
-                    **m_provenance,
-                    "raw": raw,
-                    "prepared": prepared,
-                    "old": {
-                        "text": "\n".join(t for _, t in old_pairs),
-                        "chunks": [{"source": c, "translation": t} for c, t in old_pairs],
-                        "latency_s": round(old_latency, 3),
-                    },
-                    "new": {
-                        "text": new_text,
-                        "segments": segments_out,
-                        "latency_s": round(new_latency, 3),
-                    },
-                    "reviews": reviews,
+                    partial_payload: dict[str, Any] = {
+                        "layer": "M_reviews_partial",
+                        "doc": doc,
+                        "source_text_hash": m_source_hash,
+                        "reviews": reviews,
+                    }
+                    if current_review_model is not None:
+                        partial_payload["review_model"] = current_review_model
+                    self.save(reviews_partial_rel, partial_payload)
+            m_payload: dict[str, Any] = {
+                "layer": "M",
+                "doc": doc,
+                **m_provenance,
+                "raw": raw,
+                "prepared": prepared,
+                "old": {
+                    "text": "\n".join(t for _, t in old_pairs),
+                    "chunks": [{"source": c, "translation": t} for c, t in old_pairs],
+                    "latency_s": round(old_latency, 3),
                 },
-            )
+                "new": {
+                    "text": new_text,
+                    "segments": segments_out,
+                    "latency_s": round(new_latency, 3),
+                },
+                "reviews": reviews,
+            }
+            if current_review_model is not None:
+                m_payload["review_model"] = current_review_model
+            self.save(f"M/{doc}.json", m_payload)
+            with contextlib.suppress(FileNotFoundError):
+                (self.out_dir / reviews_partial_rel).unlink()
 
     # -- M' ---------------------------------------------------------------
     async def run_mprime(self, include_supplementary: bool) -> None:
@@ -1920,25 +2011,56 @@ class Runner:
                 source_end=raw["anchor"]["source_end"],
             )
             for target in experiment["targets"]:
-                if self.done(f"Mprime/{experiment['experiment']}-P{target['para']}.json"):
+                rel = f"Mprime/{experiment['experiment']}-P{target['para']}.json"
+                if self.done(rel):
                     continue
+                existing: Mapping[str, Any] = {}
+                target_path = self.out_dir / rel
+                if self.resume and target_path.is_file():
+                    with contextlib.suppress(OSError, ValueError, TypeError):
+                        loaded = load_json(target_path)
+                        if (
+                            isinstance(loaded, Mapping)
+                            and loaded.get("experiment") == experiment["experiment"]
+                            and loaded.get("source") == target["text"]
+                        ):
+                            existing = loaded
                 out: dict[str, Any] = {
                     "layer": "Mprime",
                     "experiment": experiment["experiment"],
                     "target_para": target["para"],
                     "source": target["text"],
+                    "with_precedent": {},
+                    "without_precedent": {},
                 }
+                for condition, _precedents in (
+                    ("with_precedent", (precedent,)),
+                    ("without_precedent", ()),
+                ):
+                    cached_cond = existing.get(condition)
+                    if (
+                        isinstance(cached_cond, Mapping)
+                        and not cached_cond.get("error_code")
+                        and not cached_cond.get("timeout")
+                        and bool(cached_cond.get("text"))
+                    ):
+                        out[condition] = dict(cached_cond)
                 for condition, precedents in (
                     ("with_precedent", (precedent,)),
                     ("without_precedent", ()),
                 ):
+                    if (
+                        isinstance(out.get(condition), Mapping)
+                        and not out[condition].get("error_code")
+                        and not out[condition].get("timeout")
+                        and bool(out[condition].get("text"))
+                    ):
+                        continue
                     out[condition] = await self.translate(
                         target["text"],
                         app_layer.TranslationContext(precedents=precedents),
                     )
-                self.save(
-                    f"Mprime/{experiment['experiment']}-P{target['para']}.json", out
-                )
+                    self.save(rel, out)
 
     async def direct_translate(
         self,
@@ -2143,9 +2265,10 @@ class Runner:
                 self.save(rel, result)
                 executed_map[(case.case_id, case.direction)] = result
 
-                if result["error_code"] == "budget_exhausted":
+                error_code = result.get("error_code")
+                if error_code == "budget_exhausted":
                     raise Refused(f"budget stop during direct translation at {case.case_id}")
-                if result["error_code"] == "timeout":
+                if error_code == "timeout":
                     self.timeout_streak += 1
                     if self.timeout_streak >= TIMEOUT_STREAK_STOP:
                         raise Refused(
@@ -2153,6 +2276,14 @@ class Runner:
                         )
                 else:
                     self.timeout_streak = 0
+                    if (
+                        error_code == "gateway_not_configured"
+                        or error_code == "unexpected_error"
+                        or (isinstance(error_code, str) and error_code.startswith("gateway_error_"))
+                    ):
+                        raise Refused(
+                            f"gateway error {error_code} during direct translation at {case.case_id}"
+                        )
         finally:
             self._write_direct_baseline_manifest(
                 resolved_cases,
@@ -2244,23 +2375,83 @@ def live_run_pid(out_dir: Path) -> int | None:
         return None
     try:
         pid = int(load_json(path)["pid"])
-    except (ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError):
         return None
     return pid if _pid_alive(pid) else None
 
 
+_RUN_LOCK_FDS: dict[Path, tuple[int, int]] = {}
+
+
 def acquire_run_lock(out_dir: Path) -> None:
-    pid = live_run_pid(out_dir)
-    if pid is not None:
-        raise Refused(f"a run (pid {pid}) is still writing into {out_dir}")
-    # The Python pid itself: stopping a run means signalling this process,
-    # not the shell that started it.
-    write_json_atomic(out_dir / RUN_LOCK, {"pid": os.getpid(), "started_at": now_iso()})
+    resolved = out_dir.resolve()
+    if resolved in _RUN_LOCK_FDS:
+        raise Refused(f"a run (pid {os.getpid()}) is still writing into {out_dir}")
+    resolved.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved / RUN_LOCK
+    for _ in range(5):
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            pid = live_run_pid(resolved)
+            if pid is not None:
+                raise Refused(f"a run (pid {pid}) is still writing into {out_dir}")
+            raise Refused(f"a run is already acquiring the lock for {out_dir}")
+        try:
+            current_stat = lock_path.stat()
+            if current_stat.st_ino != os.fstat(fd).st_ino:
+                os.close(fd)
+                continue
+        except FileNotFoundError:
+            os.close(fd)
+            continue
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            existing_raw = os.pread(fd, 4096, 0).decode("utf-8", errors="ignore").strip()
+            if existing_raw:
+                with contextlib.suppress(ValueError, KeyError, TypeError):
+                    existing_pid = int(json.loads(existing_raw)["pid"])
+                    if existing_pid != os.getpid() and _pid_alive(existing_pid):
+                        raise Refused(f"a run (pid {existing_pid}) is still writing into {out_dir}")
+            payload = (json.dumps({"pid": os.getpid(), "started_at": now_iso()}, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
+            os.fsync(fd)
+            _RUN_LOCK_FDS[resolved] = (fd, os.fstat(fd).st_ino)
+            return
+        except BaseException:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+    raise Refused(f"could not acquire lock for {out_dir}")
 
 
 def release_run_lock(out_dir: Path) -> None:
-    with contextlib.suppress(FileNotFoundError):
-        (out_dir / RUN_LOCK).unlink()
+    resolved = out_dir.resolve()
+    held = _RUN_LOCK_FDS.pop(resolved, None)
+    lock_path = resolved / RUN_LOCK
+    if held is not None:
+        fd, locked_ino = held
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                if lock_path.stat().st_ino == locked_ino:
+                    lock_path.unlink()
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    else:
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            if lock_path.is_file() and int(load_json(lock_path)["pid"]) == os.getpid():
+                lock_path.unlink()
 
 
 def _raise_interrupt(signum, frame):  # noqa: ARG001
@@ -2319,9 +2510,7 @@ def _command_run(args: argparse.Namespace) -> int:
         out_dir = Path(args.out_dir).resolve()
         if out_dir == run_dir:
             raise Refused("--out-dir must not be the run directory")
-        out_dir.mkdir(parents=True, exist_ok=True)
         ledger_path = out_dir / "ledger.dry-run.json"
-        shutil.copyfile(real_ledger_path, ledger_path)
         os.environ["WUWATERM_OPENAI_BASE_URL"] = "http://dry-run.invalid/v1"
         os.environ["WUWATERM_OPENAI_API_KEY"] = "dry-run"
         os.environ["WUWATERM_OPENAI_MODEL"] = "dry-run"
@@ -2335,10 +2524,8 @@ def _command_run(args: argparse.Namespace) -> int:
             if args.out_dir
             else run_dir / "rounds" / f"round-{args.round}"
         )
-        out_dir.mkdir(parents=True, exist_ok=True)
         ledger_path = real_ledger_path
-    ledger = Ledger(ledger_path)
-    frozen = ledger.data.get("config_freeze")
+    frozen = ledger_data.get("config_freeze")
     # Check against the freeze with the algorithm that made it.
     fingerprint = config_fingerprint(int((frozen or {}).get("fingerprint_version", 1)) if frozen else FINGERPRINT_VERSION)
     if not args.fake_transport and args.round >= 1:
@@ -2351,51 +2538,73 @@ def _command_run(args: argparse.Namespace) -> int:
     # The evaluation measures the experimental feature, which is off by default.
     os.environ.setdefault(app_layer.SEMANTIC_REVIEW_ENABLED_ENV, "1")
 
-    llm_timeout = float(args.llm_timeout or os.getenv("WUWATERM_LLM_TIMEOUT_SECONDS") or 45.0)
+    if args.llm_timeout is not None:
+        llm_timeout = float(args.llm_timeout)
+    else:
+        env_timeout = os.getenv("WUWATERM_LLM_TIMEOUT_SECONDS")
+        if env_timeout is not None and env_timeout.strip():
+            try:
+                llm_timeout = float(env_timeout)
+            except ValueError as exc:
+                raise Refused(f"invalid WUWATERM_LLM_TIMEOUT_SECONDS={env_timeout!r}") from exc
+        else:
+            llm_timeout = 45.0
+    if not math.isfinite(llm_timeout) or llm_timeout <= 0:
+        raise Refused(f"--llm-timeout must be a finite positive number (got {llm_timeout})")
+
     run_parameters = {
         "translation_timeout_s": llm_timeout,
         "semantic_review_timeout_s": semantic_timeout_seconds(os.getenv(SEMANTIC_TIMEOUT_ENV)),
         "note": args.note or "",
     }
-    meta_path = out_dir / "run-meta.json"
-    meta = load_json(meta_path) if meta_path.is_file() else {}
-    history = list(meta.get("runs", []))
-    history.append({"at": now_iso(), "resume": bool(args.resume), **run_parameters})
-    write_json_atomic(
-        meta_path,
-        {
-            "round": args.round,
-            "reused_units": sorted(set(meta.get("reused_units", [])) | set(args.reused_units or [])),
-            "config": fingerprint,
-            "runs": history,
-        },
-    )
     acquire_run_lock(out_dir)
-    record_id = ledger.open_record(
-        purpose="eval",
-        round=args.round,
-        is_retry=bool(args.retry),
-        reused_samples=args.round > 1 or bool(args.reused_samples),
-        layers=list(layers),
-        reused_units=list(args.reused_units or []),
-        config_sha256=fingerprint["config_sha256"],
-        resumed=bool(args.resume),
-        run_parameters=run_parameters,
-        max_calls=args.max_calls,
-        dry_run=bool(args.fake_transport),
-        status="running",
-    )
-    remove_hook = llm_transport.add_pre_send_hook(lambda purpose: ledger.charge(record_id))
+    status = "failed"
+    ledger: Ledger | None = None
+    record_id: str | None = None
+    remove_hook = lambda: None  # noqa: E731
+    remove_observer = lambda: None  # noqa: E731
     observed: list[dict[str, Any]] = []
-    remove_observer = llm_transport.add_call_observer(
-        lambda rec: observed.append(
-            {"purpose": rec.purpose, "outcome": rec.outcome, "status": rec.status_code, "elapsed_ms": rec.elapsed_ms}
-        )
-    )
-    status = "complete"
     db_copy: Path | None = None
-    previous_handlers = _interrupt_on_terminate()
+    previous_handlers: dict[Any, Any] = {}
     try:
+        if args.fake_transport:
+            shutil.copyfile(real_ledger_path, ledger_path)
+        ledger = Ledger(ledger_path)
+        meta_path = out_dir / "run-meta.json"
+        meta = load_json(meta_path) if meta_path.is_file() else {}
+        history = list(meta.get("runs", []))
+        history.append({"at": now_iso(), "resume": bool(args.resume), **run_parameters})
+        write_json_atomic(
+            meta_path,
+            {
+                "round": args.round,
+                "reused_units": sorted(set(meta.get("reused_units", [])) | set(args.reused_units or [])),
+                "config": fingerprint,
+                "runs": history,
+            },
+        )
+        record_id = ledger.open_record(
+            purpose="eval",
+            round=args.round,
+            is_retry=bool(args.retry),
+            reused_samples=args.round > 1 or bool(args.reused_samples),
+            layers=list(layers),
+            reused_units=list(args.reused_units or []),
+            config_sha256=fingerprint["config_sha256"],
+            resumed=bool(args.resume),
+            run_parameters=run_parameters,
+            max_calls=args.max_calls,
+            dry_run=bool(args.fake_transport),
+            status="running",
+        )
+        active_record_id = record_id
+        remove_hook = llm_transport.add_pre_send_hook(lambda purpose: ledger.charge(active_record_id))
+        remove_observer = llm_transport.add_call_observer(
+            lambda rec: observed.append(
+                {"purpose": rec.purpose, "outcome": rec.outcome, "status": rec.status_code, "elapsed_ms": rec.elapsed_ms}
+            )
+        )
+        previous_handlers = _interrupt_on_terminate()
         # Set-up failures are recorded and release the lock like any stop.
         inputs = load_inputs(run_dir, corpus_dir)
         translator, service, db_copy = build_runtime(
@@ -2411,20 +2620,28 @@ def _command_run(args: argparse.Namespace) -> int:
                 direct_baseline_scope=getattr(args, "direct_baseline_scope", "m"),
             )
         )
+        status = "complete"
     except Refused as exc:
-        cap = ledger.record(record_id).get("cap_reached")
-        status = "capped by --max-calls" if cap else f"stopped: {exc}"
+        if ledger is not None and record_id is not None:
+            cap = ledger.record(record_id).get("cap_reached")
+            status = "capped by --max-calls" if cap else f"stopped: {exc}"
+        else:
+            status = f"stopped: {exc}"
     except KeyboardInterrupt:
         status = "interrupted"
+    except Exception as exc:
+        status = f"failed: {type(exc).__name__}: {exc}"
+        raise
     finally:
         _restore_handlers(previous_handlers)
         remove_hook()
         remove_observer()
-        ledger.update(record_id, status=status, finished_at=now_iso())
-        # calls.json is cumulative across the attempts of one round.
-        calls_path = out_dir / "calls.json"
-        earlier = load_json(calls_path) if args.resume and calls_path.is_file() else []
-        write_json_atomic(calls_path, [*earlier, *observed])
+        if ledger is not None and record_id is not None:
+            ledger.update(record_id, status=status, finished_at=now_iso())
+            # calls.json is cumulative across the attempts of one round.
+            calls_path = out_dir / "calls.json"
+            earlier = load_json(calls_path) if args.resume and calls_path.is_file() else []
+            write_json_atomic(calls_path, [*earlier, *observed])
         if db_copy is not None:
             shutil.rmtree(db_copy.parent, ignore_errors=True)
         release_run_lock(out_dir)
@@ -2440,8 +2657,8 @@ def _command_run(args: argparse.Namespace) -> int:
             {
                 "status": status,
                 "layers": list(layers),
-                "calls_this_run": ledger.record(record_id)["calls"],
-                "ledger_total": ledger.total,
+                "calls_this_run": ledger.record(record_id)["calls"] if ledger is not None and record_id is not None else 0,
+                "ledger_total": ledger.total if ledger is not None else int(ledger_data.get("model_calls_total", 0)),
                 "ledger": str(ledger_path),
                 "out_dir": str(out_dir),
             },
@@ -2642,7 +2859,17 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
         issues = stats.add(result, source, target)
         bucket = per_direction.setdefault(
             direction,
-            {"on_allowed_mh": 0, "offlist_mh": 0, "offlist_fp_mh": 0, "offlist_pending_mh": 0, "on_real": 0, "on_undecidable": 0, "issues": 0, "not_reviewed": 0},
+            {
+                "on_allowed_mh": 0,
+                "offlist_mh": 0,
+                "offlist_fp_mh": 0,
+                "offlist_undecidable_mh": 0,
+                "offlist_pending_mh": 0,
+                "on_real": 0,
+                "on_undecidable": 0,
+                "issues": 0,
+                "not_reviewed": 0,
+            },
         )
         if result.get("body") and result["body"]["status"] != "complete":
             bucket["not_reviewed"] += 1
@@ -2671,6 +2898,8 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
                     bucket["offlist_mh"] += 1
                     if verdict in ("allowed_rewrite", "model_misread"):
                         bucket["offlist_fp_mh"] += 1
+                    elif verdict == "undecidable":
+                        bucket["offlist_undecidable_mh"] += 1
                     elif verdict is None:
                         bucket["offlist_pending_mh"] += 1
                 if verdict is None:
@@ -2693,7 +2922,7 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
             gates[f"P_false_positives_{direction}"] = gate(NOT_EXECUTED, reason="not run")
             continue
         lower = bucket["on_allowed_mh"] + bucket["offlist_fp_mh"]
-        upper = lower + bucket["offlist_pending_mh"]
+        upper = lower + bucket["offlist_pending_mh"] + bucket["offlist_undecidable_mh"]
         missing = sorted(set(units) - covered[direction])
         if lower > limit:
             # Unreviewed units can only add false positives: already decided.
@@ -2702,6 +2931,8 @@ def score_p(inputs: Inputs, out_dir: Path, stats: ReviewStats) -> dict[str, Any]
             state = UNDECIDABLE
         else:
             state = bounded_gate(lower, upper, lambda value: value <= limit)
+            if state == PENDING and bucket["offlist_pending_mh"] == 0 and bucket["offlist_undecidable_mh"] > 0:
+                state = UNDECIDABLE
         gates[f"P_false_positives_{direction}"] = gate(
             state,
             units_expected=len(units),
@@ -2923,12 +3154,22 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     mh_issues: list[dict[str, Any]] = []
     verified = {"old": 0, "new": 0}
     pair_counts: dict[str, dict[str, int]] = {}
+    incomplete_reviews: list[str] = []
     for doc in docs:
         fidelity[doc["doc"]] = separator_fidelity(doc["raw"], doc["new"]["segments"], doc["new"]["text"])
         pair_counts[doc["doc"]] = {}
+        if doc["new"].get("segments") and not doc["reviews"]:
+            incomplete_reviews.append(f"{doc['doc']}:no_reviews")
         for review in doc["reviews"]:
             status = review.get("pair_status", "ready")
             pair_counts[doc["doc"]][status] = pair_counts[doc["doc"]].get(status, 0) + 1
+            if status == "ready" and (
+                review.get("skipped")
+                or review.get("error_code") is not None
+                or review.get("timeout")
+                or (review.get("body") or {}).get("status") != "complete"
+            ):
+                incomplete_reviews.append(f"{doc['doc']}:seg{review.get('segment')}:pair{review.get('pair')}")
             if review.get("skipped"):
                 continue
             for issue in stats.add(review, review["pair_source"], review["pair_target"]):
@@ -2976,11 +3217,18 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
         # precise: it stays in the denominator and never joins the numerator.
         precision = true_count / (len(decided) + len(undecided)) if (decided or undecided) else 0.0
         state = MET if precision >= M_PRECISION_MIN else NOT_MET
+    precision_reason = ""
+    if incomplete_reviews:
+        state = UNDECIDABLE
+        precision_reason = "incomplete reviews"
     decided_precision = true_count / (len(judged) - len(undecided)) if len(judged) > len(undecided) else None
-    gates["M_precision"] = gate(
-        state, n=len(mh_issues), min_sample=M_PRECISION_MIN_SAMPLE, judged=len(judged), true=true_count,
+    gates["M_precision"] = _gate_with(
+        state,
+        precision_reason,
+        n=len(mh_issues), min_sample=M_PRECISION_MIN_SAMPLE, judged=len(judged), true=true_count,
         undecidable=len(undecided), precision=None if not judged else round(true_count / len(judged), 3),
         precision_judged_only=None if decided_precision is None else round(decided_precision, 3),
+        **({"incomplete_reviews": incomplete_reviews} if incomplete_reviews else {}),
     )
     write_json_atomic(out_dir / "worklists" / "m-precision.json", pending)
 
@@ -3006,7 +3254,13 @@ def score_m(inputs: Inputs, out_dir: Path, stats: ReviewStats, service: Any | No
     missing_docs = sorted(set(inputs.m_gold["docs"]) - {doc["doc"] for doc in docs})
     if missing_docs:
         for name in ("M_official_terms", "M_ordinary_sense", "M_reference_negation_number", "M_precision", "separator_fidelity"):
-            gates[name] = {**gates[name], "state": UNDECIDABLE, "reason": "incomplete", "docs_missing": missing_docs}
+            current_gate = gates[name]
+            if name == "separator_fidelity" and current_gate["state"] == NOT_MET:
+                gates[name] = {**current_gate, "docs_missing": missing_docs}
+            else:
+                gates[name] = {**current_gate, "state": UNDECIDABLE, "reason": "incomplete", "docs_missing": missing_docs}
+        for row in translation["absolute"]:
+            row["state"] = gates[row["gate"]]["state"]
     return {
         "gates": gates,
         "absolute": translation["absolute"],
