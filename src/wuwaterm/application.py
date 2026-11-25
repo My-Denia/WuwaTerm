@@ -44,9 +44,9 @@ from typing import Deque, Hashable, Literal, ParamSpec, Protocol, TypeVar
 
 from .lookup import ReviewSnapshot, TermService
 from .models import LookupCandidate
-from .normalize import has_cjk, normalize_ascii
 from .normalize import count_cjk as count_cjk
 from .normalize import count_latin as count_latin
+from .normalize import normalize_ascii, normalize_prose_text
 from .protected_text import ProtectedStructure as ProtectedStructure
 from .protected_text import ProtectedText as ProtectedText
 from .protected_text import ProtectedTextIntegrityError as ProtectedTextIntegrityError
@@ -286,7 +286,10 @@ LlmCallGuard = Callable[[], None | Awaitable[None]]
 def _resolve_to_chinese(prepared: str, forced_to_chinese: bool | None) -> bool:
     if forced_to_chinese is not None:
         return forced_to_chinese
-    return not has_cjk(prepared)
+    cjk = count_cjk(prepared)
+    if cjk == 0:
+        return True
+    return count_latin(prepared) > cjk * 4
 
 
 # A single-token-ish query: no sentence punctuation, at most 32 characters.
@@ -417,14 +420,16 @@ def _dictionary_stage(
     input_limit: int,
 ) -> _DictionaryStage:
     """Everything before the LLM: prepare, direction, dictionary, size gate."""
+    normalized_input = normalize_prose_text(request.text)
     prepared = translator.prepare_text(request.text)
     if not prepared:
         return _DictionaryStage(
             "", False, TranslationOutcome(kind=KIND_NOOP, text=EMPTY_INPUT_MESSAGE)
         )
-    # Direction is auto-detected from the visible text unless the caller
-    # supplies an explicit target. Dictionary and LLM use the same direction.
-    to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
+    # Direction is auto-detected from the normalized user text before speaker
+    # prefixes are rewritten to English names, so Chinese speaker dialogue keeps
+    # zh->en direction. Dictionary and LLM use the same direction.
+    to_chinese = _resolve_to_chinese(normalized_input, request.forced_to_chinese)
     exact = translator.preferred_exact_entry(prepared, service=service)
     if exact is not None:
         official = exact.zh if to_chinese else exact.en

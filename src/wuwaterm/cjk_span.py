@@ -117,12 +117,21 @@ whereas 红椿蕊 and 红椿·蕾 do not yield the character inside them. Both
 translation reference admission and review-v2 consult the same helper, and the
 honorific and particle sets join the MATCHER_REVISION payload so stored v8
 resolution contexts go stale and are re-reviewed.
+
+wuwaterm-cjk-matcher-v10 refines single-character CJK mention judgment into an
+explicit three-way classifier (``classify_single_character_mention`` returning
+``name_mention``, ``ambiguous_mention``, or ``ordinary_word``). Both translation
+reference admission and review-v2 keep exact ``name_mention`` gating while
+distinguishing settled compounds and middle-dot terms from uncertain everyday or
+unknown continuations; ``single_character_name_mention_at`` remains as a
+compatibility predicate.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 MAX_WORD_LEN = 8
 LEXICON_COUNT = 66315
@@ -240,6 +249,58 @@ def span_inside_known_word(text: str, start: int, end: int) -> bool:
     return False
 
 
+SINGLE_CHAR_NAME_MENTION: Literal["name_mention"] = "name_mention"
+SINGLE_CHAR_AMBIGUOUS_MENTION: Literal["ambiguous_mention"] = "ambiguous_mention"
+SINGLE_CHAR_ORDINARY_WORD: Literal["ordinary_word"] = "ordinary_word"
+SingleCharMentionKind = Literal["name_mention", "ambiguous_mention", "ordinary_word"]
+
+
+def classify_single_character_mention(
+    text: str, start: int, end: int
+) -> SingleCharMentionKind:
+    """Classify a one-character CJK span as name, ambiguous, or ordinary word.
+
+    Returns ``ordinary_word`` when the span is invalid, joined by a middle dot
+    compound marker (``·``), or covered by a known 2..8-character compound.
+    Returns ``name_mention`` when the character appears in an admitted name
+    context or has a clear right word/particle/honorific boundary. Otherwise
+    returns ``ambiguous_mention`` (for everyday standalone characters outside
+    explicit name grammar, or unrecognized CJK continuations).
+    """
+    if (
+        end - start != 1
+        or start < 0
+        or end > len(text)
+        or not _is_cjk_character(text[start])
+    ):
+        return SINGLE_CHAR_ORDINARY_WORD
+    if (start > 0 and text[start - 1] == "·") or (
+        end < len(text) and text[end] == "·"
+    ):
+        # A middle dot welds the halves of one invented compound name, on
+        # either side of this character, so it is not a standalone mention.
+        return SINGLE_CHAR_ORDINARY_WORD
+    if single_character_compound_at(text, start, end):
+        return SINGLE_CHAR_ORDINARY_WORD
+    if text[start:end] in _EVERYDAY_STANDALONE_CHARS:
+        if single_character_name_context_ok(text, start, end):
+            return SINGLE_CHAR_NAME_MENTION
+        return SINGLE_CHAR_AMBIGUOUS_MENTION
+    if end < len(text) and _is_cjk_character(text[end]):
+        if (
+            single_character_name_context_ok(text, start, end)
+            or text[end] in _SINGLE_NAME_PARTICLES
+            or text.startswith(_SINGLE_NAME_HONORIFICS, end)
+            or any(
+                text[end:hi] in _WORDS
+                for hi in range(end + 2, min(len(text), end + MAX_WORD_LEN) + 1)
+            )
+        ):
+            return SINGLE_CHAR_NAME_MENTION
+        return SINGLE_CHAR_AMBIGUOUS_MENTION
+    return SINGLE_CHAR_NAME_MENTION
+
+
 def single_character_name_mention_at(text: str, start: int, end: int) -> bool:
     """Whether a one-character official name at this span is a name mention.
 
@@ -260,30 +321,7 @@ def single_character_name_mention_at(text: str, start: int, end: int) -> bool:
     回应 stay admitted. This is not a general Chinese word segmenter or a
     sentence-meaning check.
     """
-    if end - start != 1 or start < 0 or end > len(text):
-        return False
-    if (start > 0 and text[start - 1] == "·") or (
-        end < len(text) and text[end] == "·"
-    ):
-        # A middle dot welds the halves of one invented compound name, on
-        # either side of this character, so it is not a standalone mention.
-        return False
-    if single_character_compound_at(text, start, end):
-        return False
-    if text[start:end] in _EVERYDAY_STANDALONE_CHARS:
-        return single_character_name_context_ok(text, start, end)
-    if end < len(text) and _is_cjk_character(text[end]):
-        if single_character_name_context_ok(text, start, end):
-            return True
-        if text[end] in _SINGLE_NAME_PARTICLES:
-            return True
-        if text.startswith(_SINGLE_NAME_HONORIFICS, end):
-            return True
-        return any(
-            text[end:hi] in _WORDS
-            for hi in range(end + 2, min(len(text), end + MAX_WORD_LEN) + 1)
-        )
-    return True
+    return classify_single_character_mention(text, start, end) == SINGLE_CHAR_NAME_MENTION
 
 
 def crosses_cjk_word_boundary(text: str, start: int, end: int) -> bool:
@@ -66637,7 +66675,7 @@ _WORDS = frozenset(
 def _matcher_revision(words: frozenset[str]) -> str:
     payload = json.dumps(
         [
-            "wuwaterm-cjk-matcher-v9",
+            "wuwaterm-cjk-matcher-v10",
             JIEBA_COMMIT,
             LEXICON_FILTER,
             sorted(words),

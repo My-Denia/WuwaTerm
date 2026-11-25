@@ -161,6 +161,42 @@ def test_direction_is_auto_detected_from_script(sample_db):
     assert to_chinese.to_chinese is True
 
 
+def test_direction_script_ratio_handles_mixed_script_inputs(monkeypatch, sample_db):
+    from wuwaterm.application import _resolve_to_chinese
+
+    assert _resolve_to_chinese("今汐的Echo和Resonator技能很强", None) is False
+    assert _resolve_to_chinese("Explain 声骸 in this Echo build rotation.", None) is True
+    assert _resolve_to_chinese("aaaa声", None) is False
+    assert _resolve_to_chinese("aaaaa声", None) is True
+
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(
+        monkeypatch, calls, lambda locked_text, _locks: f"中文说明：{locked_text}"
+    )
+    outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="Explain 声骸 in this Echo team rotation setup."),
+        )
+    )
+    assert outcome.kind == KIND_LLM
+    assert outcome.to_chinese is True
+    assert "声骸" in outcome.text
+
+    assert translator.prepare_text("今汐：好！") == "Jinhsi: 好!"
+    speaker_outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="今汐：好！"),
+        )
+    )
+    assert speaker_outcome.kind == KIND_LLM
+    assert speaker_outcome.to_chinese is False
+
+
 def test_fuzzy_pinyin_answer_and_length_gate(monkeypatch, sample_db):
     service, translator = build_pair(sample_db)
     calls: list[tuple[str, object]] = []

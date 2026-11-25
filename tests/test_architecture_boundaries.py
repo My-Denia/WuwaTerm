@@ -707,10 +707,10 @@ def test_recorded_three_node_cycle_is_accepted(tmp_path: Path, monkeypatch):
 def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
     """Pure matching/text modules and pure plan/contract modules stay decoupled.
 
-    All nine ``PURE_MATCHING`` modules (including ``segmentation`` and
-    ``text_spans``) plus ``translation_plan`` and ``semantic_review_contract``
-    must not reach ``review``, ``lookup``, ``db``, or ``sqlite3`` even
-    through transitive imports.
+    All ten ``PURE_MATCHING`` modules (including ``structural_checks``,
+    ``segmentation`` and ``text_spans``) plus ``translation_plan`` and
+    ``semantic_review_contract`` must not reach ``review``, ``lookup``,
+    ``db``, or ``sqlite3`` even through transitive imports.
     """
     from scripts import check_architecture_boundaries as cab
 
@@ -737,6 +737,7 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
         "protected_text",
         "segmentation",
         "skill_references",
+        "structural_checks",
         "term_classification",
         "term_matching",
         "term_preparation",

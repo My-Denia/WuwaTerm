@@ -13,7 +13,6 @@ from contextlib import contextmanager
 import inspect
 import logging
 import re
-import statistics
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,11 +48,11 @@ from .lookup import TermService, preferred_exact_entry
 from .models import TermEntry
 from .normalize import normalize_prose_text, normalize_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
-from .text_spans import (
-    WHITESPACE as _SEGMENT_WHITESPACE,
-    segment_core as _segment_core,
-)
 from .semantic_review_contract import PRECEDENT_WORDING
+from .structural_checks import (
+    paragraph_line_counts as _paragraph_line_counts,
+    regroup_lines_into_source_paragraphs as _regroup_lines_into_source_paragraphs,
+)
 from .skill_references import SkillReference, skill_references
 from .term_classification import (
     derived_context_gated_sources as _derived_context_gated_sources,
@@ -123,7 +122,6 @@ from .translation_plan import (
     build_translation_request_spec as build_translation_request_spec,
     canonical_json,
     coerce_term_reference as _coerce_term_reference,
-    paragraph_line_counts as _paragraph_line_counts,
     render_context_instruction,
     resolve_configured_thinking_mode,
     resolve_request_policy_from_env,
@@ -1550,222 +1548,6 @@ def _context_instruction(
     return render_context_instruction(
         context, to_chinese=to_chinese, templates=current_prompt_templates()
     )
-
-
-def _has_text(line: str) -> bool:
-    return any(char not in _SEGMENT_WHITESPACE for char in line)
-
-
-def _line_scalar_counts(text: str) -> list[int]:
-    """Non-whitespace scalars of each non-empty line, in reading order."""
-    return [
-        sum(1 for char in line if char not in _SEGMENT_WHITESPACE)
-        for line in text.split("\n")
-        if _has_text(line)
-    ]
-
-
-def _cumulative_cuts(layout: Sequence[int]) -> frozenset[int]:
-    """Where each paragraph ends, counted in non-empty lines."""
-    total = 0
-    cuts: set[int] = set()
-    for count in layout[:-1]:
-        total += count
-        cuts.add(total)
-    return frozenset(cuts)
-
-
-# Absorbing one line into another and giving a third away as two leaves the
-# count where it was, and shifts the content: from the absorbing line to the
-# giving one, each answer line answers the source line before it, and after that
-# they agree again. Regrouping such an answer would carry text across a break.
-#
-# Both events are read from a per-line share ratio,
-# ``(answer line / answer total) / (source line / source total)``. The ratio
-# cancels the translation's overall expansion and each source line's own
-# length, so a line that absorbed a naturally long neighbour still reads as two
-# lines' worth of text rather than as a local peak against short ones. It also
-# does not dilute as the segment grows, which is why this guard is a per-line
-# test rather than a check on the two sides' running shares: a one-line shift
-# moves the running share by 1/N (5% at 20 lines, 2.2% at 45), while a faithful
-# answer at +/-35% per-line length noise already reaches a 5% running-share gap
-# at p99, so that signal cannot separate the two at any N.
-_MERGED_LINE_SHARE = 1.4
-# A merged line also stands this clear of the segment's median line, so a
-# whole-answer length bias cannot lift an ordinary line over the bound above.
-# The two bounds work together: the first keeps an ordinary line out, the second
-# keeps a line out whose segment runs long or short as a whole. 1.3 rather than
-# a rounder 1.5 because a merge of two unequal lines lands lower: a line of 40
-# with a neighbour of 30 holds 1.75 lines' worth, and a 20% noise draw that
-# comes out short leaves 1.42, which a 1.5 peer bound on a median of 1.0 denies,
-# while the split bounds below are what keep faithful answers out.
-_MERGED_LINE_PEER = 1.3
-# The neighbour a merged line absorbed, as a fraction of its own length: a merge
-# of two very unequal lines moves too little text to tell from variation.
-_ABSORBED_NEIGHBOUR_SHARE = 0.75
-# One line left with well under its own text. 0.60 rather than a tighter 0.55:
-# a split whose two halves both come out long leaves the shorter half at about
-# 0.59 (40, 30, 20, 30 answered as 56, 16, 18, 18 has one at 0.593), which a 0.55
-# bound misses while 0.60 catches it, and no faithful line reaches 0.60 at the
-# +/-35% per-line noise this guard is calibrated against.
-_SPLIT_LINE_SHARE = 0.60
-# Or the two halves of one line split in two: each half this small, and the two
-# together holding one line's worth (a split conserves the line's text, so their
-# ratios sum to about 1 however unevenly the model cut it).
-_SPLIT_PAIR_LINE_SHARE = 0.65
-_SPLIT_PAIR_TOTAL = (0.75, 1.25)
-
-
-def _line_share_ratios(
-    source_counts: Sequence[int], answer_counts: Sequence[int]
-) -> list[float]:
-    """How many source lines' worth of text each answer line carries."""
-    source_total = sum(source_counts)
-    answer_total = sum(answer_counts)
-    if source_total <= 0 or answer_total <= 0:
-        return []
-    return [
-        (answer / answer_total) / (source / source_total)
-        for source, answer in zip(source_counts, answer_counts, strict=True)
-    ]
-
-
-def _merged_line_indices(
-    source_counts: Sequence[int],
-    answer_counts: Sequence[int],
-    ratios: Sequence[float],
-) -> list[int]:
-    """Answer lines that carry their own source line and a neighbour.
-
-    The reference reading: the line holds at least 1.4 lines' worth of text and
-    stands 1.3 times as clear of the segment's median line. Both bounds are
-    needed. The first is what a merge of two similar lines shows (their sum is
-    two lines' worth), and it sits above what per-line length variation alone
-    produces; the second rescales it for a segment whose answer runs long or
-    short as a whole, where every ratio moves with it.
-
-    The second reading covers a merge the first misses: an answer line whose
-    text matches its own source line plus a neighbour's, within half the
-    distance it sits from its own source line alone. It needs a neighbour that
-    is a real part of the pair (three quarters of the line's length), so a short
-    adjacent line cannot turn ordinary variation into evidence, and it never
-    fires below 1.5 lines' worth, so it only decides a merge the median bound
-    held back.
-    """
-    source_total = sum(source_counts)
-    answer_total = sum(answer_counts)
-    if source_total <= 0 or answer_total <= 0 or not ratios:
-        return []
-    source_shares = [count / source_total for count in source_counts]
-    answer_shares = [count / answer_total for count in answer_counts]
-    peer = statistics.median(ratios)
-    merged: list[int] = []
-    for index, ratio in enumerate(ratios):
-        if ratio >= _MERGED_LINE_SHARE and ratio >= peer * _MERGED_LINE_PEER:
-            merged.append(index)
-            continue
-        own = source_shares[index]
-        excess = abs(answer_shares[index] - own)
-        if excess <= 0:
-            continue
-        for other in (index + 1, index - 1):
-            if not 0 <= other < len(source_counts):
-                continue
-            if source_shares[other] < own * _ABSORBED_NEIGHBOUR_SHARE:
-                continue
-            if abs(answer_shares[index] - (own + source_shares[other])) <= excess / 2:
-                merged.append(index)
-                break
-    return merged
-
-
-def _split_line_indices(ratios: Sequence[float]) -> list[int]:
-    """Answer lines that gave text away, on their own or as two halves."""
-    split = [index for index, ratio in enumerate(ratios) if ratio <= _SPLIT_LINE_SHARE]
-    for index in range(len(ratios) - 1):
-        left, right = ratios[index], ratios[index + 1]
-        if (
-            left <= _SPLIT_PAIR_LINE_SHARE
-            and right <= _SPLIT_PAIR_LINE_SHARE
-            and _SPLIT_PAIR_TOTAL[0] <= left + right <= _SPLIT_PAIR_TOTAL[1]
-        ):
-            split.append(index)
-    return split
-
-
-def _lines_merged_and_split(source: str, answer: str) -> bool:
-    """Whether ``answer`` merged one line and split another.
-
-    Equal line counts only say the *number* of lines survived. Under a
-    merge+split one answer line absorbed its neighbour and another gave part of
-    itself away, so line k no longer answers source line k even though the count
-    matches. Regrouping such an answer into the source's paragraphs would move
-    real content across paragraph boundaries, so it is left alone.
-
-    The two events are looked for over the whole segment, at any distance: a
-    merge in the first line and a split in the last would otherwise cancel out
-    of every count the layout shows. Refusing needs both - a line that carries
-    two source lines and another that carries well under one, or two halves of
-    one - because either alone is ordinary line-to-line variation.
-    Measured on synthetic faithful answers with +/-35% per-line length noise,
-    the pair never occurs in 50,000 trials at 10, 20 and 45 lines, while a merge
-    plus a split is recognised at a distance, in either order, with the merged
-    line next to a naturally long source line, and when the absorbed line is
-    three quarters of the absorber's length and the merged line comes out 20%
-    short. A rejected regrouping only leaves the model's own blank lines in
-    place.
-    """
-    source_counts = _line_scalar_counts(source)
-    answer_counts = _line_scalar_counts(answer)
-    if len(source_counts) != len(answer_counts) or len(source_counts) < 2:
-        return False
-    ratios = _line_share_ratios(source_counts, answer_counts)
-    if not ratios:
-        return False
-    if not _merged_line_indices(source_counts, answer_counts, ratios):
-        return False
-    return bool(_split_line_indices(ratios))
-
-
-def _regroup_lines_into_source_paragraphs(source: str, answer: str) -> str:
-    """Put the lines of ``answer`` back into the paragraphs of ``source``.
-
-    A context-mode request keeps the blank lines of the segment it sends, but
-    the model decides the blank lines of its answer and sometimes drops or adds
-    them. When the answer has a different number of paragraphs but the same
-    number of non-empty lines as ``source``, its lines are regrouped into the
-    source's paragraphs: each line keeps its own text and order, and only the
-    blank lines between them change. Any other answer is returned unchanged,
-    with no second model call: a retry would double the wait on a path that
-    already runs into the model timeout.
-
-    Three guards keep the regrouping conservative (MY-359). An answer whose
-    paragraph count already matches, or whose line count differs, is
-    byte-identical. Two layouts whose paragraph breaks cross - one keeps a
-    break the other drops before it drops one of its own - are left alone,
-    because no grouping of the answer's lines keeps both sides' paragraphs. And
-    an answer whose line shares show a merge plus a split anywhere in the
-    segment is left alone too: its lines no longer answer their own source
-    lines. Every guard returns the answer unchanged, so a rejected regrouping
-    can only leave the model's own blank lines in place, never move text.
-    """
-    source_layout = _paragraph_line_counts(source)
-    answer_layout = _paragraph_line_counts(answer)
-    if len(answer_layout) == len(source_layout) or sum(answer_layout) != sum(source_layout):
-        return answer
-    source_cuts = _cumulative_cuts(source_layout)
-    answer_cuts = _cumulative_cuts(answer_layout)
-    # One side's breaks must be a subset of the other's: a break that exists on
-    # both sides up to a point and then swaps sides is a crossing, not a
-    # dropped or added blank line.
-    if not (answer_cuts <= source_cuts or source_cuts <= answer_cuts):
-        return answer
-    if _lines_merged_and_split(source, answer):
-        return answer
-    start, end = _segment_core(answer, 0, len(answer))
-    lines = iter(line for line in answer[start:end].split("\n") if _has_text(line))
-    paragraphs = ("\n".join(next(lines) for _ in range(count)) for count in source_layout)
-    return answer[:start] + "\n\n".join(paragraphs) + answer[end:]
 
 
 def _ensure_sync_llm_outside_running_loop() -> None:

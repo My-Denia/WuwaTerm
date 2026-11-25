@@ -36,10 +36,7 @@ from .term_preparation import (
     references_need_scope_instruction,
     validated_reference_ranges,
 )
-from .text_spans import (
-    WHITESPACE as _SEGMENT_WHITESPACE,
-    paragraph_ranges,
-)
+from .structural_checks import paragraph_line_counts as paragraph_line_counts
 
 LOGGER = logging.getLogger(__name__)
 
@@ -259,18 +256,6 @@ def normalize_term_placeholders(text: str) -> str:
     Never use normalized text or hashes to relax archived response reuse.
     """
     return _TERM_PLACEHOLDER_RE.sub(_NORMALIZED_PLACEHOLDER, text)
-
-
-def _has_text(line: str) -> bool:
-    return any(char not in _SEGMENT_WHITESPACE for char in line)
-
-
-def paragraph_line_counts(text: str) -> list[int]:
-    """Non-empty lines in each segmentation-v1 paragraph region of ``text``."""
-    return [
-        sum(1 for line in text[start:end].split("\n") if _has_text(line))
-        for start, end in paragraph_ranges(text)
-    ]
 
 
 def select_en_zh_auto_thinking(

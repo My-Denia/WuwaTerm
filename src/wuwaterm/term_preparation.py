@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from .cjk_span import single_character_name_mention_at
+from .cjk_span import SINGLE_CHAR_NAME_MENTION, classify_single_character_mention
 from .protected_text import ProtectedText
 from .skill_references import SkillReference, skill_occurrences
 from .term_matching import (
@@ -616,7 +616,8 @@ def _paragraphs_with_official_terms(
         while start != -1:
             end = start + 1
             if not any(span.start <= start < span.end for span in primary_spans) and (
-                single_character_name_mention_at(context_text, start, end)
+                classify_single_character_mention(context_text, start, end)
+                == SINGLE_CHAR_NAME_MENTION
             ):
                 qualifying.add(_paragraph_index(para_spans, start))
             start = context_text.find(source, start + 1)
@@ -736,9 +737,10 @@ def _collect_additional_name_references(
         while start != -1:
             end = start + 1
             if not any(span.start <= start < span.end for span in selected) and (
-                single_character_name_mention_at(
+                classify_single_character_mention(
                     context_text, context_offset + start, context_offset + end
                 )
+                == SINGLE_CHAR_NAME_MENTION
             ):
                 model_pos = start + sum(
                     delta for edge, delta in replacements if edge <= start
