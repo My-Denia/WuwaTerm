@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Frozen scorer and leakage scan for the held-out usability evaluation (ADR 0020).
 
-``score``  validate the frozen inputs and the judgment files, resolve every item
-           to its final judgment (two agreeing judges, or the adjudicator) and
-           write the ``usability-report-v1`` metrics, per arm and direction.
-``scan``   count 12-scalar windows of the sealed sets (H1, H2) that occur in an
-           input; counts only, the matched text is never printed.
+``score``           validate the frozen inputs and the judgment files, resolve every item
+                  to its final judgment (two agreeing judges, or the adjudicator) and
+                  write the ``usability-report-v1`` metrics, per arm and direction.
+``scan``            count 12-scalar windows of the sealed sets (H1, H2) that occur in an
+                  input; counts only, the matched text is never printed.
+``paired-compare``  compare two scored arms 1:1 per direction with stratified
+                  document-cluster bootstrap 95% CIs, MQM revision cost, and unit
+                  improvement cost.
 
 The script imports nothing from ``wuwaterm``, only the standard library, so a
 later Core change cannot change how frozen judgments are scored.
@@ -44,6 +47,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import re
 import subprocess
 import sys
@@ -63,20 +67,41 @@ ITEMS_SCHEMA = "usability-items-v1"
 JUDGMENT_SCHEMA = "usability-judgment-v1"
 REPORT_SCHEMA = "usability-report-v1"
 SCAN_SCHEMA = "usability-scan-v1"
+ARM_SCORES_SCHEMA = "usability-arm-scores-v1"
+PAIRED_COMPARE_SCHEMA = "usability-paired-compare-v1"
 
 DIRECTIONS = ("zh-en", "en-zh")
+PAIRED_DIRECTIONS = ("zh->en", "en->zh")
+DIRECTION_ALIASES = {
+    "zh->en": "zh->en",
+    "zh-en": "zh->en",
+    "en->zh": "en->zh",
+    "en-zh": "en->zh",
+}
 GENRES = ("announcement", "story", "guide", "mixed")
 EXCLUSIONS = ("dictionary", "no_letter", "duplicate")
 PASSES = ("j1", "j2", "adj")
 GRADES = ("A", "B", "C", "undecidable")
 NATURALNESS = ("natural", "stiff", "disfluent", "undecidable")
 ERROR_TYPES = ("omission", "addition", "meaning_shift", "reference", "number", "negation")
+CRITICAL_BREAKDOWN_TYPES = ("accuracy", "negation", "number", "reference", "omission", "term")
 LABELS = ("official", "not_official", "omitted", "undecidable")
+COMMUNITY_LABELS = ("official", "accepted", "not_official", "omitted", "undecidable")
 RENDERED_LABELS = ("official", "not_official")
 
 ENDERS = "。．.！？!?\n"  # review-v2 sentence enders
 DECIMAL_POINTS = ".．"
 DEFAULT_WINDOW = 12
+DEFAULT_BOOTSTRAP_SAMPLES = 10_000
+DEFAULT_SEED = 0
+NOT_COMPUTABLE_DELTA_NS = "not_computable (delta_not_significant)"
+MQM_WEIGHTS = {
+    "A": 0,
+    "B_or_stiff": 1,
+    "minor_term": 2,
+    "disfluent_or_misleading": 5,
+    "critical": 10,
+}
 
 EXIT_OK = 0
 EXIT_SCAN_HIT = 1
@@ -1030,6 +1055,937 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return EXIT_SCAN_HIT if any(row["windows_uncleared"] for row in rows) else EXIT_OK
 
 
+# -------------------------------------------------------------- paired-compare
+
+
+@dataclass(frozen=True)
+class ScoredUnit:
+    unit_id: str
+    doc_id: str
+    direction: str
+    genre: str
+    source_scalars: int
+    run_failed: bool
+    grade: str | None
+    naturalness: str | None
+    critical_breakdown: dict[str, int]
+    critical_10pt_count: int
+    minor_term_errors: int
+    misleading_term_errors: int
+    mqm_points: int
+    post_edit_distance: float | None
+
+
+@dataclass(frozen=True)
+class ArmTelemetry:
+    posts: int | None = None
+    tokens: int | None = None
+    latency_seconds: float | None = None
+    cost: float | None = None
+
+
+@dataclass(frozen=True)
+class ArmScores:
+    arm: str
+    units: dict[str, ScoredUnit]
+    telemetry: dict[str, ArmTelemetry]
+
+
+def get_non_neg_float(data: dict[str, Any], key: str, where: str) -> float:
+    value = data[key]
+    if type(value) is bool or not isinstance(value, (int, float)):
+        fail(where, f"{key} must be a non-negative number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        fail(where, f"{key} must be a finite non-negative number")
+    return result
+
+
+def normalize_direction(value: Any, where: str) -> str:
+    if not isinstance(value, str) or value not in DIRECTION_ALIASES:
+        fail(where, "direction must be one of zh->en, en->zh, zh-en, en-zh")
+    return DIRECTION_ALIASES[value]
+
+
+def levenshtein_distance(a: str, b: str) -> int:
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        curr = [i]
+        for j, char_b in enumerate(b, start=1):
+            cost = 0 if char_a == char_b else 1
+            curr.append(min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost))
+        prev = curr
+    return prev[-1]
+
+
+def normalized_post_edit_distance(translation: str, reference: str) -> float:
+    return levenshtein_distance(translation, reference) / max(len(translation), len(reference), 1)
+
+
+def parse_telemetry_block(raw: Any, where: str) -> dict[str, ArmTelemetry]:
+    table = obj(raw, where)
+    parsed: dict[str, ArmTelemetry] = {}
+    for raw_dir, raw_entry in table.items():
+        direction = normalize_direction(raw_dir, f"{where}: {raw_dir!r}")
+        if direction in parsed:
+            fail(where, f"duplicate direction {direction!r} in telemetry")
+        entry_where = f"{where}.{raw_dir}"
+        entry = exact_keys(
+            obj(raw_entry, entry_where),
+            entry_where,
+            (),
+            optional=(
+                "posts",
+                "tokens",
+                "total_tokens",
+                "prompt_tokens",
+                "completion_tokens",
+                "reasoning_tokens",
+                "latency_seconds",
+                "cost_usd",
+                "cost",
+            ),
+        )
+        posts: int | None = None
+        if entry.get("posts") is not None:
+            posts = get_int(entry, "posts", entry_where, minimum=0)
+
+        tokens: int | None = None
+        if "tokens" in entry and entry["tokens"] is not None:
+            if entry["tokens"] != "unknown":
+                tokens = get_int(entry, "tokens", entry_where, minimum=0)
+        elif "total_tokens" in entry and entry["total_tokens"] is not None:
+            if entry["total_tokens"] != "unknown":
+                tokens = get_int(entry, "total_tokens", entry_where, minimum=0)
+        else:
+            token_parts = [
+                get_int(entry, k, entry_where, minimum=0)
+                for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
+                if entry.get(k) is not None and entry.get(k) != "unknown"
+            ]
+            if token_parts:
+                tokens = sum(token_parts)
+
+        latency_seconds: float | None = None
+        if entry.get("latency_seconds") is not None:
+            latency_seconds = get_non_neg_float(entry, "latency_seconds", entry_where)
+
+        if "cost_usd" in entry and "cost" in entry:
+            fail(entry_where, "cannot specify both cost_usd and cost")
+        cost: float | None = None
+        if entry.get("cost_usd") is not None:
+            cost = get_non_neg_float(entry, "cost_usd", entry_where)
+        elif entry.get("cost") is not None:
+            cost = get_non_neg_float(entry, "cost", entry_where)
+
+        parsed[direction] = ArmTelemetry(
+            posts=posts,
+            tokens=tokens,
+            latency_seconds=latency_seconds,
+            cost=cost,
+        )
+    return parsed
+
+
+def parse_unit_critical_errors(
+    raw: Any, where: str
+) -> tuple[dict[str, int], int, int]:
+    """Return (6-category breakdown without term, 10pt critical count, term count from critical_errors)."""
+    breakdown = {kind: 0 for kind in CRITICAL_BREAKDOWN_TYPES}
+    critical_10pt = 0
+    term_from_critical = 0
+    allowed = (*ERROR_TYPES, "accuracy", "term")
+
+    def add_error(kind: str, count: int) -> None:
+        nonlocal critical_10pt, term_from_critical
+        if kind == "term":
+            term_from_critical += count
+            breakdown["term"] += count
+            return
+        critical_10pt += count
+        if kind in ("addition", "meaning_shift", "accuracy"):
+            breakdown["accuracy"] += count
+        else:
+            breakdown[kind] += count
+
+    if isinstance(raw, list):
+        for idx, item in enumerate(raw):
+            spot = f"{where}: critical_errors[{idx}]"
+            entry = exact_keys(obj(item, spot), spot, ("type", "count"))
+            kind = get_enum(entry, "type", allowed, spot)
+            add_error(kind, get_int(entry, "count", spot, minimum=1))
+    elif isinstance(raw, dict):
+        for raw_kind, raw_count in raw.items():
+            if not isinstance(raw_kind, str) or raw_kind not in allowed:
+                fail(where, f"unknown critical error type {raw_kind!r}")
+            if type(raw_count) is not int or raw_count < 0:
+                fail(where, f"critical_errors[{raw_kind!r}] must be an integer >= 0")
+            if raw_count > 0:
+                add_error(raw_kind, raw_count)
+    else:
+        fail(where, "critical_errors must be an array or an object")
+    return breakdown, critical_10pt, term_from_critical
+
+
+def parse_unit_name_list(raw: Any, where: str) -> tuple[int, int]:
+    """Return (minor_term_errors, misleading_term_errors) from a name judgment list."""
+    minor = 0
+    misleading = 0
+    for idx, item in enumerate(arr(raw, where)):
+        spot = f"{where}[{idx}]"
+        entry = exact_keys(
+            obj(item, spot),
+            spot,
+            ("label", "misleading"),
+            optional=("occ", "rendering"),
+        )
+        label = get_enum(entry, "label", COMMUNITY_LABELS, spot)
+        is_misleading = get_bool(entry, "misleading", spot)
+        if is_misleading and label != "not_official":
+            fail(spot, "misleading is only allowed with label not_official")
+        if label == "not_official":
+            if is_misleading:
+                misleading += 1
+            else:
+                minor += 1
+    return minor, misleading
+
+
+def compute_mqm_points(
+    grade: str,
+    naturalness: str,
+    critical_10pt_count: int,
+    minor_term_errors: int,
+    misleading_term_errors: int,
+) -> int:
+    """Compute H3 protocol §4 deterministic MQM revision cost points for a non-failed unit."""
+    points = 0
+    if grade in ("B", "C") and naturalness != "disfluent":
+        if grade == "B" or naturalness == "stiff":
+            points += 1
+    if naturalness == "disfluent":
+        points += 5
+    points += minor_term_errors * 2
+    points += misleading_term_errors * 5
+    points += critical_10pt_count * 10
+    return points
+
+
+def load_arm_scores(path: str) -> ArmScores:
+    data = exact_keys(
+        obj(load_json(path), path),
+        path,
+        ("schema", "arm", "units"),
+        optional=("telemetry",),
+    )
+    check_schema(data, ARM_SCORES_SCHEMA, path)
+    arm = get_str(data, "arm", path)
+    telemetry = parse_telemetry_block(data["telemetry"], f"{path}: telemetry") if "telemetry" in data else {}
+    units: dict[str, ScoredUnit] = {}
+
+    for index, raw in enumerate(arr(data["units"], f"{path}: units")):
+        where = f"{path}: units[{index}]"
+        row = exact_keys(
+            obj(raw, where),
+            where,
+            ("unit_id", "doc_id", "direction", "genre"),
+            optional=(
+                "source_scalars",
+                "source",
+                "run_failed",
+                "grade",
+                "naturalness",
+                "critical_errors",
+                "names",
+                "community_names",
+                "minor_term_errors",
+                "misleading_term_errors",
+                "post_edit_distance",
+                "translation",
+                "post_edited_reference",
+                "reason",
+                "pending",
+            ),
+        )
+        if "pending" in row and get_bool(row, "pending", where):
+            fail(where, "pending items cannot be paired-compared")
+
+        unit_id = get_str(row, "unit_id", where)
+        if unit_id in units:
+            fail(where, f"duplicate unit_id {unit_id!r}")
+        doc_id = get_str(row, "doc_id", where)
+        direction = normalize_direction(row["direction"], where)
+        genre = get_enum(row, "genre", GENRES, where)
+
+        if "source_scalars" in row:
+            source_scalars = get_int(row, "source_scalars", where, minimum=0)
+            if "source" in row and row["source"] is not None:
+                source_text = get_str(row, "source", where, empty=True)
+                if len(source_text) != source_scalars:
+                    fail(where, "source_scalars does not match length of source")
+        elif "source" in row and row["source"] is not None:
+            source_scalars = len(get_str(row, "source", where, empty=True))
+        else:
+            fail(where, "missing key 'source_scalars'")
+
+        run_failed = get_bool(row, "run_failed", where) if "run_failed" in row else False
+        if run_failed:
+            if row.get("grade") is not None:
+                fail(where, "a run_failed unit has no grade")
+            units[unit_id] = ScoredUnit(
+                unit_id=unit_id,
+                doc_id=doc_id,
+                direction=direction,
+                genre=genre,
+                source_scalars=source_scalars,
+                run_failed=True,
+                grade=None,
+                naturalness=None,
+                critical_breakdown={kind: 0 for kind in CRITICAL_BREAKDOWN_TYPES},
+                critical_10pt_count=0,
+                minor_term_errors=0,
+                misleading_term_errors=0,
+                mqm_points=0,
+                post_edit_distance=None,
+            )
+            continue
+
+        if "grade" not in row or row["grade"] is None:
+            fail(where, "non-failed unit requires grade")
+        grade = get_enum(row, "grade", GRADES, where)
+        if "naturalness" not in row or row["naturalness"] is None:
+            fail(where, "non-failed unit requires naturalness")
+        naturalness = get_enum(row, "naturalness", NATURALNESS, where)
+
+        if "critical_errors" in row and row["critical_errors"] is not None:
+            breakdown, critical_10pt, term_from_critical = parse_unit_critical_errors(
+                row["critical_errors"], where
+            )
+        else:
+            breakdown = {kind: 0 for kind in CRITICAL_BREAKDOWN_TYPES}
+            critical_10pt = 0
+            term_from_critical = 0
+
+        has_name_lists = "names" in row or "community_names" in row
+        minor_from_names = misleading_from_names = 0
+        for key in ("names", "community_names"):
+            if key in row and row[key] is not None:
+                m_cnt, mis_cnt = parse_unit_name_list(row[key], f"{where}: {key}")
+                minor_from_names += m_cnt
+                misleading_from_names += mis_cnt
+
+        if "minor_term_errors" in row and row["minor_term_errors"] is not None:
+            if has_name_lists:
+                fail(where, "cannot combine minor_term_errors with names/community_names")
+            minor_term_errors = get_int(row, "minor_term_errors", where, minimum=0)
+        else:
+            minor_term_errors = minor_from_names
+
+        if "misleading_term_errors" in row and row["misleading_term_errors"] is not None:
+            if has_name_lists or term_from_critical > 0:
+                fail(
+                    where,
+                    "cannot combine misleading_term_errors with names/community_names or term critical_errors",
+                )
+            misleading_term_errors = get_int(row, "misleading_term_errors", where, minimum=0)
+        else:
+            if term_from_critical > 0 and misleading_from_names > 0:
+                fail(where, "cannot combine term critical_errors with misleading names")
+            misleading_term_errors = term_from_critical + misleading_from_names
+
+        breakdown["term"] = misleading_term_errors
+
+        if (critical_10pt > 0 or misleading_term_errors > 0) and grade != "C":
+            fail(where, "a critical error or a misleading term requires grade C")
+        if grade == "A" and naturalness != "natural":
+            fail(where, "grade A requires naturalness natural")
+        if grade == "B" and naturalness == "disfluent":
+            fail(where, "grade B is not allowed with naturalness disfluent")
+
+        post_edit_distance: float | None = None
+        if row.get("post_edit_distance") is not None:
+            post_edit_distance = get_non_neg_float(row, "post_edit_distance", where)
+        elif row.get("translation") is not None and row.get("post_edited_reference") is not None:
+            translation = get_str(row, "translation", where, empty=True)
+            post_ref = get_str(row, "post_edited_reference", where, empty=True)
+            post_edit_distance = normalized_post_edit_distance(translation, post_ref)
+
+        mqm_points = compute_mqm_points(
+            grade,
+            naturalness,
+            critical_10pt,
+            minor_term_errors,
+            misleading_term_errors,
+        )
+        units[unit_id] = ScoredUnit(
+            unit_id=unit_id,
+            doc_id=doc_id,
+            direction=direction,
+            genre=genre,
+            source_scalars=source_scalars,
+            run_failed=False,
+            grade=grade,
+            naturalness=naturalness,
+            critical_breakdown=breakdown,
+            critical_10pt_count=critical_10pt,
+            minor_term_errors=minor_term_errors,
+            misleading_term_errors=misleading_term_errors,
+            mqm_points=mqm_points,
+            post_edit_distance=post_edit_distance,
+        )
+
+    return ArmScores(arm=arm, units=units, telemetry=telemetry)
+
+
+def pair_units(
+    arm_a: ArmScores, arm_b: ArmScores
+) -> dict[str, list[tuple[ScoredUnit, ScoredUnit]]]:
+    ids_a = set(arm_a.units)
+    ids_b = set(arm_b.units)
+    if ids_a != ids_b:
+        only_a = len(ids_a - ids_b)
+        only_b = len(ids_b - ids_a)
+        fail(
+            "paired-compare",
+            f"scored unit ids do not match 1:1 between arm-a and arm-b "
+            f"(only_in_arm_a={only_a}, only_in_arm_b={only_b})",
+        )
+    if not ids_a:
+        fail("paired-compare", "no scored units to compare")
+
+    by_direction: dict[str, list[tuple[ScoredUnit, ScoredUnit]]] = {
+        direction: [] for direction in PAIRED_DIRECTIONS
+    }
+    doc_genres: dict[tuple[str, str], str] = {}
+
+    for unit_id in sorted(ids_a):
+        ua = arm_a.units[unit_id]
+        ub = arm_b.units[unit_id]
+        if (ua.doc_id, ua.direction, ua.genre, ua.source_scalars) != (
+            ub.doc_id,
+            ub.direction,
+            ub.genre,
+            ub.source_scalars,
+        ):
+            fail("paired-compare", f"unit {unit_id!r} metadata mismatch between arm-a and arm-b")
+        if (not ua.run_failed and not ub.run_failed) and (
+            (ua.post_edit_distance is None) != (ub.post_edit_distance is None)
+        ):
+            fail(
+                "paired-compare",
+                f"unit {unit_id!r} has mismatched post_edit_distance presence between arm-a and arm-b",
+            )
+        doc_key = (ua.direction, ua.doc_id)
+        prev_genre = doc_genres.get(doc_key)
+        if prev_genre is not None and prev_genre != ua.genre:
+            fail(
+                "paired-compare",
+                f"doc_id {ua.doc_id!r} in direction {ua.direction} has conflicting genres",
+            )
+        doc_genres[doc_key] = ua.genre
+        by_direction[ua.direction].append((ua, ub))
+
+    return by_direction
+
+
+def percentile(sorted_vals: Sequence[float], q: float) -> float:
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(sorted_vals[lo])
+    frac = pos - lo
+    return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
+
+
+def bootstrap_ci(vals: list[float]) -> list[float] | None:
+    if not vals:
+        return None
+    ordered = sorted(vals)
+    return [percentile(ordered, 0.025), percentile(ordered, 0.975)]
+
+
+def verdict_from_ci(ci: list[float] | None) -> str | None:
+    if ci is None:
+        return None
+    if ci[0] > 0.0:
+        return "gain"
+    if ci[1] < 0.0:
+        return "worse"
+    return "indistinguishable"
+
+
+def single_arm_summary(units: list[ScoredUnit]) -> dict[str, Any]:
+    n = len(units)
+    documents = len({u.doc_id for u in units})
+    failed = sum(1 for u in units if u.run_failed)
+    non_failed = [u for u in units if not u.run_failed]
+    grades = Counter(u.grade for u in non_failed if u.grade is not None)
+    a_count = grades["A"]
+    usable = a_count + grades["B"]
+    a_interval = wilson(a_count, n)
+    usable_interval = wilson(usable, n)
+    scalars = sum(u.source_scalars for u in non_failed)
+
+    categories = {
+        kind: sum(u.critical_breakdown[kind] for u in non_failed)
+        for kind in CRITICAL_BREAKDOWN_TYPES
+    }
+    crit_total = sum(categories.values())
+    with_crit = sum(1 for u in non_failed if sum(u.critical_breakdown.values()) > 0)
+    mqm_total = sum(u.mqm_points for u in non_failed)
+
+    genres: dict[str, Any] = {}
+    for genre in GENRES:
+        g_units = [u for u in units if u.genre == genre]
+        g_n = len(g_units)
+        g_a = sum(1 for u in g_units if not u.run_failed and u.grade == "A")
+        g_u = sum(1 for u in g_units if not u.run_failed and u.grade in ("A", "B"))
+        g_a_ci = wilson(g_a, g_n)
+        g_u_ci = wilson(g_u, g_n)
+        genres[genre] = {
+            "n": g_n,
+            "documents": len({u.doc_id for u in g_units}),
+            "a_count": g_a,
+            "a_rate": ratio(g_a, g_n),
+            "a_wilson95": list(g_a_ci) if g_a_ci else None,
+            "usable": g_u,
+            "usable_rate": ratio(g_u, g_n),
+            "usable_wilson95": list(g_u_ci) if g_u_ci else None,
+            "run_failed": sum(1 for u in g_units if u.run_failed),
+        }
+
+    return {
+        "n": n,
+        "documents": documents,
+        "a_count": a_count,
+        "a_rate": ratio(a_count, n),
+        "a_wilson95": list(a_interval) if a_interval else None,
+        "usable": usable,
+        "usable_rate": ratio(usable, n),
+        "usable_wilson95": list(usable_interval) if usable_interval else None,
+        "grades": {grade: grades[grade] for grade in GRADES},
+        "run_failed": failed,
+        "critical_errors": {
+            "total": crit_total,
+            "units_with_critical": with_crit,
+            "source_scalars": scalars,
+            "per_1000_source_scalars": (crit_total * 1000 / scalars) if scalars > 0 else None,
+            "categories": categories,
+        },
+        "mqm": {
+            "total_points": mqm_total,
+            "source_scalars": scalars,
+            "per_1000_source_scalars": (mqm_total * 1000 / scalars) if scalars > 0 else None,
+            "run_failed_count": failed,
+        },
+        "genres": genres,
+    }
+
+
+def stratified_cluster_bootstrap(
+    pairs: list[tuple[ScoredUnit, ScoredUnit]],
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, list[float] | None]:
+    """Stratified by genre, resampling doc_id clusters with replacement within one direction."""
+    # Pre-aggregate per document:
+    # (n_units, a_A, a_B, u_A, u_B, crit_A, crit_B, sc_A, sc_B, mqm_A, mqm_B)
+    by_genre_doc: dict[str, dict[str, list[int]]] = {genre: {} for genre in GENRES}
+    pe_by_genre_doc: dict[str, dict[str, list[float]]] = {genre: {} for genre in GENRES}
+
+    for ua, ub in pairs:
+        vec = by_genre_doc[ua.genre].setdefault(ua.doc_id, [0] * 11)
+        vec[0] += 1
+        if not ua.run_failed:
+            if ua.grade == "A":
+                vec[1] += 1
+            if ua.grade in ("A", "B"):
+                vec[3] += 1
+            vec[5] += sum(ua.critical_breakdown.values())
+            vec[7] += ua.source_scalars
+            vec[9] += ua.mqm_points
+        if not ub.run_failed:
+            if ub.grade == "A":
+                vec[2] += 1
+            if ub.grade in ("A", "B"):
+                vec[4] += 1
+            vec[6] += sum(ub.critical_breakdown.values())
+            vec[8] += ub.source_scalars
+            vec[10] += ub.mqm_points
+
+        if (
+            not ua.run_failed
+            and not ub.run_failed
+            and ua.post_edit_distance is not None
+            and ub.post_edit_distance is not None
+        ):
+            pe_vec = pe_by_genre_doc[ua.genre].setdefault(ua.doc_id, [0.0, 0.0, 0.0])
+            pe_vec[0] += 1.0
+            pe_vec[1] += ua.post_edit_distance
+            pe_vec[2] += ub.post_edit_distance
+
+    strata: list[list[tuple[int, ...]]] = []
+    for genre in GENRES:
+        docs = by_genre_doc[genre]
+        if docs:
+            strata.append([tuple(docs[doc_id]) for doc_id in sorted(docs)])
+
+    rng = random.Random(seed)
+    delta_a_reps: list[float] = []
+    delta_u_reps: list[float] = []
+    crit_total_red_reps: list[float] = []
+    crit_rate_red_reps: list[float] = []
+    mqm_rate_diff_reps: list[float] = []
+    mqm_rate_red_reps: list[float] = []
+
+    for _ in range(bootstrap_samples):
+        n_tot = a_a = a_b = u_a = u_b = c_a = c_b = s_a = s_b = m_a = m_b = 0
+        for stratum in strata:
+            for doc in rng.choices(stratum, k=len(stratum)):
+                n_tot += doc[0]
+                a_a += doc[1]
+                a_b += doc[2]
+                u_a += doc[3]
+                u_b += doc[4]
+                c_a += doc[5]
+                c_b += doc[6]
+                s_a += doc[7]
+                s_b += doc[8]
+                m_a += doc[9]
+                m_b += doc[10]
+        delta_a_reps.append((a_b - a_a) / n_tot)
+        delta_u_reps.append((u_b - u_a) / n_tot)
+        crit_total_red_reps.append(float(c_a - c_b))
+        if s_a > 0 and s_b > 0:
+            crit_rate_red_reps.append((c_a * 1000.0 / s_a) - (c_b * 1000.0 / s_b))
+            mqm_diff = (m_b * 1000.0 / s_b) - (m_a * 1000.0 / s_a)
+            mqm_rate_diff_reps.append(mqm_diff)
+            mqm_rate_red_reps.append(-mqm_diff)
+
+    pe_strata: list[list[tuple[float, float, float]]] = []
+    for genre in GENRES:
+        pe_docs = pe_by_genre_doc[genre]
+        if pe_docs:
+            pe_strata.append(
+                [(pe_docs[d][0], pe_docs[d][1], pe_docs[d][2]) for d in sorted(pe_docs)]
+            )
+
+    pe_diff_reps: list[float] = []
+    pe_red_reps: list[float] = []
+    if pe_strata:
+        pe_rng = random.Random(seed ^ 0x517CC1B7)
+        for _ in range(bootstrap_samples):
+            cnt = sum_a = sum_b = 0.0
+            for stratum in pe_strata:
+                for doc_pe in pe_rng.choices(stratum, k=len(stratum)):
+                    cnt += doc_pe[0]
+                    sum_a += doc_pe[1]
+                    sum_b += doc_pe[2]
+            diff = (sum_b - sum_a) / cnt
+            pe_diff_reps.append(diff)
+            pe_red_reps.append(-diff)
+
+    return {
+        "delta_a_ci95": bootstrap_ci(delta_a_reps),
+        "delta_usable_ci95": bootstrap_ci(delta_u_reps),
+        "crit_total_reduction_ci95": bootstrap_ci(crit_total_red_reps),
+        "crit_per_1000_reduction_ci95": bootstrap_ci(crit_rate_red_reps),
+        "mqm_per_1000_diff_ci95": bootstrap_ci(mqm_rate_diff_reps),
+        "mqm_per_1000_reduction_ci95": bootstrap_ci(mqm_rate_red_reps),
+        "post_edit_diff_ci95": bootstrap_ci(pe_diff_reps),
+        "post_edit_reduction_ci95": bootstrap_ci(pe_red_reps),
+    }
+
+
+def unit_cost_entry(
+    net_gain: int,
+    ci95: list[float] | None,
+    extra: dict[str, float | int | None],
+    gain_key: str,
+) -> dict[str, Any]:
+    significant = ci95 is not None and ci95[0] > 0.0 and net_gain > 0
+    if not significant:
+        return {
+            "computable": False,
+            "status": NOT_COMPUTABLE_DELTA_NS,
+            gain_key: net_gain,
+            "posts": NOT_COMPUTABLE_DELTA_NS,
+            "tokens": NOT_COMPUTABLE_DELTA_NS,
+            "latency_seconds": NOT_COMPUTABLE_DELTA_NS,
+            "cost": NOT_COMPUTABLE_DELTA_NS,
+        }
+    return {
+        "computable": True,
+        "status": "computable",
+        gain_key: net_gain,
+        "posts": (extra["posts"] / net_gain) if extra["posts"] is not None else None,
+        "tokens": (extra["tokens"] / net_gain) if extra["tokens"] is not None else None,
+        "latency_seconds": (
+            (extra["latency_seconds"] / net_gain)
+            if extra["latency_seconds"] is not None
+            else None
+        ),
+        "cost": (extra["cost"] / net_gain) if extra["cost"] is not None else None,
+    }
+
+
+def compare_direction(
+    direction: str,
+    pairs: list[tuple[ScoredUnit, ScoredUnit]],
+    tel_a: ArmTelemetry | None,
+    tel_b: ArmTelemetry | None,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    if not pairs:
+        return {
+            "n": 0,
+            "documents": 0,
+            "arms": {"arm_a": single_arm_summary([]), "arm_b": single_arm_summary([])},
+            "a_rate": None,
+            "usable_rate": None,
+            "critical_errors": None,
+            "mqm_cost": None,
+            "post_edit_distance": None,
+            "unit_improvement_cost": None,
+        }
+
+    units_a = [ua for ua, _ in pairs]
+    units_b = [ub for _, ub in pairs]
+    sum_a = single_arm_summary(units_a)
+    sum_b = single_arm_summary(units_b)
+    n = len(pairs)
+
+    a_wins = a_losses = a_ties_both = a_ties_neither = 0
+    u_wins = u_losses = u_ties_both = u_ties_neither = 0
+    for ua, ub in pairs:
+        is_a_a = not ua.run_failed and ua.grade == "A"
+        is_a_b = not ub.run_failed and ub.grade == "A"
+        if is_a_b and not is_a_a:
+            a_wins += 1
+        elif is_a_a and not is_a_b:
+            a_losses += 1
+        elif is_a_a and is_a_b:
+            a_ties_both += 1
+        else:
+            a_ties_neither += 1
+
+        is_u_a = not ua.run_failed and ua.grade in ("A", "B")
+        is_u_b = not ub.run_failed and ub.grade in ("A", "B")
+        if is_u_b and not is_u_a:
+            u_wins += 1
+        elif is_u_a and not is_u_b:
+            u_losses += 1
+        elif is_u_a and is_u_b:
+            u_ties_both += 1
+        else:
+            u_ties_neither += 1
+
+    dir_seed = seed if direction == "zh->en" else (seed + 1_000_003)
+    boot = stratified_cluster_bootstrap(pairs, bootstrap_samples, dir_seed)
+
+    delta_a = sum_b["a_rate"] - sum_a["a_rate"]
+    net_a = sum_b["a_count"] - sum_a["a_count"]
+    delta_u = sum_b["usable_rate"] - sum_a["usable_rate"]
+    net_u = sum_b["usable"] - sum_a["usable"]
+
+    crit_a = sum_a["critical_errors"]
+    crit_b = sum_b["critical_errors"]
+    crit_net_total = crit_a["total"] - crit_b["total"]
+    crit_rate_a = crit_a["per_1000_source_scalars"]
+    crit_rate_b = crit_b["per_1000_source_scalars"]
+    crit_rate_red = (
+        (crit_rate_a - crit_rate_b)
+        if crit_rate_a is not None and crit_rate_b is not None
+        else None
+    )
+    crit_cats = {
+        kind: {
+            "arm_a": crit_a["categories"][kind],
+            "arm_b": crit_b["categories"][kind],
+            "net_reduction": crit_a["categories"][kind] - crit_b["categories"][kind],
+        }
+        for kind in CRITICAL_BREAKDOWN_TYPES
+    }
+
+    mqm_a = sum_a["mqm"]
+    mqm_b = sum_b["mqm"]
+    mqm_diff_total = mqm_b["total_points"] - mqm_a["total_points"]
+    mqm_red_total = -mqm_diff_total
+    mqm_rate_a = mqm_a["per_1000_source_scalars"]
+    mqm_rate_b = mqm_b["per_1000_source_scalars"]
+    mqm_rate_diff = (
+        (mqm_rate_b - mqm_rate_a)
+        if mqm_rate_a is not None and mqm_rate_b is not None
+        else None
+    )
+    mqm_rate_red = -mqm_rate_diff if mqm_rate_diff is not None else None
+
+    pe_pairs = [
+        (ua.post_edit_distance, ub.post_edit_distance)
+        for ua, ub in pairs
+        if (
+            not ua.run_failed
+            and not ub.run_failed
+            and ua.post_edit_distance is not None
+            and ub.post_edit_distance is not None
+        )
+    ]
+    if pe_pairs:
+        pe_a_mean = sum(a for a, _ in pe_pairs) / len(pe_pairs)
+        pe_b_mean = sum(b for _, b in pe_pairs) / len(pe_pairs)
+        pe_block: dict[str, Any] = {
+            "units_evaluated": len(pe_pairs),
+            "arm_a_mean": pe_a_mean,
+            "arm_b_mean": pe_b_mean,
+            "delta_b_minus_a": pe_b_mean - pe_a_mean,
+            "delta_b_minus_a_ci95": boot["post_edit_diff_ci95"],
+            "net_reduction": pe_a_mean - pe_b_mean,
+            "net_reduction_ci95": boot["post_edit_reduction_ci95"],
+        }
+    else:
+        pe_block = {
+            "units_evaluated": 0,
+            "arm_a_mean": None,
+            "arm_b_mean": None,
+            "delta_b_minus_a": None,
+            "delta_b_minus_a_ci95": None,
+            "net_reduction": None,
+            "net_reduction_ci95": None,
+        }
+
+    def extra_diff(field: str) -> float | int | None:
+        if tel_a is None or tel_b is None:
+            return None
+        va = getattr(tel_a, field)
+        vb = getattr(tel_b, field)
+        if va is None or vb is None:
+            return None
+        return vb - va
+
+    extra = {
+        "posts": extra_diff("posts"),
+        "tokens": extra_diff("tokens"),
+        "latency_seconds": extra_diff("latency_seconds"),
+        "cost": extra_diff("cost"),
+    }
+
+    return {
+        "n": n,
+        "documents": sum_a["documents"],
+        "arms": {"arm_a": sum_a, "arm_b": sum_b},
+        "a_rate": {
+            "arm_a": sum_a["a_rate"],
+            "arm_b": sum_b["a_rate"],
+            "delta": delta_a,
+            "net_units": net_a,
+            "ci95": boot["delta_a_ci95"],
+            "wins": a_wins,
+            "losses": a_losses,
+            "ties": a_ties_both + a_ties_neither,
+            "ties_both_a": a_ties_both,
+            "ties_both_not_a": a_ties_neither,
+            "verdict": verdict_from_ci(boot["delta_a_ci95"]),
+        },
+        "usable_rate": {
+            "arm_a": sum_a["usable_rate"],
+            "arm_b": sum_b["usable_rate"],
+            "delta": delta_u,
+            "net_units": net_u,
+            "ci95": boot["delta_usable_ci95"],
+            "wins": u_wins,
+            "losses": u_losses,
+            "ties": u_ties_both + u_ties_neither,
+            "ties_both_usable": u_ties_both,
+            "ties_both_not_usable": u_ties_neither,
+            "verdict": verdict_from_ci(boot["delta_usable_ci95"]),
+        },
+        "critical_errors": {
+            "arm_a": crit_a,
+            "arm_b": crit_b,
+            "net_reduction_total": crit_net_total,
+            "net_reduction_total_ci95": boot["crit_total_reduction_ci95"],
+            "per_1000_source_scalars_net_reduction": crit_rate_red,
+            "per_1000_source_scalars_net_reduction_ci95": boot["crit_per_1000_reduction_ci95"],
+            "categories": crit_cats,
+            "verdict": verdict_from_ci(boot["crit_per_1000_reduction_ci95"]),
+        },
+        "mqm_cost": {
+            "weights": dict(MQM_WEIGHTS),
+            "arm_a": {
+                **mqm_a,
+                "run_failed_note": "max_unit_penalty (scored separately)",
+            },
+            "arm_b": {
+                **mqm_b,
+                "run_failed_note": "max_unit_penalty (scored separately)",
+            },
+            "delta_total_points": mqm_diff_total,
+            "net_reduction_total_points": mqm_red_total,
+            "per_1000_source_scalars_diff": mqm_rate_diff,
+            "per_1000_source_scalars_diff_ci95": boot["mqm_per_1000_diff_ci95"],
+            "per_1000_source_scalars_net_reduction": mqm_rate_red,
+            "per_1000_source_scalars_net_reduction_ci95": boot["mqm_per_1000_reduction_ci95"],
+            "run_failed_diff": mqm_b["run_failed_count"] - mqm_a["run_failed_count"],
+        },
+        "post_edit_distance": pe_block,
+        "unit_improvement_cost": {
+            "extra_telemetry": extra,
+            "per_net_a_unit": unit_cost_entry(
+                net_a, boot["delta_a_ci95"], extra, "net_a_units"
+            ),
+            "per_net_critical_error_reduction": unit_cost_entry(
+                crit_net_total,
+                boot["crit_per_1000_reduction_ci95"],
+                extra,
+                "net_critical_error_reduction",
+            ),
+        },
+    }
+
+
+def cmd_paired_compare(args: argparse.Namespace) -> int:
+    if args.bootstrap_samples < 1:
+        fail("--bootstrap-samples", "must be at least 1")
+    arm_a = load_arm_scores(args.arm_a)
+    arm_b = load_arm_scores(args.arm_b)
+    by_direction = pair_units(arm_a, arm_b)
+
+    directions_report = {
+        direction: compare_direction(
+            direction,
+            by_direction[direction],
+            arm_a.telemetry.get(direction),
+            arm_b.telemetry.get(direction),
+            args.bootstrap_samples,
+            args.seed,
+        )
+        for direction in PAIRED_DIRECTIONS
+    }
+    report = {
+        "schema": PAIRED_COMPARE_SCHEMA,
+        "arm_a": arm_a.arm,
+        "arm_b": arm_b.arm,
+        "seed": args.seed,
+        "bootstrap_samples": args.bootstrap_samples,
+        "directions": directions_report,
+    }
+    text = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if args.json_out:
+        try:
+            Path(args.json_out).write_bytes(text.encode("utf-8"))
+        except OSError:
+            fail(args.json_out, "cannot write report")
+    else:
+        sys.stdout.write(text)
+    return EXIT_OK
+
+
 # ------------------------------------------------------------------------- cli
 
 
@@ -1059,6 +2015,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="write one JSON line per uncleared window hit (hash and location, no text) here",
     )
     scan.set_defaults(func=cmd_scan)
+
+    paired = commands.add_parser(
+        "paired-compare",
+        help="compare two scored arms 1:1 per direction with cluster bootstrap CIs",
+    )
+    paired.add_argument("--arm-a", required=True, metavar="ARM_A.json")
+    paired.add_argument("--arm-b", required=True, metavar="ARM_B.json")
+    paired.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    paired.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_SAMPLES,
+        help="number of stratified cluster bootstrap replicates (default: 10000)",
+    )
+    paired.add_argument(
+        "--json-out",
+        metavar="REPORT.json",
+        help="write the paired comparison JSON here, not to stdout",
+    )
+    paired.set_defaults(func=cmd_paired_compare)
     return parser
 
 
