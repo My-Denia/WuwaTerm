@@ -958,7 +958,7 @@ def test_release_defaults_match_the_recorded_snapshot_and_the_guide():
     recommended = _recommended_tags()
     assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.5.0"
     assert recommended["telegram"] == recorded["telegram"].lstrip("v")
-    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.4.3"
+    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.4.4"
     assert recommended["web"] == recorded["web"]
 
 

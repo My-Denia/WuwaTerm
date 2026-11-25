@@ -80,7 +80,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ### Windows 客户端
 
-从 [WuwaTerm-Windows v0.6.3](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest) 下载 Windows 免安装包，使用和构建说明见[独立 Windows 仓库](https://github.com/My-Denia/WuwaTerm-Windows)。客户端未签名，Windows SmartScreen 可能提示；它通过受设备令牌保护的 API 连接服务端。Windows 的问题与功能请求也请提交至该仓库。
+从 [WuwaTerm-Windows 最新发布页](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest)下载 Windows 免安装包（当前最新发布为 `v0.6.5`），使用和构建说明见[独立 Windows 仓库](https://github.com/My-Denia/WuwaTerm-Windows)。客户端未签名，Windows SmartScreen 可能提示；它通过受设备令牌保护的 API 连接服务端。Windows 的问题与功能请求也请提交至该仓库。
 
 ### Telegram bot
 
