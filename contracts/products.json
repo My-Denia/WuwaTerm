@@ -149,7 +149,7 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core is deployed on production VPS API r13 by deploy/vps-update.sh --runtime-only. The r13 checkout and .deploy_commit are 486312df532a3757f367d523d6f7a7cdd5735f96, a main commit that holds v0.13.0 (e5b7f1a8) plus the offline-only evaluation change #321 and #323, whose request-local ambiguous-mention evidence is off by default and leaves responses byte-identical; the host does not run the bare v0.13.0 tag commit. /openapi.json reports info.version 0.13.0, data/terms.db keeps sha256 9ddee819… and rollback point r12 (Core v0.12.0, 6fb4d8a4) is retained.",
+      "adoption_note": "Core is deployed on production VPS API r13 by deploy/vps-update.sh --runtime-only. The .deploy_commit is 486312df532a3757f367d523d6f7a7cdd5735f96, a main commit that holds v0.13.0 (e5b7f1a8) plus the offline-only evaluation change #321 and #323, whose request-local ambiguous-mention evidence is off by default and leaves responses byte-identical; the host does not run the bare v0.13.0 tag commit. /openapi.json reports info.version 0.13.0, data/terms.db keeps sha256 9ddee819… and rollback point r12 (Core v0.12.0, 6fb4d8a4) is retained.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
         "https://github.com/My-Denia/WuwaTerm/blob/e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8/docs/self-hosting.md",
@@ -304,7 +304,7 @@
         "signed": false,
         "note": "v0.6.5 ships cross-client 3-pass duplicate-source segment attribution SPEC alignment (#43 at a45dbf2, MY-350) and updates contracts/sources.json to Core 0.12.0 (6fb4d8a4) and Web v0.4.4 (d702328e) while bumping the package version to 0.6.5 (#44 at 502ac829). Manuscript formats wuwaterm-manuscript-v1 through wuwaterm-manuscript-v4 and the HTTP API contract are unchanged. The release ZIP is 57,322,359 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 502ac829 by release run 45439299768 after CI run 45423607436 and Dependency audit run 45423606923. Kept as history after v0.6.6; v0.6.4 and earlier remain on the release page."
       },
-      "adoption_note": "0.6.6 is published. The anonymously downloaded ZIP was run on the owner's Windows desktop (PowerShell 7) with an isolated APPDATA: --self-check passed and a windowed launch ran for 4 seconds. That is a run of the downloaded package, not an installed copy in the owner's own profile, so adoption stays unknown until an installed copy is recorded. The earlier v0.6.4 desktop run (8c0c4a9f, isolated temporary profile, recorded in docs/products.md) was the same kind of check, not an installed copy either."
+      "adoption_note": "0.6.6 is published. The anonymously downloaded ZIP was run on the owner's Windows desktop (PowerShell 7) with an isolated APPDATA: --self-check passed and a windowed launch ran for 4 seconds. No installed copy in the owner's own profile is recorded, so adoption is unknown. The earlier v0.6.4 desktop run (8c0c4a9f, isolated temporary profile, recorded in docs/products.md) is the same kind of run check."
     },
     {
       "id": "web",
