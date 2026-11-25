@@ -464,7 +464,9 @@ def test_marker_regexes_never_eat_prose(sample_db):
         assert translator.prepare_text(text) == text
 
 
-def test_marker_regexes_still_strip_marker_forms(sample_db):
+def test_telegram_wrapper_cleanup_is_adapter_only_and_preserves_prose(sample_db):
+    from wuwaterm.normalize import strip_telegram_wrapper_noise
+
     translator = SentenceTranslator(sample_db)
     cases = [
         ("[spolier] (WW 3.4) 这是一个测试。", "这是一个测试。"),
@@ -483,13 +485,43 @@ def test_marker_regexes_still_strip_marker_forms(sample_db):
         ("spoiler: hidden text", "hidden text"),
     ]
     for source, expected in cases:
-        assert translator.prepare_text(source) == expected
+        assert strip_telegram_wrapper_noise(source) == expected
+    wrapped = "(WW 3.4)\n[spoiler]\n> 洛瑟菈：声骸"
+    assert strip_telegram_wrapper_noise(wrapped) == "洛瑟菈:声骸"
+    assert translator.prepare_text(strip_telegram_wrapper_noise(wrapped)) == "Lucilla: 声骸"
+    assert strip_telegram_wrapper_noise(">50% Energy Regen") == ">50% Energy Regen"
+    assert (
+        strip_telegram_wrapper_noise("#spoilersafe Please do not reveal the ending.")
+        == "#spoilersafe Please do not reveal the ending."
+    )
+    assert (
+        strip_telegram_wrapper_noise("#spoiler-free guide for players")
+        == "#spoiler-free guide for players"
+    )
+    assert strip_telegram_wrapper_noise("#剧透警告 今汐") == "#剧透警告 今汐"
+    assert (
+        strip_telegram_wrapper_noise(
+            "(WW 3.4)\n[spoiler]\n> 第一段\n\n> 第二段", keep_paragraphs=True
+        )
+        == "第一段\n\n第二段"
+    )
 
-
-def test_prepare_text_strips_screenshot_noise_and_resolves_speaker(sample_db):
-    translator = SentenceTranslator(sample_db)
-
-    assert translator.prepare_text("(WW 3.4)\n[spoiler]\n> 洛瑟菈：声骸") == "Lucilla: 声骸"
+    # Generic Core preparation preserves comparators, hashtags, and bracketed headers.
+    assert translator.prepare_text(">50% Energy Regen") == ">50% Energy Regen"
+    assert (
+        translator.prepare_text("#spoilersafe Please do not reveal the ending.")
+        == "#spoilersafe Please do not reveal the ending."
+    )
+    assert translator.prepare_text("[Wuthering Waves 3.7]\n\nBody text.") == (
+        "[Wuthering Waves 3.7]\nBody text."
+    )
+    assert translator.prepare_text_keeping_paragraphs(
+        "[Wuthering Waves 3.7]\n\nBody text."
+    ) == "[Wuthering Waves 3.7]\n\nBody text."
+    assert translator.prepare_text("(WW 3.4)\n[spoiler]\n> 洛瑟菈：声骸") == (
+        "(WW 3.4)\n[spoiler]\n> 洛瑟菈:声骸"
+    )
+    assert translator.prepare_text("洛瑟菈：声骸") == "Lucilla: 声骸"
 
 
 def test_sentence_locks_english_official_terms_after_nfkc(sample_db):
