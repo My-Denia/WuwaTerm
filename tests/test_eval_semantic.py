@@ -1943,3 +1943,263 @@ def test_direct_baseline_pairing_system_status_and_model_mismatch(ev, run_dirs, 
     assert paired_failed is not None
     assert paired_failed["comparable"] is False
     assert paired_failed["system"]["status"] == "failed"
+
+
+# --------------------------------------------------------------------------
+# MY-229 audit hardening regressions
+# --------------------------------------------------------------------------
+
+
+def test_my229_command_run_records_failed_status_on_unexpected_exception(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+    out = tmp_path / "unexpected_crash"
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom during layer execution")
+
+    monkeypatch.setattr(ev, "_run_layers", boom)
+    with pytest.raises(RuntimeError, match="boom during layer execution"):
+        ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+                 "--fake-transport", "--out-dir", str(out)])
+    dry = json.loads((out / "ledger.dry-run.json").read_text(encoding="utf-8"))
+    assert dry["records"][-1]["status"].startswith("failed: RuntimeError:")
+    assert not (out / "run.lock").exists()
+
+
+def test_my229_run_lock_protects_run_meta_and_rejects_concurrent_acquire(ev, run_dirs, tmp_path):
+    run, corpus = run_dirs
+    out = tmp_path / "locked_out"
+    out.mkdir(parents=True)
+    sentinel_meta = {"round": 1, "runs": [{"note": "untouched"}], "config": {"config_sha256": "x"}, "reused_units": []}
+    ev.write_json_atomic(out / "run-meta.json", sentinel_meta)
+    ev.acquire_run_lock(out)
+    try:
+        with pytest.raises(ev.Refused, match="still writing"):
+            ev.acquire_run_lock(out)
+        code = ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+                        "--fake-transport", "--out-dir", str(out)])
+        assert code == 1
+        assert json.loads((out / "run-meta.json").read_text(encoding="utf-8")) == sentinel_meta
+    finally:
+        ev.release_run_lock(out)
+    assert not (out / "run.lock").exists()
+    # Unheld release_run_lock must never unlink another PID's active lock file.
+    ev.write_json_atomic(out / "run.lock", {"pid": ev.os.getpid() + 999999, "started_at": ev.now_iso()})
+    ev.release_run_lock(out)
+    assert (out / "run.lock").is_file()
+    (out / "run.lock").unlink()
+
+
+@pytest.mark.parametrize("bad_timeout", ["0", "-1", "nan", "inf"])
+def test_my229_invalid_llm_timeout_refused(ev, run_dirs, tmp_path, bad_timeout):
+    run, corpus = run_dirs
+    out = tmp_path / f"bad_timeout_{bad_timeout}"
+    code = ev.main(["run", "--run-dir", str(run), "--corpus-dir", str(corpus), "--layer", "P",
+                    "--fake-transport", "--out-dir", str(out), "--llm-timeout", bad_timeout])
+    assert code == 1
+    assert not (out / "run.lock").exists()
+    assert not (out / "ledger.dry-run.json").exists()
+
+
+def test_my229_score_p_tracks_offlist_undecidable_mh(ev, tmp_path):
+    inputs, out = _inputs(ev, tmp_path), tmp_path / "p_undecided"
+    # Limit is 1.0 FP; two medium/high offlist issues marked undecidable must stay in upper bound -> undecidable.
+    issues = [
+        {"id": f"{i:032x}", "category": "omission", "confidence": "high",
+         "source_span": {"start": 3 + i, "end": 4 + i, "text": "甲乙丙丁戊"[3 + i]}, "target_span": None, "rationale": "r"}
+        for i in range(2)
+    ]
+    _write_p(ev, out, [_p_result(u, d, issues=issues if u == "U1" and d == "zh->en" else ())
+                       for u in ("U1", "U2") for d in ("zh->en", "en->zh")])
+    keys = [f"P:U1:zh->en:{i['id']}" for i in issues]
+    ev.write_json_atomic(out / "adjudication" / "p-offlist.json", {k: "undecidable" for k in keys})
+    gate = ev.score_p(inputs, out, ev.ReviewStats())["gates"]["P_false_positives_zh->en"]
+    assert gate["offlist_undecidable_mh"] == 2
+    assert gate["offlist_pending_mh"] == 0
+    assert gate["numerator_lower"] == 0 and gate["numerator_upper"] == 2
+    assert gate["state"] == "undecidable"
+
+
+def test_my229_score_m_incomplete_reviews_separator_failure_and_absolute_sync(ev, tmp_path):
+    out = tmp_path / "m_audit"
+    out.mkdir(parents=True)
+    issues = [_precision_issue(n) for n in range(20)]
+    doc = _m_doc(ev, out, issues)
+    # 1. Incomplete review alongside 1 true + 19 false issues (partial precision < 0.60)
+    # must force M_precision to UNDECIDABLE because incomplete reviews could overturn NOT_MET.
+    doc["reviews"].append({
+        "segment": 0, "pair": 1, "pair_source": "x", "pair_target": "y",
+        "pair_status": "ready", "latency_s": 1.0, "bytes": None, "error_code": "llm_unavailable",
+        "timeout": True, "body": None,
+    })
+    # Also force separator_fidelity failure (segment translation corrupted relative to new.text).
+    doc["new"]["text"] = "WRONG"
+    ev.write_json_atomic(out / "M" / "B9.json", doc)
+    keys = [f"M:B9:seg0:pair0:{issue['id']}" for issue in issues]
+    ev.write_json_atomic(
+        out / "adjudication" / "m-precision.json",
+        {key: ("true" if idx == 0 else "false") for idx, key in enumerate(keys)},
+    )
+
+    inputs_single = _m_inputs(ev, _official_items(), docs=("B9",))
+    scored_single = ev.score_m(inputs_single, out, ev.ReviewStats(), None)
+    assert scored_single["gates"]["M_precision"]["state"] == "undecidable"
+    assert scored_single["gates"]["M_precision"]["incomplete_reviews"] == ["B9:seg0:pair1"]
+    assert scored_single["gates"]["separator_fidelity"]["state"] == "not_met"
+
+    # 2. Missing doc B10 preserves monotonic separator_fidelity NOT_MET, while non-monotonic
+    # M gates (even if partial sample was NOT_MET) become UNDECIDABLE synced with absolute rows.
+    inputs_two = _m_inputs(ev, _official_items(), docs=("B9", "B10"))
+    ev.write_json_atomic(out / "worklists" / "m-blind-key.json", {"B9": ["old", "new"], "B10": ["old", "new"]})
+    ev.write_json_atomic(
+        out / "adjudication" / "m-translation.json",
+        _m_verdicts([i["id"] for i in _official_items()], "correct", "wrong"),
+    )
+    scored_two = ev.score_m(inputs_two, out, ev.ReviewStats(), None)
+    assert scored_two["gates"]["separator_fidelity"]["state"] == "not_met"
+    assert scored_two["gates"]["separator_fidelity"]["docs_missing"] == ["B10"]
+    assert scored_two["gates"]["M_official_terms"]["state"] == "undecidable"
+    assert scored_two["gates"]["M_official_terms"]["docs_missing"] == ["B10"]
+    row_states = {row["gate"]: row["state"] for row in scored_two["absolute"]}
+    assert row_states["M_official_terms"] == scored_two["gates"]["M_official_terms"]["state"]
+    assert row_states["M_ordinary_sense"] == scored_two["gates"]["M_ordinary_sense"]["state"]
+
+
+def test_my229_resume_hardening_m_mprime_corrupt_json_and_direct_gateway_stop(ev, run_dirs, tmp_path, monkeypatch):
+    run, corpus = run_dirs
+    out = tmp_path / "resume_harden"
+    inputs = ev.load_inputs(run, corpus)
+    _write(out / "ledger.dry-run.json", json.loads((run / "ledger.json").read_text(encoding="utf-8")))
+    ledger = ev.Ledger(out / "ledger.dry-run.json")
+    rid = ledger.open_record(purpose="eval", round=1, status="running")
+
+    # 1. Corrupt JSON in Runner.done returns False instead of raising.
+    _write(out / "P" / "bad.json", "{corrupt json")
+    translator, service, db_copy = ev.build_runtime(inputs, out, fake=True)
+    try:
+        runner = ev.Runner(inputs, out, ledger, rid, translator, service, resume=True)
+        assert runner.done("P/bad.json") is False
+    finally:
+        asyncio.run(translator.aclose())
+        shutil.rmtree(db_copy.parent, ignore_errors=True)
+
+    # 2. run_m translation cache identity check + per-pair .reviews.partial.json resume + review_model check.
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://test.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "k")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "model-a")
+    monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model-a")
+    out_m = tmp_path / "m_resume"
+    _write(out_m / "ledger.dry-run.json", json.loads((run / "ledger.json").read_text(encoding="utf-8")))
+    m_ledger = ev.Ledger(out_m / "ledger.dry-run.json")
+    m_rid = m_ledger.open_record(purpose="eval", round=1, status="running")
+    calls_made = []
+
+    async def fake_legacy(tr, text):
+        return [(text, "Old.")]
+
+    async def fake_long(tr, raw, **kwargs):
+        mid = len(raw) // 2
+        class Seg:
+            def __init__(self, s: int, e: int) -> None:
+                self.start = s
+                self.end = e
+                self.core_start = s
+                self.core_end = e
+                self.hard_cut = False
+        kwargs["on_segment"](Seg(0, mid), "First.")
+        kwargs["on_segment"](Seg(mid, len(raw)), "Second.")
+        class Out:
+            error_code = None
+            text = "First.Second."
+        return Out()
+
+    monkeypatch.setattr(ev, "legacy_translate_plain", fake_legacy)
+    monkeypatch.setattr(ev.app_layer, "_translate_long_plain_text", fake_long)
+    t1, s1, d1 = ev.build_runtime(inputs, out_m, fake=True)
+    try:
+        r1 = ev.Runner(inputs, out_m, m_ledger, m_rid, t1, s1, resume=True)
+        stop_on_key: set[str] = {"M:B1:seg1:pair0", "M:B2:seg1:pair0"}
+        async def fail_on_target(key, job):
+            calls_made.append(key)
+            if key in stop_on_key:
+                raise ev.Refused(f"simulated stop on {key}")
+            return {"key": key, "latency_s": 0.1, "error_code": None, "bytes": 10,
+                    "body": {"status": "complete", "dropped_unanchored": 0, "omitted_issues": 0, "issues": []},
+                    "model_calls": 1}
+        r1.review = fail_on_target  # type: ignore[method-assign]
+        # Attempt 1: B1 seg0 cached in B1.reviews.partial.json before failing on B1:seg1.
+        with pytest.raises(ev.Refused, match="simulated stop"):
+            asyncio.run(r1.run_m())
+        assert calls_made == ["M:B1:seg0:pair0", "M:B1:seg1:pair0"]
+        assert not (out_m / "M" / "B1.json").is_file()
+        assert (out_m / "M" / "B1.translations.json").is_file()
+        partial_b1 = json.loads((out_m / "M" / "B1.reviews.partial.json").read_text(encoding="utf-8"))
+        assert partial_b1["review_model"] == "review-model-a"
+        assert len(partial_b1["reviews"]) == 1
+        # Translation model change must refuse stale translation cache on resume.
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "model-b")
+        with pytest.raises(ev.Refused, match="model mismatch"):
+            asyncio.run(r1.run_m())
+        # Attempt 2 (same models): skips cached B1:seg0, completes B1 (unlinking B1.reviews.partial.json),
+        # persists review_model in B1.json, then caches B2:seg0 before failing on B2:seg1.
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "model-a")
+        calls_made.clear()
+        stop_on_key.clear()
+        stop_on_key.add("M:B2:seg1:pair0")
+        with pytest.raises(ev.Refused, match="simulated stop"):
+            asyncio.run(r1.run_m())
+        assert calls_made == ["M:B1:seg1:pair0", "M:B2:seg0:pair0", "M:B2:seg1:pair0"]
+        assert not (out_m / "M" / "B1.reviews.partial.json").exists()
+        assert json.loads((out_m / "M" / "B1.json").read_text(encoding="utf-8"))["review_model"] == "review-model-a"
+        assert (out_m / "M" / "B2.reviews.partial.json").is_file()
+        # Attempt 3: switching review model invalidates B2.reviews.partial.json and runs both B2 pairs fresh.
+        monkeypatch.setenv("WUWATERM_SEMANTIC_REVIEW_MODEL", "review-model-b")
+        calls_made.clear()
+        stop_on_key.clear()
+        asyncio.run(r1.run_m())
+        assert calls_made == ["M:B2:seg0:pair0", "M:B2:seg1:pair0"]
+        assert json.loads((out_m / "M" / "B2.json").read_text(encoding="utf-8"))["review_model"] == "review-model-b"
+        assert not (out_m / "M" / "B2.reviews.partial.json").exists()
+    finally:
+        asyncio.run(t1.aclose())
+        shutil.rmtree(d1.parent, ignore_errors=True)
+
+    # 3. run_mprime per-condition resume saves with_precedent and only calls without_precedent on resume.
+    out_mp = tmp_path / "mp_resume"
+    _write(out_mp / "ledger.dry-run.json", json.loads((run / "ledger.json").read_text(encoding="utf-8")))
+    mp_ledger = ev.Ledger(out_mp / "ledger.dry-run.json")
+    mp_rid = mp_ledger.open_record(purpose="eval", round=1, status="running")
+    t2, s2, d2 = ev.build_runtime(inputs, out_mp, fake=True)
+    try:
+        r2 = ev.Runner(inputs, out_mp, mp_ledger, mp_rid, t2, s2, resume=True)
+        mp_calls = []
+        async def flaky_translate(text, context):
+            mp_calls.append(len(context.precedents) if context else 0)
+            if len(mp_calls) == 2:
+                raise ev.Refused("stop after first condition")
+            return {"kind": "llm", "error_code": None, "text": f"t-{len(mp_calls)}", "latency_s": 0.1}
+        r2.translate = flaky_translate  # type: ignore[method-assign]
+        with pytest.raises(ev.Refused, match="stop after first condition"):
+            asyncio.run(r2.run_mprime(False))
+        assert mp_calls == [1, 0]
+        # Second attempt resumes and only calls without_precedent (0 precedents).
+        mp_calls.clear()
+        asyncio.run(r2.run_mprime(False))
+        assert mp_calls == [0]
+    finally:
+        asyncio.run(t2.aclose())
+        shutil.rmtree(d2.parent, ignore_errors=True)
+
+    # 4. run_direct_baseline raises Refused on non-timeout gateway failures instead of burning remaining cases.
+    out_db = tmp_path / "db_gateway"
+    runner_db, db_payloads = _build_direct_runner(
+        ev, run_dirs, out_db, monkeypatch, model="deepseek-chat",
+        gateway_fn=lambda req: httpx.Response(400, json={"error": "bad model"}),
+    )
+    try:
+        cases = [ev.DirectBaselineCase(case_id=f"c-{i}", source_text=f"原文 {i}") for i in range(3)]
+        with pytest.raises(ev.Refused, match="gateway error"):
+            asyncio.run(runner_db.run_direct_baseline(cases))
+        assert len(db_payloads) == 1
+    finally:
+        asyncio.run(runner_db.translator.aclose())
