@@ -27,7 +27,7 @@ release. That boundary has not moved.
   HTTP changes are additive; schema `2`, pinned data `9218d612` and thinking
   defaults (`omit` / `disabled`) are unchanged from `v0.13.0`, so `v0.13.0`
   deployments can keep their `terms.db` and upgrade with `--runtime-only`.
-  Before it is `v0.13.0`, a
+  Its predecessor is `v0.13.0`, a
   translation-direction, prose-preservation and terms release on top of
   `v0.12.0`: with no `forced_to_chinese` the direction is read from the
   normalized user text and CJK text translates to Chinese only when its Latin

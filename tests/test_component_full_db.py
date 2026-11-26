@@ -368,7 +368,106 @@ except m.FullDatabaseError: sys.exit(47)
     assert result["stat"]["inode"] == before.st_ino and result["sha256"] == binding["sha256"]
 
 
+def _descendants(pid: int) -> list[int]:
+    """Every process below ``pid`` right now, read from /proc."""
+    found: list[int] = []
+    pending = [pid]
+    while pending:
+        current = pending.pop()
+        try:
+            children = Path(f"/proc/{current}/task/{current}/children").read_text().split()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for child in children:
+            found.append(int(child))
+            pending.append(int(child))
+    return found
+
+
+def _state(pid: int) -> str | None:
+    """The state letter from /proc/<pid>/status, or None when that process is gone."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+    for line in status.splitlines():
+        if line.startswith("State:"):
+            return line.split()[1]
+    return None
+
+
+def _stop_group(pid: int) -> list[int] | None:
+    """Freeze the deployment's process group and return its members while frozen.
+
+    One SIGSTOP to the group is what makes discovery deterministic: the tree is
+    frozen before it is read, so a scan cannot miss a verifier that starts and
+    exits between two reads, and the signal cannot be sent to a pid that has
+    already finished. SIGSTOP is delivered asynchronously, so the members are
+    read back in state T instead of sleeping for a guessed interval, and the
+    group is signalled again on every pass because a child created in that
+    window was not in the first signal's target set. A member blocked in an
+    uninterruptible syscall cannot reach state T until that call returns, but it
+    executes no user code meanwhile, so its own command line and descriptors are
+    read just as safely. ``None`` means the deployment is gone: nothing was left
+    to freeze.
+    """
+    for _ in range(2000):
+        try:
+            os.killpg(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            return None
+        members = _descendants(pid)
+        if all(_state(member) in (None, "T", "Z", "D") for member in members):
+            return members
+        time.sleep(0.0005)
+    raise AssertionError("the deployment process group did not stop")
+
+
+def _resume_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGCONT)
+    except ProcessLookupError:
+        pass
+
+
+def _exact_hit_verifier(members: list[int], lock_path: Path) -> int | None:
+    """The stopped member that is the real exact-hit verifier on the deployment lock."""
+    for member in members:
+        try:
+            if b"verify_exact_hits.py" not in Path(f"/proc/{member}/cmdline").read_bytes():
+                continue
+            target = os.readlink(f"/proc/{member}/fd/9")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if target == str(lock_path):
+            return member
+    return None
+
+
+def _reap_killed(process: subprocess.Popen[bytes]) -> int:
+    """Reap a killed deployment without waiting for its pipes to reach EOF.
+
+    ``communicate`` waits for EOF, and a stopped descendant holding a copy of
+    the write end can deny it for as long as that descendant stays stopped.
+    This test reads the exit status only, so the pipes are closed instead.
+    """
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+    return process.wait()
+
+
 def test_real_verifier_inherits_fd9_after_parent_death(tmp_path: Path) -> None:
+    """The deployment lock outlives the process that started the verifier.
+
+    The verifier is found by freezing the deployment's own process group and
+    reading it while it cannot change. Polling a running tree every couple of
+    milliseconds fails on a loaded host in both directions: a verifier that
+    runs for a fraction of a second can start and exit between two reads, and a
+    signal sent to a pid that has already exited is lost without a trace. While
+    the tree advances only in the quanta this loop gives it, a freeze lands
+    inside the verifier's life instead of racing its exit.
+    """
     root, live, candidate = setup_root(tmp_path)
     code = ("import pathlib,sys; sys.path.insert(0,sys.argv[1]); import component_full_db as m; "
             "m.prepare_candidate(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]),sys.argv[4])")
@@ -376,74 +475,62 @@ def test_real_verifier_inherits_fd9_after_parent_death(tmp_path: Path) -> None:
     command = ["sh", "-c", 'exec 9<>"$1"; shift; flock -n 9 || exit 98; exec "$@"',
                "fixture-lock", str(lock_path), PYTHON, "-I", "-B", "-c", code,
                str(SOURCE / "scripts"), str(root), str(candidate), TRANSACTION]
+    # A session of its own puts the deployment and every verifier it starts in
+    # one process group, which is what the freeze below signals.
     process = subprocess.Popen(command, cwd=SOURCE, env={"PATH": "/usr/local/bin:/usr/bin:/bin",
-                               "LANG": "C.UTF-8"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                               "LANG": "C.UTF-8"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
     verifier = None
     try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and process.poll() is None:
-            try:
-                children = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
-            except FileNotFoundError:
+        for _ in range(4000):
+            members = _stop_group(process.pid)
+            if members is None:
                 break
-            for child in children:
-                try:
-                    arguments = Path(f"/proc/{child}/cmdline").read_bytes()
-                    if b"verify_exact_hits.py" not in arguments:
-                        continue
-                    target = os.readlink(f"/proc/{child}/fd/9")
-                except (FileNotFoundError, ProcessLookupError, PermissionError):
-                    continue
-                if target == str(lock_path):
-                    try:
-                        os.kill(int(child), signal.SIGSTOP)
-                    except ProcessLookupError:
-                        continue
-                    verifier = int(child)
-                    break
+            verifier = _exact_hit_verifier(members, lock_path)
             if verifier is not None:
                 break
+            _resume_group(process.pid)
             time.sleep(0.002)
         assert verifier is not None, "actual exact-hit verifier was not observed"
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                status = Path(f"/proc/{verifier}/status").read_text()
-            except FileNotFoundError:
-                break
-            if "State:\tT" in status:
-                break
-            time.sleep(0.002)
-        else:
-            raise AssertionError("the selected verifier did not stop")
+        assert _state(verifier) in ("T", "D")
         assert os.readlink(f"/proc/{verifier}/fd/9") == str(lock_path)
         assert os.stat(f"/proc/{verifier}/fd/9").st_ino == lock_path.stat().st_ino
         process.kill()
-        process.communicate(timeout=10)
-        assert process.returncode == -signal.SIGKILL
+        assert _reap_killed(process) == -signal.SIGKILL
+        stopped = verifier
         with lock_path.open("r+") as competing:
+            # The verifier is still stopped and the process that started it is
+            # gone, so only the inherited descriptor can hold the lock now.
             with pytest.raises(BlockingIOError):
                 fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.kill(verifier, signal.SIGCONT)
+            os.kill(stopped, signal.SIGCONT)
             verifier = None
-            deadline = time.monotonic() + 20
-            while True:
-                try:
-                    fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # The verifier's own exit ends this wait: the descriptor it
+            # inherited is closed then, and the lock with it. A stopwatch
+            # reading of how busy the host is would say nothing about either,
+            # so this is a hang backstop above sub-second work, not a budget.
+            for _ in range(6000):
+                if _state(stopped) in (None, "Z"):
                     break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise AssertionError("verifier did not release inherited lock") from None
-                    time.sleep(0.01)
-    finally:
-        if verifier is not None:
+                time.sleep(0.01)
+            else:
+                raise AssertionError("the released verifier did not exit")
             try:
-                os.kill(verifier, signal.SIGCONT)
-            except ProcessLookupError:
-                pass
+                fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise AssertionError("the inherited lock outlived its verifier") from None
+    finally:
+        _resume_group(process.pid)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         if process.poll() is None:
-            process.kill()
-            process.communicate(timeout=10)
+            _reap_killed(process)
+        else:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
     assert verify_result(invoke(root, "candidate", str(candidate), TRANSACTION))["verification"]["exact_hits_exit"] == 0
     assert live.is_file()
 
