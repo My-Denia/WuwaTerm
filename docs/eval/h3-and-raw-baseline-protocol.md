@@ -125,7 +125,7 @@ Every frozen file whose SHA-256 the §0 table records has that SHA-256 at the ta
 | Genre | Code | Source & Scope | Weighting Rationale |
 | --- | --- | --- | --- |
 | 攻略 Guide | `guide` | Community builds, rotations, mechanics, walkthroughs, farming, pulling advice (TapTap `zh`, Steam guides `en`), rich in shorthand (`3+1`, `S0R1`), skill stems, and community jargon | **Weighted highest on `zh->en`** (`>= 50` scored units) to target the `71/87` `H1` bottleneck |
-| 公告 Announcement | `announcement` | Official Kuro website announcement JSON (`zh`/`en` editions), using distinct non-boilerplate sections where possible | Measures official terminology and formatting fidelity |
+| 公告 Announcement | `announcement` | Official Kuro website announcement JSON (`zh`/`en` editions), using distinct non-boilerplate sections where possible; collection ladder and template pruning in §2.5 | Measures official terminology and formatting fidelity |
 | 剧情 Story | `story` | Dialogue and narration scenes from pinned `3.7` TextMaps (`9218d612`) disjoint from all earlier sets | Measures pronoun/elided-subject continuity, speaker disambiguation, and tone |
 | 混合语境 Mixed | `mixed` | Community discussion, reviews, UI/event notices mixing official names with everyday words (`心`, `椿`, `tuner`, `energy core`) | Measures homograph isolation and zero false-positive priming |
 
@@ -153,7 +153,7 @@ Before the **first** live model call of `H3`, an automated pre-freeze check (the
 These rules were registered before any `H3` candidate was scanned against a sealed set; `T` was set from `D` alone.
 
 - **Sealed sets.** Every source and reference paragraph of the prior corpora of rule 1, and the Core tree under test: the 350 text blobs of the `v0.14.0` tag commit `2737530`. A text blob is a tracked blob that is not a symlink or submodule, holds no NUL byte and decodes as UTF-8, the rule of the scorer's `git_blob_texts`; the six PNG images drop out. ADR 0020's merge scan uses the Core tree the other way round, as a clearing source (`--clear-git`). Here the tree is sealed: the tree under test must not already hold `H3` text, and nothing in this scan is cleared against it. Such text would most likely sit in tests and fixtures, so the whole tree is scanned, not only `src/`.
-- **Windows.** 12 Unicode scalars of the raw text, no normalization, the scorer's `windows()`. The frozen `scan` takes only sample files as `--sealed` and no git tree, so this scan is check `C4` of the corpus checker (§2.6), which loads the scorer's window function after checking the scorer's SHA-256.
+- **Windows.** 12 Unicode scalars of the raw text, no normalization, the scorer's `windows()`. The frozen `scan` takes only sample files as `--sealed` and no git tree, so this scan is check `C4` of the corpus checker that revision (c) adds (§2.6), which must load the scorer's window function only after checking the scorer's SHA-256.
 - **Shared fragment.** The shared fragment of a hit window is the longest run of consecutive window positions of the candidate paragraph that are all hits and include that window. Its length in scalars is the number of windows in the run plus `11`; a lone hit window gives `12`.
 - **Noise calibration on `D`**, scanned against `H1`, `H2` and the Core tree under test before any `H3` candidate was scanned:
 
@@ -165,7 +165,7 @@ These rules were registered before any `H3` candidate was scanned against a seal
   Of the English hit windows, 0.35% hold an `Nd` digit and 9.8% hold a dictionary surface at least 2 scalars long. The Core tree brings most of the English noise; Chinese has none. `T = 24` lies above every shared fragment seen on `D` (max 22).
 - **Clearance classes.** Each hit window is tested against M1, then M2, then M3; the first class that applies clears it and is the class recorded:
   - **M1, declared names**: the window lies wholly inside one entry of a declared name set, frozen and bound in the acceptance receipt: the official names (ADR 0020's frozen upstream name file) or the `H3` community lexicon (§5.3).
-  - **M2, generic English phrase**: the window holds no Unicode `Nd` character, holds no term surface of the bound dictionary (`terms.db` `9ddee819…`) at least 2 scalars long, and its shared fragment is shorter than `T = 24` scalars. These three conditions are the whole test; on `D` every hit was English.
+  - **M2, generic English phrase**: the window holds no CJK character (Unicode scripts Han, Hiragana, Katakana, Hangul), holds no Unicode `Nd` character, holds no term surface of the bound dictionary (`terms.db` `9ddee819…`) at least 2 scalars long, and its shared fragment is shorter than `T = 24` scalars. `T` was calibrated on English hits only (Chinese had none on `D`), so a hit window with CJK text clears only by M1 or M3.
   - **M3, `upstream_data`**: the window is on the frozen clearance list, whose every entry names it by window SHA-256 and location and attributes it to `upstream_data` (game data outside the sealed paragraphs, as in ADR 0020). The list holds no other class.
   - Every other hit is **uncleared**. ADR 0020's hand-classified *ordinary wording* clearance is not used for `H3`; M2 replaces it.
 - **Pruning and freeze.** At assembly, a paragraph with an uncleared window is removed whole, with its aligned reference, never rewritten around the window. The freeze requires `uncleared == 0` (`C4`). The receipt gives the counts per class (M1, M2, M3, uncleared) and the longest shared fragment; window SHA-256 values and locations are kept, never the text.
@@ -189,7 +189,7 @@ At every level:
 
 ### 2.6 Freeze Gates: Acceptance Receipt and Judge Roster (revision (c))
 
-The corpus checker `scripts/eval_h3_corpus.py` runs the checks below on the assembled set and writes an `h3-acceptance-v1` receipt. Its output holds counts, SHA-256 values and rule ids, never text.
+The corpus checker that revision (c) adds, `scripts/eval_h3_corpus.py`, must run the checks below on the assembled set and write an `h3-acceptance-v1` receipt. Its output must hold counts, SHA-256 values and rule ids, never text.
 
 | Check | Rule |
 | --- | --- |
@@ -206,7 +206,7 @@ The corpus checker `scripts/eval_h3_corpus.py` runs the checks below on the asse
 
 The judge roster `h3-judges-v1` pins the independent strong-pool judges `j1` and `j2` and the arbitrator `adj` (§5.3), each a fresh context, before the freeze. The manifest has no field for them.
 
-Both files are `--freeze` inputs, so their SHA-256 values enter the bindings and the approval token. The revision (c) runner prints an approval token from `preflight` only when the `--freeze` inputs hold a valid `h3-acceptance-v1` with `verdict == "pass"` for the same manifest and an `h3-judges-v1`; otherwise it prints none. `run --live` makes the same check and refuses before any client exists.
+Both files are `--freeze` inputs, so their SHA-256 values enter the bindings and the approval token. The revision (c) runner must print an approval token from `preflight` only when the `--freeze` inputs hold a valid `h3-acceptance-v1` with `verdict == "pass"` for the same manifest and an `h3-judges-v1`, and print none otherwise. `run --live` must make the same check and refuse before any client exists.
 
 ## 3. Experimental Arms (2-Arm Primary + `en->zh` `raw_matched` Ablation; Arm C Deferred)
 
