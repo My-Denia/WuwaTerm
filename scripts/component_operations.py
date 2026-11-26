@@ -177,6 +177,37 @@ def _recipe_matches(actual: dict[str, Any], snapshot: dict[str, Any]) -> None:
         raise TransactionError("observed container recipe differs")
 
 
+def _resource_additions(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """Name the resource options ``new`` adds to ``old``; refuse any other change.
+
+    A recorded option cannot be changed or dropped here, so a refresh can only
+    complete a record that predates these options.
+    """
+    if set(old) != set(new):
+        raise TransactionError("recorded recipe fields differ")
+    differing = sorted(key for key in old if key != "runtime_options" and old[key] != new[key])
+    before, after = old["runtime_options"], new["runtime_options"]
+    differing += sorted("runtime_options." + key for key in set(before) | set(after)
+                        if (key in before and (key not in after or after[key] != before[key]))
+                        or (key not in before and key not in manifest._RESOURCE_OPTIONS))
+    if differing:
+        raise TransactionError("recorded settings differ: " + ", ".join(differing))
+    return sorted(set(after) - set(before))
+
+
+def _verify_refresh_delta(root: Path, journal: dict[str, Any]) -> None:
+    old = _snapshot(root, journal["before"]["topology"]["api"])
+    new = _snapshot(root, journal["target"]["manifest"]["components"]["api"])
+    if not _resource_additions(old, new):
+        raise TransactionError("refresh record adds no runtime option")
+
+
+def _verify_refresh_live(root: Path, journal: dict[str, Any], compose_path: Path) -> None:
+    """A refresh never touches Docker, so the live topology is always its target."""
+    _verify_refresh_delta(root, journal)
+    _verify_live_topology(root, journal, which="target", compose_path=compose_path)
+
+
 def _retained_name(journal: dict[str, Any], component: str = "api") -> str:
     return "wuwaterm-rollback-" + journal["transaction_id"] + "-" + component
 
@@ -490,7 +521,8 @@ def _verify_full4_telegram_paths(journal: dict[str, Any], actual: dict[str, Any]
 def _verify_live_topology(root: Path, journal: dict[str, Any], *, which: str,
                           compose_path: Path, allow_selected_restart: bool = False,
                           allow_retained: bool = False, allow_runtime_drift: bool = False,
-                          full4_endpoints: bool = False, _full4_runtime_predecessor: bool = False) -> None:
+                          full4_endpoints: bool = False, _full4_runtime_predecessor: bool = False,
+                          api_override: dict[str, Any] | None = None) -> None:
     """Check recorded containers and supported bindings with no mutations."""
     if type(full4_endpoints) is not bool or type(_full4_runtime_predecessor) is not bool:
         raise TransactionError("invalid FULL4 route selection")
@@ -502,8 +534,9 @@ def _verify_live_topology(root: Path, journal: dict[str, Any], *, which: str,
         and journal.get("schema_version") in (2, 3, 4)
     ):
         raise TransactionError("FULL4 endpoint route requires an admitted FULL4 context")
+    # A schema-4 refresh keeps the adopted leaf forms: it changes no state path.
     adoption = (journal.get("kind") == "component-runtime" and journal.get("schema_version") == 4
-                and journal.get("action") == "adopt")
+                and journal.get("action") in ("adopt", runtime.REFRESH_ACTION))
     if adoption:
         runtime.validate_journal(journal)
         adoption = journal["selection"] == [] and journal["migrations"] == []
@@ -513,6 +546,14 @@ def _verify_live_topology(root: Path, journal: dict[str, Any], *, which: str,
     else:
         topology = journal["before"]["topology"]
         records = journal["before"]["containers"]
+    if api_override is not None:
+        # Only the record refresh passes this: it compares the recorded API
+        # against the recipe and container it is about to record. Every other
+        # check, and every other component, stays as recorded.
+        if topology["api"] is None:
+            raise TransactionError("API is not part of the recorded topology")
+        topology = {**topology, "api": {**topology["api"], "recipe": api_override["recipe"]}}
+        records = {**records, "api": api_override["container"]}
     key = os.urandom(32)
     required: dict[tuple[str, str], set[str]] = {}
     optional: dict[tuple[str, str], dict[str, str]] = {}
@@ -606,7 +647,8 @@ def _full4_record_route(journal: dict[str, Any], *, for_full4: bool) -> bool:
 
 
 def _verify_terminal_record(root: Path, journal: dict[str, Any], raw: bytes, compose_path: Path, *,
-                            full4_predecessor: bool = False) -> None:
+                            full4_predecessor: bool = False,
+                            api_override: dict[str, Any] | None = None) -> None:
     if journal["status"] not in ("committed", "rolled_back"):
         raise TransactionError("runtime transaction is not terminal")
     if journal["schema_version"] in (4, 5):
@@ -623,11 +665,15 @@ def _verify_terminal_record(root: Path, journal: dict[str, Any], raw: bytes, com
         if manifest.read_manifest(root, previous["deployment_id"]) != previous:
             raise TransactionError("terminal prior manifest differs")
     _verify_manifest_if_present(root, journal, required=committed)
+    if journal["action"] == runtime.REFRESH_ACTION:
+        _verify_refresh_delta(root, journal)
     endpoints = _full4_record_route(journal, for_full4=full4_predecessor)
     _verify_live_topology(root, journal, which=which, compose_path=compose_path,
                           allow_selected_restart=not committed and journal["action"] == "update",
-                          allow_retained=committed and journal["action"] == "update", allow_runtime_drift=True,
-                          full4_endpoints=endpoints, _full4_runtime_predecessor=endpoints)
+                          allow_retained=(committed and journal["action"] == "update"
+                                          and api_override is None), allow_runtime_drift=True,
+                          full4_endpoints=endpoints, _full4_runtime_predecessor=endpoints,
+                          api_override=api_override)
     if committed and journal["action"] == "update":
         if "api" in journal["selection"]:
             _verify_candidate(root, journal)
@@ -671,8 +717,10 @@ def _terminal_health(root: Path, journal: dict[str, Any]) -> dict[str, str]:
 def _verify_initial_preimage(root: Path, journal: dict[str, Any], compose_path: Path,
                              predecessor: dict[str, Any] | None, predecessor_raw: bytes | None) -> None:
     if (journal["status"] != "active" or journal["phase"] != "prepared"
-            or journal["action"] not in ("adopt", "update")):
+            or journal["action"] not in ("adopt", "update", runtime.REFRESH_ACTION)):
         raise TransactionError("successor journal is not prepared")
+    if journal["action"] == runtime.REFRESH_ACTION and predecessor is None:
+        raise TransactionError("refresh requires an adopted predecessor")
     if journal["action"] == "update" and any(
         journal["before"]["topology"][name] is None or journal["target"]["containers"][name]["id"] is not None
         for name in journal["selection"]
@@ -727,7 +775,10 @@ def _verify_initial_preimage(root: Path, journal: dict[str, Any], compose_path: 
             _telegram_receipt(root, journal)
     _require_target_manifest_absent(root, journal)
     _exact_pointers(root, journal, "old")
-    _verify_live_topology(root, journal, which="before", compose_path=compose_path)
+    if journal["action"] == runtime.REFRESH_ACTION:
+        _verify_refresh_live(root, journal, compose_path)
+    else:
+        _verify_live_topology(root, journal, which="before", compose_path=compose_path)
 
 
 def _replace_pointer(root: Path, name: str, desired: dict[str, Any], allowed: list[dict[str, Any]]) -> None:

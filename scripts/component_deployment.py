@@ -37,6 +37,12 @@ def main(argv: list[str] | None = None, *, runtime: ModuleType) -> int:
     adopt_command.add_argument("--api-receipt")
     adopt_command.add_argument("--telegram-receipt")
     adopt_command.add_argument("--expected-sha")
+    refresh = commands.add_parser(
+        "refresh-runtime-options",
+        help="record the API memory reservation and OOM score that an earlier adoption lacks")
+    refresh.add_argument("--container-id", required=True, help="full ID of the running recorded or recreated API")
+    refresh.add_argument("--compose-executable", type=Path, required=True)
+    refresh.add_argument("--expected-sha")
     probe_recovery = commands.add_parser("recover-probe")
     probe_recovery.add_argument("--probe-id", required=True)
     probe_recovery.add_argument("--compose-executable", type=Path, required=True)
@@ -250,6 +256,15 @@ def main(argv: list[str] | None = None, *, runtime: ModuleType) -> int:
                                   api_receipt=args.api_receipt, telegram_receipt=args.telegram_receipt,
                                   expected_sha=args.expected_sha)
             print(json.dumps({"deployment_id": deployment_id, "polling_health": "unconfirmed"}, sort_keys=True))
+            return 0
+        if args.command == "refresh-runtime-options":
+            runtime.admission.admit_component(root, operation=args.command, code_root=runtime.CODE_ROOT)
+            if not runtime.capsule_execution_ready(full=False):
+                runtime._fail("record refresh is unavailable until saved-source recovery is enabled")
+            result = runtime.refresh_runtime_options(
+                args.root, container_id=args.container_id, compose_executable=args.compose_executable,
+                expected_sha=args.expected_sha)
+            print(json.dumps(result, sort_keys=True))
             return 0
         if args.command == "recover-probe":
             import component_recovery as recovery  # noqa: PLC0415

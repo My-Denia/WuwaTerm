@@ -56,6 +56,7 @@ from component_adoption import (  # noqa: E402
     _legacy_component as _legacy_component,
     _adopt_component as _adopt_component,
     adopt as adopt,
+    refresh_runtime_options as refresh_runtime_options,
 )
 
 from component_journal_runtime import (  # noqa: E402

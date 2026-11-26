@@ -139,14 +139,9 @@ The Compose file has two image roles across three services:
   also sets `MemoryLow`. The OOM score makes the OOM killer pick the API only
   after ordinary processes. Both live in the Compose file because the updater
   recreates from that file alone. A container adopted by a release that records
-  these fields has both recorded, and updates keep and replay them. A
-  deployment adopted earlier keeps its existing record, which lacks them: an
-  update copies the running container's host configuration and keeps that
-  record, so a container recreated through Compose with these settings, or
-  given a memory reservation with `docker update` (which cannot set the OOM
-  score), is reported as `observed container recipe differs`. `adopt` refuses
-  an already adopted deployment, so there is no migration path for the old
-  record yet.
+  these fields has both recorded, and updates keep and replay them from the
+  recorded recipe. A deployment adopted earlier has a record without them; see
+  [API resource settings on an adopted deployment](#api-resource-settings-on-an-adopted-deployment).
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
@@ -186,6 +181,77 @@ cd /opt/wuwaterm/current
 export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+## API Resource Settings On An Adopted Deployment
+
+A component deployment adopted before the recipe carried the API memory
+reservation and OOM score has neither recorded. Once the live container has
+them, verification and update preparation refuse it with
+`observed container recipe differs` (a recreated container is also not the
+recorded one). `refresh-runtime-options` records the two values from the live
+container. `adopt` still refuses an already adopted deployment.
+
+There are two ways to give the container the settings:
+
+- `docker update --memory-reservation 96m <container>` changes the running
+  container in place. It can set only the memory reservation.
+- Recreating `wuwaterm-api` through Compose applies both, and restarts the API.
+  Use the recorded Compose project name and the deployed image, pinned as in the
+  `--force-recreate` command under [HTTP Adapter Service](#http-adapter-service).
+
+Then name that container, by its full ID, from a clean checkout at the
+deployment root running a release that has the command:
+
+```sh
+deploy/product-update.sh --root "$PWD" refresh-runtime-options \
+  --container-id "$(docker inspect --format '{{.Id}}' wuwaterm-api)" \
+  --compose-executable /path/to/docker-compose
+```
+
+`--expected-sha <full-commit>` rejects an unexpected operations commit. The
+command runs only when all of this holds:
+
+- the deployment is adopted and has no unfinished transaction, and its last
+  transaction verifies in every respect other than the recorded API;
+- the named container is the only container of the recorded API project and
+  service. A rollback container that an earlier update has not yet retired
+  counts as a second one. If an update reported `"retirement": "pending"`, retire
+  it before changing the API container, with `recover --transaction-id <id>` of
+  that committed update: once the live container has the new settings, that
+  recovery no longer verifies;
+- its image, command, entrypoint, mounts, network, ports, restart policy, user,
+  working directory, every other runtime option, name and running state match
+  the record, and its environment equals what the recorded env file references
+  and overrides render to;
+- the recorded container keeps its transaction ownership label; a replacement
+  container carries none;
+- the only difference is that `memory_reservation`, `oom_score_adj` or both are
+  present on the container and absent from the record. A recorded value is never
+  changed or removed, and a replacement container that adds neither is not
+  rebound;
+- the Telegram component, if installed, keeps its recorded container binding,
+  recipe and environment; its running state is re-read, as an update does. It
+  cannot carry either setting through this command.
+
+A refusal leaves the recorded manifest, journal and pointers as they were; a
+field difference is reported by name, without values. On success the command
+publishes a new metadata-only transaction (action `refresh-runtime-options`):
+a new recipe snapshot, product manifest and journal, with the previous journal
+archived under `.deployments/component-runtime-history/`. Earlier manifests and
+snapshots are not rewritten. It moves `.deploy_current` to the new deployment
+and `.deploy_commit` to the checkout that ran it. No container is created,
+started, stopped or removed, and no readiness is claimed. Later updates keep and
+replay the recorded values. Running it again prints `"status": "unchanged"` and
+publishes nothing.
+
+The journal action is new. After a refresh, an operations checkout older than
+the release that added it cannot read the journal and refuses component
+operations with `component runtime journal is unknown`.
+
+If publication fails, the previous pointers are restored. The container still
+differs from the previous record, so run the refresh again after fixing the
+cause. If the command was interrupted, run `recover --transaction-id <id>`
+with the ID that `inspect` reports, then run the refresh again.
 
 ## HTTP Adapter Service
 

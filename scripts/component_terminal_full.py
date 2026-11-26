@@ -23,7 +23,8 @@ validate_journal = journal.validate_journal
 
 
 def verify_terminal(root: Path, *, compose_path: Path, strict_runtime: bool = False,
-                    recovery_source_id: str | None = None) -> tuple[bytes, dict[str, Any]] | None:
+                    recovery_source_id: str | None = None,
+                    api_override: dict[str, Any] | None = None) -> tuple[bytes, dict[str, Any]] | None:
     """Verify a terminal FULL3 binding without reconciling or changing services."""
     import component_full_db as database  # noqa: PLC0415
     import component_operations as transaction  # noqa: PLC0415
@@ -87,10 +88,15 @@ def verify_terminal(root: Path, *, compose_path: Path, strict_runtime: bool = Fa
         # for the full transaction are performed explicitly below.
         current["migrations"] = []
         transaction._verify_live_topology(root, current, which=which, compose_path=compose_path,
-                                          allow_retained=committed, allow_runtime_drift=True,
-                                          full4_endpoints=_full4_endpoint_route(journal))
+                                          allow_retained=committed and api_override is None,
+                                          allow_runtime_drift=True,
+                                          full4_endpoints=_full4_endpoint_route(journal),
+                                          api_override=api_override)
         topology = winning["components"]
         records = journal[which]["containers"]
+        if api_override is not None:
+            topology = {**topology, "api": {**topology["api"], "recipe": api_override["recipe"]}}
+            records = {**records, "api": api_override["container"]}
         for name in ("api", "telegram"):
             component, expected = topology[name], records[name]
             if component is None:
