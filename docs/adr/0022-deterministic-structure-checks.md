@@ -238,8 +238,8 @@ with no model call. Numbers below are for this change's head.
   identifiers only; no corpus text is written anywhere.
 - **Time.** The slowest of 20 adversarial pairs with both sides at 2,000
   scalars (signs, percents, build markers, comparison words, units, ranges,
-  tags, many ways of writing one value, long digit runs) took 10.2 ms, best
-  of 5, on the development machine. The test suite bounds each at 100 ms, to
+  tags, many ways of writing one value, long digit runs) took 11.8 ms on
+  Python 3.11 and 10.7 ms on 3.13, best of 5, on the development machine. The test suite bounds each at 100 ms, to
   catch a superlinear path without failing on a slow shared runner.
 
 ## Evidence
