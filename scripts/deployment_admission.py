@@ -549,7 +549,7 @@ def _component_conflicts(root: Path, *, allowed_probe_id: str | None = None,
 
 def _require_execution_readiness(operation: str) -> None:
     """Require the saved-source recovery capability for the write being admitted."""
-    if operation not in ("adopt", "update", "full-update"):
+    if operation not in ("adopt", "update", "full-update", "refresh-runtime-options"):
         return
     try:
         recovery, runtime = _tool_modules("component_recovery", "component_runtime",
@@ -574,7 +574,8 @@ def admit_component(root: Path, *, operation: str, code_root: Path,
     root = _physical_root(root)
     if root != _physical_root(code_root) or root != CODE_ROOT:
         raise AdmissionError("component source and deployment roots differ")
-    if operation not in ("build", "prepare-source", "adopt", "update", "full-update") or transaction_id is not None:
+    if operation not in ("build", "prepare-source", "adopt", "update", "full-update",
+                         "refresh-runtime-options") or transaction_id is not None:
         raise AdmissionError("recovery requires verified capsule admission")
     require_lock(root)
     if operation == "build" and not ISOLATED_BUILD_EXECUTION_READY:

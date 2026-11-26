@@ -21,6 +21,10 @@ JOURNAL_SCHEMA_VERSION = 5
 
 RUNTIME4_SCHEMA_VERSION = 4
 
+# Metadata-only rewrite of an adopted API record that predates the recorded
+# resource options. It never creates, starts, stops or removes a container.
+REFRESH_ACTION = "refresh-runtime-options"
+
 TOOL_PATHS = (
     "deploy/product-update.sh",
     "scripts/deployment_admission.py",
@@ -320,6 +324,26 @@ def validate_predecessor(value: Any, *, successor_id: str, required: bool) -> di
     return record
 
 
+def _refreshed_api(previous: Any, proposed: Any, observed: Any, expected: Any) -> None:
+    """Bound what a metadata refresh may change in the API record.
+
+    Only the recipe snapshot reference moves. The snapshot contents are checked
+    by the operations layer, which can read them. The container may be a
+    replacement of the recorded one, which then carries no transaction label.
+    """
+    if previous is None or proposed is None or observed is None or expected is None:
+        _fail("journal: refresh requires an installed API")
+    recipe = {**previous["recipe"], **{key: proposed["recipe"][key] for key in ("sha256", "snapshot_path")}}
+    if proposed["recipe"]["sha256"] == previous["recipe"]["sha256"] or {**previous, "recipe": recipe} != proposed:
+        _fail("journal: refresh changes only the API recipe snapshot")
+    _container(expected, "journal.target.api", observed=True)
+    if any(observed[key] != expected[key] for key in ("image_id", "project", "service", "name", "running")):
+        _fail("journal: refresh changed the API container binding")
+    label = observed["transaction_label"] if observed["id"] == expected["id"] else None
+    if expected["transaction_label"] != label:
+        _fail("journal: refresh changed the API ownership label")
+
+
 def validate_journal(value: Any) -> dict[str, Any]:
     """Reject unknown schemas and unsafe or inconsistent recovery records.
 
@@ -344,12 +368,14 @@ def validate_journal(value: Any) -> dict[str, Any]:
         _fail("journal: unsupported kind")
     transaction_id = _match(journal["transaction_id"], _DEPLOYMENT_ID, "journal.transaction_id")
     action = journal["action"]
-    if action not in ("adopt", "update"):
+    if action not in ("adopt", "update", REFRESH_ACTION):
         _fail("journal: unsupported action")
     if journal["schema_version"] >= RUNTIME4_SCHEMA_VERSION:
-        validate_predecessor(journal["predecessor"], successor_id=transaction_id, required=action == "update")
-    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION and action != "update":
-        _fail("journal: schema-5 records only completed-artifact updates")
+        validate_predecessor(journal["predecessor"], successor_id=transaction_id, required=action != "adopt")
+    if journal["schema_version"] == JOURNAL_SCHEMA_VERSION and action == "adopt":
+        _fail("journal: schema-5 records only completed-artifact updates and record refreshes")
+    if action == REFRESH_ACTION and journal["schema_version"] < RUNTIME4_SCHEMA_VERSION:
+        _fail("journal: refresh requires a predecessor-bound schema")
     status, phase = journal["status"], journal["phase"]
     if (status not in ("active", "unresolved", "rolled_back", "committed")
             or type(phase) is not str or phase not in PHASES):
@@ -390,11 +416,11 @@ def validate_journal(value: Any) -> dict[str, Any]:
     selection = journal["selection"]
     if selection not in ([], ["api"], ["telegram"], ["api", "telegram"]):
         _fail("journal.selection: unsupported selection")
-    if (action == "adopt") != (selection == []):
+    if (action != "update") != (selection == []):
         _fail("journal.selection: action and selection disagree")
     before = _object(journal["before"], {"manifest", "topology", "containers"}, "journal.before")
     target = _object(journal["target"], {"manifest", "containers"}, "journal.target")
-    if journal["schema_version"] >= RUNTIME4_SCHEMA_VERSION and action == "update" and before["manifest"] is None:
+    if journal["schema_version"] >= RUNTIME4_SCHEMA_VERSION and action != "adopt" and before["manifest"] is None:
         _fail("journal.before: runtime update requires an adopted manifest")
     target_manifest = _manifest(target["manifest"], "journal.target.manifest")
     # Historical schemas embed only schema-2 manifests; schema 5 writes 3.
@@ -406,6 +432,8 @@ def validate_journal(value: Any) -> dict[str, Any]:
         _fail("journal.before.manifest: schema differs from the journal schema")
     if target_manifest["schema_version"] != manifest_versions[-1]:
         _fail("journal.target.manifest: schema differs from the journal schema")
+    if action == REFRESH_ACTION and before["manifest"].get("schema_version") != target_manifest["schema_version"]:
+        _fail("journal: refresh keeps the manifest schema")
     if target_manifest["deployment_id"] != transaction_id:
         _fail("journal.target: deployment ID mismatch")
     ops = target_manifest["operations"]
@@ -457,11 +485,15 @@ def validate_journal(value: Any) -> dict[str, Any]:
                 _fail("journal: container and component binding differ")
         if expected["running"] != observed["running"]:
             _fail("journal: selected running state changed")
-        if component_name not in selection:
+        if action == REFRESH_ACTION and component_name == "api":
+            _refreshed_api(previous, proposed, observed, expected)
+        elif component_name not in selection:
             if previous != proposed or observed != expected:
                 _fail("journal: unselected component changed")
         elif expected["transaction_label"] != transaction_id:
             _fail("journal: selected target ownership label differs")
+    if action == REFRESH_ACTION and before_topology["api"] is None:
+        _fail("journal: refresh requires an installed API")
     if action == "adopt" and before_topology != target_manifest["components"]:
         _fail("journal: adoption changed topology")
     _migrations(journal["migrations"], permitted="telegram" in selection)

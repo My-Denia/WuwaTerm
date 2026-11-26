@@ -108,7 +108,8 @@ def verify_predecessor(root: Path, *, successor_kind: str, successor: dict[str, 
     """Require the immutable predecessor archive after successor publication."""
     reference = successor.get("predecessor")
     if reference is None:
-        if successor_kind == "full" or successor.get("schema_version") in (4, 5) and successor.get("action") == "update":
+        if (successor_kind == "full" or successor.get("schema_version") in (4, 5)
+                and successor.get("action") in ("update", runtime.REFRESH_ACTION)):
             _fail("handoff: published successor has no predecessor")
         return
     runtime.validate_predecessor(reference, successor_id=successor["transaction_id"], required=True)

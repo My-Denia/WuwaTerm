@@ -72,6 +72,7 @@ from component_operations import (  # noqa: E402
     _verify_adoption_telegram_paths as _verify_adoption_telegram_paths,
     _verify_full4_telegram_paths as _verify_full4_telegram_paths,
     _verify_live_topology as _verify_live_topology,
+    _verify_refresh_live as _verify_refresh_live,
     _full4_record_route as _full4_record_route,
     _verify_terminal_record as _verify_terminal_record,
     _terminal_health as _terminal_health,
@@ -143,15 +144,33 @@ def write_initial_journal(root: Path, successor: dict[str, Any], *, predecessor_
         admission.require_lock(root)
         journal = runtime.validate_journal(copy.deepcopy(successor))
         admission._component_conflicts(root)
-        terminal = verify_terminal(root, compose_path=compose_path)
+        # A refresh exists because the predecessor's API record no longer
+        # matches Docker (the recorded container may be gone), so it verifies
+        # the predecessor against the API it records and, like adoption,
+        # makes no readiness claim.
+        refresh = journal["action"] == runtime.REFRESH_ACTION
+        override = None if not refresh else {
+            "recipe": journal["target"]["manifest"]["components"]["api"]["recipe"],
+            "container": journal["target"]["containers"]["api"]}
+
+        def current_terminal() -> tuple[bytes, dict[str, Any]] | None:
+            if override is None:
+                return verify_terminal(root, compose_path=compose_path)
+            return verify_terminal(root, compose_path=compose_path, api_override=override)
+
+        def predecessor_health(record: dict[str, Any]) -> None:
+            if not refresh:
+                _predecessor_health(root, record)
+
+        terminal = current_terminal()
         if (terminal is None) != (predecessor_raw is None):
             raise TransactionError("terminal predecessor presence changed")
         if terminal is not None and terminal[0] != predecessor_raw:
             raise TransactionError("terminal predecessor bytes changed")
         previous = None if terminal is None else terminal[1]
         if previous is not None:
-            _predecessor_health(root, previous)
-            checked = verify_terminal(root, compose_path=compose_path)
+            predecessor_health(previous)
+            checked = current_terminal()
             if checked is None or checked[0] != predecessor_raw:
                 raise TransactionError("terminal predecessor changed during readiness")
         _verify_initial_preimage(root, journal, compose_path, previous, predecessor_raw)
@@ -165,10 +184,10 @@ def write_initial_journal(root: Path, successor: dict[str, Any], *, predecessor_
                 previous_name = admission.COMPONENT_FULL if previous_kind == "full" else runtime.JOURNAL_NAME
                 with manifest._directory(root, (".deployments", history_name), create=True) as history:
                     manifest._write_file(history, previous["transaction_id"] + ".json", predecessor_raw, reuse=True)
-                checked = verify_terminal(root, compose_path=compose_path)
+                checked = current_terminal()
                 if checked is None or checked[0] != predecessor_raw:
                     raise TransactionError("terminal predecessor changed after archival")
-                _predecessor_health(root, previous)
+                predecessor_health(previous)
                 _verify_initial_preimage(root, journal, compose_path, previous, predecessor_raw)
                 if runtime._read_regular(root / ".deployments" / previous_name) != predecessor_raw:
                     raise TransactionError("terminal predecessor bytes changed before replacement")
@@ -1051,7 +1070,7 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
             health = _terminal_health(root, journal)
         return {"status": "committed", "transaction_id": transaction_id,
                 "already_committed": True, "health": health}
-    if journal["action"] == "adopt":
+    if journal["action"] in ("adopt", runtime.REFRESH_ACTION):
         return _recover_adoption(root, journal, compose_path)
     if "telegram" in journal["selection"]:
         try:
@@ -1119,8 +1138,8 @@ def recover(root: Path, transaction_id: str, source_tool_sha256: str, *,
 
 
 def _verify_adoption_recovery(root: Path, journal: dict[str, Any], compose_path: Path) -> None:
-    if journal["action"] != "adopt" or journal["selection"] != []:
-        raise TransactionError("journal is not a metadata-only adoption")
+    if journal["action"] not in ("adopt", runtime.REFRESH_ACTION) or journal["selection"] != []:
+        raise TransactionError("journal is not a metadata-only adoption or refresh")
     _verify_saved_source(root, journal["source"])
     _verify_old_topology(root, journal, compose_path=compose_path, allow_probe=False)
     _check_pointers(root, journal)
@@ -1130,7 +1149,10 @@ def _verify_adoption_recovery(root: Path, journal: dict[str, Any], compose_path:
             raise TransactionError("adoption preimage manifest differs")
     pointer_is_target = _pointer(root, ".deploy_current") == journal["pointers"]["target"][".deploy_current"]
     _verify_manifest_if_present(root, journal, required=pointer_is_target)
-    _verify_live_topology(root, journal, which="before", compose_path=compose_path)
+    if journal["action"] == runtime.REFRESH_ACTION:
+        _verify_refresh_live(root, journal, compose_path)
+    else:
+        _verify_live_topology(root, journal, which="before", compose_path=compose_path)
 
 
 def _recover_adoption(root: Path, journal: dict[str, Any], compose_path: Path) -> dict[str, Any]:

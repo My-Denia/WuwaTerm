@@ -25,7 +25,7 @@ if [ "$command" = build ]; then
   exit 2
 fi
 case "$command" in
-  adopt|runtime-update|update|full-update|recover|recover-probe|cancel-build) ;;
+  adopt|refresh-runtime-options|runtime-update|update|full-update|recover|recover-probe|cancel-build) ;;
   *) exec python3 -I -B "$runtime" "$@" ;;
 esac
 

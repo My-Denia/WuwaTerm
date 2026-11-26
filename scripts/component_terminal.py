@@ -23,9 +23,15 @@ def _predecessor_health(root: Path, journal: dict[str, Any]) -> dict[str, str]:
     return _terminal_health(root, journal)
 
 
-def verify_terminal(root: Path, *, compose_path: Path) -> tuple[bytes, dict[str, Any]] | None:
-    """Read and reconcile a terminal journal without creating state probes or writes."""
-    return _verify_terminal(root, compose_path=compose_path, full4_predecessor=False)
+def verify_terminal(root: Path, *, compose_path: Path,
+                    api_override: dict[str, Any] | None = None) -> tuple[bytes, dict[str, Any]] | None:
+    """Read and reconcile a terminal journal without creating state probes or writes.
+
+    ``api_override`` is reserved for the runtime-options refresh; see
+    ``component_operations._verify_live_topology``.
+    """
+    return _verify_terminal(root, compose_path=compose_path, full4_predecessor=False,
+                            api_override=api_override)
 
 
 def verify_terminal_for_full4(root: Path, *, compose_path: Path) -> tuple[bytes, dict[str, Any]] | None:
@@ -40,8 +46,8 @@ def verify_terminal_for_full4(root: Path, *, compose_path: Path) -> tuple[bytes,
     return _verify_terminal(root, compose_path=compose_path, full4_predecessor=True)
 
 
-def _verify_terminal(root: Path, *, compose_path: Path,
-                     full4_predecessor: bool) -> tuple[bytes, dict[str, Any]] | None:
+def _verify_terminal(root: Path, *, compose_path: Path, full4_predecessor: bool,
+                     api_override: dict[str, Any] | None = None) -> tuple[bytes, dict[str, Any]] | None:
     root = admission._physical_root(root)
     if root != CODE_ROOT:
         raise TransactionError("terminal verification requires the physical source checkout")
@@ -55,7 +61,7 @@ def _verify_terminal(root: Path, *, compose_path: Path,
             import component_terminal_full as full  # noqa: PLC0415
             if Path(full.__file__).resolve() != CODE_ROOT / "scripts/component_terminal_full.py":
                 raise TransactionError("full terminal module belongs to another source")
-            return full.verify_terminal(root, compose_path=compose_path)
+            return full.verify_terminal(root, compose_path=compose_path, api_override=api_override)
         except full.FullError as exc:
             raise TransactionError("full terminal deployment cannot be verified") from exc
     try:
@@ -65,7 +71,8 @@ def _verify_terminal(root: Path, *, compose_path: Path,
     try:
         raw = runtime._read_regular(path)
         journal = runtime.validate_journal(runtime._decode(raw))
-        _verify_terminal_record(root, journal, raw, compose_path, full4_predecessor=full4_predecessor)
+        _verify_terminal_record(root, journal, raw, compose_path, full4_predecessor=full4_predecessor,
+                                api_override=api_override)
         return raw, journal
     except TransactionError:
         raise

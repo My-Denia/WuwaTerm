@@ -61,6 +61,8 @@ from component_adopt_probe import (  # noqa: E402
 from component_journal_runtime import (  # noqa: E402
     JOURNAL_NAME,
     RUNTIME4_SCHEMA_VERSION,
+    JOURNAL_SCHEMA_VERSION,
+    REFRESH_ACTION,
     _HEX40,
     _HEX64,
     _DEPLOYMENT_ID,
@@ -591,3 +593,167 @@ def adopt(root: Path, *, projects: list[str], compose_executable: Path,
     except (recovery.RecoveryError, observe.ObservationError, transaction.TransactionError,
             capsule.CapsuleError, manifest.ManifestError, OSError, UnicodeError, ValueError) as exc:
         raise JournalError("adoption preflight failed") from exc
+
+
+def refresh_runtime_options(root: Path, *, container_id: str, compose_executable: Path,
+                            expected_sha: str | None = None) -> dict[str, Any]:
+    """Record API resource options that an earlier adoption record lacks.
+
+    ``container_id`` names the one live API container: either the recorded one
+    or the container that replaced it. Everything else must still match the
+    record. The change is published as a new metadata-only transaction, so the
+    previous manifest, recipe snapshot and journal stay as recorded. No
+    container is created, started, stopped or removed.
+    """
+    import component_observe as observe  # noqa: PLC0415
+    import component_recovery as recovery  # noqa: PLC0415
+    import component_operations as operations  # noqa: PLC0415
+    import component_terminal as terminal_ops  # noqa: PLC0415
+    import component_transaction as transaction  # noqa: PLC0415
+    import package_recovery_source as capsule  # noqa: PLC0415
+
+    root = Path(os.path.abspath(os.fspath(root)))
+    try:
+        admission.admit_component(root, operation=REFRESH_ACTION, code_root=CODE_ROOT)
+        _match(container_id, _HEX64, "container ID")
+        compose_executable = operations._compose_binary(compose_executable)
+        current = inspect_deployment(root)
+        old = current["manifest"]
+        if current["binding"] != "recorded" or old is None:
+            _fail("an adopted and reconciled deployment is required")
+        if old["components"]["api"] is None:
+            _fail("the adopted deployment has no API; only the API record can gain these options")
+        old_snapshot = operations._snapshot(root, old["components"]["api"])
+        actual = operations._observed(container_id, old_snapshot, os.urandom(32))
+        # env_files and overrides cannot be observed; terminal verification
+        # below compares the rendered environment with the container's. The
+        # container name is compared with the recorded container.
+        observed_snapshot = {**old_snapshot, **{
+            key: value for key, value in actual["recipe"].items()
+            if key not in ("env_files", "container_name")}}
+        added = operations._resource_additions(old_snapshot, observed_snapshot)
+        path, digest = manifest.write_recipe_snapshot(root, observed_snapshot)
+        recipe = {key: observed_snapshot[key] for key in manifest._RECIPE_FIELDS}
+        recipe.update(snapshot_path=path, sha256=digest)
+        terminal = terminal_ops.verify_terminal(
+            root, compose_path=compose_executable,
+            api_override={"recipe": recipe, "container": actual["container"]})
+        if terminal is None:
+            _fail("an adopted and reconciled deployment is required")
+        predecessor_raw, previous = terminal
+        won = "target" if previous["status"] == "committed" else "before"
+        winning = previous["target"]["manifest"] if won == "target" else previous["before"]["manifest"]
+        if winning != old:
+            _fail("current manifest differs from terminal deployment")
+        recorded = previous[won]["containers"]["api"]
+        fresh = actual["container"]
+        differing = [key for key in ("image_id", "project", "service", "name", "running")
+                     if fresh[key] != recorded[key]]
+        replaced = fresh["id"] != recorded["id"]
+        if fresh["transaction_label"] != (None if replaced else recorded["transaction_label"]):
+            differing.append("transaction_label")
+        if differing:
+            _fail("API container differs from the record: " + ", ".join(differing))
+        if not added:
+            if replaced:
+                _fail("the API container was replaced but adds no runtime option; refresh does not rebind it")
+            return {"status": "unchanged", "deployment_id": old["deployment_id"]}
+
+        commit = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{commit}", lock_root=root).decode("ascii").strip()
+        tree = recovery.safe_git(root, "rev-parse", "--verify", "HEAD^{tree}", lock_root=root).decode("ascii").strip()
+        if expected_sha is not None and _match(expected_sha, _HEX40, "expected source commit") != commit:
+            _fail("source commit differs from --expected-sha")
+        recovery._load_packager(root / "scripts" / "package_recovery_source.py")
+        recovery._verify_clean_source(root, commit, tree)
+        source = recovery.prepare_source(root, commit, tree, compose_path=compose_executable)
+        compose_executable = recovery._verify_bound_compose(root, source)
+
+        before_containers = copy.deepcopy(previous[won]["containers"])
+        if before_containers["telegram"] is not None:
+            snapshot = operations._snapshot(root, old["components"]["telegram"])
+            before_containers["telegram"] = operations._observed(
+                before_containers["telegram"]["id"], snapshot, os.urandom(32))["container"]
+        target_containers = copy.deepcopy(before_containers)
+        target_containers["api"] = copy.deepcopy(fresh)
+        deployment_id = manifest.new_deployment_id()
+        product = copy.deepcopy(old)
+        product.update(deployment_id=deployment_id,
+                       deployment_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                       operations={"repository": "My-Denia/WuwaTerm", "source_commit": commit,
+                                   "source_tree": tree, "source_tool_sha256": source["source_tool_sha256"]})
+        product["components"]["api"]["recipe"] = recipe
+        manifest.validate_manifest(product)
+        old_pointers = {".deploy_commit": _snapshot_pointer(root, ".deploy_commit", _HEX40),
+                        ".deploy_current": _snapshot_pointer(root, ".deploy_current", _DEPLOYMENT_ID)}
+        target_pointers = {".deploy_commit": {"present": True, "bytes": commit + "\n"},
+                           ".deploy_current": {"present": True, "bytes": deployment_id + "\n"}}
+        kind = "full" if previous["kind"] == "component-full" else "runtime"
+        journal = {
+            # The journal schema follows the manifest schema, which stays.
+            "schema_version": (RUNTIME4_SCHEMA_VERSION
+                               if old["schema_version"] == manifest.PREVIOUS_MANIFEST_SCHEMA_VERSION
+                               else JOURNAL_SCHEMA_VERSION),
+            "kind": "component-runtime", "transaction_id": deployment_id,
+            "action": REFRESH_ACTION, "status": "active", "phase": "prepared", "source": source,
+            "predecessor": predecessor_reference(kind, previous["transaction_id"], predecessor_raw),
+            "selection": [],
+            "before": {"manifest": copy.deepcopy(old), "topology": copy.deepcopy(old["components"]),
+                       "containers": before_containers},
+            "target": {"manifest": product, "containers": target_containers},
+            "database": {"binding": copy.deepcopy(old["database"]),
+                         "stat": manifest.verify_database_binding(old["database"])},
+            "api_identity": copy.deepcopy(old["api_identity"]), "migrations": [],
+            "pointers": {"old": old_pointers, "target": target_pointers},
+            "manifest": {"deployment_id": deployment_id,
+                         "path": f".deployments/products/{deployment_id}.json",
+                         "sha256": hashlib.sha256(manifest._encode(product)).hexdigest()},
+        }
+
+        def recheck() -> None:
+            recovery._verify_clean_source(root, commit, tree)
+            if tool_bytes_identity(root) != source["tool_bytes_sha256"]:
+                _fail("refresh source tools changed")
+            operations._verify_refresh_live(root, journal, compose_executable)
+
+        transaction.write_initial_journal(root, journal, predecessor_raw=predecessor_raw,
+                                          compose_path=compose_executable)
+        try:
+            journal["phase"] = "immutable-manifest"
+            _write_adopt_journal(root, journal)
+            recheck()
+            manifest.write_manifest(root, product)
+            for phase, name in (("deploy-commit", ".deploy_commit"), ("deploy-current", ".deploy_current")):
+                journal["phase"] = phase
+                _write_adopt_journal(root, journal)
+                recheck()
+                _replace_pointer(root, name, old_pointers[name], target_pointers[name])
+            recheck()
+            if inspect_deployment(root)["manifest"] != product:
+                _fail("refreshed metadata readback differs")
+            journal.update(status="committed", phase="committed")
+            _write_adopt_journal(root, journal)
+        except Exception as exc:
+            try:
+                transaction._recover_adoption(root, journal, compose_executable)
+            except Exception as rollback_error:
+                journal.update(status="unresolved", phase="unresolved")
+                try:
+                    _write_adopt_journal(root, journal)
+                except Exception:
+                    pass
+                raise JournalError(f"record refresh failed and pointer rollback is unresolved; recover "
+                                   f"--transaction-id {deployment_id}") from rollback_error
+            raise JournalError("record refresh failed; original pointers were restored") from exc
+        return {"status": "refreshed", "deployment_id": deployment_id,
+                "added": {key: observed_snapshot["runtime_options"][key] for key in added},
+                "container_replaced": replaced, "polling_health": "unconfirmed"}
+    except JournalError:
+        raise
+    except admission.AdmissionError as exc:
+        raise JournalError(f"deployment admission refused: {exc}") from exc
+    except (operations.TransactionError, observe.ObservationError) as exc:
+        # Both carry fixed, nonsecret refusal text; field names, never values.
+        raise JournalError(f"record refresh refused: {exc}") from exc
+    except (recovery.RecoveryError, capsule.CapsuleError, manifest.ManifestError,
+            OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        raise JournalError("record refresh preflight failed") from exc
