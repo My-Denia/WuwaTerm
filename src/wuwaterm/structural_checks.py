@@ -11,8 +11,8 @@ structure checks (``check_segment_structure``, structure-check-v1, ADR 0022).
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from decimal import Context, Decimal, InvalidOperation
 import re
 import statistics
@@ -298,6 +298,20 @@ def check_placeholder_integrity(source: str, answer: str) -> bool:
 # their own; they only excuse a digit number with the same value on the other
 # side. A number that only some reading of the other side accounts for is
 # treated as accounted for: a missed error is cheaper here than a false alarm.
+#
+# Two numbers of the same value still do not account for each other when they
+# are written as different facts: a percentage and a plain number, a multiplier
+# and a plain number, an explicit `+` and an explicit `-`, "at least" and "at
+# most", or two different time or distance units. Each of these needs the fact
+# to be written on both sides; a sign, unit or comparison word that only one
+# side writes is a normal translation choice and never decides anything.
+# Resonance Chain and refinement markers (`S0R1`, `3+1`, `6链`) are read as one
+# fact each, so `S0R1` and `S1R0` differ.
+#
+# Which number a value belongs to (`攻击力 20%，暴击率 10%` translated as `ATK
+# 10%, CRIT Rate 20%`) is not checked: the two sides name their attributes in
+# different words and orders, so pairing by position would raise a false alarm
+# on every reordered sentence. That is Layer 2 semantic review's to find.
 # --------------------------------------------------------------------------
 
 STRUCTURE_CHECK_VERSION: Literal["structure-check-v1"] = "structure-check-v1"
@@ -382,12 +396,132 @@ _EN_NUMBER_WORDS = {
     "nineteenth": 19, "twentieth": 20, "thirtieth": 30, "fortieth": 40,
     "fiftieth": 50, "sixtieth": 60, "seventieth": 70, "eightieth": 80,
     "ninetieth": 90, "once": 1, "twice": 2, "thrice": 3, "dozen": 12,
+    "double": 2, "triple": 3, "quadruple": 4,
+}
+# A month name accounts for the month number of a date (`11月26日` as
+# `November 26`). It is a value of its own, never part of a spelled number.
+_EN_MONTHS = {
+    name: number
+    for number, names in enumerate(
+        (
+            ("january", "jan"), ("february", "feb"), ("march", "mar"), ("april", "apr"),
+            ("may",), ("june", "jun"), ("july", "jul"), ("august", "aug"),
+            ("september", "sep", "sept"), ("october", "oct"), ("november", "nov"),
+            ("december", "dec"),
+        ),
+        start=1,
+    )
+    for name in names
 }
 _EN_SCALES = {
     "hundred": 100, "hundredth": 100, "thousand": 10**3, "thousandth": 10**3,
     "million": 10**6, "millionth": 10**6, "billion": 10**9, "billionth": 10**9,
 }
 _EN_WORD_RE = re.compile(r"[A-Za-z]+")
+
+# Masked markup in the facet view. Nothing is read across a placeholder; only a
+# comparison word may be read across a tag, as in `低于<color=Red>50%`.
+_FENCE = "\x00"
+_TAG_FENCE = "\x01"
+_SPACES = " \t　"
+_SPACES_OR_TAG = _SPACES + _TAG_FENCE
+
+_PLAIN_MEASURE = frozenset({""})
+_PERCENT = frozenset({"%"})
+_MULTIPLIER = frozenset({"x"})
+# `3 times` and `×100` read as a count as often as a multiplier.
+_COUNT_OR_MULTIPLIER = frozenset({"", "x"})
+
+_SIGNS = {"+": "+", "-": "-", "−": "-", "–": "-"}
+# A dash right after one of these joins a range (`50%-60%`, `3秒-5秒`).
+_RANGE_BEFORE_DASH = frozenset("%秒米倍层次级个点")
+# Attached directly to the digits: `50%`, `1.5倍`, `2x`, `8s`, `20m`.
+_UNIT_ATTACHED_RE = re.compile(
+    r"(?P<percent>%|个?百分点)"
+    r"|(?P<multiplier>倍|[xX×](?![A-Za-z0-9]))"
+    r"|(?P<second>秒|s(?![A-Za-z0-9]))"
+    r"|(?P<minute>分钟)"
+    r"|(?P<hour>小时|h(?![A-Za-z0-9]))"
+    r"|(?P<meter>米)"
+    r"|(?P<meter_or_minute>m(?![A-Za-z0-9]))"
+)
+# A word that may follow a space: `50 percent`, `3 times`, `20 seconds`.
+_UNIT_WORD_RE = re.compile(
+    r"[ \t]*(?:(?P<percent>%|percent(?:age points?)?|per cent|pct)"
+    r"|(?P<times>times)|(?P<multiplier>-?fold)"
+    r"|(?P<second>secs?|seconds?)|(?P<minute>mins?|minutes?)|(?P<hour>hrs?|hours?)"
+    r"|(?P<meter>meters?|metres?))(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_UNIT_MEASURES = {
+    "percent": _PERCENT,
+    "multiplier": _MULTIPLIER,
+    "times": _COUNT_OR_MULTIPLIER,
+}
+_UNIT_KINDS = {
+    "second": frozenset({"s"}),
+    "minute": frozenset({"min"}),
+    "hour": frozenset({"h"}),
+    "meter": frozenset({"m"}),
+    "meter_or_minute": frozenset({"m", "min"}),
+}
+# Comparison words that open a number. `>` reads "at least / more than", `<`
+# "at most / less than"; strictness is not compared, only the direction.
+_GREATER_BEFORE = (
+    "大于等于", "大于", "超过", "高于", "多于", "不低于", "不少于", "不小于", "至少",
+    "最少", "≥", "≧", ">=", ">", "at least", "more than", "greater than",
+    "higher than", "over", "above", "exceeding", "exceeds", "no less than",
+    "not less than", "no fewer than", "no lower than", "a minimum of",
+)
+_LESS_BEFORE = (
+    "小于等于", "小于", "低于", "少于", "不足", "未满", "不超过", "不高于", "不大于",
+    "不多于", "至多", "最多", "≤", "≦", "<=", "<", "at most", "less than",
+    "fewer than", "lower than", "under", "below", "up to", "no more than",
+    "not more than", "no greater than", "no higher than", "a maximum of",
+)
+_POLARITY_BEFORE = {
+    **{phrase: ">" for phrase in _GREATER_BEFORE},
+    **{phrase: "<" for phrase in _LESS_BEFORE},
+}
+# Matched backwards from the number, longest phrase first, so `不低于` is not
+# read as `低于`. A word must start a word (`Rover 3` is not `over 3`), and `>`
+# is not the head of an arrow (`->`, `=>`).
+_POLARITY_BEFORE_RE = re.compile(
+    "|".join(
+        re.escape(phrase[::-1])
+        + (r"(?![A-Za-z])" if phrase[0].isascii() and phrase[0].isalpha() else "")
+        + (r"(?![-=])" if phrase == ">" else "")
+        for phrase in sorted(_POLARITY_BEFORE, key=len, reverse=True)
+    ),
+    re.IGNORECASE,
+)
+_POLARITY_LAST_CHARS = frozenset(
+    char for phrase in _POLARITY_BEFORE for char in (phrase[-1], phrase[-1].upper())
+)
+# Comparison words that close a number: `150%以上`, `3层以下`, `3 or more`,
+# `3 stacks or fewer`.
+_POLARITY_AFTER_RE = re.compile(
+    r"[ \t]*(?:[㐀-鿿][ \t]*)?(?P<cn>[及或]?以[上下内])"
+    r"|[ \t]+(?:[A-Za-z]{1,16}[ \t]+)?(?P<en>(?:or|and)[ \t]+"
+    r"(?:more|above|higher|greater|over|up|less|below|lower|fewer|under))(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_GREATER_AFTER_WORDS = ("more", "above", "higher", "greater", "over", "up")
+# A bare number joined to the next one by a range or list mark takes its
+# percent or multiplier from it: `30-45%`, `50/60/70%`, `1.5~2倍`.
+_RANGE_JOIN_RE = re.compile(r"[ \t]*[-–—~〜至到/][ \t]*|[ \t]+to[ \t]+")
+
+# Resonance Chain (S/C) and refinement (R) markers, read as one fact each:
+# `S0R1`, `C6`, `S6 R5`, `R1`, `0+1` (chain + refinement), `6链`, `0链1精`.
+# The lettered form takes any digit, so a wrong `S1R0` is still one marker; the
+# bare forms take only real chain (0-6) and refinement (1-5) levels, and
+# `1+1=2` or `3+1+1` is arithmetic left to the number rule.
+_BUILD_RE = re.compile(
+    r"(?<![A-Za-z0-9])[SsCc](?P<s1>[0-9])(?:[ \t]?[Rr](?P<r1>[0-9]))?(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])[Rr](?P<r2>[0-9])(?![A-Za-z0-9])"
+    r"|(?<![0-9.+\-−–×*/=<>])(?P<s3>[0-6])\+(?P<r3>[1-5])(?![0-9.+\-=<>%])"
+    r"|(?<![0-9.])(?P<s4>[0-6])链(?:(?P<r4>[1-5])精)?(?![接条])"
+)
 
 
 @dataclass(frozen=True)
@@ -421,12 +555,67 @@ class SegmentStructureReport:
 
 
 @dataclass(frozen=True)
+class _Facets:
+    """How a digit number is written, besides its value.
+
+    ``measure`` holds the readings it allows: ``""`` a plain quantity, ``"%"``
+    a percentage, ``"x"`` a multiplier. ``units`` holds the time or distance
+    units it could be in, empty when none is written. ``sign`` is an explicit
+    ``+`` or ``-``, and ``polarity`` an explicit comparison (``>`` at least or
+    more than, ``<`` at most or less than); both are empty when not written.
+    """
+
+    measure: frozenset[str] = _PLAIN_MEASURE
+    units: frozenset[str] = frozenset()
+    sign: str = ""
+    polarity: str = ""
+
+
+_PLAIN = _Facets()
+
+
+def _compatible(left: _Facets, right: _Facets) -> bool:
+    """Whether two numbers of one value can be the same fact.
+
+    A percentage or multiplier must be one on both sides. A unit, sign or
+    comparison only separates them when both sides write one and they differ.
+    """
+    return (
+        bool(left.measure & right.measure)
+        and (not left.units or not right.units or bool(left.units & right.units))
+        and (not left.sign or not right.sign or left.sign == right.sign)
+        and (not left.polarity or not right.polarity or left.polarity == right.polarity)
+    )
+
+
+@dataclass(frozen=True)
 class _Token:
     span: StructureSpan
     values: frozenset[str]
     key: str = ""
     # A digit number as read in the NFKC view (`１００,２００．５` → `100,200.5`).
     folded: str = ""
+    facets: _Facets = _PLAIN
+
+
+@dataclass(frozen=True)
+class _Build:
+    """A Resonance Chain / refinement marker: chain ``s``, refinement ``r``."""
+
+    span: StructureSpan
+    s: str | None
+    r: str | None
+
+
+def _builds_match(left: _Build, right: _Build) -> bool:
+    """Same chain and refinement wherever both name one, and at least one named."""
+    shared = False
+    for a, b in ((left.s, right.s), (left.r, right.r)):
+        if a is not None and b is not None:
+            if a != b:
+                return False
+            shared = True
+    return shared
 
 
 def is_blank(text: str) -> bool:
@@ -506,6 +695,11 @@ def _english_number_runs(text: str) -> list[str]:
         if word == "and" and joined:
             previous_end = match.end()
             continue
+        if word in _EN_MONTHS:
+            close()
+            values.append(_canonical(_EN_MONTHS[word]))
+            previous_end = match.end()
+            continue
         if word in _EN_NUMBER_WORDS or word in _EN_SCALES:
             if not joined:
                 close()
@@ -530,7 +724,7 @@ def _english_number_runs(text: str) -> list[str]:
 
 def _numeric_view(
     text: str, masked: Sequence[tuple[int, int]]
-) -> tuple[str, list[int], list[frozenset[str]]]:
+) -> tuple[str, list[int], list[frozenset[str]], str]:
     """NFKC view of ``text`` for number reading, with an offset map back.
 
     Masked ranges (markup) become spaces. Decimal digits of any script become
@@ -539,15 +733,22 @@ def _numeric_view(
     an enumerator or an exponent far more often than a quantity. The
     fullwidth comma stays as it is, because Chinese text uses it between list
     items (`100，200`) and never inside one number.
+
+    The fourth value is the same view with masked ranges as fences instead of
+    spaces (:data:`_TAG_FENCE` for a tag, :data:`_FENCE` otherwise), for the
+    readers of signs, units and comparison words.
     """
-    hidden = [False] * len(text)
+    hidden = [""] * len(text)
     for start, end in masked:
-        hidden[start:end] = [True] * (end - start)
+        fence = _TAG_FENCE if text.startswith("<", start) else _FENCE
+        hidden[start:end] = [fence] * (end - start)
     chars: list[str] = []
+    fences: list[tuple[int, str]] = []
     origin: list[int] = []
     specials: list[frozenset[str]] = []
     for index, char in enumerate(text):
         if hidden[index]:
+            fences.append((len(chars), hidden[index]))
             chars.append(" ")
             origin.append(index)
             continue
@@ -575,7 +776,10 @@ def _numeric_view(
         for piece in folded:
             chars.append(piece)
             origin.append(index)
-    return "".join(chars), origin, specials
+    view = "".join(chars)
+    for position, fence in fences:
+        chars[position] = fence
+    return view, origin, specials, "".join(chars)
 
 
 def _is_list_label(view: str, start: int, end: int, token: str) -> bool:
@@ -590,14 +794,153 @@ def _is_list_label(view: str, start: int, end: int, token: str) -> bool:
     return not view[end + 1 :].lstrip(_HORIZONTAL_SPACE)[:1].isdigit()
 
 
+def _explicit_sign(fence: str, at: int) -> str:
+    """The sign ``fence[at]`` gives the number right after it, or ``""``.
+
+    A dash after a digit, a percent sign or a unit joins a range (`100-150`,
+    `50%-60%`, `3秒-5秒`); after a word it joins a compound (`Type-2`) unless
+    the word is a stat abbreviation (`ATK-20%`). `+` after a digit is
+    arithmetic or a build marker (`3+1`). The em dash is never read as a sign.
+    """
+    char = fence[at]
+    sign = _SIGNS[char]
+    if at == 0:
+        return sign
+    before = fence[at - 1]
+    if before.isdigit():
+        return ""
+    if sign == "+" or char == "−":
+        return sign
+    if before in _RANGE_BEFORE_DASH:
+        return ""
+    if before.isascii() and before.isalpha():
+        word_start = at - 1
+        while (
+            word_start > 0
+            and at - word_start < 12
+            and fence[word_start - 1].isascii()
+            and fence[word_start - 1].isalpha()
+        ):
+            word_start -= 1
+        word = fence[word_start:at]
+        return sign if len(word) >= 2 and word.isupper() else ""
+    if before in _SPACES:
+        previous = at - 1
+        while previous > 0 and fence[previous - 1] in _SPACES:
+            previous -= 1
+        # `100 -150` is a range written with spaces.
+        if previous and (fence[previous - 1].isdigit() or fence[previous - 1] in _RANGE_BEFORE_DASH):
+            return ""
+    return sign
+
+
+def _polarity_before(fence: str, reversed_fence: str, head: int) -> tuple[str, int]:
+    """A comparison word ending right before ``fence[head]``, and the new head.
+
+    Spaces or tags may separate the word from the number. The word joins the
+    span only when nothing but spaces does.
+    """
+    near = head
+    while near > 0 and fence[near - 1] in _SPACES:
+        near -= 1
+    far = near
+    while far > 0 and fence[far - 1] in _SPACES_OR_TAG:
+        far -= 1
+    if far == 0 or fence[far - 1] not in _POLARITY_LAST_CHARS:
+        return "", head
+    match = _POLARITY_BEFORE_RE.match(reversed_fence, len(fence) - far)
+    if match is None:
+        return "", head
+    polarity = _POLARITY_BEFORE[match.group()[::-1].casefold()]
+    return polarity, far - len(match.group()) if far == near else head
+
+
+def _past_tags(fence: str, position: int) -> int:
+    while position < len(fence) and fence[position] == _TAG_FENCE:
+        position += 1
+    return position
+
+
+def _read_facets(
+    fence: str, reversed_fence: str, start: int, end: int
+) -> tuple[_Facets, int, int]:
+    """Facets of the digits at ``fence[start:end]``, and the view range they cover."""
+    measure = _PLAIN_MEASURE
+    units: frozenset[str] = frozenset()
+    sign = ""
+    head = start
+    before = fence[start - 1] if start else ""
+    if before in _SIGNS:
+        sign = _explicit_sign(fence, start - 1)
+        if sign:
+            head -= 1
+    elif before and before in "xX×" and not (
+        start >= 2 and fence[start - 2].isascii() and fence[start - 2].isalnum()
+    ):
+        measure = _COUNT_OR_MULTIPLIER
+        head -= 1
+    elif start >= 3 and fence.startswith("百分之", start - 3):
+        measure = _PERCENT
+        head -= 3
+    polarity, head = _polarity_before(fence, reversed_fence, head)
+    # What follows may sit behind a closing tag (`<color=Red>1.1</color>倍`):
+    # it is read there, but the span stops at the tag.
+    tail = end
+    reach = _past_tags(fence, end)
+    contiguous = reach == end
+    unit = _UNIT_ATTACHED_RE.match(fence, reach) or _UNIT_WORD_RE.match(fence, reach)
+    if unit is not None and unit.lastgroup is not None:
+        kind = unit.lastgroup
+        if kind in _UNIT_MEASURES:
+            written = _UNIT_MEASURES[kind]
+            measure = written if measure is _PLAIN_MEASURE else (measure & written) or written
+        else:
+            units = _UNIT_KINDS[kind]
+        reach = unit.end()
+        if contiguous:
+            tail = reach
+    following = _past_tags(fence, reach)
+    contiguous = contiguous and following == reach
+    after = _POLARITY_AFTER_RE.match(fence, following)
+    if after is not None:
+        if not polarity:
+            chinese = after.group("cn")
+            if chinese:
+                polarity = ">" if chinese.endswith("上") else "<"
+            else:
+                word = after.group("en").split()[-1].casefold()
+                polarity = ">" if word in _GREATER_AFTER_WORDS else "<"
+        if contiguous:
+            tail = after.end()
+    if measure is _PLAIN_MEASURE and not units and not sign and not polarity:
+        return _PLAIN, head, tail
+    return _Facets(measure, units, sign, polarity), head, tail
+
+
 def _number_tokens(
     text: str, masked: Sequence[tuple[int, int]]
-) -> tuple[list[_Token], list[frozenset[str]]]:
-    """Reportable digit numbers, and the values that only excuse the other side."""
-    view, origin, excuses = _numeric_view(text, masked)
-    reportable: list[_Token] = []
+) -> tuple[list[_Token], list[_Build], list[frozenset[str]]]:
+    """Reportable digit numbers and build markers, and the values that only
+    excuse the other side."""
+    view, origin, excuses, fence = _numeric_view(text, masked)
+    reversed_fence = fence[::-1]
+    builds: list[_Build] = []
+    in_build = bytearray(len(view))
+    for match in _BUILD_RE.finditer(fence):
+        start, end = origin[match.start()], origin[match.end() - 1] + 1
+        builds.append(
+            _Build(
+                span=StructureSpan(start, end, text[start:end]),
+                s=match.group("s1") or match.group("s3") or match.group("s4"),
+                r=match.group("r1") or match.group("r2") or match.group("r3") or match.group("r4"),
+            )
+        )
+        in_build[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+    read: list[tuple[int, int, _Facets, str, frozenset[str], str]] = []
     for match in _DIGIT_NUMBER_RE.finditer(view):
         start, end = match.span()
+        if in_build[start]:
+            continue
         token = match.group()
         canonical, number = _digit_values(token)
         values = {canonical}
@@ -610,9 +953,6 @@ def _number_tokens(
             if scale:
                 factor = _EN_SCALES[scale.group(1).casefold()]
                 values.add(_canonical(_EXACT.multiply(number, Decimal(factor))))
-        source_start = origin[start]
-        source_end = origin[end - 1] + 1
-        span = StructureSpan(source_start, source_end, text[source_start:source_end])
         # A list label, or the `:00` of a clock time that the other language
         # writes as `4点`, is never reported on its own.
         label = _is_list_label(view, start, end, token)
@@ -620,69 +960,242 @@ def _number_tokens(
         if label or clock_zero:
             excuses.append(frozenset(values))
             continue
+        facets, head, tail = _read_facets(fence, reversed_fence, start, end)
+        read.append((head, tail, facets, canonical, frozenset(values), token))
+    for index in range(len(read) - 2, -1, -1):
+        head, tail, facets, canonical, readings, token = read[index]
+        following = read[index + 1]
+        if (
+            facets.measure is _PLAIN_MEASURE
+            and following[2].measure in (_PERCENT, _MULTIPLIER)
+            and _RANGE_JOIN_RE.fullmatch(fence, tail, following[0])
+        ):
+            facets = replace(facets, measure=following[2].measure)
+            read[index] = (head, tail, facets, canonical, readings, token)
+    reportable: list[_Token] = []
+    for head, tail, facets, canonical, readings, token in read:
+        start, end = origin[head], origin[tail - 1] + 1
         reportable.append(
-            _Token(span=span, values=frozenset(values), key=canonical, folded=token)
+            _Token(
+                span=StructureSpan(start, end, text[start:end]),
+                values=readings,
+                key=canonical,
+                folded=token,
+                facets=facets,
+            )
         )
     for match in _CN_NUMERAL_RE.finditer(view):
         value = _chinese_numeral_value(match.group())
         if value is not None:
             excuses.append(frozenset({value}))
     excuses.extend(frozenset({value}) for value in _english_number_runs(view))
-    return reportable, [values for values in excuses if values]
+    return reportable, builds, [values for values in excuses if values]
 
 
 class _Pool:
-    """Unclaimed positions per value, taken in reading order."""
+    """Unclaimed positions per value and way of writing, taken in reading order."""
 
-    def __init__(self, entries: Sequence[frozenset[str]], used: list[bool]):
+    def __init__(
+        self,
+        entries: Sequence[frozenset[str]],
+        used: list[bool],
+        facets: Sequence[_Facets] | None = None,
+    ):
         self.used = used
-        self.positions: dict[str, deque[int]] = {}
+        self.positions: dict[str, dict[_Facets | None, deque[int]]] = {}
         for position, values in enumerate(entries):
-            if not used[position]:
-                for value in sorted(values):
-                    self.positions.setdefault(value, deque()).append(position)
+            if used[position]:
+                continue
+            written = None if facets is None else facets[position]
+            for value in sorted(values):
+                self.positions.setdefault(value, {}).setdefault(written, deque()).append(
+                    position
+                )
 
-    def take(self, value: str, held: frozenset[int] = frozenset()) -> int | None:
-        queue = self.positions.get(value)
-        if not queue:
+    def take(
+        self,
+        value: str,
+        facets: _Facets | None = None,
+        *,
+        held: frozenset[int] = frozenset(),
+    ) -> int | None:
+        """The first unclaimed position of ``value`` written compatibly with ``facets``."""
+        groups = self.positions.get(value)
+        if not groups:
             return None
-        while queue and self.used[queue[0]]:
-            queue.popleft()
-        for position in queue:
-            if not self.used[position] and position not in held:
-                return position
-        return None
+        best: int | None = None
+        for written, queue in groups.items():
+            if written is not None and facets is not None and not _compatible(written, facets):
+                continue
+            while queue and self.used[queue[0]]:
+                queue.popleft()
+            for position in queue:
+                if not self.used[position] and position not in held:
+                    if best is None or position < best:
+                        best = position
+                    break
+        return best
+
+
+def _claim_parts(pool: _Pool, parts: Iterable[str | None]) -> set[int] | None:
+    """One unclaimed position for each part, or None when one has none left."""
+    held: set[int] = set()
+    for part in parts:
+        if part is None:
+            continue
+        match = pool.take(part, held=frozenset(held))
+        if match is None:
+            return None
+        held.add(match)
+    return held
+
+
+def _class_flow(
+    supply: Sequence[int], demand: Sequence[int], edges: Sequence[Sequence[bool]]
+) -> list[list[int]]:
+    """A maximum flow from left classes to right classes along ``edges``.
+
+    A class is the numbers of one value written one way; one value has few of
+    them, so augmenting paths over classes stay cheap however many numbers
+    each class holds.
+    """
+    supply = list(supply)
+    demand = list(demand)
+    lefts, rights = len(supply), len(demand)
+    flow = [[0] * rights for _ in range(lefts)]
+    while True:
+        # Breadth-first from every left class with numbers left: a right class
+        # is reached forward, a left class backward from a right class it
+        # currently sends to (-1 marks the source).
+        from_right: list[int | None] = [None] * rights
+        from_left: list[int | None] = [None] * lefts
+        queue: deque[int] = deque()
+        for index in range(lefts):
+            if supply[index] > 0:
+                from_left[index] = -1
+                queue.append(index)
+        end: int | None = None
+        while queue and end is None:
+            index = queue.popleft()
+            for other in range(rights):
+                if not edges[index][other] or from_right[other] is not None:
+                    continue
+                from_right[other] = index
+                if demand[other] > 0:
+                    end = other
+                    break
+                for back in range(lefts):
+                    if from_left[back] is None and flow[back][other] > 0:
+                        from_left[back] = other
+                        queue.append(back)
+        if end is None:
+            return flow
+        forward: list[tuple[int, int]] = []
+        backward: list[tuple[int, int]] = []
+        other = end
+        while True:
+            sender = from_right[other]
+            assert sender is not None
+            forward.append((sender, other))
+            previous = from_left[sender]
+            assert previous is not None
+            if previous == -1:
+                start = sender
+                break
+            backward.append((sender, previous))
+            other = previous
+        amount = min(supply[start], demand[end], *(flow[i][j] for i, j in backward))
+        for i, j in forward:
+            flow[i][j] += amount
+        for i, j in backward:
+            flow[i][j] -= amount
+        supply[start] -= amount
+        demand[end] -= amount
+
+
+# Ways of writing one value that are matched exactly; past this, by value.
+_MAX_WAYS = 8
+
+
+def _pair_same_values(
+    left: list[_Token], right: list[_Token], left_used: list[bool], right_used: list[bool]
+) -> None:
+    """Pair numbers of the same value, as many as their facets allow.
+
+    A maximum matching, so an unsigned `20%` that could go with either side's
+    `+20%` never leaves a pair unmatched that another choice would match.
+    Within one way of writing, earlier numbers are paired first.
+    """
+    groups: dict[str, tuple[dict[_Facets, list[int]], dict[_Facets, list[int]]]] = {}
+    for side, tokens in ((0, left), (1, right)):
+        for position, token in enumerate(tokens):
+            groups.setdefault(token.key, ({}, {}))[side].setdefault(token.facets, []).append(
+                position
+            )
+    for left_classes, right_classes in groups.values():
+        if not left_classes or not right_classes:
+            continue
+        if len(left_classes) > _MAX_WAYS or len(right_classes) > _MAX_WAYS:
+            # No text writes one value this many ways; pair it by value alone
+            # so the matching stays linear.
+            left_classes = {_PLAIN: sorted(p for ps in left_classes.values() for p in ps)}
+            right_classes = {_PLAIN: sorted(p for ps in right_classes.values() for p in ps)}
+        left_items = list(left_classes.items())
+        right_items = list(right_classes.items())
+        if len(left_items) == 1 and len(right_items) == 1:
+            (written, lefts), (other, rights) = left_items[0], right_items[0]
+            if _compatible(written, other):
+                for position, match in zip(lefts, rights):
+                    left_used[position] = right_used[match] = True
+            continue
+        flow = _class_flow(
+            [len(positions) for _, positions in left_items],
+            [len(positions) for _, positions in right_items],
+            [
+                [_compatible(written, other) for other, _ in right_items]
+                for written, _ in left_items
+            ],
+        )
+        left_next = [0] * len(left_items)
+        right_next = [0] * len(right_items)
+        for i, row in enumerate(flow):
+            for j, units in enumerate(row):
+                for _ in range(units):
+                    left_used[left_items[i][1][left_next[i]]] = True
+                    right_used[right_items[j][1][right_next[j]]] = True
+                    left_next[i] += 1
+                    right_next[j] += 1
 
 
 def _pair_tokens(left: list[_Token], right: list[_Token]) -> tuple[list[bool], list[bool]]:
-    """Match digit numbers across the two sides, exact values first."""
+    """Match digit numbers across the two sides: the same value first, as many
+    as their facets allow, then any other reading of the value."""
     left_used = [False] * len(left)
     right_used = [False] * len(right)
-    for exact in (True, False):
-        pool = _Pool(
-            [frozenset({token.key}) if exact else token.values for token in right],
-            right_used,
-        )
-        for position, token in enumerate(left):
-            if left_used[position]:
-                continue
-            for value in sorted({token.key} if exact else token.values):
-                match = pool.take(value)
-                if match is not None:
-                    right_used[match] = left_used[position] = True
-                    break
+    _pair_same_values(left, right, left_used, right_used)
+    pool = _Pool([token.values for token in right], right_used, [token.facets for token in right])
+    for position, token in enumerate(left):
+        if left_used[position]:
+            continue
+        for value in sorted(token.values):
+            match = pool.take(value, token.facets)
+            if match is not None:
+                right_used[match] = left_used[position] = True
+                break
     # `100,200` on one side can be the list `100、200` on the other.
     for grouped, other, grouped_used, other_used in (
         (left, right, left_used, right_used),
         (right, left, right_used, left_used),
     ):
-        pool = _Pool([token.values for token in other], other_used)
+        pool = _Pool(
+            [token.values for token in other], other_used, [token.facets for token in other]
+        )
         for position, token in enumerate(grouped):
             if grouped_used[position] or "," not in token.folded:
                 continue
             held: set[int] = set()
             for part in token.folded.split(","):
-                match = pool.take(_digit_values(part)[0], frozenset(held))
+                match = pool.take(_digit_values(part)[0], token.facets, held=frozenset(held))
                 if match is None:
                     break
                 held.add(match)
@@ -693,7 +1206,62 @@ def _pair_tokens(left: list[_Token], right: list[_Token]) -> tuple[list[bool], l
     return left_used, right_used
 
 
-def _excuse(tokens: list[_Token], used: list[bool], excuses: list[frozenset[str]]) -> None:
+def _pair_builds(left: list[_Build], right: list[_Build]) -> tuple[list[bool], list[bool]]:
+    """Match build markers across the two sides, identical ones first."""
+    left_used = [False] * len(left)
+    right_used = [False] * len(right)
+    by_key: dict[tuple[str | None, str | None], deque[int]] = {}
+    for position, build in enumerate(right):
+        by_key.setdefault((build.s, build.r), deque()).append(position)
+    samples = {key: right[queue[0]] for key, queue in by_key.items()}
+    for exact in (True, False):
+        for position, build in enumerate(left):
+            if left_used[position]:
+                continue
+            key = (build.s, build.r)
+            keys = (
+                [key]
+                if exact
+                else [other for other, sample in samples.items() if _builds_match(build, sample)]
+            )
+            best: tuple[int, deque[int]] | None = None
+            for other in keys:
+                queue = by_key.get(other)
+                while queue and right_used[queue[0]]:
+                    queue.popleft()
+                if queue and (best is None or queue[0] < best[0]):
+                    best = (queue[0], queue)
+            if best is not None:
+                right_used[best[0]] = left_used[position] = True
+    return left_used, right_used
+
+
+def _builds_spelled_out(
+    builds: list[_Build], built: list[bool], numbers: list[_Token], used: list[bool]
+) -> None:
+    """A marker the other side writes as plain numbers (`S3R1` as `Sequence 3, Refinement 1`)."""
+    if all(built):
+        return
+    pool = _Pool(
+        [token.values if "" in token.facets.measure else frozenset() for token in numbers], used
+    )
+    for position, build in enumerate(builds):
+        if built[position]:
+            continue
+        held = _claim_parts(pool, (build.s, build.r))
+        if held is not None:
+            built[position] = True
+            for match in held:
+                used[match] = True
+
+
+def _excuse(
+    tokens: list[_Token],
+    used: list[bool],
+    builds: list[_Build],
+    built: list[bool],
+    excuses: list[frozenset[str]],
+) -> None:
     pool = _Pool(excuses, [False] * len(excuses))
     for position, token in enumerate(tokens):
         if used[position]:
@@ -703,6 +1271,14 @@ def _excuse(tokens: list[_Token], used: list[bool], excuses: list[frozenset[str]
             if match is not None:
                 pool.used[match] = used[position] = True
                 break
+    for position, build in enumerate(builds):
+        if built[position]:
+            continue
+        held = _claim_parts(pool, (build.s, build.r))
+        if held is not None:
+            built[position] = True
+            for match in held:
+                pool.used[match] = True
 
 
 def _number_findings(
@@ -711,22 +1287,25 @@ def _number_findings(
     source_masked: Sequence[tuple[int, int]],
     target_masked: Sequence[tuple[int, int]],
 ) -> list[StructureFinding]:
-    source_numbers, source_excuses = _number_tokens(source, source_masked)
-    target_numbers, target_excuses = _number_tokens(target, target_masked)
+    source_numbers, source_builds, source_excuses = _number_tokens(source, source_masked)
+    target_numbers, target_builds, target_excuses = _number_tokens(target, target_masked)
     source_used, target_used = _pair_tokens(source_numbers, target_numbers)
-    _excuse(source_numbers, source_used, target_excuses)
-    _excuse(target_numbers, target_used, source_excuses)
-    findings = [
-        StructureFinding("number_missing", source_span=token.span)
-        for token, used in zip(source_numbers, source_used, strict=True)
-        if not used
+    source_built, target_built = _pair_builds(source_builds, target_builds)
+    _builds_spelled_out(source_builds, source_built, target_numbers, target_used)
+    _builds_spelled_out(target_builds, target_built, source_numbers, source_used)
+    _excuse(source_numbers, source_used, source_builds, source_built, target_excuses)
+    _excuse(target_numbers, target_used, target_builds, target_built, source_excuses)
+    missing = [
+        *(token.span for token, used in zip(source_numbers, source_used, strict=True) if not used),
+        *(build.span for build, used in zip(source_builds, source_built, strict=True) if not used),
     ]
-    findings += [
-        StructureFinding("number_unexpected", target_span=token.span)
-        for token, used in zip(target_numbers, target_used, strict=True)
-        if not used
+    unexpected = [
+        *(token.span for token, used in zip(target_numbers, target_used, strict=True) if not used),
+        *(build.span for build, used in zip(target_builds, target_built, strict=True) if not used),
     ]
-    return findings
+    return [StructureFinding("number_missing", source_span=span) for span in missing] + [
+        StructureFinding("number_unexpected", target_span=span) for span in unexpected
+    ]
 
 
 def _markup_key(token: str) -> str:

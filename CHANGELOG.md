@@ -16,6 +16,18 @@ does not distribute generated game data or generated SQLite databases.
   spelled English numbers and list labels are never reported on their own.
   Each side is at most 2,000 Unicode scalars and 20,000 across the request
   (`input_too_long`, 422); at most 16 findings per segment are returned.
+- Numeric facts in the number rule (MY-504): a percentage or multiplier
+  against a plain number (`50%` / `50`, `1.5倍` / `1.5`), a flipped explicit
+  sign (`+20%` / `−20%`), a flipped comparison (`大于 150%` / `less than
+  150%`, `至少 3 层` / `at most 3 stacks`), a changed build marker (`S0R1` /
+  `S1R0`, `3+1` / `2+1`) and two different units (`20秒` / `20m`) are now
+  reported as `number_missing` and `number_unexpected`. A sign, unit or
+  comparison written on one side only is not. Ranges keep their dash
+  (`100-150`), and English month names account for the month of a date.
+  Number finding spans now include the sign, unit and comparison written
+  with the number. No rule id, check name or field was added.
+  `scripts/eval_structure_checks.py` measures false alarms and misses offline
+  (ADR 0022).
 - `GET /v1/capabilities` always lists `structure-check-v1`. Without a model it
   now answers `["ambiguous-mention-v1", "structure-check-v1"]`.
 - `POST /v1/reviews` and `POST /v1/semantic-reviews` are unchanged; a test pins
