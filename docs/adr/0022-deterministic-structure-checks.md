@@ -217,14 +217,21 @@ with no model call. Numbers below are for this change's head.
   | Attribution swaps found (not claimed) | 0 / 6 | 0 / 6 |
 
   The two earlier false alarms were the month name in `11月26日` /
-  `November 26`.
+  `November 26`. The labels were committed before any rule, but the fixture
+  is not blind: its first run against the new rules found 70 of 72 errors
+  with 2 false alarms, and two changes followed from it (the lettered build
+  form takes any digit so `S1R0` is one marker, and month names account for
+  a month). The official corpus below is the measure the rules were not
+  tuned on.
 - **Official corpus.** With `--textmap-root data/wutheringdata/Textmaps
   --baseline-ref fe4555f`, the 27,385 zh-Hans/en pairs of the official game
   text (data `9218d61`, 3.7.8) that hold a digit are read in both
   directions. Official translations rarely change a number, so a pair this
   change newly flags is read as a false alarm unless the two texts really
   disagree. Flagged pairs went from 2,337 to 2,270 per direction: 75 stopped
-  being flagged, all for a month name; 8 are newly flagged, and each of the 8
+  being flagged, each for a month name (63 dates with `N月` against the
+  English month, and the 12 birthday-month labels `1` / `Jan` to `12` /
+  `Dec`); 8 are newly flagged, and each of the 8
   is a real difference in the official text: `热熔伤害提升10%` translated as
   `Gain 10 Fusion DMG Bonus` in four item texts, `0%` against `0` or `0.0` in
   two, `0` against `0%` and `+0.02` against `0.02%`. The script prints counts and

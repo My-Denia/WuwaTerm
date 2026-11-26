@@ -253,10 +253,11 @@ def extract_numbers(text: str) -> tuple[str, ...]:
 
 
 def missing_numbers(source: str, answer: str) -> tuple[str, ...]:
-    """Return digit numbers of ``source`` that ``answer`` does not account for.
+    """Return the numbers of ``source`` that ``answer`` does not account for.
 
     The structure-check number rule, source side only: see
-    :func:`check_segment_structure`.
+    :func:`check_segment_structure`. Each is the text of its finding span, so
+    it carries the sign, unit or comparison written with it (`+20%`, `S0R1`).
     """
     return tuple(
         finding.source_span.text
