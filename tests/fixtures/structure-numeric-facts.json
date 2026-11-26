@@ -1,5 +1,5 @@
 {
-  "description": "Offline benchmark for the structure-check-v1 number rule (MY-504). Hand-written Wuthering Waves guide, announcement, skill and story pairs. Negative buckets are natural translations and must raise no finding. Positive buckets carry one injected error each; marks locate it, and a case counts as detected when a number finding overlaps a mark. The attribution bucket is outside what Layer 1 claims to find and is reported on its own. Labels were written before the rules they measure.",
+  "description": "Offline benchmark for the structure-check-v1 number rule (MY-504, MY-515). Hand-written Wuthering Waves guide, announcement, skill and story pairs. Negative buckets are natural translations and must raise no finding. Positive buckets carry one injected error each; marks locate it, and a case counts as detected when a number finding overlaps a mark. The attribution bucket is outside what Layer 1 claims to find and is reported on its own. Labels were written before the rules they measure.",
   "negative_buckets": ["natural", "hard_negative"],
   "out_of_scope_buckets": ["attribution"],
   "cases": [
@@ -60,6 +60,13 @@
     {"id": "N55", "bucket": "hard_negative", "genre": "skill", "source": "伤害提升50%。", "target": "DMG is increased by 50 per cent."},
     {"id": "N56", "bucket": "hard_negative", "genre": "skill", "source": "在3回合内持续造成伤害。", "target": "Deals DMG over 3 turns."},
     {"id": "N57", "bucket": "hard_negative", "genre": "guide", "source": "S1赛季的深塔第12层。", "target": "Tower of Adversity Floor 12 in Season 1."},
+    {"id": "N58", "bucket": "hard_negative", "genre": "skill", "source": "最多叠加{0}层。", "target": "Stacks up to {0} {Cus:Sap,S=stack P=stacks SapTag=0}."},
+    {"id": "N59", "bucket": "hard_negative", "genre": "story", "source": "当前索拉等级已提升。", "target": "Your SOL3 Phase has increased."},
+    {"id": "N60", "bucket": "hard_negative", "genre": "story", "source": "启动锁天工核心。", "target": "Activate the T-G0NG core."},
+    {"id": "N61", "bucket": "hard_negative", "genre": "skill", "source": "造成5+1倍伤害。", "target": "Deals 5+1x DMG."},
+    {"id": "N62", "bucket": "hard_negative", "genre": "skill", "source": "持续至少3回合，生命值低于<color=Red>50%</color>时触发。", "target": "Lasts 3 turns and below <color=Red>50%</color> HP."},
+    {"id": "N63", "bucket": "hard_negative", "genre": "story", "source": "挑战伤痕2。", "target": "Challenge Scar II."},
+    {"id": "N64", "bucket": "hard_negative", "genre": "guide", "source": "体能训练4已完成。", "target": "Physical Training IV completed."},
 
     {"id": "E01", "bucket": "percent", "genre": "skill", "source": "攻击力提高50%。", "target": "ATK increases by 50.", "marks": [{"side": "target", "text": "50"}]},
     {"id": "E02", "bucket": "percent", "genre": "skill", "source": "暴击伤害提升30%，持续10秒。", "target": "Crit DMG increases by 30 for 10s.", "marks": [{"side": "target", "text": "30"}]},
@@ -97,6 +104,11 @@
     {"id": "E34", "bucket": "count", "genre": "story", "source": "还剩2分钟！", "target": "Only 3 minutes left!", "marks": [{"side": "target", "text": "3"}]},
     {"id": "E35", "bucket": "count", "genre": "skill", "source": "Consumes 3 stacks of Concerto.", "target": "消耗5层「协奏」。", "marks": [{"side": "target", "text": "5"}]},
     {"id": "E36", "bucket": "percent", "genre": "skill", "source": "攻击提升30%-45%。", "target": "ATK is increased by 30-45.", "marks": [{"side": "target", "text": "30-45"}]},
+    {"id": "E37", "bucket": "count", "genre": "skill", "source": "每2秒可触发1次。", "target": "Can be triggered {Cus:Sap,S=time P=times SapTag=1} every 2s.", "marks": [{"side": "source", "text": "1"}]},
+    {"id": "E38", "bucket": "percent", "genre": "skill", "source": "生命值40%。", "target": "HP50%.", "marks": [{"side": "target", "text": "50%"}]},
+    {"id": "E39", "bucket": "multiplier", "genre": "guide", "source": "获得枢芯×1。", "target": "Obtain Kernel x2.", "marks": [{"side": "target", "text": "x2"}]},
+    {"id": "E40", "bucket": "count", "genre": "story", "source": "我有1个苹果。", "target": "I have an apple.", "marks": [{"side": "source", "text": "1"}]},
+    {"id": "E41", "bucket": "count", "genre": "story", "source": "我有苹果。", "target": "I have 1 apple.", "marks": [{"side": "target", "text": "1"}]},
 
     {"id": "A01", "bucket": "attribution", "genre": "skill", "source": "攻击力20%，暴击率10%", "target": "ATK 10%, CRIT Rate 20%", "marks": [{"side": "target", "text": "10%"}, {"side": "target", "text": "20%"}]},
     {"id": "A02", "bucket": "attribution", "genre": "skill", "source": "冷却12秒，持续8秒。", "target": "Cooldown: 8s, lasts 12s.", "marks": [{"side": "target", "text": "8s"}, {"side": "target", "text": "12s"}]},
