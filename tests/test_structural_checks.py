@@ -226,6 +226,10 @@ def test_structure_checks_report_breaks_in_a_fixed_order(source, target, expecte
         ("推荐3+1", "2+1 is recommended", [("number_missing", "3+1"), ("number_unexpected", "2+1")]),
         ("推荐3+1配置", "This setup is recommended", [("number_missing", "3+1")]),
         ("6链后", "At S5", [("number_missing", "6链"), ("number_unexpected", "S5")]),
+        # A marker naming less than the other is a different marker.
+        ("S0R1即可", "S0 is enough", [("number_missing", "S0R1"), ("number_unexpected", "S0")]),
+        ("推荐0+1", "S0 is recommended", [("number_missing", "0+1"), ("number_unexpected", "S0")]),
+        ("S6R5", "R5", [("number_missing", "S6R5"), ("number_unexpected", "R5")]),
         # Two units written on both sides that differ.
         ("持续20秒", "Lasts 20m", [("number_missing", "20秒"), ("number_unexpected", "20m")]),
         ("冷却2分钟", "Cooldown: 2s", [("number_missing", "2分钟"), ("number_unexpected", "2s")]),
@@ -287,8 +291,13 @@ def test_structure_checks_report_changed_numeric_facts(source, target, expected)
         ("0链1精", "S0R1"),
         ("0+1配置", "S0R1 setup"),
         ("3+1的赞妮", "Zani at Sequence 3 with Refinement 1"),
+        ("6链0精", "S6R0"),
         ("S1赛季第12层", "Floor 12 in Season 1"),
         ("1+1=2", "1+1=2"),
+        ("伤害提升5+1倍", "DMG +5+1x"),
+        ("1+2×3", "1+2*3"),
+        # A trailing `and below` that opens the next number is not this one's.
+        ("持续至少3回合，生命值低于50%时", "Lasts 3 turns and below 50% HP"),
         # Month names account for the month of a date.
         ("11月26日06:00", "November 26, 06:00"),
         ("4月{0}日开启", "Available Apr {0}"),

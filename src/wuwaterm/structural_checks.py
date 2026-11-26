@@ -504,7 +504,9 @@ _POLARITY_LAST_CHARS = frozenset(
 _POLARITY_AFTER_RE = re.compile(
     r"[ \t]*(?:[㐀-鿿][ \t]*)?(?P<cn>[及或]?以[上下内])"
     r"|[ \t]+(?:[A-Za-z]{1,16}[ \t]+)?(?P<en>(?:or|and)[ \t]+"
-    r"(?:more|above|higher|greater|over|up|less|below|lower|fewer|under))(?![A-Za-z])",
+    r"(?:more|above|higher|greater|over|up|less|below|lower|fewer|under))(?![A-Za-z])"
+    # `3 turns and below 50% HP`: the word opens the next number, not this one.
+    r"(?![ \t]*[+\-−–]?[0-9])",
     re.IGNORECASE,
 )
 _GREATER_AFTER_WORDS = ("more", "above", "higher", "greater", "over", "up")
@@ -514,14 +516,15 @@ _RANGE_JOIN_RE = re.compile(r"[ \t]*[-–—~〜至到/][ \t]*|[ \t]+to[ \t]+")
 
 # Resonance Chain (S/C) and refinement (R) markers, read as one fact each:
 # `S0R1`, `C6`, `S6 R5`, `R1`, `0+1` (chain + refinement), `6链`, `0链1精`.
-# The lettered form takes any digit, so a wrong `S1R0` is still one marker; the
-# bare forms take only real chain (0-6) and refinement (1-5) levels, and
-# `1+1=2` or `3+1+1` is arithmetic left to the number rule.
+# The lettered form, and a refinement right after `链`, take any digit, so a
+# wrong `S1R0` or `6链0精` is still one marker. The bare forms take only real
+# chain (0-6) and refinement (1-5) levels, and `1+1=2`, `3+1+1`, `5+1倍` or
+# `1+2×3` is arithmetic left to the number rule.
 _BUILD_RE = re.compile(
     r"(?<![A-Za-z0-9])[SsCc](?P<s1>[0-9])(?:[ \t]?[Rr](?P<r1>[0-9]))?(?![A-Za-z0-9])"
     r"|(?<![A-Za-z0-9])[Rr](?P<r2>[0-9])(?![A-Za-z0-9])"
-    r"|(?<![0-9.+\-−–×*/=<>])(?P<s3>[0-6])\+(?P<r3>[1-5])(?![0-9.+\-=<>%])"
-    r"|(?<![0-9.])(?P<s4>[0-6])链(?:(?P<r4>[1-5])精)?(?![接条])"
+    r"|(?<![0-9.+\-−–×*/=<>])(?P<s3>[0-6])\+(?P<r3>[1-5])(?![0-9.+\-−–×*/=<>%倍])"
+    r"|(?<![0-9.])(?P<s4>[0-6])链(?:(?P<r4>[0-9])精)?(?![接条])"
 )
 
 
@@ -606,17 +609,6 @@ class _Build:
     span: StructureSpan
     s: str | None
     r: str | None
-
-
-def _builds_match(left: _Build, right: _Build) -> bool:
-    """Same chain and refinement wherever both name one, and at least one named."""
-    shared = False
-    for a, b in ((left.s, right.s), (left.r, right.r)):
-        if a is not None and b is not None:
-            if a != b:
-                return False
-            shared = True
-    return shared
 
 
 def is_blank(text: str) -> bool:
@@ -1208,32 +1200,17 @@ def _pair_tokens(left: list[_Token], right: list[_Token]) -> tuple[list[bool], l
 
 
 def _pair_builds(left: list[_Build], right: list[_Build]) -> tuple[list[bool], list[bool]]:
-    """Match build markers across the two sides, identical ones first."""
+    """Match build markers across the two sides: the same chain and the same
+    refinement, or neither named on both. `S0R1` does not match `S0`."""
     left_used = [False] * len(left)
     right_used = [False] * len(right)
     by_key: dict[tuple[str | None, str | None], deque[int]] = {}
     for position, build in enumerate(right):
         by_key.setdefault((build.s, build.r), deque()).append(position)
-    samples = {key: right[queue[0]] for key, queue in by_key.items()}
-    for exact in (True, False):
-        for position, build in enumerate(left):
-            if left_used[position]:
-                continue
-            key = (build.s, build.r)
-            keys = (
-                [key]
-                if exact
-                else [other for other, sample in samples.items() if _builds_match(build, sample)]
-            )
-            best: tuple[int, deque[int]] | None = None
-            for other in keys:
-                queue = by_key.get(other)
-                while queue and right_used[queue[0]]:
-                    queue.popleft()
-                if queue and (best is None or queue[0] < best[0]):
-                    best = (queue[0], queue)
-            if best is not None:
-                right_used[best[0]] = left_used[position] = True
+    for position, build in enumerate(left):
+        queue = by_key.get((build.s, build.r))
+        if queue:
+            right_used[queue.popleft()] = left_used[position] = True
     return left_used, right_used
 
 

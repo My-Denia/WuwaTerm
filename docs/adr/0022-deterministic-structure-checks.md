@@ -130,7 +130,8 @@ section records the rules a schema cannot express.
     `up to`, a trailing `以下`, `以内` or `or less`. A leading word sits right
     before the number, with only spaces or tags between them; a trailing one
     follows the number and its unit, with at most one classifier or word
-    between (`3层以上`, `3 stacks or more`). Strictness is not compared:
+    between (`3层以上`, `3 stacks or more`), and is not followed by another
+    number (`3 turns and below 50%` gives `below` to `50%`). Strictness is not compared:
     `大于` matches `at least`.
   - Time and distance units written on both sides agree: `秒`/`s`/`sec`,
     `分钟`/`min`, `小时`/`h`, `米`/`meter`; a bare `m` reads as metres or
@@ -144,11 +145,12 @@ section records the rules a schema cannot express.
   is matched by value alone.
 - **Build markers.** Resonance Chain and refinement markers are one fact
   each: `S0R1`, `C0R1` (C reads as S), `S6 R5`, `S6`, `R1`, `0+1`, `3+1`,
-  `6链` and `0链1精`. `S0R1` matches `0链1精` and `0+1` but not `S1R0` or
-  `S0R5`. A marker the other side spells out as plain numbers (`S3R1` as
-  `Sequence 3, Refinement 1`) is accounted for by those numbers. `N+M` is a
-  marker only for chain 0 to 6 and refinement 1 to 5 standing alone, so
-  `1+1=2` and `3+1+1` stay arithmetic.
+  `6链` and `0链1精`. Two markers match only when they name the same chain
+  and the same refinement: `S0R1` matches `0链1精` and `0+1` but not `S1R0`,
+  `S0R5` or `S0`. A marker the other side spells out as plain numbers (`S3R1`
+  as `Sequence 3, Refinement 1`) is accounted for by those numbers. `N+M` is
+  a marker only for chain 0 to 6 and refinement 1 to 5 standing alone, so
+  `1+1=2`, `3+1+1`, `5+1倍` and `1+2×3` stay arithmetic.
 - **Spans of number findings.** A number finding's span covers the number as
   written: an explicit sign, an attached percent sign, multiplier or unit,
   and a comparison word, as far as they are contiguous text outside markup
@@ -238,7 +240,7 @@ with no model call. Numbers below are for this change's head.
   identifiers only; no corpus text is written anywhere.
 - **Time.** The slowest of 20 adversarial pairs with both sides at 2,000
   scalars (signs, percents, build markers, comparison words, units, ranges,
-  tags, many ways of writing one value, long digit runs) took 11.8 ms on
+  tags, many ways of writing one value, long digit runs) took 12.0 ms on
   Python 3.11 and 10.7 ms on 3.13, best of 5, on the development machine. The test suite bounds each at 100 ms, to
   catch a superlinear path without failing on a slow shared runner.
 
