@@ -74,6 +74,7 @@ DIRECTION_ALIASES = {
 }
 GENRES = ("announcement", "story", "guide", "mixed")
 COMMUNITY_GENRES = ("guide", "mixed")
+ANNOUNCEMENT_LEVELS = ("L0", "L1", "L2")
 EXCLUSIONS = ("dictionary", "no_letter", "duplicate")
 
 # C3 default thresholds.
@@ -323,12 +324,14 @@ def _read_until_nul(stream: Any) -> bytes | None:
         buf.extend(ch)
 
 
-def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[list[str], list[str]]:
+def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[list[str], list[str], int]:
     """Resolve one or more commits and read the union of tracked UTF-8 non-binary blobs.
 
     Uses the exact blob-filtering rule of ``eval_usability.git_blob_texts``:
     tracked regular blobs (not symlinks ``120000`` or submodules), no NUL byte,
     valid UTF-8. Duplicate blob OIDs across commits are read once.
+
+    Returns ``(resolved_commits, unique_text_blobs, text_blob_entries_count)``.
     """
     resolved_list: list[str] = []
     unique_resolved: list[str] = []
@@ -342,7 +345,7 @@ def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[lis
             unique_resolved.append(resolved)
 
     oids: list[bytes] = []
-    seen_oids: set[bytes] = set()
+    oid_entry_counts: dict[bytes, int] = {}
     for resolved in unique_resolved:
         rc, listing, _ = _git(repo, "ls-tree", "-r", "-z", resolved)
         if rc != 0:
@@ -355,13 +358,16 @@ def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[lis
             if len(fields) != 3 or fields[1] != b"blob" or fields[0] == b"120000":
                 continue
             oid = fields[2]
-            if oid not in seen_oids:
-                seen_oids.add(oid)
+            if oid not in oid_entry_counts:
+                oid_entry_counts[oid] = 1
                 oids.append(oid)
+            else:
+                oid_entry_counts[oid] += 1
 
     texts: list[str] = []
+    text_entries_total = 0
     if not oids:
-        return resolved_list, texts
+        return resolved_list, texts, 0
 
     proc = subprocess.Popen(
         ["git", "-C", str(repo), "cat-file", "--batch", "-Z"],
@@ -374,7 +380,7 @@ def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[lis
         payload = b"".join(oid + b"\0" for oid in oids)
         proc.stdin.write(payload)
         proc.stdin.close()
-        for _ in oids:
+        for oid in oids:
             header = _read_until_nul(proc.stdout)
             if header is None:
                 raise _CheckError("git_cat_file_failed", "cat-file stream truncated")
@@ -394,6 +400,7 @@ def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[lis
                 continue
             try:
                 texts.append(body.decode("utf-8"))
+                text_entries_total += oid_entry_counts[oid]
             except UnicodeDecodeError:
                 continue
     finally:
@@ -402,7 +409,7 @@ def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[lis
         rc = proc.wait()
     if rc != 0:
         raise _CheckError("git_cat_file_failed", "git cat-file exited non-zero")
-    return resolved_list, texts
+    return resolved_list, texts, text_entries_total
 
 
 @dataclass
@@ -498,6 +505,7 @@ class DocMetadata:
     author: str | None
     bilingual_pair_id: str | None
     published: str | None
+    announcement_level: str | None = None
 
 
 # ------------------------------------------------------------ loaders (C1-C9)
@@ -679,6 +687,9 @@ def _load_metadata(
             published_raw = raw.get("published")
             if published_raw is not None and not isinstance(published_raw, str):
                 raise _CheckError("invalid_metadata", "published")
+            ann_level_raw = raw.get("announcement_level")
+            if ann_level_raw is not None and not isinstance(ann_level_raw, str):
+                raise _CheckError("invalid_announcement_level_type", "announcement_level")
             tm_keys = (
                 _as_str_tuple(raw.get("textmap_keys"), field_name="textmap_keys", where=where)
                 + _as_str_tuple(raw.get("textmap_key"), field_name="textmap_key", where=where)
@@ -694,6 +705,7 @@ def _load_metadata(
             author=author_raw,
             bilingual_pair_id=pair_raw,
             published=published_raw,
+            announcement_level=ann_level_raw,
         )
 
     if metadata_path is not None:
@@ -963,7 +975,9 @@ def resolve_announcement_floors(
 
 def check_c3(
     *,
+    manifest_docs: Sequence[ManifestDoc],
     sample_paragraphs: Sequence[SampleParagraph],
+    metadata_by_doc: Mapping[str, DocMetadata],
     announcement_floor_zh_en: int,
     announcement_floor_en_zh: int,
     floor_config_error: str | None = None,
@@ -973,6 +987,9 @@ def check_c3(
             "status": "fail",
             "floor_profile": f"invalid:{floor_config_error}",
             "non_default_floor": True,
+            "announcement_units_by_level": {d: {lvl: 0 for lvl in ANNOUNCEMENT_LEVELS} for d in DIRECTIONS},
+            "announcement_level_issues_count": 0,
+            "announcement_level_issues": [],
             "shortfalls_count": 1,
             "shortfalls": [{"code": floor_config_error}],
         }
@@ -1000,13 +1017,42 @@ def check_c3(
         },
     }
 
+    # Validate announcement_level (§2.5 & §6.7: required L0/L1/L2 on announcements, forbidden on non-announcements).
+    level_issues: list[dict[str, Any]] = []
+    doc_ann_level: dict[str, str] = {}
+    for doc in manifest_docs:
+        meta = metadata_by_doc.get(doc.doc_id)
+        level = meta.announcement_level if meta is not None else None
+        if doc.genre == "announcement":
+            if level is None:
+                level_issues.append({"code": "missing_announcement_level", "doc_id": doc.doc_id})
+            elif level not in ANNOUNCEMENT_LEVELS:
+                level_issues.append({"code": "invalid_announcement_level", "doc_id": doc.doc_id})
+            else:
+                doc_ann_level[doc.doc_id] = level
+        elif level is not None:
+            level_issues.append(
+                {
+                    "code": "unexpected_announcement_level_on_non_announcement",
+                    "doc_id": doc.doc_id,
+                    "genre": doc.genre,
+                }
+            )
+
     observed_dir: dict[str, int] = {d: 0 for d in DIRECTIONS}
     observed_genre: dict[str, dict[str, int]] = {d: {g: 0 for g in GENRES} for d in DIRECTIONS}
+    announcement_units_by_level: dict[str, dict[str, int]] = {
+        d: {lvl: 0 for lvl in ANNOUNCEMENT_LEVELS} for d in DIRECTIONS
+    }
     for para in sample_paragraphs:
         if not para.scored:
             continue
         observed_dir[para.direction] += 1
         observed_genre[para.direction][para.genre] += 1
+        if para.genre == "announcement":
+            lvl = doc_ann_level.get(para.doc_id)
+            if lvl is not None:
+                announcement_units_by_level[para.direction][lvl] += 1
 
     shortfalls: list[dict[str, Any]] = []
     for direction in DIRECTIONS:
@@ -1034,7 +1080,7 @@ def check_c3(
                 )
 
     return {
-        "status": "pass" if not shortfalls else "fail",
+        "status": "pass" if (not shortfalls and not level_issues) else "fail",
         "floor_profile": floor_profile,
         "non_default_floor": non_default,
         "effective_floors": {
@@ -1045,6 +1091,9 @@ def check_c3(
             "per_direction": observed_dir,
             "per_genre": observed_genre,
         },
+        "announcement_units_by_level": announcement_units_by_level,
+        "announcement_level_issues_count": len(level_issues),
+        "announcement_level_issues": level_issues,
         "shortfalls_count": len(shortfalls),
         "shortfalls": shortfalls,
     }
@@ -1376,9 +1425,10 @@ def check_c4(
             "scorer_sha256": actual_scorer_sha,
             "scorer_sha256_expected": expected_scorer_sha256,
             "scorer_sha256_ok": False,
-            "core_commit": None,
+            "core_tag_commit": None,
             "freeze_core_commit": None,
-            "core_blobs_scanned": 0,
+            "core_blob_entries_scanned": 0,
+            "core_unique_blobs_scanned": 0,
             "prior_sets_scanned": list(prior_sets),
             "required_prior_sets_complete": not missing_prior,
             "m2_max_shared_span_threshold": m2_threshold,
@@ -1396,16 +1446,31 @@ def check_c4(
     if getattr(ev, "DEFAULT_WINDOW", WINDOW_SIZE) != WINDOW_SIZE:
         issues.append({"code": "scorer_window_size_mismatch"})
 
-    commits_to_scan = [core_commit]
-    if freeze_core_commit is not None and freeze_core_commit != core_commit:
-        commits_to_scan.append(freeze_core_commit)
-    try:
-        resolved_commits, core_blobs = iter_git_commits_text_blobs(core_repo, commits_to_scan)
-        resolved_core = resolved_commits[0]
-        resolved_freeze = resolved_commits[-1]
-    except _CheckError as exc:
-        issues.append({"code": exc.code})
-        resolved_core, resolved_freeze, core_blobs = "", "", []
+    resolved_core = ""
+    resolved_freeze = ""
+    core_blobs: list[str] = []
+    core_blob_entries = 0
+    if not freeze_core_commit or not freeze_core_commit.strip():
+        issues.append({"code": "missing_freeze_core_commit"})
+        try:
+            resolved_commits, core_blobs, core_blob_entries = iter_git_commits_text_blobs(core_repo, [core_commit])
+            resolved_core = resolved_commits[0]
+        except _CheckError as exc:
+            issues.append({"code": exc.code})
+    else:
+        try:
+            resolved_commits, core_blobs, core_blob_entries = iter_git_commits_text_blobs(
+                core_repo, [core_commit, freeze_core_commit]
+            )
+            resolved_core, resolved_freeze = resolved_commits[0], resolved_commits[1]
+            if resolved_freeze == resolved_core:
+                issues.append({"code": "freeze_core_commit_equals_tag_commit"})
+            else:
+                rc_anc, _, _ = _git(core_repo, "merge-base", "--is-ancestor", resolved_core, resolved_freeze)
+                if rc_anc != 0:
+                    issues.append({"code": "core_tag_not_ancestor_of_freeze_commit"})
+        except _CheckError as exc:
+            issues.append({"code": exc.code})
 
     m1_names, m1_issues = _load_m1_name_strings(clear_name_paths, community_lexicon_paths)
     issues.extend(m1_issues)
@@ -1518,9 +1583,10 @@ def check_c4(
         "scorer_sha256": verified_sha,
         "scorer_sha256_expected": expected_scorer_sha256,
         "scorer_sha256_ok": True,
-        "core_commit": resolved_core or None,
+        "core_tag_commit": resolved_core or None,
         "freeze_core_commit": resolved_freeze or None,
-        "core_blobs_scanned": len(core_blobs),
+        "core_blob_entries_scanned": core_blob_entries,
+        "core_unique_blobs_scanned": len(core_blobs),
         "prior_sets_scanned": list(prior_sets),
         "required_prior_sets_complete": not missing_prior,
         "m2_max_shared_span_threshold": m2_threshold,
@@ -2231,7 +2297,7 @@ def build_bindings_and_c10(
     if rc_st != 0 or out_st.strip():
         issues.append({"code": "bound_tree_dirty"})
 
-    # Core commit + freeze Core commit verification.
+    # Core tag commit + mandatory distinct descendant freeze Core commit verification.
     rc_cc, out_cc, _ = _git(core_repo, "rev-parse", "--verify", f"{core_commit}^{{commit}}")
     resolved_core_commit = out_cc.decode("utf-8").strip() if rc_cc == 0 else None
     if resolved_core_commit is None:
@@ -2245,19 +2311,32 @@ def build_bindings_and_c10(
             }
         )
 
-    effective_freeze_rev = freeze_core_commit if freeze_core_commit is not None else core_commit
-    rc_fc, out_fc, _ = _git(core_repo, "rev-parse", "--verify", f"{effective_freeze_rev}^{{commit}}")
-    resolved_freeze_commit = out_fc.decode("utf-8").strip() if rc_fc == 0 else None
-    if resolved_freeze_commit is None:
-        issues.append({"code": "freeze_core_commit_unresolvable"})
-    elif expected_freeze_core_commit is not None and resolved_freeze_commit != expected_freeze_core_commit:
-        issues.append(
-            {
-                "code": "freeze_core_commit_mismatch",
-                "actual": resolved_freeze_commit,
-                "expected": expected_freeze_core_commit,
-            }
-        )
+    resolved_freeze_commit: str | None = None
+    if not freeze_core_commit or not freeze_core_commit.strip():
+        issues.append({"code": "missing_freeze_core_commit"})
+    else:
+        rc_fc, out_fc, _ = _git(core_repo, "rev-parse", "--verify", f"{freeze_core_commit}^{{commit}}")
+        resolved_freeze_commit = out_fc.decode("utf-8").strip() if rc_fc == 0 else None
+        if resolved_freeze_commit is None:
+            issues.append({"code": "freeze_core_commit_unresolvable"})
+        else:
+            if expected_freeze_core_commit is not None and resolved_freeze_commit != expected_freeze_core_commit:
+                issues.append(
+                    {
+                        "code": "freeze_core_commit_mismatch",
+                        "actual": resolved_freeze_commit,
+                        "expected": expected_freeze_core_commit,
+                    }
+                )
+            if resolved_core_commit is not None:
+                if resolved_freeze_commit == resolved_core_commit:
+                    issues.append({"code": "freeze_core_commit_equals_tag_commit"})
+                else:
+                    rc_anc, _, _ = _git(
+                        core_repo, "merge-base", "--is-ancestor", resolved_core_commit, resolved_freeze_commit
+                    )
+                    if rc_anc != 0:
+                        issues.append({"code": "core_tag_not_ancestor_of_freeze_commit"})
 
     # Import bound Core.
     core: BoundCore | None = None
@@ -2348,6 +2427,7 @@ def build_bindings_and_c10(
         issues.append({"code": "missing_input_file", "input": "upstream_clearances"})
 
     bindings: dict[str, Any] = {
+        "core_tag_commit": resolved_core_commit,
         "core_commit": resolved_core_commit,
         "freeze_core_commit": resolved_freeze_commit,
         "expected_core_commit": expected_core_commit,
@@ -2464,10 +2544,15 @@ def validate_acceptance_receipt(
     if bindings.get("non_default_parameters") != non_default_top:
         raise ReceiptValidationError("non_default_parameters disagrees with hashed bindings")
 
-    for sha40_key in ("core_commit", "freeze_core_commit", "bound_tree_src_sha"):
+    for sha40_key in ("core_tag_commit", "freeze_core_commit", "bound_tree_src_sha"):
         val = bindings.get(sha40_key)
         if require_pass and (not isinstance(val, str) or not _HEX40_RE.match(val)):
             raise ReceiptValidationError(f"bindings.{sha40_key} must be a 40-hex git SHA")
+    if require_pass:
+        if "core_commit" in bindings and bindings.get("core_commit") != bindings.get("core_tag_commit"):
+            raise ReceiptValidationError("bindings.core_commit disagrees with bindings.core_tag_commit")
+        if bindings.get("freeze_core_commit") == bindings.get("core_tag_commit"):
+            raise ReceiptValidationError("bindings.freeze_core_commit must differ from bindings.core_tag_commit")
     for sha64_key in ("terms_db_sha256", "matcher_revision"):
         val = bindings.get(sha64_key)
         if require_pass and (not isinstance(val, str) or not _HEX64_RE.match(val)):
@@ -2561,7 +2646,7 @@ def validate_acceptance_receipt(
         actual_meta = meta_entry.get("sha256") if isinstance(meta_entry, dict) else None
         _check_expected("metadata_sha256", actual_meta, expected_metadata_sha256)
     _check_expected("bound_tree_src_sha", bindings.get("bound_tree_src_sha"), expected_src_tree)
-    _check_expected("core_commit", bindings.get("core_commit"), expected_core_commit)
+    _check_expected("core_tag_commit", bindings.get("core_tag_commit"), expected_core_commit)
     _check_expected("freeze_core_commit", bindings.get("freeze_core_commit"), expected_freeze_core_commit)
     _check_expected("terms_db_sha256", bindings.get("terms_db_sha256"), expected_terms_sha256)
     _check_expected("matcher_revision", bindings.get("matcher_revision"), expected_matcher_revision)
@@ -2716,7 +2801,9 @@ def run_acceptance(
         terms_db=terms_db,
     )
     c3 = check_c3(
+        manifest_docs=manifest_docs,
         sample_paragraphs=sample_paragraphs,
+        metadata_by_doc=metadata_by_doc,
         announcement_floor_zh_en=eff_ann_zh,
         announcement_floor_en_zh=eff_ann_en,
         floor_config_error=floor_err,
@@ -2838,9 +2925,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     acc.add_argument(
         "--freeze-core-commit",
-        default=None,
+        required=True,
         metavar="SHA",
-        help="optional freeze-time main commit; when different from --core-commit, C4 scans the union of tracked text blobs",
+        help="mandatory freeze-time main commit (strict descendant of --core-commit); C4 scans the union of tracked text blobs",
     )
     acc.add_argument("--terms-db", required=True, metavar="TERMS.db", help="bound production terms.db")
     acc.add_argument(

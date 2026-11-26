@@ -139,13 +139,23 @@ def corpus_env(tmp_path: Path, sample_db: Path):
             "docs/note.md": "Synthetic repository documentation line for isolated C4 scan.\n",
         },
     )
+    freeze_core_commit = _commit_git_files(
+        core_repo,
+        {"docs/freeze_snapshot.md": "Synthetic clean post-tag freeze commit note.\n"},
+        "synthetic freeze commit",
+    )
     src_tree = _git(ROOT, "rev-parse", "HEAD:src")
     from wuwaterm import cjk_span
 
     matcher_rev = str(cjk_span.MATCHER_REVISION)
     terms_sha = _sha256_file(sample_db)
 
-    def build_argv(*extra: str, receipt_out: Path | None = None, include_adjudication: bool = True) -> list[str]:
+    def build_argv(
+        *extra: str,
+        receipt_out: Path | None = None,
+        include_adjudication: bool = True,
+        freeze_commit_override: str | None = freeze_core_commit,
+    ) -> list[str]:
         argv = [
             "accept",
             "--manifest",
@@ -185,6 +195,8 @@ def corpus_env(tmp_path: Path, sample_db: Path):
             "--expected-terms-sha256",
             terms_sha,
         ]
+        if freeze_commit_override is not None:
+            argv.extend(["--freeze-core-commit", freeze_commit_override])
         if include_adjudication:
             argv.extend(["--annotation-adjudication", str(case_dir / "annotation_adjudication.json")])
         if receipt_out is not None:
@@ -201,6 +213,7 @@ def corpus_env(tmp_path: Path, sample_db: Path):
             "expected_metadata_sha256": _sha256_file(case_dir / "metadata.json"),
             "expected_src_tree": src_tree,
             "expected_core_commit": core_commit,
+            "expected_freeze_core_commit": freeze_core_commit,
             "expected_terms_sha256": terms_sha,
             "expected_matcher_revision": matcher_rev,
             "allow_non_default_bindings": True,
@@ -212,6 +225,7 @@ def corpus_env(tmp_path: Path, sample_db: Path):
         "case_dir": case_dir,
         "core_repo": core_repo,
         "core_commit": core_commit,
+        "freeze_core_commit": freeze_core_commit,
         "src_tree": src_tree,
         "matcher_rev": matcher_rev,
         "terms_db": sample_db,
@@ -253,12 +267,19 @@ def test_accept_baseline_pass_and_zero_text_leak(gate, corpus_env, capsys):
         assert block["status"] == "pass", (rule, block)
     assert receipt["checks"]["C3"]["floor_profile"] == "default"
     assert receipt["checks"]["C3"]["non_default_floor"] is False
+    assert receipt["checks"]["C3"]["announcement_units_by_level"] == {
+        "zh->en": {"L0": 30, "L1": 0, "L2": 0},
+        "en->zh": {"L0": 35, "L1": 0, "L2": 0},
+    }
     assert receipt["checks"]["C4"]["windows_uncleared"] == 0
     assert receipt["checks"]["C4"]["scorer_sha256_ok"] is True
     assert receipt["checks"]["C4"]["required_prior_sets_complete"] is True
+    assert receipt["checks"]["C4"]["core_unique_blobs_scanned"] == 3
+    assert receipt["checks"]["C4"]["core_blob_entries_scanned"] == 5
     assert receipt["checks"]["C9"]["community_target_scored_units"] == 150
+    assert receipt["bindings"]["core_tag_commit"] == corpus_env["core_commit"]
     assert receipt["bindings"]["core_commit"] == corpus_env["core_commit"]
-    assert receipt["bindings"]["freeze_core_commit"] == corpus_env["core_commit"]
+    assert receipt["bindings"]["freeze_core_commit"] == corpus_env["freeze_core_commit"]
 
     # Default validate_acceptance_receipt fails closed because test uses non-pinned core_commit / sample_db.
     with pytest.raises(gate.ReceiptValidationError, match="non_default_parameters"):
@@ -309,15 +330,18 @@ def test_accept_baseline_pass_and_zero_text_leak(gate, corpus_env, capsys):
 
 
 def test_accept_against_real_v0_14_0_commit_blobs(gate, corpus_env, capsys):
-    """Fixture corpus has zero uncleared 12-scalar overlap against real Core v0.14.0 tracked blobs."""
+    """Fixture corpus has zero uncleared 12-scalar overlap against real Core v0.14.0 + descendant commit union."""
     v14_commit = gate.PINNED_CORE_COMMIT
-    proc = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "--verify", f"{v14_commit}^{{commit}}"],
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        pytest.skip("v0.14.0 commit not present in shallow clone")
+    # Use v0.14.0's immediate descendant d50919e (present in branch history and excludes our fixture files).
+    freeze_candidate = "d50919e517a399d5a3099aa5fbf8944ca038a33b"
+    for rev in (v14_commit, freeze_candidate):
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", f"{rev}^{{commit}}"],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"commit {rev[:8]} not present in shallow clone")
     argv = [
         "accept",
         "--manifest",
@@ -348,6 +372,8 @@ def test_accept_against_real_v0_14_0_commit_blobs(gate, corpus_env, capsys):
         str(ROOT),
         "--core-commit",
         v14_commit,
+        "--freeze-core-commit",
+        freeze_candidate,
         "--terms-db",
         str(corpus_env["terms_db"]),
         "--expected-core-commit",
@@ -361,7 +387,8 @@ def test_accept_against_real_v0_14_0_commit_blobs(gate, corpus_env, capsys):
     ]
     code, receipt, out, err = _run_gate(gate, argv, capsys)
     assert code == 0, receipt["checks"]["C4"]
-    assert receipt["checks"]["C4"]["core_blobs_scanned"] > 100
+    assert receipt["checks"]["C4"]["core_unique_blobs_scanned"] > 100
+    assert receipt["checks"]["C4"]["core_blob_entries_scanned"] >= receipt["checks"]["C4"]["core_unique_blobs_scanned"]
     assert receipt["checks"]["C4"]["windows_uncleared"] == 0
     _assert_no_text_leak(out, err, None, ["合成甲标九", "SYNTHCANARYEN"])
 
@@ -522,6 +549,55 @@ def test_c3_fail_default_and_per_direction_announcement_floor_override(gate, cor
     )
 
 
+def test_c3_announcement_levels_breakdown_and_fail_cases(gate, corpus_env, capsys):
+    case_dir = corpus_env["case_dir"]
+    meta_path = case_dir / "metadata.json"
+
+    # 1) Mixed L0/L1/L2 across the 4 announcement docs -> pass with accurate per-direction breakdown.
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    by_id = {d["doc_id"]: d for d in meta["documents"]}
+    by_id["syn-zh-ann-01"]["announcement_level"] = "L0"
+    by_id["syn-zh-ann-02"]["announcement_level"] = "L1"
+    by_id["syn-en-ann-01"]["announcement_level"] = "L0"
+    by_id["syn-en-ann-02"]["announcement_level"] = "L2"
+    _write_json(meta_path, meta)
+
+    code_mix, rec_mix, _, _ = _run_gate(gate, corpus_env["build_argv"](), capsys)
+    assert code_mix == 0, rec_mix["checks"]["C3"]
+    assert rec_mix["checks"]["C3"]["announcement_units_by_level"] == {
+        "zh->en": {"L0": 15, "L1": 15, "L2": 0},
+        "en->zh": {"L0": 18, "L1": 0, "L2": 17},
+    }
+
+    # 2) Missing announcement_level on an announcement doc fails C3.
+    del by_id["syn-zh-ann-01"]["announcement_level"]
+    _write_json(meta_path, meta)
+    code_miss, rec_miss, _, _ = _run_gate(gate, corpus_env["build_argv"](), capsys)
+    assert code_miss == 1
+    assert rec_miss["failed_rules"] == ["C3"]
+    assert any(i["code"] == "missing_announcement_level" for i in rec_miss["checks"]["C3"]["announcement_level_issues"])
+
+    # 3) Invalid announcement_level ("L3") on an announcement doc fails C3.
+    by_id["syn-zh-ann-01"]["announcement_level"] = "L3"
+    _write_json(meta_path, meta)
+    code_bad, rec_bad, _, _ = _run_gate(gate, corpus_env["build_argv"](), capsys)
+    assert code_bad == 1
+    assert rec_bad["failed_rules"] == ["C3"]
+    assert any(i["code"] == "invalid_announcement_level" for i in rec_bad["checks"]["C3"]["announcement_level_issues"])
+
+    # 4) Non-announcement doc carrying announcement_level fails C3.
+    by_id["syn-zh-ann-01"]["announcement_level"] = "L0"
+    by_id["syn-zh-gui-01"]["announcement_level"] = "L0"
+    _write_json(meta_path, meta)
+    code_non, rec_non, _, _ = _run_gate(gate, corpus_env["build_argv"](), capsys)
+    assert code_non == 1
+    assert rec_non["failed_rules"] == ["C3"]
+    assert any(
+        i["code"] == "unexpected_announcement_level_on_non_announcement"
+        for i in rec_non["checks"]["C3"]["announcement_level_issues"]
+    )
+
+
 def test_c3_fail_zh_en_guide_below_50(gate, corpus_env, capsys):
     case_dir = corpus_env["case_dir"]
     sample_path = case_dir / "sample.json"
@@ -658,38 +734,59 @@ def test_c4_cross_set_spliced_fragment_length_consecutive_windows_plus_11(gate, 
     _assert_no_text_leak(out, err, None, [spliced, part_h1, part_h2])
 
 
-def test_c4_dual_core_commit_union_catches_post_tag_blob(gate, corpus_env, capsys):
-    """--freeze-core-commit scans the union of tag commit and freeze-time commit blobs."""
+def test_c4_dual_core_commit_mandatory_ancestry_and_union(gate, corpus_env, capsys):
+    """Mandatory --freeze-core-commit must be a strict descendant of --core-commit and its blobs are scanned."""
     case_dir = corpus_env["case_dir"]
     sample = json.loads((case_dir / "sample.json").read_text(encoding="utf-8"))
     zh_source = sample["paragraphs"][0]["source"]
 
-    # Commit 1 (core_commit) is clean; Commit 2 (freeze_core_commit) adds a file overlapping H3.
-    freeze_commit = _commit_git_files(
+    # 1) Omitting --freeze-core-commit on CLI is rejected by argparse (exit 2).
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main(corpus_env["build_argv"](freeze_commit_override=None))
+    assert exc_info.value.code == 2
+    capsys.readouterr()
+
+    # 2) Passing freeze_core_commit == core_commit fails C4 and C10.
+    code_eq, rec_eq, _, _ = _run_gate(
+        gate,
+        corpus_env["build_argv"](freeze_commit_override=corpus_env["core_commit"]),
+        capsys,
+    )
+    assert code_eq == 1
+    assert "C4" in rec_eq["failed_rules"]
+    assert "C10" in rec_eq["failed_rules"]
+    assert any(i["code"] == "freeze_core_commit_equals_tag_commit" for i in rec_eq["checks"]["C10"]["issues"])
+
+    # 3) Non-ancestor (swapped: tag commit is descendant of freeze commit) fails C4 and C10.
+    argv_swapped = corpus_env["build_argv"](freeze_commit_override=corpus_env["core_commit"])
+    cc_idx = argv_swapped.index("--core-commit")
+    argv_swapped[cc_idx + 1] = corpus_env["freeze_core_commit"]
+    exp_idx = argv_swapped.index("--expected-core-commit")
+    argv_swapped[exp_idx + 1] = corpus_env["freeze_core_commit"]
+    code_anc, rec_anc, _, _ = _run_gate(gate, argv_swapped, capsys)
+    assert code_anc == 1
+    assert "C4" in rec_anc["failed_rules"]
+    assert "C10" in rec_anc["failed_rules"]
+    assert any(i["code"] == "core_tag_not_ancestor_of_freeze_commit" for i in rec_anc["checks"]["C10"]["issues"])
+
+    # 4) Valid descendant freeze commit adding an overlapping file is caught by C4 union scan.
+    overlap_freeze = _commit_git_files(
         corpus_env["core_repo"],
         {"docs/post_tag_note.md": f"added before freeze: {zh_source}\n"},
         "add post-tag overlap",
     )
-
-    # Scanning only core_commit passes.
-    code1, receipt1, _, _ = _run_gate(gate, corpus_env["build_argv"](), capsys)
-    assert code1 == 0
-    assert receipt1["bindings"]["core_commit"] == corpus_env["core_commit"]
-    assert receipt1["bindings"]["freeze_core_commit"] == corpus_env["core_commit"]
-
-    # Scanning with --freeze-core-commit catches the overlap in commit 2 and records both 40-hex SHAs.
-    code2, receipt2, out2, err2 = _run_gate(
+    code_ov, rec_ov, out_ov, err_ov = _run_gate(
         gate,
-        corpus_env["build_argv"]("--freeze-core-commit", freeze_commit),
+        corpus_env["build_argv"](freeze_commit_override=overlap_freeze),
         capsys,
     )
-    assert code2 == 1
-    assert "C4" in receipt2["failed_rules"]
-    assert receipt2["bindings"]["core_commit"] == corpus_env["core_commit"]
-    assert receipt2["bindings"]["freeze_core_commit"] == freeze_commit
-    assert receipt2["checks"]["C4"]["windows_uncleared"] > 0
-    assert any("core_tree" in u["targets"] for u in receipt2["checks"]["C4"]["uncleared_windows"])
-    _assert_no_text_leak(out2, err2, None, [zh_source, zh_source[:12]])
+    assert code_ov == 1
+    assert rec_ov["failed_rules"] == ["C4"]
+    assert rec_ov["bindings"]["core_tag_commit"] == corpus_env["core_commit"]
+    assert rec_ov["bindings"]["freeze_core_commit"] == overlap_freeze
+    assert rec_ov["checks"]["C4"]["windows_uncleared"] > 0
+    assert any("core_tree" in u["targets"] for u in rec_ov["checks"]["C4"]["uncleared_windows"])
+    _assert_no_text_leak(out_ov, err_ov, None, [zh_source, zh_source[:12]])
 
 
 def test_c4_m1_tightening_m2_m3_strict_and_full_hit_audit(gate, corpus_env, capsys):
@@ -1122,6 +1219,24 @@ def test_c10_fail_mismatched_binding_and_receipt_validator_rejections(gate, corp
     with pytest.raises(gate.ReceiptValidationError, match="bound_tree_src_sha"):
         gate.validate_acceptance_receipt(
             ok_receipt, **corpus_env["validate_kwargs"](expected_src_tree="b" * 40)
+        )
+
+    # Tampered freeze_core_commit == core_tag_commit (even with recomputed bindings_sha256) fails validator.
+    eq_freeze = json.loads(json.dumps(ok_receipt))
+    eq_freeze["bindings"]["freeze_core_commit"] = eq_freeze["bindings"]["core_tag_commit"]
+    eq_freeze["bindings_sha256"] = gate.sha256_bytes(gate.canonical(eq_freeze["bindings"]))
+    with pytest.raises(gate.ReceiptValidationError, match="freeze_core_commit must differ"):
+        gate.validate_acceptance_receipt(
+            eq_freeze, **corpus_env["validate_kwargs"](expected_freeze_core_commit=None)
+        )
+
+    # Missing freeze_core_commit fails validator.
+    no_freeze = json.loads(json.dumps(ok_receipt))
+    no_freeze["bindings"]["freeze_core_commit"] = None
+    no_freeze["bindings_sha256"] = gate.sha256_bytes(gate.canonical(no_freeze["bindings"]))
+    with pytest.raises(gate.ReceiptValidationError, match="freeze_core_commit"):
+        gate.validate_acceptance_receipt(
+            no_freeze, **corpus_env["validate_kwargs"](expected_freeze_core_commit=None)
         )
 
     # Inconsistent failed_rules vs checks fails.

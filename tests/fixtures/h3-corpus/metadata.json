@@ -27,7 +27,8 @@
       "series": "syn-series-003",
       "author": null,
       "bilingual_pair_id": "syn-pair-003",
-      "published": "2026-10-03T10:00:00+08:00"
+      "published": "2026-10-03T10:00:00+08:00",
+      "announcement_level": "L0"
     },
     {
       "doc_id": "syn-zh-ann-02",
@@ -36,7 +37,8 @@
       "series": "syn-series-004",
       "author": null,
       "bilingual_pair_id": "syn-pair-004",
-      "published": "2026-10-04T10:00:00+08:00"
+      "published": "2026-10-04T10:00:00+08:00",
+      "announcement_level": "L0"
     },
     {
       "doc_id": "syn-zh-sto-01",
@@ -103,7 +105,8 @@
       "series": "syn-series-011",
       "author": null,
       "bilingual_pair_id": "syn-pair-011",
-      "published": "2026-10-11T10:00:00+08:00"
+      "published": "2026-10-11T10:00:00+08:00",
+      "announcement_level": "L0"
     },
     {
       "doc_id": "syn-en-ann-02",
@@ -112,7 +115,8 @@
       "series": "syn-series-012",
       "author": null,
       "bilingual_pair_id": "syn-pair-012",
-      "published": "2026-10-12T10:00:00+08:00"
+      "published": "2026-10-12T10:00:00+08:00",
+      "announcement_level": "L0"
     },
     {
       "doc_id": "syn-en-sto-01",
