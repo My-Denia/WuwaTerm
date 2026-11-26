@@ -37,12 +37,15 @@ deterministic gateway (``httpx.MockTransport``), points the gateway variables at
 ``.invalid`` and refuses ``--proxy``. Every POST is charged to ``h3-ledger.json``
 by the transport pre-send hook before it is sent and refused once ``--max-calls``,
 the stage cap (``pilot`` 56, ``full`` 240, ``ablation`` 58), the ``H3`` total
-(354), or the cumulative USD budget (``spent_usd + reserved_next_post_usd >
-ledger_budget_usd``) would be passed; the run then stops at once (no rerun) and
-exits 3. Failed or timed-out POSTs stay charged at their full conservative
-reserve; a 2xx response missing ``usage`` stays charged at full reserve and stops
-the run immediately (exit 3). ``ledger_budget_usd`` is written on first ledger
-creation and immutable thereafter. The ledger and its append-only, hash-chained
+(354), or the pre-send USD budget gate (a POST is sent only while
+``spent_usd + reserved_next_post_usd <= ledger_budget_usd``; one POST whose real
+usage exceeds its reserve can carry ``spent_usd`` past the budget by that excess,
+after which every further POST is refused, exit 3) would be passed; the run then
+stops at once (no rerun) and exits 3. Failed or timed-out POSTs stay charged at
+their full conservative reserve; a 2xx response missing ``usage`` stays charged at
+full reserve and stops the run immediately (exit 3). ``ledger_budget_usd`` and
+``prices_usd_per_1m`` are written on first ledger creation and immutable
+thereafter. The ledger and its append-only, hash-chained
 ``h3-ledger-log.jsonl`` hold counts, USD totals, ``proxy_enabled`` (never proxy
 URLs or credentials) and SHA-256 values only, never text; a run directory that
 holds another evaluation's ``ledger.json`` is refused. Arm outputs (text) go to
@@ -115,7 +118,7 @@ RESERVE_MIN_INPUT_TOKENS = 4_000
 RESERVE_OUTPUT_REASONING_TOKENS = 4_096
 RESERVE_MIN_OUTPUT_TOKENS = 8_192
 
-ALLOWED_PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+ALLOWED_PROXY_SCHEMES = ("http", "https")
 REQUIRED_JUDGE_ROLES = ("j1", "j2", "adj")
 ACCEPTANCE_RULES = tuple(f"C{i}" for i in range(1, 11))
 ACCEPTANCE_TOOLS = ("scripts/eval_h3_corpus.py", "scripts/eval_usability.py")
@@ -438,14 +441,14 @@ def import_core(bound: Path) -> Core:
 
 @dataclass(frozen=True)
 class CostConfig:
-    """Cumulative USD budget cap and peak uncached per-1M token prices."""
+    """Pre-send USD budget gate and peak uncached per-1M token prices."""
 
     ledger_budget_usd: float
     price_input_per_1m: float
     price_output_per_1m: float
 
     def reserve_usd(self, core_text: str | None) -> float:
-        """Conservative worst-case USD reserve for one POST before it is sent."""
+        """Conservative USD reserve (not an upper bound: translation requests set no max_tokens)."""
         src_tokens = estimate_tokens(core_text) if core_text else 0
         est_in = max(RESERVE_MIN_INPUT_TOKENS, src_tokens * 2 + RESERVE_INPUT_OVERHEAD_TOKENS)
         est_out = max(RESERVE_MIN_OUTPUT_TOKENS, src_tokens * 3 + RESERVE_OUTPUT_REASONING_TOKENS)
@@ -544,10 +547,15 @@ def frozen_file_hashes() -> dict[str, str]:
 
 
 def binding_set(
-    *, src_tree: str, terms_db_sha256: str, matcher_revision: str, overrides: Mapping[str, Any],
+    *,
+    src_tree: str,
+    terms_db_sha256: str,
+    matcher_revision: str,
+    overrides: Mapping[str, Any],
     frozen_inputs: Mapping[str, str],
+    pilot_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "pinned_tag_commit": PINNED_TAG_COMMIT,
         "src_tree": src_tree,
         "terms_db_sha256": terms_db_sha256,
@@ -564,6 +572,9 @@ def binding_set(
         "frozen_inputs": dict(sorted(frozen_inputs.items())),
         "overrides": dict(overrides),
     }
+    if pilot_manifest_sha256 is not None:
+        data["pilot_manifest_sha256"] = pilot_manifest_sha256
+    return data
 
 
 def approval_token(bindings: Mapping[str, Any], manifest_sha256: str) -> str:
@@ -596,7 +607,7 @@ def _extract_judge_roles(data: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _validate_judges_manifest(
-    judges_files: Sequence[tuple[str, dict[str, Any]]], *, manifest_sha256: str
+    judges_files: Sequence[tuple[str, dict[str, Any]]], *, manifest_sha256: str | None
 ) -> tuple[str | None, str | None]:
     """Return ``(judges_filename, error)``; ``error`` is ``None`` when valid."""
     if not judges_files:
@@ -611,7 +622,7 @@ def _validate_judges_manifest(
         return name, f"{name}: {JUDGES_SCHEMA} status is not ready"
     bindings = data.get("bindings") if isinstance(data.get("bindings"), Mapping) else {}
     bound_manifest = bindings.get("manifest_sha256") or data.get("manifest_sha256")
-    if bound_manifest is not None and bound_manifest != manifest_sha256:
+    if bound_manifest is not None and manifest_sha256 is not None and bound_manifest != manifest_sha256:
         return name, f"{name}: {JUDGES_SCHEMA} manifest_sha256 does not match manifest"
     roles = _extract_judge_roles(data)
     if roles is None or not all(role in roles for role in REQUIRED_JUDGE_ROLES):
@@ -627,11 +638,10 @@ def _validate_judges_manifest(
         provider = entry.get("provider")
         if provider is not None and (not isinstance(provider, str) or not provider.strip()):
             return name, f"{name}: {JUDGES_SCHEMA} role {role} provider must be a non-empty string"
-        ctx = entry.get("context_id") or entry.get("session_id")
-        if ctx is not None:
-            if not isinstance(ctx, str) or not ctx.strip() or ctx in seen_contexts:
-                return name, f"{name}: {JUDGES_SCHEMA} role {role} must have a unique context/session id"
-            seen_contexts.add(ctx)
+        ctx = entry.get("context_id")
+        if not isinstance(ctx, str) or not ctx.strip() or ctx in seen_contexts:
+            return name, f"{name}: {JUDGES_SCHEMA} role {role} must define a unique non-empty context_id"
+        seen_contexts.add(ctx)
     return name, None
 
 
@@ -650,8 +660,7 @@ def _collect_input_hashes(inputs_sha: Mapping[str, Any]) -> set[str]:
 def _validate_acceptance_receipt(
     acceptances: Sequence[tuple[str, dict[str, Any]]],
     *,
-    stage: str,
-    manifest_sha256: str,
+    expected_manifest_sha256: str | None,
     src_tree: str,
     terms_db_sha256: str,
     matcher_revision: str,
@@ -659,10 +668,13 @@ def _validate_acceptance_receipt(
     frozen_hashes: Mapping[str, str],
     frozen_by_schema: Mapping[str, list[tuple[str, str]]],
     judges_name: str | None,
-) -> str | None:
-    """Validate an ``h3-acceptance-v1`` receipt (compatible with ``eval_h3_corpus``)."""
+) -> tuple[str | None, str | None]:
+    """Validate an ``h3-acceptance-v1`` receipt (compatible with ``eval_h3_corpus``).
+
+    Returns ``(accepted_full_manifest_sha256, error)``.
+    """
     if not acceptances:
-        return f"missing {ACCEPTANCE_SCHEMA} in --freeze"
+        return None, f"missing {ACCEPTANCE_SCHEMA} in --freeze"
 
     def _receipt_manifest_sha(data: Mapping[str, Any]) -> str | None:
         b = data.get("bindings")
@@ -674,31 +686,21 @@ def _validate_acceptance_receipt(
         entry = inp.get("manifest")
         return entry.get("sha256") if isinstance(entry, Mapping) and isinstance(entry.get("sha256"), str) else None
 
-    def _matches_manifest(data: Mapping[str, Any]) -> bool:
-        m_sha = _receipt_manifest_sha(data)
-        if m_sha == manifest_sha256:
-            return True
-        if stage == "pilot":
-            b = data.get("bindings")
-            inp = b.get("inputs_sha256") if isinstance(b, Mapping) else None
-            p_entry = inp.get("pilot_manifest") if isinstance(inp, Mapping) else None
-            if isinstance(p_entry, Mapping) and p_entry.get("sha256") == manifest_sha256:
-                return True
-        return False
-
     if len(acceptances) == 1:
         name, data = acceptances[0]
-    else:
-        matched = [(n, d) for n, d in acceptances if _matches_manifest(d)]
+    elif expected_manifest_sha256 is not None:
+        matched = [(n, d) for n, d in acceptances if _receipt_manifest_sha(d) == expected_manifest_sha256]
         if not matched:
-            return f"no {ACCEPTANCE_SCHEMA} receipt in --freeze matches this manifest"
+            return None, f"no {ACCEPTANCE_SCHEMA} receipt in --freeze matches this manifest"
         if len(matched) > 1:
-            return f"multiple {ACCEPTANCE_SCHEMA} receipts in --freeze match this manifest"
+            return None, f"multiple {ACCEPTANCE_SCHEMA} receipts in --freeze match this manifest"
         name, data = matched[0]
+    else:
+        return None, f"multiple {ACCEPTANCE_SCHEMA} receipts in --freeze; pass --full-manifest to disambiguate"
 
     verdict = data.get("verdict")
     if verdict != "pass":
-        return f"{name}: {ACCEPTANCE_SCHEMA} verdict must be 'pass'"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} verdict must be 'pass'"
 
     failed_rules = data.get("failed_rules")
     if (
@@ -706,76 +708,77 @@ def _validate_acceptance_receipt(
         or len(failed_rules) != 0
         or not all(isinstance(r, str) and r in ACCEPTANCE_RULES for r in failed_rules)
     ):
-        return f"{name}: {ACCEPTANCE_SCHEMA} failed_rules must be an empty list"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} failed_rules must be an empty list"
 
     checks = data.get("checks")
     if not isinstance(checks, Mapping) or set(checks) != set(ACCEPTANCE_RULES):
-        return f"{name}: {ACCEPTANCE_SCHEMA} checks must contain exact keys C1..C10"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} checks must contain exact keys C1..C10"
     for rule in ACCEPTANCE_RULES:
         block = checks[rule]
         if not isinstance(block, Mapping) or block.get("status") != "pass":
-            return f"{name}: {ACCEPTANCE_SCHEMA} checks[{rule!r}].status must be 'pass'"
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} checks[{rule!r}].status must be 'pass'"
 
     c3 = checks["C3"]
     if c3.get("non_default_floor") is not False or c3.get("floor_profile") != "default":
-        return f"{name}: {ACCEPTANCE_SCHEMA} non-default C3 floor_profile is not allowed"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} non-default C3 floor_profile is not allowed"
 
     c4 = checks["C4"]
     if c4.get("windows_uncleared") != 0:
-        return f"{name}: {ACCEPTANCE_SCHEMA} C4 windows_uncleared must be 0"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} C4 windows_uncleared must be 0"
     if c4.get("scorer_sha256_ok") is not True:
-        return f"{name}: {ACCEPTANCE_SCHEMA} C4 scorer_sha256_ok must be true"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} C4 scorer_sha256_ok must be true"
 
     bindings = data.get("bindings")
     if not isinstance(bindings, Mapping):
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings must be an object"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings must be an object"
     declared_bsha = data.get("bindings_sha256")
     computed_bsha = sha256_bytes(canonical(bindings))
     if not isinstance(declared_bsha, str) or declared_bsha != computed_bsha:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings_sha256 does not match canonical bindings"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings_sha256 does not match canonical bindings"
 
     core_commit = bindings.get("core_commit")
     if not isinstance(core_commit, str) or not HEX40_RE.match(core_commit) or core_commit != PINNED_TAG_COMMIT:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.core_commit does not match pinned tag commit"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.core_commit does not match pinned tag commit"
     bound_src = bindings.get("bound_tree_src_sha")
     if not isinstance(bound_src, str) or not HEX40_RE.match(bound_src) or bound_src != src_tree:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.bound_tree_src_sha does not match bound tree"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.bound_tree_src_sha does not match bound tree"
     rec_terms = bindings.get("terms_db_sha256")
     if not isinstance(rec_terms, str) or not HEX64_RE.match(rec_terms) or rec_terms != terms_db_sha256:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.terms_db_sha256 does not match --terms-db"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.terms_db_sha256 does not match --terms-db"
     rec_matcher = bindings.get("matcher_revision")
     if not isinstance(rec_matcher, str) or not HEX64_RE.match(rec_matcher) or rec_matcher != matcher_revision:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.matcher_revision does not match bound tree"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.matcher_revision does not match bound tree"
 
     tools_sha = bindings.get("tools_sha256")
     if not isinstance(tools_sha, Mapping):
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256 must be an object"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256 must be an object"
     for tool_key in ACCEPTANCE_TOOLS:
         tval = tools_sha.get(tool_key)
         expected_tool = frozen_files_sha256.get(tool_key)
         if not isinstance(tval, str) or not HEX64_RE.match(tval) or tval != expected_tool:
-            return f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256[{tool_key!r}] mismatch"
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256[{tool_key!r}] mismatch"
 
     inputs_sha = bindings.get("inputs_sha256")
     if not isinstance(inputs_sha, Mapping):
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256 must be an object"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256 must be an object"
     for inp_key in ACCEPTANCE_REQUIRED_INPUTS:
         entry = inputs_sha.get(inp_key)
         if not isinstance(entry, Mapping) or not isinstance(entry.get("sha256"), str) or not HEX64_RE.match(
             entry["sha256"]
         ):
-            return f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}].sha256 must be a 64-hex SHA-256"
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}].sha256 must be a 64-hex SHA-256"
     prior_texts = inputs_sha.get("prior_texts")
     if not isinstance(prior_texts, list) or not prior_texts:
-        return f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts must be a non-empty list"
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts must be a non-empty list"
     for idx, entry in enumerate(prior_texts):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("sha256"), str) or not HEX64_RE.match(
             entry["sha256"]
         ):
-            return f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts[{idx}] has invalid sha256"
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts[{idx}] has invalid sha256"
 
-    if not _matches_manifest(data):
-        return f"{name}: {ACCEPTANCE_SCHEMA} manifest_sha256 does not match manifest"
+    accepted_manifest_sha = str(inputs_sha["manifest"]["sha256"])
+    if expected_manifest_sha256 is not None and accepted_manifest_sha != expected_manifest_sha256:
+        return None, f"{name}: {ACCEPTANCE_SCHEMA} manifest_sha256 does not match manifest"
 
     schema_to_key = (
         (SAMPLE_SCHEMA, "sample"),
@@ -788,10 +791,10 @@ def _validate_acceptance_receipt(
     for schema_id, inp_key in schema_to_key:
         entries = frozen_by_schema.get(schema_id) or []
         if len(entries) != 1:
-            return f"{name}: --freeze must contain exactly one {schema_id} file matching {ACCEPTANCE_SCHEMA}"
+            return None, f"{name}: --freeze must contain exactly one {schema_id} file matching {ACCEPTANCE_SCHEMA}"
         fname, actual_sha = entries[0]
         if inputs_sha[inp_key]["sha256"] != actual_sha:
-            return f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}] does not match --freeze {fname}"
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}] does not match --freeze {fname}"
         verified_names.add(fname)
 
     known_input_hashes = _collect_input_hashes(inputs_sha)
@@ -799,14 +802,13 @@ def _validate_acceptance_receipt(
         if fname in verified_names:
             continue
         if actual_sha not in known_input_hashes:
-            return f"{name}: {ACCEPTANCE_SCHEMA} does not bind --freeze file {fname}"
-    return None
+            return None, f"{name}: {ACCEPTANCE_SCHEMA} does not bind --freeze file {fname}"
+    return accepted_manifest_sha, None
 
 
 def validate_live_preconditions(
     *,
-    stage: str,
-    manifest_sha256: str,
+    expected_full_manifest_sha256: str | None,
     src_tree: str,
     terms_db_sha256: str,
     matcher_revision: str,
@@ -815,6 +817,11 @@ def validate_live_preconditions(
     frozen_paths: Mapping[str, Path],
 ) -> str | None:
     """Validate frozen ``h3-acceptance-v1`` and ``h3-judges-v1`` preconditions.
+
+    Both files are checked against the same accepted H3 full manifest (for
+    ``pilot``, ``expected_full_manifest_sha256`` may be passed explicitly via
+    ``--full-manifest`` or derived from the verified ``h3-acceptance-v1``
+    receipt and cross-checked against ``h3-judges-v1``).
 
     Returns ``None`` when both are present and valid for the current bindings,
     otherwise a concise refusal/unavailable reason string.
@@ -838,11 +845,10 @@ def validate_live_preconditions(
         elif schema == JUDGES_SCHEMA:
             judges_files.append((name, data))
 
-    judges_name, judges_err = _validate_judges_manifest(judges_files, manifest_sha256=manifest_sha256)
-    acceptance_err = _validate_acceptance_receipt(
+    judges_name = judges_files[0][0] if len(judges_files) == 1 else None
+    accepted_manifest_sha, acceptance_err = _validate_acceptance_receipt(
         acceptances,
-        stage=stage,
-        manifest_sha256=manifest_sha256,
+        expected_manifest_sha256=expected_full_manifest_sha256,
         src_tree=src_tree,
         terms_db_sha256=terms_db_sha256,
         matcher_revision=matcher_revision,
@@ -853,6 +859,9 @@ def validate_live_preconditions(
     )
     if acceptance_err is not None:
         return acceptance_err
+    _, judges_err = _validate_judges_manifest(
+        judges_files, manifest_sha256=expected_full_manifest_sha256 or accepted_manifest_sha
+    )
     return judges_err
 
 
@@ -906,8 +915,14 @@ class Ledger:
         mode: str,
         bindings: Mapping[str, Any],
         ledger_budget_usd: float | None = None,
+        prices_usd_per_1m: Mapping[str, float] | None = None,
         proxy_enabled: bool = False,
     ) -> None:
+        expected_prices = (
+            {"input": float(prices_usd_per_1m["input"]), "output": float(prices_usd_per_1m["output"])}
+            if prices_usd_per_1m is not None
+            else None
+        )
         if self.path.exists():
             data = load_json(self.path)
             if not isinstance(data, dict) or data.get("schema") != LEDGER_SCHEMA:
@@ -928,6 +943,15 @@ class Ledger:
                     f"{LEDGER_NAME}: ledger_budget_usd is immutable "
                     f"({recorded_budget!r} != {ledger_budget_usd!r})"
                 )
+            recorded_prices = data.get("prices_usd_per_1m")
+            if init_entry is not None and "prices_usd_per_1m" in init_entry:
+                if recorded_prices != init_entry["prices_usd_per_1m"]:
+                    raise Refused(f"{LEDGER_NAME}: prices_usd_per_1m differs from {LOG_NAME}")
+            if recorded_prices != expected_prices:
+                raise Refused(
+                    f"{LEDGER_NAME}: prices_usd_per_1m is immutable "
+                    f"({recorded_prices!r} != {expected_prices!r})"
+                )
             last_logged_spent = None
             for entry in entries:
                 if "spent_usd" in entry:
@@ -946,6 +970,7 @@ class Ledger:
             "bindings": dict(bindings),
             "bindings_sha256": sha256_bytes(canonical(bindings)),
             "ledger_budget_usd": ledger_budget_usd,
+            "prices_usd_per_1m": expected_prices,
             "spent_usd": 0.0,
             "proxy_enabled": bool(proxy_enabled),
             "manifests": {},
@@ -959,6 +984,7 @@ class Ledger:
             mode=mode,
             bindings_sha256=self.data["bindings_sha256"],
             ledger_budget_usd=ledger_budget_usd,
+            prices_usd_per_1m=expected_prices,
             spent_usd=0.0,
         )
         self.save()
@@ -1465,6 +1491,8 @@ class RunConfig:
     frozen_paths: dict[str, Path] = field(default_factory=dict)
     cost: CostConfig | None = None
     proxy: str | None = None
+    pilot_manifest_sha256: str | None = None
+    full_manifest_sha256: str | None = None
 
 
 @dataclass
@@ -1868,8 +1896,12 @@ def prepare(cfg: RunConfig) -> tuple[Core, dict[str, Any]]:
     if "src_tree" not in overrides and core.matcher_revision != PINNED_MATCHER_REVISION:
         raise Refused("matcher revision of the bound tree differs from the pinned revision")
     bindings = binding_set(
-        src_tree=tree, terms_db_sha256=terms_sha, matcher_revision=core.matcher_revision, overrides=overrides,
+        src_tree=tree,
+        terms_db_sha256=terms_sha,
+        matcher_revision=core.matcher_revision,
+        overrides=overrides,
         frozen_inputs=cfg.frozen_inputs,
+        pilot_manifest_sha256=cfg.pilot_manifest_sha256,
     )
     return core, bindings
 
@@ -1898,6 +1930,13 @@ def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
             "--live requires --ledger-budget-usd (or --max-cost-usd), "
             "--price-input-per-1m and --price-output-per-1m"
         )
+    if cfg.stage == "pilot":
+        if cfg.pilot_manifest_sha256 is not None and cfg.pilot_manifest_sha256 != cfg.manifest.sha256:
+            raise Refused("--pilot-manifest must match --manifest when --stage is pilot")
+        if cfg.live and cfg.pilot_manifest_sha256 is None:
+            cfg.pilot_manifest_sha256 = cfg.manifest.sha256
+    elif cfg.full_manifest_sha256 is not None:
+        raise Refused("--full-manifest is only for --stage pilot")
     if cfg.arm == "raw_matched":
         cfg.directions = ("en->zh",)
     docs = [d for d in cfg.manifest.documents if d.direction in cfg.directions]
@@ -1905,9 +1944,13 @@ def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
         raise Refused("the manifest has no document in the selected directions")
     core, bindings = prepare(cfg)
     if cfg.live:
+        if cfg.stage == "pilot" and bindings.get("pilot_manifest_sha256") != cfg.manifest.sha256:
+            raise Refused("pilot manifest SHA-256 does not match bindings.pilot_manifest_sha256")
+        expected_full_manifest = (
+            cfg.full_manifest_sha256 if cfg.stage == "pilot" else cfg.manifest.sha256
+        )
         precondition_error = validate_live_preconditions(
-            stage=cfg.stage,
-            manifest_sha256=cfg.manifest.sha256,
+            expected_full_manifest_sha256=expected_full_manifest,
             src_tree=bindings["src_tree"],
             terms_db_sha256=bindings["terms_db_sha256"],
             matcher_revision=bindings["matcher_revision"],
@@ -1945,11 +1988,17 @@ def _execute(
     runner: Runner | None = None
     try:
         ledger_budget_usd = cfg.cost.ledger_budget_usd if cfg.cost is not None else None
+        prices_usd_per_1m = (
+            {"input": cfg.cost.price_input_per_1m, "output": cfg.cost.price_output_per_1m}
+            if cfg.cost is not None
+            else None
+        )
         proxy_enabled = cfg.proxy is not None
         ledger.open_or_create(
             mode="live" if cfg.live else "dry_run",
             bindings=bindings,
             ledger_budget_usd=ledger_budget_usd,
+            prices_usd_per_1m=prices_usd_per_1m,
             proxy_enabled=proxy_enabled,
         )
         ledger.cost = cfg.cost
@@ -2103,6 +2152,7 @@ def preflight(
 ) -> dict[str, Any]:
     """A full dry run of every stage; returns the exact POST itemization."""
     plan: list[tuple[str, Manifest]] = []
+    pilot_sha = pilot_manifest.sha256 if pilot_manifest is not None else None
     if pilot_manifest is not None:
         plan.append(("pilot", pilot_manifest))
     plan += [("full", manifest), ("ablation", manifest)]
@@ -2117,7 +2167,7 @@ def preflight(
                 bound_tree=bound_tree, terms_db=terms_db, max_calls=STAGE_CAPS[stage], live=False,
                 approval=None, expected_src_tree=expected_src_tree,
                 expected_terms_sha256=expected_terms_sha256, scenario=[], frozen_inputs=dict(frozen_inputs),
-                frozen_paths=paths_map,
+                frozen_paths=paths_map, pilot_manifest_sha256=pilot_sha,
             )
             code, summary = execute_run(cfg)
             row: dict[str, Any] = {"stage": stage, "arm": arm, "status": summary["status"],
@@ -2142,8 +2192,7 @@ def preflight(
             tokens[stage] = "unavailable (bindings overridden)"
         else:
             precondition_error = validate_live_preconditions(
-                stage=stage,
-                manifest_sha256=stage_manifest.sha256,
+                expected_full_manifest_sha256=manifest.sha256,
                 src_tree=bindings["src_tree"],
                 terms_db_sha256=bindings["terms_db_sha256"],
                 matcher_revision=bindings["matcher_revision"],
@@ -2240,6 +2289,16 @@ def build_parser() -> argparse.ArgumentParser:
     _common(run)
     run.add_argument("--run-dir", required=True, metavar="DIR")
     run.add_argument("--manifest", required=True, metavar="MANIFEST.json")
+    run.add_argument(
+        "--pilot-manifest",
+        metavar="MANIFEST.json",
+        help="optional pilot manifest bound into bindings.pilot_manifest_sha256 (keeps bindings identical across pilot, full and ablation)",
+    )
+    run.add_argument(
+        "--full-manifest",
+        metavar="MANIFEST.json",
+        help="optional H3 full manifest (for --stage pilot) to cross-check h3-acceptance-v1 and h3-judges-v1",
+    )
     run.add_argument("--stage", required=True, choices=sorted(STAGE_ARMS))
     run.add_argument("--arm", required=True, choices=ARMS)
     run.add_argument("--direction", choices=("both", *DIRECTIONS), default="both")
@@ -2256,7 +2315,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ledger-budget-usd",
         type=float,
         metavar="USD",
-        help="cumulative USD hard cap written to h3-ledger.json on first run and immutable thereafter (required for --live)",
+        help=(
+            "pre-send USD budget gate written to h3-ledger.json on first run and immutable thereafter: "
+            "a POST is sent only while spent_usd + reserve <= ledger_budget_usd; one POST whose real "
+            "usage exceeds its reserve can carry spent_usd past the budget by that excess, after which "
+            "every further POST is refused (exit 3) (required for --live)"
+        ),
     )
     run.add_argument(
         "--max-cost-usd",
@@ -2268,18 +2332,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--price-input-per-1m",
         type=float,
         metavar="USD",
-        help="conservative peak uncached input USD price per 1M tokens (required for --live)",
+        help="conservative peak uncached input USD price per 1M tokens, locked in h3-ledger.json (required for --live)",
     )
     run.add_argument(
         "--price-output-per-1m",
         type=float,
         metavar="USD",
-        help="conservative peak uncached output USD price per 1M tokens (required for --live)",
+        help="conservative peak uncached output USD price per 1M tokens, locked in h3-ledger.json (required for --live)",
     )
     run.add_argument(
         "--proxy",
         metavar="URL",
-        help="live runs only: explicit proxy URL for httpx.AsyncHTTPTransport (never written to ledger)",
+        help="live runs only: explicit http/https proxy URL for httpx.AsyncHTTPTransport (never written to ledger)",
     )
     run.add_argument("--env-file", metavar="PATH", help="live runs only: gateway credentials")
 
@@ -2343,11 +2407,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if run_dir.is_relative_to(ROOT) or run_dir.is_relative_to(bound_tree):
         raise Refused("--run-dir must lie outside this repository and the bound tree")
     freeze_hashes, freeze_paths = frozen_input_paths(args.freeze)
+    manifest = load_manifest(Path(args.manifest))
+    pilot_manifest_sha256 = (
+        load_manifest(Path(args.pilot_manifest)).sha256 if args.pilot_manifest else None
+    )
+    full_manifest_sha256 = (
+        load_manifest(Path(args.full_manifest)).sha256 if args.full_manifest else None
+    )
     cfg = RunConfig(
         stage=args.stage,
         arm=args.arm,
         directions=DIRECTIONS if args.direction == "both" else (args.direction,),
-        manifest=load_manifest(Path(args.manifest)),
+        manifest=manifest,
         run_dir=run_dir,
         bound_tree=bound_tree,
         terms_db=Path(args.terms_db).resolve(),
@@ -2362,6 +2433,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         frozen_paths=freeze_paths,
         cost=cost,
         proxy=proxy,
+        pilot_manifest_sha256=pilot_manifest_sha256,
+        full_manifest_sha256=full_manifest_sha256,
     )
     code, summary = execute_run(cfg)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

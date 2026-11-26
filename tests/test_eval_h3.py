@@ -592,11 +592,13 @@ def test_live_missing_cost_params_refused_before_client_construction(h3, env, ca
     assert not env["run_dir"].exists()
     assert no_network == []
 
-    # CLI help must explicitly state --owner-approval-token is not a budget authorization.
+    # CLI help must explicitly state --owner-approval-token is not a budget authorization,
+    # and describe --ledger-budget-usd as a pre-send USD budget gate.
     run_parser = h3.build_parser()._subparsers._group_actions[0].choices["run"]
     help_text = run_parser.format_help()
     assert "--owner-approval-token" in help_text
     assert "NOT a budget" in help_text or "not a budget" in help_text.lower()
+    assert "pre-send USD budget gate" in help_text
 
 
 def test_cost_cap_pre_send_refusal_exits_3_and_keeps_transport_posts_equal(h3, env, capsys, no_network):
@@ -720,6 +722,7 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
     ledger_path = env["run_dir"] / "h3-ledger.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert ledger["ledger_budget_usd"] == 5.0
+    assert ledger["prices_usd_per_1m"] == {"input": 0.5, "output": 2.0}
     assert ledger["spent_usd"] == pytest.approx(summary["spent_usd"])
 
     # Subsequent run with a different budget must be refused (exit 1).
@@ -728,6 +731,13 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *changed_cost), capsys
     )
     assert code == 1 and "immutable" in err
+
+    # Subsequent run with lower token prices must be refused (exit 1).
+    lower_prices = ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.25", "--price-output-per-1m", "1.0"]
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *lower_prices), capsys
+    )
+    assert code == 1 and "prices_usd_per_1m" in err and "immutable" in err
 
     # Tampering ledger_budget_usd in h3-ledger.json is caught against h3-ledger-log.jsonl.
     original = ledger_path.read_text(encoding="utf-8")
@@ -741,6 +751,14 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
     )
     assert code == 1 and "ledger_budget_usd" in err
 
+    # Tampering prices_usd_per_1m in h3-ledger.json is caught against h3-ledger-log.jsonl.
+    tampered_prices = dict(ledger, prices_usd_per_1m={"input": 0.25, "output": 1.0})
+    ledger_path.write_text(json.dumps(tampered_prices), encoding="utf-8")
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *lower_prices), capsys
+    )
+    assert code == 1 and "prices_usd_per_1m" in err
+
     # Tampering spent_usd in h3-ledger.json is caught against h3-ledger-log.jsonl.
     tampered_spent = dict(ledger, spent_usd=0.0)
     ledger_path.write_text(json.dumps(tampered_spent), encoding="utf-8")
@@ -749,7 +767,7 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
     )
     assert code == 1 and "spent_usd" in err
 
-    # Restoring original ledger allows the next direction with the same immutable budget.
+    # Restoring original ledger allows the next direction with the same immutable budget and prices.
     ledger_path.write_text(original, encoding="utf-8")
     code, summary2 = _run(
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *cost), capsys
@@ -877,11 +895,21 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
 
 def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, env, capsys, monkeypatch, no_network):
     secret_proxy = "http://proxyuser:super-secret-pass@proxy.internal.invalid:8443"
-    # 1. --proxy combined with --fake-transport is refused (exit 1).
+    # 1. --proxy combined with --fake-transport is refused (exit 1), and unsupported schemes (socks5) are refused.
     code, err = _run(
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--proxy", secret_proxy), capsys
     )
     assert code == 1 and "--proxy" in err and "super-secret-pass" not in err
+    code_socks, err_socks = _run(
+        h3,
+        env["args"](
+            "full", "raw_baseline", "--live", "--owner-approval-token", "h3-live-000000000000000000000000",
+            "--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+            "--proxy", "socks5://proxy.internal.invalid:1080",
+        ),
+        capsys,
+    )
+    assert code_socks == 1 and "scheme" in err_socks and "proxy.internal.invalid" not in err_socks
 
     # 2. Live path mounts AsyncHTTPTransport(proxy=..., trust_env=False) and never writes URL/creds to ledger.
     monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
@@ -935,7 +963,7 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
     code, summary = _run(
         h3,
         ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_proxy), "--manifest", str(two_docs),
-         "--stage", "pilot", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
          "--live", "--owner-approval-token", token,
          "--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
          "--proxy", secret_proxy],
@@ -957,7 +985,7 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
     code2, summary2 = _run(
         h3,
         ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_direct), "--manifest", str(two_docs),
-         "--stage", "pilot", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
          "--live", "--owner-approval-token", token,
          "--max-cost-usd", "9.5", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],
         capsys,
@@ -968,6 +996,145 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
     assert json.loads((run_dir_direct / "h3-ledger.json").read_text(encoding="utf-8"))["proxy_enabled"] is False
     # Wire request bytes sent to the gateway are unchanged by budget/proxy settings.
     assert len(captured_payloads) == 2 and captured_payloads[0] == captured_payloads[1]
+    assert no_network == []
+
+
+def test_pilot_stage_live_path_with_full_manifest_acceptance_receipt(h3, env, capsys, monkeypatch, no_network):
+    """Stage 1 pilot (separate 8-doc diagnostic slice) passes preflight and live runs
+    using the H3 full manifest's h3-acceptance-v1 receipt and h3-judges-v1 roster,
+    sharing one h3-ledger.json across pilot, full, and ablation.
+    """
+    monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
+    monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
+    monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://live-gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "live-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", h3.PINNED_MODEL)
+
+    # Separate 8-doc pilot diagnostic manifest (distinct from the full H3 manifest).
+    pilot_docs = [
+        {"doc_id": f"d_zh_{i}", "direction": "zh->en", "genre": "guide", "text": f"诊断中文段落 {i}。"}
+        for i in range(4)
+    ] + [
+        {"doc_id": f"d_en_{i}", "direction": "en->zh", "genre": "guide", "text": f"Diagnostic English line {i}."}
+        for i in range(4)
+    ]
+    pilot_manifest = env["tmp"] / "pilot_manifest.json"
+    pilot_manifest.write_text(
+        json.dumps({"schema": "h3-manifest-v1", "set": "D-pilot-8", "documents": pilot_docs}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    full_manifest = env["manifest"]
+    assert _sha256(pilot_manifest) != _sha256(full_manifest)
+
+    # Receipt accepts ONLY the full H3 manifest (no pilot_manifest field, matching eval_h3_corpus).
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=full_manifest, src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    # Pin manifest_sha256 on judges.json to the full H3 manifest too.
+    judges_data = json.loads(judges.read_text(encoding="utf-8"))
+    judges_data["manifest_sha256"] = _sha256(full_manifest)
+    judges.write_text(json.dumps(judges_data, ensure_ascii=False), encoding="utf-8")
+
+    pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
+    freeze_all = [*env["freeze"], "--freeze", str(good_acc), "--freeze", str(judges)]
+
+    # Preflight with --pilot-manifest issues valid tokens for pilot, full, and ablation.
+    pf_out = env["tmp"] / "pf_pilot_live.json"
+    code = h3.main(
+        ["preflight", *pinned_args, *freeze_all, "--manifest", str(full_manifest),
+         "--pilot-manifest", str(pilot_manifest), "--json-out", str(pf_out)]
+    )
+    assert code == 0
+    pf = json.loads(pf_out.read_text(encoding="utf-8"))
+    pilot_tok = pf["approval_tokens"]["pilot"]
+    full_tok = pf["approval_tokens"]["full"]
+    ablation_tok = pf["approval_tokens"]["ablation"]
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", pilot_tok), pilot_tok
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", full_tok), full_tok
+    assert ablation_tok == full_tok
+    assert pilot_tok != full_tok
+
+    # Verify missing context_id in h3-judges-v1 is rejected.
+    bad_judges = env["tmp"] / "judges_no_ctx.json"
+    bad_judges_data = json.loads(judges.read_text(encoding="utf-8"))
+    del bad_judges_data["judges"]["j2"]["context_id"]
+    bad_judges.write_text(json.dumps(bad_judges_data, ensure_ascii=False), encoding="utf-8")
+    pf_bad_j = env["tmp"] / "pf_bad_j.json"
+    assert h3.main(
+        ["preflight", *pinned_args, *env["freeze"], "--freeze", str(good_acc), "--freeze", str(bad_judges),
+         "--manifest", str(full_manifest), "--pilot-manifest", str(pilot_manifest), "--json-out", str(pf_bad_j)]
+    ) == 0
+    assert json.loads(pf_bad_j.read_text(encoding="utf-8"))["approval_tokens"]["pilot"].startswith("unavailable")
+
+    # Monkeypatch AsyncHTTPTransport to in-process FakeGateway so live path runs with 0 network.
+    monkeypatch.setattr(
+        httpx,
+        "AsyncHTTPTransport",
+        lambda *a, **kw: httpx.MockTransport(h3.FakeGateway("wuwaterm_prod", [])),
+    )
+    live_dir = env["tmp"] / "live_all_stages"
+    cost_flags = ["--ledger-budget-usd", "10.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+
+    # Stage 1 pilot (without --full-manifest, then with --full-manifest) succeeds and binds pilot_manifest_sha256.
+    code, p_prod = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "wuwaterm_prod", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_prod
+    code, p_raw = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--full-manifest", str(full_manifest),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_raw
+    code, p_matched = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "raw_matched", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_matched
+
+    # Stage 2 full and Stage 3 ablation on the SAME h3-ledger.json with --pilot-manifest pass cleanly.
+    for stage, arm, tok in (
+        ("full", "wuwaterm_prod", full_tok),
+        ("full", "raw_baseline", full_tok),
+        ("ablation", "raw_matched", ablation_tok),
+    ):
+        code, res = _run(
+            h3,
+            ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(full_manifest),
+             "--pilot-manifest", str(pilot_manifest),
+             "--stage", stage, "--arm", arm, "--max-calls", "240",
+             "--live", "--owner-approval-token", tok, *cost_flags],
+            capsys,
+        )
+        assert code == 0, (stage, arm, res)
+
+    ledger = json.loads((live_dir / "h3-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["mode"] == "live"
+    assert ledger["bindings"]["pilot_manifest_sha256"] == _sha256(pilot_manifest)
+    assert len(ledger["records"]) == 6
+
+    # Negative check: mismatched --full-manifest on pilot is refused (exit 1).
+    code_bad, err_bad = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(env["tmp"] / "bad_pilot"), "--manifest", str(pilot_manifest),
+         "--full-manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code_bad == 1 and "manifest_sha256" in err_bad
     assert no_network == []
 
 
