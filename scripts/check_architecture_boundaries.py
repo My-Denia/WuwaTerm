@@ -105,6 +105,7 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
 
 DOMAIN_CORE = frozenset(
     {
+        "attribution_candidates",
         "lookup",
         "normalize",
         "models",
@@ -128,6 +129,7 @@ DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semant
 # independent of storage (`db`), storage-coupled (`lookup`, `review`), and `sqlite3`.
 PURE_MATCHING = frozenset(
     {
+        "attribution_candidates",
         "term_matching",
         "term_preparation",
         "cjk_span",
