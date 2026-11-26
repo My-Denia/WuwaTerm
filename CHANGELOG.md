@@ -3,12 +3,46 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.14.0 - 2026-11-26
+
+### Review & Terms
+
+- Request-local evidence for ambiguous one-character names (#323): the new pure
+  module `wuwaterm.single_char_context` looks at four kinds of evidence in the
+  submitted text (document topic, an entity in the same paragraph, resonator
+  co-occurrence and position context) for a one-character resonator or speaker
+  occurrence that the matcher classifies as `ambiguous_mention`. It qualifies
+  only when two kinds hold on distinct supporting spans and at least one of
+  them is an entity kind. Term preparation records the evaluation without
+  adding a lock or a term reference.
+  `RequestPolicy.ambiguous_mention_exposure` defaults to `off`;
+  `scoped_alternative` is for offline tests and future experiments.
+- `ambiguous-mention-v1` (#325): an opt-in `review-v2` feature, sent in
+  `X-WuwaTerm-Review-Features` on `POST /v1/reviews` together with `reason-v1`
+  (`invalid_request` without it). A one-character resonator name that the
+  matcher classifies as `ambiguous_mention`, and whose evidence from the
+  submitted source meets that threshold, is reported as a `not_evaluated`
+  finding with reason `ambiguous_mention` and its official candidates. It is
+  judged (`verified_constraint` or `confirmed_conflict`) only after the caller
+  resolves it with `official_pair`. While unresolved it changes no other
+  finding, is not counted as evaluated and sorts after every other finding, so
+  the finding cap and the 64 KiB ceiling drop it first.
+  `GET /v1/capabilities` always lists `ambiguous-mention-v1`.
+- `wuwaterm-cjk-matcher-v11` (`MATCHER_REVISION =
+  286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664`, #325): the
+  matcher functions, lexicon slice and single-character name sets are the `v10`
+  ones. The label moves because the same review request can now give a
+  different report.
+- Because the label moves, stored `v10` resolution contexts, and manuscript-v3
+  or manuscript-v4 segment results that a client saved under `v10`, become stale
+  after the upgrade and are re-reviewed. The re-review spends review quota; a
+  review that does not ask for `ambiguous-mention-v1` returns the `v10` report
+  apart from the matcher revision value.
 
 ### Structure Checks
 
 - `POST /v1/structure-checks` (`structure-check-v1`, MY-490,
-  [ADR 0022](docs/adr/0022-deterministic-structure-checks.md)): Layer 1
+  [ADR 0022](docs/adr/0022-deterministic-structure-checks.md), #326): Layer 1
   deterministic structure checks for 1 to 64 paired segments. Each segment is
   checked for an empty target, numbers, placeholders and markup tags, and
   paragraph and line layout. No model is called and nothing is stored. Numbers
@@ -16,40 +50,92 @@ does not distribute generated game data or generated SQLite databases.
   spelled English numbers and list labels are never reported on their own.
   Each side is at most 2,000 Unicode scalars and 20,000 across the request
   (`input_too_long`, 422); at most 16 findings per segment are returned.
-- Numeric facts in the number rule (MY-504): a percentage or multiplier
-  against a plain number (`50%` / `50`, `1.5倍` / `1.5`), a flipped explicit
-  sign (`+20%` / `−20%`), a flipped comparison (`大于 150%` / `less than
-  150%`, `至少 3 层` / `at most 3 stacks`), a changed build marker (`S0R1` /
-  `S1R0`, `3+1` / `2+1`) and two different units (`20秒` / `20m`) are now
+- The number rule also reads numeric facts (MY-504, #331): a percentage or
+  multiplier against a plain number (`50%` / `50`, `1.5倍` / `1.5`), a flipped
+  explicit sign (`+20%` / `−20%`), a flipped comparison (`大于 150%` / `less
+  than 150%`, `至少 3 层` / `at most 3 stacks`), a changed build marker (`S0R1`
+  / `S1R0`, `3+1` / `2+1`) and two different units (`20秒` / `20m`) are
   reported as `number_missing` and `number_unexpected`. A sign, unit or
   comparison written on one side only is not. Ranges keep their dash
-  (`100-150`), and English month names account for the month of a date.
-  Number finding spans now include the sign, unit and comparison written
-  with the number. No rule id, check name or field was added.
+  (`100-150`), and English month names account for the month of a date. Number
+  finding spans include the sign, unit and comparison written with the number.
   `scripts/eval_structure_checks.py` measures false alarms and misses offline
   (ADR 0022).
 - `GET /v1/capabilities` always lists `structure-check-v1`. Without a model it
   now answers `["ambiguous-mention-v1", "structure-check-v1"]`.
-- `POST /v1/reviews` and `POST /v1/semantic-reviews` are unchanged; a test pins
-  the `/v1/reviews` schemas and response bytes to what main served before this
-  endpoint.
+- The structure-check endpoint does not change `POST /v1/reviews` or
+  `POST /v1/semantic-reviews`; the `/v1/reviews` changes in this release come
+  from #325. A test pins the `/v1/reviews` schemas and response bytes to those
+  recorded on `main` just before this endpoint (`6e096e1`).
 
-### Installer
+### Deployment
 
-- `deploy/setup.sh` defaults the installer to Telegram `v0.6.0` (pinning Core
-  `v0.13.0`) and Web `v0.4.5`, the releases `contracts/products.json` now
-  records.
+- `deploy/docker-compose.yml` gives `wuwaterm-api` `mem_reservation: 96m` and
+  `oom_score_adj: -500` (#328). The reservation is a soft request, not a cap,
+  and protects the working set during host-wide reclaim only when every
+  non-root ancestor cgroup also sets `MemoryLow`. Component observation and
+  replay carry both values as optional recipe `runtime_options`, so recipe
+  snapshots written without them still validate.
+- `deploy/product-update.sh refresh-runtime-options` (MY-503, #332) records the
+  two values from the live API container on a component deployment adopted
+  before the recipe carried them; until then, a live container that has them is
+  refused with `observed container recipe differs`. It is a metadata-only
+  transaction that creates, starts, stops and removes no container. The
+  preconditions are in
+  [docs/deployment.md](docs/deployment.md#api-resource-settings-on-an-adopted-deployment).
+  The journal action is new: after a refresh, an operations checkout older than
+  this release refuses component operations with
+  `component runtime journal is unknown`.
 
 ### Evaluation & Research
 
-- Add the frozen H3 evaluation tools (MY-489): `scripts/eval_h3.py` runs
+- Add the `paired-compare` subcommand to `scripts/eval_usability.py` (#321): it
+  compares two scored arms unit by unit for each translation direction, with
+  cluster bootstrap confidence intervals.
+- Revise the H3 / raw-baseline protocol (#327, #333): pin the Core under test to
+  `v0.13.0`, add the `en->zh` `raw_matched` thinking ablation, a pre-registered
+  decision rule with a critical-error non-worsening gate and the community-term
+  judging rules (`docs/eval/h3-judging-addendum.md`).
+- Add the frozen H3 evaluation tools (MY-489, #333): `scripts/eval_h3.py` runs
   `raw_baseline`, `wuwaterm_prod` and `raw_matched` with a `--fake-transport`
   dry run, per-stage call caps counted before each POST, and an owner approval
   token for live runs, and offers `preflight` and `cost-estimate`;
   `scripts/eval_h3_export.py` writes `usability-arm-scores-v1` files and applies
-  the pre-registered decision rule. The protocol adds a critical-error
-  non-worsening gate and the community-term judging rules
-  (`docs/eval/h3-judging-addendum.md`). No runtime path uses them.
+  the decision rule. No runtime path uses these tools, and no live model call
+  was made to add them.
+
+### Tests
+
+- Raise the budgets of the request-budget tests that could time out under CPU
+  contention before reaching the stage they assert (MY-499, #330). Only test
+  files changed.
+
+### Upgrade & Compatibility
+
+- The HTTP API changes are additive: the new `/v1/structure-checks` route and
+  its schemas, `ambiguous-mention-v1` and `structure-check-v1` in the
+  `GET /v1/capabilities` enum, and the `ambiguous-mention-v1` paragraph in the
+  `/v1/reviews` description. A client that assumed an empty capability list
+  without a model now receives two entries. Without the `ambiguous-mention-v1`
+  token, `/v1/reviews` responses are as in `v0.13.0` apart from the matcher
+  revision value where a response carries it.
+- With `ambiguous_mention_exposure` at its `off` default, translation prompt
+  bytes and the request-policy hash are unchanged by #323. `OperationIdentity`
+  includes the matcher revision, so operation hashes differ from `v0.13.0`.
+- Dictionary builder logic, SQLite schema (`2`), pinned game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`), the `terms.db` contents, the
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH` default (`omit`; `auto` remains opt-in)
+  and the `zh->en` default (`disabled`) are unchanged from `v0.13.0`.
+- Deployments already running `v0.13.0` can keep their `terms.db`; the upgrade
+  needs no rebuild (`deploy/vps-update.sh --runtime-only`). An adopted component
+  deployment whose API container gains the new resource settings also needs
+  `refresh-runtime-options`, described above.
+- `deploy/setup.sh` defaults the installer to Telegram `v0.6.0` (pinning Core
+  `v0.13.0`) and Web `v0.4.5`, the releases `contracts/products.json` records
+  (#329).
+- Container images continue to omit game data and databases; deploying from a
+  source checkout at the release commit or tag remains required alongside the
+  published registry images.
 
 ## 0.13.0 - 2026-11-26
 
