@@ -25,11 +25,13 @@ What the model is told and what the server decides are kept apart:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from . import semantic_review_contract as contract
+from .attribution_candidates import AttributionCandidate, detect_attribution_candidates
 from .llm_transport import LLMTranslationError
 from .review import VERDICT_NEEDS_REVIEW, VERDICT_VERIFIED, ReviewReport
 from .segmentation import WHITESPACE
@@ -57,6 +59,25 @@ SEMANTIC_THINKING_DEFAULT = "low"
 # answers llm_unavailable rather than being cut by the request budget.
 SEMANTIC_TIMEOUT_SECONDS = 75.0
 SEMANTIC_TIMEOUT_ENV = "WUWATERM_SEMANTIC_REVIEW_TIMEOUT_SECONDS"
+
+# Opt-in numeric attribution hint (ADR 0024, MY-490 / MY-228). The hint is
+# program-computed evidence about which number sits on which stat slot; it
+# changes the prompt bytes and what the model sees, so it stays off until the
+# ADR 0024 gates are measured on a frozen set. Only these three spellings turn
+# it on: a server that sets the variable to anything else keeps today's prompt.
+SEMANTIC_ATTRIBUTION_HINTS_ENV = "WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS"
+_ATTRIBUTION_HINTS_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def attribution_hints_enabled(raw: str | None = None) -> bool:
+    """Whether a review prompt may carry the numeric attribution hint.
+
+    ``raw`` overrides the environment, so a caller that already resolved the
+    setting does not read it twice.
+    """
+    if raw is None:
+        raw = os.environ.get(SEMANTIC_ATTRIBUTION_HINTS_ENV, "")
+    return raw.strip().casefold() in _ATTRIBUTION_HINTS_TRUTHY
 
 
 def semantic_timeout_seconds(raw: str | None) -> float:
@@ -104,6 +125,15 @@ TERM_FACT_WORDING = (
     "match only says that an official form appears in the corresponding region "
     "of the translation; it does not say the word means the official concept "
     "here. Judge every occurrence from its context."
+)
+
+ATTRIBUTION_HINT_WORDING = (
+    "numeric_attribution_candidates below is read by a program from the two "
+    "texts: it names stat slots both sides write and the numbers each side puts "
+    "on them. It is surface evidence, not a verdict, and a restructured "
+    "sentence can raise it while the translation is right. Check whether a "
+    "value sits on a different stat than the source puts it on; when the "
+    "attribution reads correctly, report nothing for it."
 )
 
 _LANGUAGE_NAMES = {"zh": "Chinese", "en": "English"}
@@ -269,7 +299,19 @@ def term_facts(report: ReviewReport, source: str, direction: str) -> list[str]:
     return facts
 
 
-def build_messages(job: SemanticReviewJob, facts: Sequence[str]) -> list[dict[str, str]]:
+def build_messages(
+    job: SemanticReviewJob,
+    facts: Sequence[str],
+    *,
+    attribution_hints: bool | None = None,
+) -> list[dict[str, str]]:
+    """The two messages for one review.
+
+    ``attribution_hints`` defaults to :func:`attribution_hints_enabled`; with it
+    off the messages are byte for byte what they are without the hint feature.
+    """
+    if attribution_hints is None:
+        attribution_hints = attribution_hints_enabled()
     source_language = "en" if job.direction == "zh" else "zh"
     payload: dict[str, Any] = {
         "source_language": _LANGUAGE_NAMES[source_language],
@@ -283,6 +325,13 @@ def build_messages(job: SemanticReviewJob, facts: Sequence[str]) -> list[dict[st
         }
     payload["source"] = job.source
     payload["target"] = job.target
+    if attribution_hints:
+        hint: AttributionCandidate | None = detect_attribution_candidates(
+            job.source, job.target
+        )
+        if hint is not None:
+            payload["numeric_attribution_candidates_note"] = ATTRIBUTION_HINT_WORDING
+            payload["numeric_attribution_candidates"] = hint
     if facts:
         payload["term_facts_note"] = TERM_FACT_WORDING
         payload["term_facts"] = list(facts[:MAX_TERM_FACTS])

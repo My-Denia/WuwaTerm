@@ -1,13 +1,19 @@
 # Number attribution: an offline candidate signal for Layer 2
 
-- Status: offline prototype, measured. No runtime code, contract or finding
-  category changes; nothing in this document is wired into the server.
+- Status: measured candidate signal. The reader is in the package
+  (`wuwaterm.attribution_candidates`) and the Layer 2 prompt hint exists behind a
+  default-off flag (`WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS`, ADR 0024). No
+  response body, wire contract or finding category changes; with the flag off
+  the prompt bytes equal today's.
 - Date: 2026-11-26
 - Related: [ADR 0022](../adr/0022-deterministic-structure-checks.md),
+  [ADR 0024](../adr/0024-diagnose-then-repair-targeted-review.md),
   [ADR 0018](../adr/0018-semantic-review.md),
+  `src/wuwaterm/attribution_candidates.py`,
   `scripts/eval_structure_checks.py` (mode `attribution`),
   `tests/fixtures/structure-attribution.json`,
-  `tests/test_eval_structure_checks.py`.
+  `tests/test_eval_structure_checks.py`,
+  `tests/test_attribution_candidates.py`.
 
 ## Problem
 
@@ -25,9 +31,9 @@ is one plausible reading among several. A deterministic reader that names the
 slots and the values it paired, and says which pair disagrees, turns "look
 closely at these percentages" into "`atk` reads 20% here and 10% there".
 
-This document measures such a reader as an offline candidate signal, and
-records how it would reach Layer 2 without changing the API, the schemas or the
-finding categories.
+This document measures such a reader as a candidate signal, and records how it
+reaches Layer 2 without changing the API, the schemas or the finding
+categories.
 
 ## The signal
 
@@ -178,25 +184,24 @@ the suite. The masking, slot and number patterns are single-pass and bounded;
 no input in that set costs more than a few milliseconds, so there is no
 backtracking shape to exploit.
 
-## Where it would go in Layer 2 (design only)
+## Where it went in Layer 2
 
-Nothing below exists in the code today. It is the shape a follow-up change
-would take, kept separate so this prototype can be measured without touching
-the server.
+Steps 1 and 2 below exist; steps 3 and 4 are the shape the change keeps.
 
-1. **The reader moves into the package.** `scripts/eval_structure_checks.py`
-   keeps the benchmark; the reader itself becomes a pure function beside
-   `structural_checks.py` with the same no-model, no-storage, no-network
-   properties.
-2. **The prompt gains one optional payload key.** `build_messages` in
+1. **The reader lives in the package.** `src/wuwaterm/attribution_candidates.py`
+   is a pure function beside `structural_checks.py` with the same no-model,
+   no-storage, no-network properties, and `scripts/eval_structure_checks.py`
+   imports it instead of carrying a copy. Both sides are capped at 2,000
+   scalars and the hint at eight slots with four values each.
+2. **The prompt gains two optional payload keys.** `build_messages` in
    `semantic_review.py` builds a JSON payload today (`term_facts`,
-   `precedents`, `context_before`). When a gate is on and the pair has a
-   candidate, the payload gains `numeric_attribution` with the hint, plus one
-   wording constant in the style of `TERM_FACT_WORDING` saying it is
-   program-computed surface evidence, not a verdict. The gate is a
-   server-side environment flag like the existing semantic options, off by
-   default, so the prompt, the bytes and the cost of a normal request do not
-   change.
+   `precedents`, `context_before`). When
+   `WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS` is explicitly `1`, `true` or
+   `yes` and the pair has a candidate, the payload gains
+   `numeric_attribution_candidates_note` (the fixed, non-binding wording
+   `ATTRIBUTION_HINT_WORDING`) and `numeric_attribution_candidates` (the hint).
+   Off — the default — produces byte-identical messages, pinned by a SHA-256
+   test over both messages.
 3. **Nothing in the wire contract changes.** No request field, no response
    field, no OpenAPI change, no new finding category and no new rule id: a
    confirmed attribution problem is reported as the existing

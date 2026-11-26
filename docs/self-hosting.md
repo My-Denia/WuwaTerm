@@ -428,6 +428,16 @@ Turn it on only if your users want model-flagged meaning differences and accept
 that noise; each review takes about 10-30 s. Translation context
 (`translation-context-v1`) is not affected by this switch.
 
+`WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS` adds one optional thing to that
+prompt: when both sides name the same stat slots with the same numbers and one
+number sits on a different stat, the payload names the slots and the values so
+the model can check the attribution instead of guessing from two percentages
+([ADR 0024](adr/0024-diagnose-then-repair-targeted-review.md)). It is off unless
+set to exactly `1`, `true` or `yes`; off, the prompt bytes are identical to a
+server without the switch, which a test pins. It is a hint, not a finding:
+nothing appears in a response body, and a pair with no candidate is prompted
+exactly as before.
+
 **For the owner-private web layer (optional, off by default):**
 `WUWATERM_API_WEB_ENABLED`, `WUWATERM_API_WEB_DEVICE_TOKEN`,
 `WUWATERM_API_WEB_EDGE_SECRET`, `WUWATERM_API_WEB_SESSION_TTL_SECONDS`,

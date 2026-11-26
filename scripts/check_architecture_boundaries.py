@@ -3,11 +3,11 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     lookup, normalize, models, review, cjk_span, protected_text,
-                   english_plural, segmentation, semantic_review_contract,
-                   single_char_context, skill_references, term_classification,
-                   term_matching, term_preparation, termbase, text_spans,
-                   document_anchor
+  domain core:     attribution_candidates, lookup, normalize, models, review,
+                   cjk_span, document_anchor, protected_text, english_plural,
+                   segmentation, semantic_review_contract, single_char_context,
+                   skill_references, term_classification, term_matching,
+                   term_preparation, termbase, text_spans
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
@@ -60,10 +60,11 @@ nested subpackages discovered via rglob):
    ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
    strongly connected component may appear — a two-module mutual import is one
    cycle shape, not the only one.
-11. Pure matching modules (``term_matching``, ``term_preparation``,
-   ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``,
-   ``single_char_context``, ``skill_references``, ``term_classification``,
-   ``termbase``, ``text_spans``, ``document_anchor``) must not import
+11. Pure matching modules (``attribution_candidates``, ``term_matching``,
+   ``term_preparation``, ``cjk_span``, ``document_anchor``, ``protected_text``,
+   ``segmentation``, ``english_plural``, ``single_char_context``,
+   ``skill_references``, ``term_classification``, ``termbase``, ``text_spans``)
+   must not import
    storage ``db``, storage-coupled modules (``lookup``, ``review``), or
    ``sqlite3`` (including under ``TYPE_CHECKING``).
 12. Dynamic tool imports in ``scripts/deployment_admission.py`` via
@@ -106,6 +107,7 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
 
 DOMAIN_CORE = frozenset(
     {
+        "attribution_candidates",
         "lookup",
         "normalize",
         "models",
@@ -131,6 +133,7 @@ DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semant
 # independent of storage (`db`), storage-coupled (`lookup`, `review`), and `sqlite3`.
 PURE_MATCHING = frozenset(
     {
+        "attribution_candidates",
         "term_matching",
         "term_preparation",
         "cjk_span",
