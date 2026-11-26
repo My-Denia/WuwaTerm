@@ -110,7 +110,10 @@ the user resolves it with `official_pair`. While unresolved it changes no
 other finding; it never counts as evaluated, sorts after every other finding
 and is the first to be dropped when the finding page or the byte ceiling is
 reached. A review
-that does not ask for the feature returns the `v10` report and bytes; the
+that does not ask for the feature returns the `v10` report; the one difference
+is that a response carrying the matcher revision (`review-v2` sent with
+`X-WuwaTerm-Matcher-Basis: 1`) now carries the `v11` value instead of the `v10`
+one, so only responses without it keep the `v10` bytes. The
 translation side still admits only `name_mention`, and its ambiguous-mention
 exposure stays off by default. Because the same request can now yield a
 different report, stored `v10` resolution contexts and saved manuscript

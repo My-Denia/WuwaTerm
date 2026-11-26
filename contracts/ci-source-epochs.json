@@ -8,9 +8,9 @@
   "consumers": {
     "web_repository": "My-Denia/WuwaTerm-Web",
     "legacy_web_revision": "6cbba41bb934d44d1dde1b94f1b50d6d845af599",
-    "split_web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+    "split_web_revision": "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
     "windows_repository": "My-Denia/WuwaTerm-Windows",
-    "split_windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854",
+    "split_windows_revision": "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
     "windows_recipe_workflow": ".github/workflows/legacy-core-validation.yml",
     "windows_recipe_sha": "974160e74286f03463ab98c4e1b1ab1d45be2bfc"
   },
