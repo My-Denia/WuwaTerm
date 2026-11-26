@@ -64,9 +64,11 @@ TERMBASE_ENTRY_KEYS = frozenset(
 # read by clients in JavaScript, where they rewrite an object's prototype.
 PROTOTYPE_POLLUTION_KEYS = frozenset({"__proto__", "constructor", "prototype"})
 
+# ``\A``/``\Z`` rather than ``^``/``$``: ``$`` also matches before a trailing
+# newline, so ``2026-11-25T00:00:00Z\n`` would pass a ``$``-anchored check.
 _TIMESTAMP_RE = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?"
-    r"(Z|[+-]00:00)$"
+    r"\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?"
+    r"(Z|[+-]00:00)\Z"
 )
 _LATIN_LETTER_RE = re.compile(r"[0-9A-Za-z]")
 
@@ -146,6 +148,16 @@ def _has_latin_or_digit(text: str) -> bool:
 
 def _contains_non_whitespace(text: str) -> bool:
     return any(not char.isspace() for char in text)
+
+
+def _collision_key(surface: str) -> str:
+    """The identity two surfaces are compared by, for precedence and de-duplication.
+
+    Surrounding whitespace is not part of a surface: without the strip, a
+    termbase entry written ``" 今汐 "`` would not collide with the official
+    ``今汐`` and would slip past the official-precedence gate.
+    """
+    return surface.strip().casefold()
 
 
 def _reject_duplicate_or_unsafe_key(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -304,6 +316,10 @@ def parse_termbase(payload: str | bytes) -> tuple[TermbaseEntry, ...]:
         )
     except TermbaseError:
         raise
+    except RecursionError as exc:
+        # ``"[" * 2000 + "]" * 2000`` exhausts the parser's stack before any of
+        # our own bounds can see it. That is a malformed payload, not a crash.
+        raise TermbaseError("payload nests too deeply") from exc
     except ValueError as exc:
         raise TermbaseError("termbase is not valid JSON") from exc
     _scan_strings(data)
@@ -380,13 +396,13 @@ def match_user_glossary(
     if limit < 1:
         return ()
     effective_limit = min(int(limit), MAX_USER_GLOSSARY_REFERENCES)
-    excluded = {surface.casefold() for surface in excluded_surfaces if surface}
+    excluded = {_collision_key(surface) for surface in excluded_surfaces if surface}
     matches: list[tuple[int, int, UserGlossaryReference]] = []
     seen_sources: set[str] = set()
     for index, entry in enumerate(entries):
         if entry.direction != direction:
             continue
-        source_key = entry.source.casefold()
+        source_key = _collision_key(entry.source)
         if source_key in excluded or source_key in seen_sources:
             continue
         position = _first_occurrence(source_text, entry.source)
@@ -431,7 +447,9 @@ def select_prompt_references(
     if limit < 1:
         return ()
     effective_limit = min(int(limit), MAX_USER_GLOSSARY_REFERENCES)
-    official = {surface.casefold() for surface in official_surfaces if surface}
+    official = {
+        _collision_key(surface) for surface in official_surfaces if surface
+    }
     selected: list[UserGlossaryReference] = []
     seen_sources: set[str] = set()
     for reference in references:
@@ -439,7 +457,7 @@ def select_prompt_references(
             continue
         if reference.direction != direction:
             continue
-        source_key = reference.source.casefold()
+        source_key = _collision_key(reference.source)
         if source_key in official or source_key in seen_sources:
             continue
         if not _reference_within_bounds(reference):

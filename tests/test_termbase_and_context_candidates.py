@@ -33,7 +33,7 @@ from wuwaterm.document_anchor import (
 )
 from wuwaterm.models import TermRecord
 from wuwaterm.sentence import SentenceTranslator
-from wuwaterm.term_preparation import TermReference
+from wuwaterm.term_preparation import TermOccurrence, TermReference
 from wuwaterm.termbase import (
     MAX_TERMBASE_ENTRIES,
     MAX_USER_GLOSSARY_REFERENCES,
@@ -228,9 +228,6 @@ def test_termbase_rejects_a_shape_the_format_does_not_allow(mutate):
     "text",
     [
         pytest.param('{"format": "wuwaterm-termbase-v1", "format": "x"}', id="duplicate-key"),
-        pytest.param('{"a": "__proto__"}', id="prototype-pollution-key"),
-        pytest.param('{"constructor": 1}', id="constructor-key"),
-        pytest.param('{"entries": [{"prototype": 1}]}', id="nested-pollution-key"),
         pytest.param('{"a": NaN}', id="nan"),
         pytest.param('{"a": Infinity}', id="infinity"),
         pytest.param('{"a": -Infinity}', id="negative-infinity"),
@@ -243,6 +240,39 @@ def test_termbase_rejects_a_shape_the_format_does_not_allow(mutate):
 def test_termbase_rejects_unsafe_or_unparseable_json(text):
     with pytest.raises(TermbaseError):
         parse_termbase(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"__proto__": 1}', id="prototype"),
+        pytest.param('{"constructor": 1}', id="constructor"),
+        pytest.param('{"prototype": 1}', id="prototype-plain"),
+        pytest.param('{"entries": [{"__proto__": {}}]}', id="nested-prototype"),
+        pytest.param('{"a": {"prototype": 1}}', id="deeper-prototype"),
+    ],
+)
+def test_termbase_refuses_reserved_keys_at_any_depth(text):
+    with pytest.raises(TermbaseError, match="reserved object key"):
+        parse_termbase(text)
+
+
+def test_termbase_refuses_a_payload_that_nests_past_the_parser_stack():
+    # A well-formed but 2,000-deep array exhausts the JSON parser's stack; the
+    # parser must answer with its own error, not raise RecursionError.
+    with pytest.raises(TermbaseError, match="nests too deeply"):
+        parse_termbase("[" * 2000 + "]" * 2000)
+
+
+def test_termbase_rejects_a_trailing_newline_after_a_timestamp():
+    for updated_at in ("2026-11-25T00:00:00Z\n", "2026-11-25T00:00:00Z\r\n"):
+        with pytest.raises(TermbaseError, match="timestamp"):
+            parse_termbase(_text(_payload(_entry(updated_at=updated_at))))
+
+        data = _payload(_entry())
+        data["updated_at"] = updated_at
+        with pytest.raises(TermbaseError, match="updated_at"):
+            parse_termbase(_text(data))
 
 
 def test_termbase_rejects_non_utf8_bytes():
@@ -449,6 +479,99 @@ def test_a_user_reference_never_displaces_an_official_reference_or_lock():
         context=TranslationContext(user_glossary_references=_glossary(echo, direction="zh")),
     )
     assert ZH_EN_GLOSSARY in _prompt(alone)
+
+
+def test_a_scoped_skill_stem_claims_the_stem_and_the_span_it_matched():
+    """`延奏` and the longer `延奏技能` are the same official admission."""
+    stem = TermReference(
+        source="延奏",
+        zh="延奏",
+        en="Intro Skill",
+        category="core_term",
+        # The admitted span is the stem; `matched_text` records the longer
+        # surface the segment actually carried at that spot.
+        occurrences=(TermOccurrence(0, 2, "延奏技能", 0, 0, 2),),
+        origin="scoped_skill_stem",
+    )
+    surfaces = official_source_surfaces((), (stem,), to_chinese=False)
+    assert set(surfaces) == {"延奏", "延奏技能"}
+
+    for source in ("延奏", "延奏技能"):
+        entry = TermbaseEntry(
+            id="tb-001",
+            source=source,
+            target="intro",
+            direction="en",
+            kind="community_term",
+            note="",
+        )
+        plan = _plan(
+            "延奏技能",
+            context=TranslationContext(user_glossary_references=_glossary(entry)),
+            references=(stem,),
+        )
+        assert ZH_EN_GLOSSARY not in _prompt(plan), source
+
+
+def test_a_derived_inflection_claims_both_forms():
+    """`Resonators` in the segment and the official `Resonator` are both official."""
+    derived = TermReference(
+        source="Resonators",
+        zh="共鸣者",
+        en="Resonator",
+        category="resonator",
+    )
+    surfaces = official_source_surfaces((), (derived,), to_chinese=True)
+    assert set(surfaces) == {"Resonators", "Resonator"}
+
+    for source in ("Resonators", "Resonator"):
+        entry = TermbaseEntry(
+            id="tb-001",
+            source=source,
+            target="共鸣者们",
+            direction="zh",
+            kind="preferred_term",
+            note="",
+        )
+        plan = _plan(
+            "Resonators",
+            to_chinese=True,
+            context=TranslationContext(
+                user_glossary_references=_glossary(entry, direction="zh")
+            ),
+            references=(derived,),
+        )
+        assert ZH_EN_GLOSSARY not in _prompt(plan), source
+
+
+def test_padded_whitespace_cannot_bypass_official_precedence():
+    entry = TermbaseEntry(
+        id="tb-001",
+        source="  今汐  ",
+        target="Jinxi",
+        direction="en",
+        kind="preferred_term",
+        note="",
+    )
+
+    assert (
+        select_prompt_references(
+            _glossary(entry), direction="en", official_surfaces=("今汐",)
+        )
+        == ()
+    )
+    assert (
+        match_user_glossary((entry,), "  今汐  ", direction="en", excluded_surfaces=("今汐",))
+        == ()
+    )
+
+    official = TermReference(source="今汐", zh="今汐", en="Jinhsi", category="resonator")
+    plan = _plan(
+        "  今汐  ",
+        context=TranslationContext(user_glossary_references=_glossary(entry)),
+        references=(official,),
+    )
+    assert ZH_EN_GLOSSARY not in _prompt(plan)
 
 
 def test_the_render_gate_caps_foreign_or_oversized_references():
@@ -801,6 +924,8 @@ def test_zh_en_auto_identity_is_distinct_and_the_other_modes_keep_their_payloads
     auto_payload = auto_policy.to_identity_dict(to_chinese=False)
     assert auto_payload["configured_thinking"] == "auto"
     assert set(auto_payload) - set(disabled_payload) == {
+        "auto_lock_limit",
+        "auto_paragraph_limit",
         "zh_en_auto_scalar_limit",
         "timeout_fallback_min_remaining_seconds",
         "timeout_fallback_timeout_seconds",
@@ -819,6 +944,66 @@ def test_zh_en_auto_identity_is_distinct_and_the_other_modes_keep_their_payloads
     # A short `auto` segment thinks, so its wire request differs as well.
     assert identities["auto"].request.thinking_mode == "low"
     assert identities["auto"].request.request_sha256 != identities["disabled"].request.request_sha256
+
+
+@pytest.mark.parametrize(
+    ("overrides", "changed"),
+    [
+        ({"auto_lock_limit": 2}, True),
+        ({"auto_paragraph_limit": 3}, True),
+        ({"zh_en_auto_scalar_limit": 5}, True),
+        ({"timeout_fallback_timeout_seconds": 11.0}, True),
+        ({}, False),
+    ],
+)
+def test_every_zh_en_auto_bound_moves_both_identities(overrides, changed):
+    """Each bound decides which mode a request runs under, so each is in the hash."""
+    plan = _plan("短句一句。")
+    base = RequestPolicy(zh_en_auto_thinking=True)
+    other = RequestPolicy(zh_en_auto_thinking=True, **overrides)
+
+    def identity(policy: RequestPolicy):
+        return build_translation_request_spec(plan, policy=policy, model="m").operation_identity(
+            policy, DEFAULT_PROVIDER_PROFILE
+        )
+
+    base_identity, other_identity = identity(base), identity(other)
+
+    if changed:
+        assert base_identity.policy_sha256 != other_identity.policy_sha256
+        assert base_identity.operation_sha256 != other_identity.operation_sha256
+    else:
+        assert base_identity.policy_sha256 == other_identity.policy_sha256
+        assert base_identity.operation_sha256 == other_identity.operation_sha256
+
+
+def test_the_auto_bounds_stay_out_of_a_disabled_or_omit_identity():
+    """The bounds are absent unless `auto` is on, so those payloads cannot move."""
+    plan = _plan("短句一句。")
+    default = RequestPolicy()
+    tweaked = RequestPolicy(
+        auto_lock_limit=1, auto_paragraph_limit=2, zh_en_auto_scalar_limit=3
+    )
+
+    default_payload = default.to_identity_dict(to_chinese=False)
+    tweaked_payload = tweaked.to_identity_dict(to_chinese=False)
+    assert default_payload == tweaked_payload
+    for key in ("auto_lock_limit", "auto_paragraph_limit", "zh_en_auto_scalar_limit"):
+        assert key not in default_payload
+
+    def identity(policy: RequestPolicy):
+        return build_translation_request_spec(plan, policy=policy, model="m").operation_identity(
+            policy, DEFAULT_PROVIDER_PROFILE
+        )
+
+    assert identity(default).policy_sha256 == identity(tweaked).policy_sha256
+    assert identity(default).operation_sha256 == identity(tweaked).operation_sha256
+
+    omit = RequestPolicy(configured_thinking_zh_en="omit")
+    omit_tweaked = RequestPolicy(configured_thinking_zh_en="omit", auto_lock_limit=1)
+    assert omit.to_identity_dict(to_chinese=False) == omit_tweaked.to_identity_dict(
+        to_chinese=False
+    )
 
 
 def test_zh_en_auto_selection_reaches_the_request_and_its_one_timeout_fallback():
@@ -848,7 +1033,35 @@ def test_zh_en_auto_selection_reaches_the_request_and_its_one_timeout_fallback()
     )
     assert (
         auto_policy.paragraph_repair_thinking_mode(
+            to_chinese=False,
+            initial_thinking_mode="disabled",
+            lock_count=1,
+            prepared_scalars=200,
+        )
+        == "low"
+    )
+    # A repair of a segment its own scalar bound already ruled out stays off:
+    # the repair adds a sentence, and `low` there is the timeout it avoids.
+    assert (
+        auto_policy.paragraph_repair_thinking_mode(
+            to_chinese=False,
+            initial_thinking_mode="disabled",
+            lock_count=1,
+            prepared_scalars=901,
+        )
+        == "disabled"
+    )
+    assert (
+        auto_policy.paragraph_repair_thinking_mode(
             to_chinese=False, initial_thinking_mode="disabled", lock_count=1
+        )
+        == "disabled"
+    )
+    # Into Chinese there is no scalar bound, so the paragraph-count escalation
+    # that already existed is unchanged.
+    assert (
+        RequestPolicy(configured_thinking_en_zh="auto").paragraph_repair_thinking_mode(
+            to_chinese=True, initial_thinking_mode="disabled", lock_count=1
         )
         == "low"
     )
@@ -872,13 +1085,16 @@ def test_zh_en_auto_refuses_a_second_explicit_mode():
 
 def test_official_source_surfaces_names_the_requests_own_source_language():
     reference = TermReference(source="声骸", zh="声骸", en="Echo", category="core_term")
+
     lock = ("__WUWA_TERM_0000000000000000_0000__", "星声", "Astrite")
-
     zh_en = official_source_surfaces((lock,), (reference,), to_chinese=False)
-    en_zh = official_source_surfaces((lock,), (reference,), to_chinese=True)
+    en_zh_reference = TermReference(source="Echo", zh="声骸", en="Echo", category="core_term")
+    en_zh = official_source_surfaces((lock,), (en_zh_reference,), to_chinese=True)
 
+    # The pair's own side, the surface the dictionary matched, and the lock's
+    # side in this direction; never the other direction's text.
     assert set(zh_en) == {"声骸", "星声"}
-    assert set(en_zh) == {"Echo", "Astrite"}  # the pair's own side, never the other
+    assert set(en_zh) == {"Echo", "Astrite"}
 
 
 def test_select_prompt_references_is_the_documented_gate():

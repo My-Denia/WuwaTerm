@@ -138,9 +138,14 @@ def bounded_anchor_fields(
     :class:`DocumentAnchor`. Fields outside the cap are cut here instead of
     reaching a prompt, and a value that is not a string is dropped.
     """
-    topic = _clip(_clean(getattr(anchor, "topic", "")), MAX_DOCUMENT_ANCHOR_TOPIC_SCALARS)
+    # Strip first: a whitespace-only field is not background, and rendering it
+    # would add an empty block to a prompt that asked for nothing.
+    topic = _clip(
+        _clean(getattr(anchor, "topic", "")).strip(),
+        MAX_DOCUMENT_ANCHOR_TOPIC_SCALARS,
+    )
     heading = _clip(
-        _clean(getattr(anchor, "section_heading", "")),
+        _clean(getattr(anchor, "section_heading", "")).strip(),
         MAX_DOCUMENT_ANCHOR_HEADING_SCALARS,
     )
     raw_entities = getattr(anchor, "active_entities", ())
@@ -240,7 +245,10 @@ def extract_document_anchor(
     """The read-only anchor for segment ``current_index`` of ``segments``.
 
     Pure and deterministic, and bounded in work as well as in output: it reads
-    at most ``ANCHOR_SEGMENT_WINDOW`` segments. ``topic`` is the first level-1
+    at most ``ANCHOR_SEGMENT_WINDOW`` preceding segments for the heading and the
+    entities, and the same number of segments at the start of the document for
+    the title, so no call touches more than ``2 * ANCHOR_SEGMENT_WINDOW``
+    segments however long the document is. ``topic`` is the first level-1
     heading in the document head (or, failing that, the first non-blank line of
     the first non-empty segment there); ``section_heading`` is the nearest
     Markdown heading in the window of preceding segments; ``active_entities``

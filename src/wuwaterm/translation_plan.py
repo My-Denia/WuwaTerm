@@ -526,6 +526,7 @@ class RequestPolicy:
         initial_thinking_mode: ConcreteThinkingMode,
         lock_count: int,
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+        prepared_scalars: int | None = None,
     ) -> ConcreteThinkingMode:
         if (
             initial_thinking_mode == "disabled"
@@ -533,9 +534,31 @@ class RequestPolicy:
             and self.configured_mode(to_chinese=to_chinese)
             == TRANSLATION_THINKING_AUTO
             and provider_profile.distinguishes_thinking_modes("disabled", "low")
+            and self._repair_may_step_up(
+                to_chinese=to_chinese, prepared_scalars=prepared_scalars
+            )
         ):
             return "low"
         return initial_thinking_mode
+
+    def _repair_may_step_up(
+        self, *, to_chinese: bool, prepared_scalars: int | None
+    ) -> bool:
+        """Whether repairing an already-``disabled`` segment may turn thinking on.
+
+        Into Chinese the initial ``disabled`` came from paragraph or lock
+        density, and the repair fixes the paragraph count, so it may step up.
+        Into English ``auto`` also sends a long segment ``disabled``, and a
+        repair appends a sentence to that same segment: stepping back into
+        ``low`` would walk into the timeout the scalar bound exists to avoid.
+        An unknown length therefore stays ``disabled`` too.
+        """
+        if to_chinese:
+            return True
+        return (
+            prepared_scalars is not None
+            and prepared_scalars <= self.zh_en_auto_scalar_limit
+        )
 
     def paragraph_repair_timeout_seconds(
         self, remaining_budget_seconds: float | None
@@ -630,6 +653,8 @@ class RequestPolicy:
         """
         if not self.zh_en_auto_thinking:
             return
+        payload["auto_lock_limit"] = self.auto_lock_limit
+        payload["auto_paragraph_limit"] = self.auto_paragraph_limit
         payload["zh_en_auto_scalar_limit"] = self.zh_en_auto_scalar_limit
         payload["timeout_fallback_min_remaining_seconds"] = float(
             self.timeout_fallback_min_remaining_seconds
@@ -1024,12 +1049,27 @@ def official_source_surfaces(
     Used as the collision set for user termbase references: a lock and a
     reference already own their surface, so a user preference for the same
     string must not appear beside them.
+
+    The set is deliberately wider than the official pair. ``reference.source``
+    is the surface the dictionary actually matched (a derived ``Resonators``
+    beside the official ``Resonator``, a scoped skill stem ``延奏`` beside the
+    longer ``延奏技能``), and every occurrence's ``matched_text`` is what the
+    segment contained at that spot. A user entry for any of those forms would
+    compete with the official pair in this very segment, so all of them are
+    claimed here; losing a preference is harmless, letting it override an
+    official pair is not.
     """
     surfaces: dict[str, None] = {}
     for reference in references:
-        official = reference.en if to_chinese else reference.zh
-        if official:
-            surfaces.setdefault(official, None)
+        for value in (
+            reference.source,
+            reference.en if to_chinese else reference.zh,
+        ):
+            if value:
+                surfaces.setdefault(value, None)
+        for occurrence in reference.occurrences:
+            if occurrence.matched_text:
+                surfaces.setdefault(occurrence.matched_text, None)
     lock_index = 2 if to_chinese else 1
     for lock in locks:
         if len(lock) > lock_index and lock[lock_index]:
@@ -1501,6 +1541,7 @@ def build_paragraph_repair_request_spec(
         initial_thinking_mode=initial_thinking_mode,
         lock_count=len(plan.locks),
         provider_profile=provider_profile,
+        prepared_scalars=len(plan.locked_text),
     )
     prompt_suffix = plan.prompt_templates.format_paragraph_repair_instruction(
         paragraphs
