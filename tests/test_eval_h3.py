@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,7 +149,7 @@ def env(tmp_path, sample_db):
 
     fake = ["--fake-transport", "--fake-scenario", str(scenario)]
     return {"args": args, "pins": pins, "fake": fake, "run_dir": run_dir, "manifest": manifest,
-            "tmp": tmp_path, "db": sample_db, "annotations": annotations}
+            "tmp": tmp_path, "db": sample_db, "annotations": annotations, "freeze": freeze}
 
 
 def _run(module, argv, capsys):
@@ -422,25 +423,826 @@ def test_stage_cap_is_cumulative_across_runs(h3, env, capsys, monkeypatch):
     assert code == 3 and raw["posts"] == 12 - prod["posts"]
 
 
+def _write_live_preconditions(
+    h3,
+    tmp: Path,
+    *,
+    manifest: Path,
+    src_tree: str,
+    terms_db: Path,
+    annotations: dict[str, Path],
+    verdict: str = "pass",
+    matcher_revision: str | None = None,
+    core_commit: str | None = None,
+    freeze_core_commit: str | None = None,
+    non_default_floor: bool = False,
+    floor_profile: str = "default",
+    non_default_parameters: dict[str, object] | None = None,
+    windows_uncleared: int = 0,
+    tamper_bindings_sha256: bool = False,
+    tools_sha256_override: dict[str, str] | None = None,
+    failed_rules: list[str] | None = None,
+    upstream_clearances: Path | None = None,
+    community_lexicon: Path | None = None,
+    annotation_adjudication: Path | None = None,
+) -> tuple[Path, Path]:
+    matcher = matcher_revision or sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION
+    frozen_tools = h3.frozen_file_hashes()
+    tools_sha = {
+        "scripts/eval_h3_corpus.py": frozen_tools["scripts/eval_h3_corpus.py"],
+        "scripts/eval_usability.py": frozen_tools["scripts/eval_usability.py"],
+    }
+    if tools_sha256_override:
+        tools_sha.update(tools_sha256_override)
+    tag_commit = core_commit or h3.PINNED_TAG_COMMIT
+    freeze_commit = freeze_core_commit or ("a" * 40)
+    non_default = dict(non_default_parameters or {})
+    if non_default_floor and not non_default:
+        non_default["announcement_floor_zh_en"] = 10
+    inputs_sha: dict[str, object] = {
+        "manifest": {"name": manifest.name, "sha256": _sha256(manifest)},
+        "sample": {"name": annotations["sample.json"].name, "sha256": _sha256(annotations["sample.json"])},
+        "names": {"name": annotations["names.json"].name, "sha256": _sha256(annotations["names.json"])},
+        "community_names": {
+            "name": annotations["community.json"].name,
+            "sha256": _sha256(annotations["community.json"]),
+        },
+        "annotation_adjudication": (
+            {"name": annotation_adjudication.name, "sha256": _sha256(annotation_adjudication)}
+            if annotation_adjudication is not None
+            else None
+        ),
+        "metadata": None,
+        "prior_ids": {"name": "prior_ids.json", "sha256": "1" * 64},
+        "prior_texts": [{"name": "prior_texts.json", "sha256": "2" * 64}],
+        "clear_names": [],
+        "community_lexicon": (
+            [{"name": community_lexicon.name, "sha256": _sha256(community_lexicon)}]
+            if community_lexicon is not None
+            else []
+        ),
+        "upstream_clearances": (
+            {"name": upstream_clearances.name, "sha256": _sha256(upstream_clearances)}
+            if upstream_clearances is not None
+            else None
+        ),
+    }
+    bindings = {
+        "core_tag_commit": tag_commit,
+        "core_commit": tag_commit,
+        "freeze_core_commit": freeze_commit,
+        "bound_tree_src_sha": src_tree,
+        "terms_db_sha256": _sha256(terms_db),
+        "matcher_revision": matcher,
+        "non_default_parameters": non_default,
+        "tools_sha256": tools_sha,
+        "inputs_sha256": inputs_sha,
+    }
+    rules_failed = list(failed_rules) if failed_rules is not None else ([] if verdict == "pass" else ["C8"])
+    checks = {
+        f"C{i}": {"status": "fail" if f"C{i}" in rules_failed else "pass"}
+        for i in range(1, 11)
+    }
+    checks["C3"].update({
+        "floor_profile": floor_profile,
+        "non_default_floor": non_default_floor,
+        "announcement_units_by_level": {
+            "zh->en": {"L0": 30, "L1": 0, "L2": 0},
+            "en->zh": {"L0": 30, "L1": 0, "L2": 0},
+        },
+    })
+    checks["C4"].update({
+        "windows_hit": 0,
+        "windows_cleared_m1": 0,
+        "windows_cleared_m2": 0,
+        "windows_cleared_m3": 0,
+        "windows_uncleared": windows_uncleared,
+        "scorer_sha256_ok": True,
+        "required_prior_sets_complete": True,
+        "m2_max_shared_span_threshold": 24,
+    })
+    checks["C7"].update({"cutoff": "2026-11-06T19:45:00+08:00"})
+    bindings_sha = h3.sha256_bytes(h3.canonical(bindings))
+    if tamper_bindings_sha256:
+        bindings_sha = "0" * 64
+    acceptance_body = {
+        "schema": "h3-acceptance-v1",
+        "verdict": verdict,
+        "failed_rules": rules_failed,
+        "non_default_parameters": non_default,
+        "checks": checks,
+        "bindings": bindings,
+        "bindings_sha256": bindings_sha,
+    }
+    acceptance = tmp / "acceptance.json"
+    acceptance.write_text(json.dumps(acceptance_body, ensure_ascii=False), encoding="utf-8")
+    judges = tmp / "judges.json"
+    judges.write_text(
+        json.dumps(
+            {
+                "schema": "h3-judges-v1",
+                "judges": {
+                    "j1": {"model": "strong-judge-a", "provider": "sub-a", "context_id": "ctx-j1"},
+                    "j2": {"model": "strong-judge-b", "provider": "sub-b", "context_id": "ctx-j2"},
+                    "adj": {"model": "strong-judge-c", "provider": "sub-c", "context_id": "ctx-adj"},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return acceptance, judges
+
+
 def test_live_mode_is_refused_without_a_matching_approval(h3, env, capsys, monkeypatch, no_network):
+    cost_flags = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
     code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--live"), capsys)
     assert code == 1 and "--owner-approval-token" in err
     code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--live", "--fake-transport"), capsys)
     assert code == 1 and "exactly one" in err
     code, err = _run(h3, env["args"]("pilot", "raw_baseline"), capsys)
     assert code == 1 and "exactly one" in err
-    code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--live", "--owner-approval-token", "x"), capsys)
-    assert code == 1 and "dry-run only" in err  # the test tree is not the pinned tree
-    # With this tree pinned, a wrong token is refused before any client exists.
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--live", "--owner-approval-token", "x", *cost_flags), capsys
+    )
+    assert code == 1 and "dry-run only" in err  # sample_db is not the pinned production terms.db
+    # With this tree and test db pinned and valid preconditions, a wrong token is refused before any client exists.
     monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
     monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
     monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
-    live = ["run", "--bound-tree", str(ROOT), "--terms-db", str(env["db"]), "--run-dir", str(env["run_dir"]),
-            "--manifest", str(env["manifest"]), "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
-            "--live", "--owner-approval-token", "h3-live-000000000000000000000000"]
+    acceptance, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+    )
+    live = ["run", "--bound-tree", str(ROOT), "--terms-db", str(env["db"]), *env["freeze"],
+            "--freeze", str(acceptance), "--freeze", str(judges),
+            "--run-dir", str(env["run_dir"]), "--manifest", str(env["manifest"]),
+            "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
+            "--live", "--owner-approval-token", "h3-live-000000000000000000000000", *cost_flags]
     code, err = _run(h3, live, capsys)
     assert code == 1 and "does not match" in err
     assert not env["run_dir"].exists()
+    assert no_network == []
+
+
+def test_v014_pinned_bindings_and_missing_corpus_script_refusal(h3, env, tmp_path, monkeypatch, capsys):
+    assert h3.PINNED_TAG_COMMIT == "2737530187f1e1c3a6b8758de357c8d32d21dfc7"
+    assert h3.PINNED_SRC_TREE == "8e6bd426bfc12625f050c03ed14e419d3dba145f"
+    assert h3.PINNED_MATCHER_REVISION == "286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664"
+    assert "scripts/eval_h3_corpus.py" in h3.FROZEN_FILES
+
+    # Build a repo mirror deliberately missing scripts/eval_h3_corpus.py.
+    incomplete_root = tmp_path / "_missing_corpus_repo"
+    for rel in h3.FROZEN_FILES:
+        if rel == "scripts/eval_h3_corpus.py":
+            continue
+        dest = incomplete_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((ROOT / rel).read_bytes())
+    monkeypatch.setattr(h3, "ROOT", incomplete_root)
+    with pytest.raises(h3.Refused, match=r"scripts/eval_h3_corpus\.py"):
+        h3.frozen_file_hashes()
+    code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--fake-transport"), capsys)
+    assert code == 1 and "scripts/eval_h3_corpus.py" in err
+
+
+def test_live_missing_cost_params_refused_before_client_construction(h3, env, capsys, monkeypatch, no_network):
+    def fail_client(*args, **kwargs):
+        raise AssertionError("HTTP client/transport must not be constructed when cost params are missing")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", fail_client)
+
+    base = env["args"]("pilot", "raw_baseline", "--live", "--owner-approval-token", "h3-live-000000000000000000000000")
+    cases = [
+        [],  # missing both limits and both prices
+        ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing --max-cost-usd
+        ["--max-cost-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing --ledger-budget-usd
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0"],  # missing both prices
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0", "--price-input-per-1m", "0.5"],  # missing output price
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0", "--price-output-per-1m", "2.0"],  # missing input price
+        ["--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing both budget limits
+        ["--ledger-budget-usd", "0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero ledger budget
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero per-run cap
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "-0.5", "--price-output-per-1m", "2.0"],  # negative price
+    ]
+    for extra in cases:
+        code, err = _run(h3, [*base, *extra], capsys)
+        assert code == 1, (extra, err)
+    assert not env["run_dir"].exists()
+    assert no_network == []
+
+    # CLI help must explicitly state --owner-approval-token is not a budget authorization,
+    # and describe --ledger-budget-usd as a pre-send USD budget gate.
+    run_parser = h3.build_parser()._subparsers._group_actions[0].choices["run"]
+    help_text = run_parser.format_help()
+    assert "--owner-approval-token" in help_text
+    assert "NOT a budget" in help_text or "not a budget" in help_text.lower()
+    assert "pre-send USD budget gate" in help_text
+
+
+def test_cost_cap_pre_send_refusal_exits_3_and_keeps_transport_posts_equal(h3, env, capsys, no_network):
+    cost_cfg = h3.CostConfig(ledger_budget_usd=1.0, price_input_per_1m=10.0, price_output_per_1m=40.0)
+    reserve_first = cost_cfg.reserve_usd(DOCS[0]["text"])
+    # Budget allows the first POST (plus a tiny margin) once actual cost settles, OR if we use
+    # http_500 on doc 1 attempt 1 so doc 1 attempt 1 keeps full reserve and doc 1 attempt 2 exceeds budget:
+    scenario = env["tmp"] / "cap_scenario.json"
+    scenario.write_text(
+        json.dumps({"schema": "h3-fake-scenario-v1", "rules": [{"doc_id": "z1", "doc_attempt": 1, "action": "http_500"}]}),
+        encoding="utf-8",
+    )
+    budget = round(reserve_first * 1.5, 12)
+    code, summary = _run(
+        h3,
+        env["args"](
+            "pilot", "raw_baseline", "--fake-transport", "--fake-scenario", str(scenario),
+            "--ledger-budget-usd", str(budget), "--max-cost-usd", str(budget),
+            "--price-input-per-1m", "10.0", "--price-output-per-1m", "40.0",
+        ),
+        capsys,
+    )
+    assert code == 3, summary
+    assert summary["status"] == "capped"
+    assert summary["stop_reason"] == "cost_cap"
+    assert summary["posts"] == summary["transport_posts"] == 1
+    assert summary["spent_usd"] == pytest.approx(reserve_first)
+    assert summary["ledger_spent_usd"] == pytest.approx(reserve_first)
+    assert summary["ledger_budget_usd"] == pytest.approx(budget)
+    log = [json.loads(line) for line in (env["run_dir"] / "h3-ledger-log.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in log].count("post_charged") == 1
+    refused = [e for e in log if e["event"] == "post_refused"]
+    assert len(refused) == 1 and refused[0]["reason"] == "cost_cap"
+    assert no_network == []
+
+
+def test_failed_and_timeout_posts_charge_full_reserve_and_ok_settles_actual(h3, env, capsys, no_network):
+    price_in, price_out = 2.0, 8.0
+    cost_cfg = h3.CostConfig(ledger_budget_usd=10.0, price_input_per_1m=price_in, price_output_per_1m=price_out)
+    # Unit check: reasoning tokens billed at output price (both inclusive OpenAI and separate formats).
+    assert cost_cfg.actual_usd(
+        {"prompt_tokens": 100, "completion_tokens": 250, "total_tokens": 350, "reasoning_tokens": 150}
+    ) == pytest.approx(100 * 2.0 / 1e6 + 250 * 8.0 / 1e6)
+    assert cost_cfg.actual_usd(
+        {"prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 350, "reasoning_tokens": 150}
+    ) == pytest.approx(100 * 2.0 / 1e6 + 250 * 8.0 / 1e6)
+    assert cost_cfg.actual_usd(
+        {"prompt_tokens": 100, "completion_tokens": 100, "total_tokens": None, "reasoning_tokens": 150},
+        raw_usage={"prompt_tokens": 100, "completion_tokens": 100, "reasoning_tokens": 150},
+    ) == pytest.approx(100 * 2.0 / 1e6 + 250 * 8.0 / 1e6)
+
+    # End-to-end: z1 attempt 1 times out (full reserve charged), z1 attempt 2 succeeds (actual charged).
+    one_doc = env["tmp"] / "one_doc.json"
+    one_doc.write_text(
+        json.dumps({"schema": "h3-manifest-v1", "set": "H3-one", "documents": [DOCS[0]]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    scenario = env["tmp"] / "timeout_then_ok.json"
+    scenario.write_text(
+        json.dumps({"schema": "h3-fake-scenario-v1", "rules": [{"doc_id": "z1", "doc_attempt": 1, "action": "timeout"}]}),
+        encoding="utf-8",
+    )
+    code, summary = _run(
+        h3,
+        ["run", *env["pins"], *env["freeze"], "--run-dir", str(env["run_dir"]), "--manifest", str(one_doc),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "10",
+         "--fake-transport", "--fake-scenario", str(scenario),
+         "--ledger-budget-usd", "10.0", "--max-cost-usd", "10.0",
+         "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out)],
+        capsys,
+    )
+    assert code == 0, summary
+    assert summary["posts"] == summary["transport_posts"] == 2
+    reserve = cost_cfg.reserve_usd(DOCS[0]["text"])
+    tel = summary["telemetry"]["zh->en"]
+    actual_ok = tel["prompt_tokens"] * price_in / 1e6 + tel["completion_tokens"] * price_out / 1e6
+    assert summary["spent_usd"] == pytest.approx(reserve + actual_ok)
+    log = [json.loads(line) for line in (env["run_dir"] / "h3-ledger-log.jsonl").read_text().splitlines()]
+    settled = [e for e in log if e["event"] == "post_settled"]
+    assert [e["billing"] for e in settled] == ["reserved_on_failure", "actual"]
+    assert settled[0]["settled_usd"] == pytest.approx(reserve)
+    assert settled[1]["settled_usd"] == pytest.approx(actual_ok)
+    assert no_network == []
+
+
+def test_missing_usage_charges_full_reserve_and_stops_immediately(h3, env, capsys, no_network):
+    price_in, price_out = 1.0, 4.0
+    cost_cfg = h3.CostConfig(ledger_budget_usd=10.0, price_input_per_1m=price_in, price_output_per_1m=price_out)
+    scenario = env["tmp"] / "missing_usage.json"
+    scenario.write_text(
+        json.dumps({"schema": "h3-fake-scenario-v1", "rules": [{"doc_id": "z1", "action": "missing_usage"}]}),
+        encoding="utf-8",
+    )
+    code, summary = _run(
+        h3,
+        env["args"](
+            "pilot", "raw_baseline", "--fake-transport", "--fake-scenario", str(scenario),
+            "--ledger-budget-usd", "10.0", "--max-cost-usd", "10.0",
+            "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out),
+        ),
+        capsys,
+    )
+    assert code == 3, summary
+    assert summary["status"] == "capped"
+    assert summary["stop_reason"] == "missing_usage"
+    assert summary["posts"] == summary["transport_posts"] == 1
+    assert summary["documents"] == 1
+    expected_reserve = cost_cfg.reserve_usd(DOCS[0]["text"])
+    assert summary["spent_usd"] == pytest.approx(expected_reserve)
+    assert summary["ledger_spent_usd"] == pytest.approx(expected_reserve)
+    log = [json.loads(line) for line in (env["run_dir"] / "h3-ledger-log.jsonl").read_text().splitlines()]
+    settled = [e for e in log if e["event"] == "post_settled"]
+    assert len(settled) == 1 and settled[0]["billing"] == "reserved_missing_usage"
+    assert settled[0]["settled_usd"] == pytest.approx(expected_reserve)
+    assert no_network == []
+
+
+def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_network):
+    cost = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
+    code, summary = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "zh->en", *cost), capsys
+    )
+    assert code == 0, summary
+    ledger_path = env["run_dir"] / "h3-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["ledger_budget_usd"] == 5.0
+    assert ledger["prices_usd_per_1m"] == {"input": 0.5, "output": 2.0}
+    assert ledger["spent_usd"] == pytest.approx(summary["spent_usd"])
+
+    # Subsequent run with a different budget must be refused (exit 1).
+    changed_cost = [
+        "--ledger-budget-usd", "6.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *changed_cost), capsys
+    )
+    assert code == 1 and "immutable" in err
+
+    # Subsequent run with lower token prices must be refused (exit 1).
+    lower_prices = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.25", "--price-output-per-1m", "1.0",
+    ]
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *lower_prices), capsys
+    )
+    assert code == 1 and "prices_usd_per_1m" in err and "immutable" in err
+
+    # Tampering ledger_budget_usd in h3-ledger.json is caught against h3-ledger-log.jsonl.
+    original = ledger_path.read_text(encoding="utf-8")
+    tampered = dict(ledger, ledger_budget_usd=500.0)
+    ledger_path.write_text(json.dumps(tampered), encoding="utf-8")
+    code, err = _run(
+        h3,
+        env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh",
+                    "--ledger-budget-usd", "500.0", "--max-cost-usd", "5.0",
+                    "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"),
+        capsys,
+    )
+    assert code == 1 and "ledger_budget_usd" in err
+
+    # Tampering prices_usd_per_1m in h3-ledger.json is caught against h3-ledger-log.jsonl.
+    tampered_prices = dict(ledger, prices_usd_per_1m={"input": 0.25, "output": 1.0})
+    ledger_path.write_text(json.dumps(tampered_prices), encoding="utf-8")
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *lower_prices), capsys
+    )
+    assert code == 1 and "prices_usd_per_1m" in err
+
+    # Tampering spent_usd in h3-ledger.json is caught against h3-ledger-log.jsonl.
+    tampered_spent = dict(ledger, spent_usd=0.0)
+    ledger_path.write_text(json.dumps(tampered_spent), encoding="utf-8")
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *cost), capsys
+    )
+    assert code == 1 and "spent_usd" in err
+
+    # Restoring original ledger allows the next direction with the same immutable budget and prices.
+    ledger_path.write_text(original, encoding="utf-8")
+    code, summary2 = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *cost), capsys
+    )
+    assert code == 0, summary2
+    assert summary2["ledger_spent_usd"] == pytest.approx(summary["spent_usd"] + summary2["spent_usd"])
+    assert no_network == []
+
+
+def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, capsys, monkeypatch, no_network):
+    monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
+    monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
+    monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
+    pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
+    cost_flags = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
+
+    def run_preflight(*extra_freeze: Path) -> dict:
+        out = env["tmp"] / f"pf-{len(list(env['tmp'].glob('pf-*.json')))}.json"
+        freeze = [*env["freeze"], *(arg for p in extra_freeze for arg in ("--freeze", str(p)))]
+        code = h3.main(["preflight", *pinned_args, *freeze, "--manifest", str(env["manifest"]), "--json-out", str(out)])
+        assert code == 0
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    # 1. Missing both h3-acceptance-v1 and h3-judges-v1 -> unavailable.
+    pf_none = run_preflight()
+    assert pf_none["approval_tokens"]["full"].startswith("unavailable")
+    assert "h3-acceptance-v1" in pf_none["approval_tokens"]["full"]
+    assert "not a budget" in pf_none["approval_token_note"].lower()
+
+    # 2. Acceptance verdict != pass -> unavailable, and run --live refused.
+    bad_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="fail",
+    )
+    pf_fail = run_preflight(bad_acc, judges)
+    assert pf_fail["approval_tokens"]["full"].startswith("unavailable")
+    assert "verdict" in pf_fail["approval_tokens"]["full"]
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *env["freeze"], "--freeze", str(bad_acc), "--freeze", str(judges),
+         "--run-dir", str(env["run_dir"]), "--manifest", str(env["manifest"]),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
+         "--live", "--owner-approval-token", "h3-live-000000000000000000000000", *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "verdict" in err
+
+    # 3. Valid acceptance without judges -> unavailable, and run --live refused.
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    pf_no_judges = run_preflight(good_acc)
+    assert pf_no_judges["approval_tokens"]["full"].startswith("unavailable")
+    assert "h3-judges-v1" in pf_no_judges["approval_tokens"]["full"]
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *env["freeze"], "--freeze", str(good_acc),
+         "--run-dir", str(env["run_dir"]), "--manifest", str(env["manifest"]),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
+         "--live", "--owner-approval-token", "h3-live-000000000000000000000000", *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "h3-judges-v1" in err
+
+    # 4. Acceptance with mismatched bound_tree_src_sha -> unavailable.
+    wrong_tree_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree="0" * 40,
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    pf_wrong_tree = run_preflight(wrong_tree_acc, judges)
+    assert pf_wrong_tree["approval_tokens"]["full"].startswith("unavailable")
+    assert "bound_tree_src_sha" in pf_wrong_tree["approval_tokens"]["full"]
+
+    # 5. Tampered bindings_sha256 -> unavailable.
+    tampered_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], tamper_bindings_sha256=True,
+    )
+    pf_tampered = run_preflight(tampered_acc, judges)
+    assert pf_tampered["approval_tokens"]["full"].startswith("unavailable")
+    assert "bindings_sha256" in pf_tampered["approval_tokens"]["full"]
+
+    # 6. Non-default C3 floor override -> unavailable (fail-closed in validate_acceptance_receipt).
+    custom_floor_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        non_default_floor=True, floor_profile="custom:announcement[zh->en]=10",
+    )
+    pf_floor = run_preflight(custom_floor_acc, judges)
+    assert pf_floor["approval_tokens"]["full"].startswith("unavailable")
+    assert "non_default_parameters" in pf_floor["approval_tokens"]["full"] or "floor_profile" in pf_floor["approval_tokens"]["full"]
+
+    # 7. C4 windows_uncleared > 0 -> unavailable.
+    uncleared_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], windows_uncleared=1,
+    )
+    pf_c4 = run_preflight(uncleared_acc, judges)
+    assert pf_c4["approval_tokens"]["full"].startswith("unavailable")
+    assert "windows_uncleared" in pf_c4["approval_tokens"]["full"]
+
+    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 mismatch).
+    bad_tool_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        tools_sha256_override={"scripts/eval_h3_corpus.py": "f" * 64},
+    )
+    pf_tool = run_preflight(bad_tool_acc, judges)
+    assert pf_tool["approval_tokens"]["full"].startswith("unavailable")
+    assert "gate_sha256" in pf_tool["approval_tokens"]["full"]
+
+    # 8b. freeze_core_commit equal to core_tag_commit -> unavailable.
+    same_commit_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        freeze_core_commit=h3.PINNED_TAG_COMMIT,
+    )
+    pf_same = run_preflight(same_commit_acc, judges)
+    assert pf_same["approval_tokens"]["full"].startswith("unavailable")
+    assert "freeze_core_commit" in pf_same["approval_tokens"]["full"]
+
+    # 8c. External clearance/adjudication files recorded in receipt must be frozen and untampered.
+    clearances = env["tmp"] / "upstream_clearances.json"
+    clearances.write_text(json.dumps({"schema": "h3-upstream-clearances-v1", "entries": []}), encoding="utf-8")
+    lexicon = env["tmp"] / "community_lexicon.json"
+    lexicon.write_text(json.dumps({"schema": "h3-community-lexicon-v1", "terms": []}), encoding="utf-8")
+    acc_with_ext, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        upstream_clearances=clearances, community_lexicon=lexicon,
+    )
+    pf_missing_ext = run_preflight(acc_with_ext, judges)
+    assert pf_missing_ext["approval_tokens"]["full"].startswith("unavailable")
+    assert "upstream_clearances" in pf_missing_ext["approval_tokens"]["full"]
+    pf_ok_ext = run_preflight(acc_with_ext, judges, clearances, lexicon)
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", pf_ok_ext["approval_tokens"]["full"])
+    assert pf_ok_ext["preconditions"]["acceptance_bindings_sha256"] == json.loads(
+        acc_with_ext.read_text(encoding="utf-8")
+    )["bindings_sha256"]
+
+    # 9. Valid acceptance + valid judges via --acceptance-receipt and --judges flags -> issues h3-live-... token.
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+        matcher_revision=sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION,
+    )
+    pf_ok = run_preflight(good_acc, judges)
+    token = pf_ok["approval_tokens"]["full"]
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", token), token
+    assert pf_ok["approval_tokens"]["ablation"] == token
+    pf_flags_out = env["tmp"] / "pf_flags.json"
+    assert h3.main(
+        ["preflight", *pinned_args, *env["freeze"],
+         "--acceptance-receipt", str(good_acc), "--judges", str(judges),
+         "--manifest", str(env["manifest"]), "--json-out", str(pf_flags_out)]
+    ) == 0
+    assert json.loads(pf_flags_out.read_text(encoding="utf-8"))["approval_tokens"]["full"] == token
+    assert no_network == []
+
+
+def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, env, capsys, monkeypatch, no_network):
+    secret_proxy = "http://proxyuser:super-secret-pass@proxy.internal.invalid:8443"
+    # 1. --proxy combined with --fake-transport is refused (exit 1), and unsupported schemes (socks5) are refused.
+    code, err = _run(
+        h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--proxy", secret_proxy), capsys
+    )
+    assert code == 1 and "--proxy" in err and "super-secret-pass" not in err
+    code_socks, err_socks = _run(
+        h3,
+        env["args"](
+            "full", "raw_baseline", "--live", "--owner-approval-token", "h3-live-000000000000000000000000",
+            "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+            "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+            "--proxy", "socks5://proxy.internal.invalid:1080",
+        ),
+        capsys,
+    )
+    assert code_socks == 1 and "scheme" in err_socks and "proxy.internal.invalid" not in err_socks
+
+    # 2. Live path mounts AsyncHTTPTransport(proxy=..., trust_env=False) and never writes URL/creds to ledger.
+    monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
+    monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
+    monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://live-gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "live-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", h3.PINNED_MODEL)
+    monkeypatch.setenv("HTTPS_PROXY", "http://unrequested-env-proxy.invalid:9999")
+
+    two_docs = env["tmp"] / "live_two_docs.json"
+    two_docs.write_text(
+        json.dumps(
+            {"schema": "h3-manifest-v1", "set": "H3-live-proxy", "documents": [DOCS[0], DOCS[2]]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=two_docs, src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
+    freeze_all = [*env["freeze"], "--freeze", str(good_acc), "--freeze", str(judges)]
+    pf_out = env["tmp"] / "pf_live_proxy.json"
+    assert h3.main(["preflight", *pinned_args, *freeze_all, "--manifest", str(two_docs), "--json-out", str(pf_out)]) == 0
+    token = json.loads(pf_out.read_text(encoding="utf-8"))["approval_tokens"]["full"]
+    assert token.startswith("h3-live-")
+
+    captured_transport_kwargs: list[dict] = []
+    captured_payloads: list[bytes] = []
+    real_async_transport = httpx.AsyncHTTPTransport
+
+    def spy_transport(*args, **kwargs):
+        captured_transport_kwargs.append(dict(kwargs))
+        # Validate httpx accepts the exact arguments (proxy + trust_env=False) without making a socket call.
+        real = real_async_transport(*args, **kwargs)
+        assert real is not None
+        fake_gw = h3.FakeGateway("raw_baseline", [])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_payloads.append(bytes(request.content))
+            return fake_gw(request)
+
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", spy_transport)
+
+    # Run 1 (with --proxy)
+    run_dir_proxy = env["tmp"] / "live_run_proxy"
+    code, summary = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_proxy), "--manifest", str(two_docs),
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--live", "--owner-approval-token", token,
+         "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+         "--proxy", secret_proxy],
+        capsys,
+    )
+    assert code == 0, summary
+    assert summary["proxy_enabled"] is True
+    assert captured_transport_kwargs == [{"proxy": secret_proxy, "trust_env": False}]
+    ledger_text = (run_dir_proxy / "h3-ledger.json").read_text(encoding="utf-8")
+    log_text = (run_dir_proxy / "h3-ledger-log.jsonl").read_text(encoding="utf-8")
+    ledger = json.loads(ledger_text)
+    assert ledger["proxy_enabled"] is True
+    assert ledger["records"][-1]["proxy_enabled"] is True
+    assert "super-secret-pass" not in ledger_text and "proxy.internal.invalid" not in ledger_text
+    assert "super-secret-pass" not in log_text and "proxy.internal.invalid" not in log_text
+
+    # Run 2 (without --proxy, different budget to prove token excludes budget and proxy; payload bytes identical)
+    run_dir_direct = env["tmp"] / "live_run_direct"
+    code2, summary2 = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_direct), "--manifest", str(two_docs),
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--live", "--owner-approval-token", token,
+         "--ledger-budget-usd", "9.5", "--max-cost-usd", "4.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],
+        capsys,
+    )
+    assert code2 == 0, summary2
+    assert summary2["proxy_enabled"] is False
+    assert captured_transport_kwargs[-1] == {"proxy": None, "trust_env": False}
+    assert json.loads((run_dir_direct / "h3-ledger.json").read_text(encoding="utf-8"))["proxy_enabled"] is False
+    # Wire request bytes sent to the gateway are unchanged by budget/proxy settings.
+    assert len(captured_payloads) == 2 and captured_payloads[0] == captured_payloads[1]
+    assert no_network == []
+
+
+def test_pilot_stage_live_path_with_full_manifest_acceptance_receipt(h3, env, capsys, monkeypatch, no_network):
+    """Stage 1 pilot (separate 8-doc diagnostic slice) passes preflight and live runs
+    using the H3 full manifest's h3-acceptance-v1 receipt and h3-judges-v1 roster,
+    sharing one h3-ledger.json across pilot, full, and ablation.
+    """
+    monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
+    monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
+    monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://live-gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "live-test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", h3.PINNED_MODEL)
+
+    # Separate 8-doc pilot diagnostic manifest (distinct from the full H3 manifest).
+    pilot_docs = [
+        {"doc_id": f"d_zh_{i}", "direction": "zh->en", "genre": "guide", "text": f"诊断中文段落 {i}。"}
+        for i in range(4)
+    ] + [
+        {"doc_id": f"d_en_{i}", "direction": "en->zh", "genre": "guide", "text": f"Diagnostic English line {i}."}
+        for i in range(4)
+    ]
+    pilot_manifest = env["tmp"] / "pilot_manifest.json"
+    pilot_manifest.write_text(
+        json.dumps({"schema": "h3-manifest-v1", "set": "D-pilot-8", "documents": pilot_docs}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    full_manifest = env["manifest"]
+    assert _sha256(pilot_manifest) != _sha256(full_manifest)
+
+    # Receipt accepts ONLY the full H3 manifest (no pilot_manifest field, matching eval_h3_corpus).
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=full_manifest, src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    # Pin manifest_sha256 on judges.json to the full H3 manifest too.
+    judges_data = json.loads(judges.read_text(encoding="utf-8"))
+    judges_data["manifest_sha256"] = _sha256(full_manifest)
+    judges.write_text(json.dumps(judges_data, ensure_ascii=False), encoding="utf-8")
+
+    pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
+    freeze_all = [*env["freeze"], "--freeze", str(good_acc), "--freeze", str(judges)]
+
+    # Preflight with --pilot-manifest issues valid tokens for pilot, full, and ablation.
+    pf_out = env["tmp"] / "pf_pilot_live.json"
+    code = h3.main(
+        ["preflight", *pinned_args, *freeze_all, "--manifest", str(full_manifest),
+         "--pilot-manifest", str(pilot_manifest), "--json-out", str(pf_out)]
+    )
+    assert code == 0
+    pf = json.loads(pf_out.read_text(encoding="utf-8"))
+    pilot_tok = pf["approval_tokens"]["pilot"]
+    full_tok = pf["approval_tokens"]["full"]
+    ablation_tok = pf["approval_tokens"]["ablation"]
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", pilot_tok), pilot_tok
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", full_tok), full_tok
+    assert ablation_tok == full_tok
+    assert pilot_tok != full_tok
+
+    # Verify missing context_id in h3-judges-v1 is rejected.
+    bad_judges = env["tmp"] / "judges_no_ctx.json"
+    bad_judges_data = json.loads(judges.read_text(encoding="utf-8"))
+    del bad_judges_data["judges"]["j2"]["context_id"]
+    bad_judges.write_text(json.dumps(bad_judges_data, ensure_ascii=False), encoding="utf-8")
+    pf_bad_j = env["tmp"] / "pf_bad_j.json"
+    assert h3.main(
+        ["preflight", *pinned_args, *env["freeze"], "--freeze", str(good_acc), "--freeze", str(bad_judges),
+         "--manifest", str(full_manifest), "--pilot-manifest", str(pilot_manifest), "--json-out", str(pf_bad_j)]
+    ) == 0
+    assert json.loads(pf_bad_j.read_text(encoding="utf-8"))["approval_tokens"]["pilot"].startswith("unavailable")
+
+    # Monkeypatch AsyncHTTPTransport to in-process FakeGateway so live path runs with 0 network.
+    monkeypatch.setattr(
+        httpx,
+        "AsyncHTTPTransport",
+        lambda *a, **kw: httpx.MockTransport(h3.FakeGateway("wuwaterm_prod", [])),
+    )
+    live_dir = env["tmp"] / "live_all_stages"
+    cost_flags = [
+        "--ledger-budget-usd", "10.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
+
+    # Stage 1 pilot (without --full-manifest, then with --full-manifest) succeeds and binds pilot_manifest_sha256.
+    code, p_prod = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "wuwaterm_prod", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_prod
+    code, p_raw = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--full-manifest", str(full_manifest),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_raw
+    code, p_matched = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "raw_matched", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, p_matched
+
+    # Stage 2 full and Stage 3 ablation on the SAME h3-ledger.json with --pilot-manifest pass cleanly.
+    for stage, arm, tok in (
+        ("full", "wuwaterm_prod", full_tok),
+        ("full", "raw_baseline", full_tok),
+        ("ablation", "raw_matched", ablation_tok),
+    ):
+        code, res = _run(
+            h3,
+            ["run", *pinned_args, *freeze_all, "--run-dir", str(live_dir), "--manifest", str(full_manifest),
+             "--pilot-manifest", str(pilot_manifest),
+             "--stage", stage, "--arm", arm, "--max-calls", "240",
+             "--live", "--owner-approval-token", tok, *cost_flags],
+            capsys,
+        )
+        assert code == 0, (stage, arm, res)
+
+    ledger = json.loads((live_dir / "h3-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["mode"] == "live"
+    assert ledger["bindings"]["pilot_manifest_sha256"] == _sha256(pilot_manifest)
+    assert len(ledger["records"]) == 6
+    assert ledger["records"][0]["preconditions"]["acceptance_bindings_sha256"] == json.loads(
+        good_acc.read_text(encoding="utf-8")
+    )["bindings_sha256"]
+    assert ledger["records"][0]["preconditions"]["judges_sha256"] == _sha256(judges)
+
+    # Negative check: mismatched --full-manifest on pilot is refused (exit 1).
+    code_bad, err_bad = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(env["tmp"] / "bad_pilot"), "--manifest", str(pilot_manifest),
+         "--full-manifest", str(pilot_manifest),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "56",
+         "--live", "--owner-approval-token", pilot_tok, *cost_flags],
+        capsys,
+    )
+    assert code_bad == 1 and "manifest_sha256" in err_bad
     assert no_network == []
 
 
@@ -490,8 +1292,16 @@ def test_preflight_and_cost_estimate_itemize_the_dry_run(h3, env, capsys, no_net
 
 def test_protocol_records_the_sha256_of_the_frozen_h3_tools():
     text = PROTOCOL.read_text(encoding="utf-8")
-    for rel in ("scripts/eval_h3.py", "scripts/eval_h3_export.py", "docs/eval/h3-judging-addendum.md",
-                "scripts/eval_usability.py"):
+    for rel in (
+        "scripts/eval_h3.py",
+        "scripts/eval_h3_corpus.py",
+        "scripts/eval_h3_tree_diff.py",
+        "scripts/eval_h3_export.py",
+        "scripts/eval_usability.py",
+        "scripts/eval_semantic.py",
+        "docs/eval/usability-judging.md",
+        "docs/eval/h3-judging-addendum.md",
+    ):
         recorded = re.findall(rf"`{re.escape(rel)}` SHA-256 `([0-9a-f]{{64}})`", text)
         assert recorded, rel
         assert set(recorded) == {_sha256(ROOT / rel)}, rel
