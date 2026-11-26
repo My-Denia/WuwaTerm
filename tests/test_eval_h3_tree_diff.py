@@ -40,6 +40,11 @@ def diff_mod():
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Block socket/DNS calls in the pytest main process.
+
+    Child processes launched by ``eval_h3_tree_diff`` enforce offline
+    isolation via ``MockTransport``, ``ASGITransport``, and ``.invalid`` URLs.
+    """
     attempts: list[object] = []
 
     def refuse(*args, **kwargs):
@@ -173,6 +178,9 @@ def test_identical_trees_pass_all_scenarios_without_text_leak(
     assert by_scenario["timeout_fallback"]["counts"]["documents_inconsistent"] == 0
     assert by_scenario["paragraph_repair"]["counts"]["posts_a"] > default_counts["posts_a"]
     assert by_scenario["paragraph_repair"]["counts"]["documents_inconsistent"] == 0
+    assert report["static_reachability"]["pinned_v013_v014_baseline"] is False
+    assert report["static_reachability"]["default_translation_path_analysis"] is None
+    assert report["static_reachability"]["changed_src_files"] == []
     assert no_network == []
 
 
@@ -234,6 +242,9 @@ def test_injected_prepared_terms_diff_is_localized_without_text_leak(
     assert loc["earliest_diverging_stage"] == "prepared_terms"
     assert "locks" in loc["diverging_fields"]
     assert loc["fixed_nonce_request_diffs"] >= 1
+    assert report["static_reachability"]["pinned_v013_v014_baseline"] is False
+    assert report["static_reachability"]["default_translation_path_analysis"] is None
+    assert report["static_reachability"]["changed_src_files"] == ["src/wuwaterm/term_preparation.py"]
 
 
 def test_injected_request_spec_thinking_diff_is_localized(
@@ -301,6 +312,99 @@ def test_injected_request_spec_thinking_diff_is_localized(
     loc = sc["inconsistent_documents"][0]["stage_localization"]
     assert loc["earliest_diverging_stage"] == "request_spec"
     assert "thinking_mode" in loc["diverging_fields"]
+    assert report["static_reachability"]["changed_src_files"] == ["src/wuwaterm/translation_plan.py"]
+
+
+def test_prefix_counter_does_not_contaminate_subsequent_documents(
+    diff_mod, tmp_path: Path, sample_db: Path
+) -> None:
+    """Divergence in document 1's lock/prefix call count must not taint document 2."""
+    tree_a = tmp_path / "tree_a"
+    tree_b = tmp_path / "tree_b"
+    _init_git_tree(tree_a)
+    _init_git_tree(tree_b)
+
+    # Mutate tree_b so ONLY the first document's text triggers an extra prefix call
+    # while the second document (which also uses mixed single-char locks) stays untouched.
+    sentence_path = tree_b / "src" / "wuwaterm" / "sentence.py"
+    original = sentence_path.read_text(encoding="utf-8")
+    target = "        prepared = prepare_term_segment("
+    extra = (
+        '        if "第一篇测试" in text:\n'
+        "            new_placeholder_prefix(text)\n"
+        "        prepared = prepare_term_segment("
+    )
+    assert target in original
+    sentence_path.write_text(original.replace(target, extra, 1), encoding="utf-8")
+    _commit_tree(tree_b, "extra prefix call on doc 1 only")
+
+    docs = [
+        {
+            "doc_id": "doc_1_extra_call",
+            "direction": "zh->en",
+            "genre": "story",
+            "text": "第一篇测试：椿和今汐看着红椿蕊。",
+        },
+        {
+            "doc_id": "doc_2_clean_locked",
+            "direction": "zh->en",
+            "genre": "story",
+            "text": "第二篇正常：椿和今汐看着红椿蕊。",
+        },
+    ]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"schema": "h3-manifest-v1", "set": "isolation-test", "documents": docs}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "diff-isolation.json"
+
+    code = diff_mod.main(
+        [
+            "run",
+            "--tree-a",
+            str(tree_a),
+            "--tree-b",
+            str(tree_b),
+            "--terms-db",
+            str(sample_db),
+            "--manifest",
+            str(manifest),
+            "--scenarios",
+            "default",
+            "--always-verify-stages",
+            "--skip-api-check",
+            "--json-out",
+            str(out_json),
+        ]
+    )
+    assert code == 1
+    report = json.loads(out_json.read_text(encoding="utf-8"))
+    sc = report["scenarios"][0]
+    assert sc["counts"]["documents_matched"] == 1
+    assert sc["counts"]["documents_inconsistent"] == 1
+    assert [d["doc_id"] for d in sc["inconsistent_documents"]] == ["doc_1_extra_call"]
+
+
+def test_localize_counts_unmatched_requests_as_fixed_nonce_diffs(diff_mod) -> None:
+    doc_a = {
+        "output_sha256": "aaa",
+        "attempts": [{"attempt": 1, "segments": [{"requests": [{"plan_core_sha256": "p1"}]}]}],
+    }
+    doc_b = {
+        "output_sha256": "aaa",
+        "attempts": [
+            {
+                "attempt": 1,
+                "segments": [{"requests": [{"plan_core_sha256": "p1"}, {"plan_core_sha256": "p2"}]}],
+            }
+        ],
+    }
+    loc = diff_mod.localize_document_stages(doc_a, doc_b)
+    assert loc["earliest_diverging_stage"] == "request_spec"
+    assert "request_count" in loc["diverging_fields"]
+    assert loc["fixed_nonce_request_diffs"] == 1
+    assert loc["fixed_nonce_requests_compared"] == 2
 
 
 def test_synthetic_stress_set_and_blind_path_guard(diff_mod, tmp_path: Path, sample_db: Path) -> None:
@@ -312,13 +416,16 @@ def test_synthetic_stress_set_and_blind_path_guard(diff_mod, tmp_path: Path, sam
     assert any("心月狐" in d["text"] for d in stress_docs)
     assert any("椿的回音频段" in d["text"] for d in stress_docs)
 
-    forbidden = tmp_path / "wuwaterm-eval" / "h3-20261126" / "manifest.json"
-    with pytest.raises(diff_mod.DiffToolError, match="forbidden blind evaluation"):
-        diff_mod.ensure_not_blind_path(forbidden)
+    for candidate in (
+        tmp_path / "eval-root" / "h3-20990101" / "manifest.json",
+        tmp_path / "eval-root" / "h3-20990101-pilot" / "manifest.json",
+        tmp_path / "real-manuscript-eval-20990101" / "pool" / "item.json",
+        tmp_path / "real-manuscript-eval-20990101-D" / "corpus" / "item.json",
+    ):
+        with pytest.raises(diff_mod.DiffToolError, match="forbidden blind evaluation"):
+            diff_mod.ensure_not_blind_path(candidate)
 
-    forbidden_real = tmp_path / "real-manuscript-eval-20261115" / "pool" / "item.json"
-    with pytest.raises(diff_mod.DiffToolError, match="forbidden blind evaluation"):
-        diff_mod.ensure_not_blind_path(forbidden_real)
+    forbidden = tmp_path / "eval-root" / "h3-20990101" / "manifest.json"
 
     # CLI refuses forbidden manifest path with exit code 2
     code = diff_mod.main(

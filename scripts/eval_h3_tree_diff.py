@@ -33,6 +33,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,8 +52,10 @@ EXPECTED_V014_TERM_COUNT = 12097
 EXPECTED_V014_MATCHER_REVISION = (
     "286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664"
 )
+PINNED_V013_SRC_TREE = "9e23fd5975caeab024dcb00267e20a6266f4678e"
+PINNED_V014_SRC_TREE = "8e6bd426bfc12625f050c03ed14e419d3dba145f"
 
-FORBIDDEN_BLIND_MARKERS = frozenset({"h3-20261126"})
+FORBIDDEN_H3_DIR_RE = re.compile(r"^h3-\d{8}(?:-[A-Za-z0-9_-]+)?$")
 FORBIDDEN_BLIND_SUBDIRS = frozenset({"pool", "raw", "corpus", "annotations", "work"})
 
 SCENARIOS: dict[str, list[dict[str, Any]]] = {
@@ -106,10 +109,10 @@ def sha16_text(text: str) -> str:
 
 def ensure_not_blind_path(path: Path) -> None:
     parts = path.resolve(strict=False).parts
-    if any(part in FORBIDDEN_BLIND_MARKERS for part in parts):
+    if any(FORBIDDEN_H3_DIR_RE.match(part) for part in parts):
         raise DiffToolError("refused: path lies inside a forbidden blind evaluation directory")
     for idx, part in enumerate(parts[:-1]):
-        if part == "real-manuscript-eval-20261115" and parts[idx + 1] in FORBIDDEN_BLIND_SUBDIRS:
+        if part.startswith("real-manuscript-eval-") and parts[idx + 1] in FORBIDDEN_BLIND_SUBDIRS:
             raise DiffToolError("refused: path lies inside a forbidden blind evaluation directory")
 
 
@@ -591,73 +594,104 @@ def _probe_stages_in_process(
     from wuwaterm import application, cjk_span, request_trace, segmentation, sentence
     from wuwaterm import term_preparation, translation_plan
 
+    current_state: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+        "probe_state", default=None
+    )
+
     if fixed_placeholder_prefix is not None:
-        counter = {"n": 0}
+        fallback_counter = {"n": 0}
 
         def deterministic_prefix(source_text: str) -> str:
+            state = current_state.get()
+            if state is not None:
+                seg_rec = state["segments"][state["seg_idx"]]
+                seg_rec["prefix_calls"] += 1
+                call_idx = seg_rec["prefix_calls"]
+                doc_id = state["doc_id"]
+                attempt = state["attempt"]
+                seg_idx = state["seg_idx"]
+                salt = 0
+                while True:
+                    tag = f"{doc_id}:{attempt}:{seg_idx}:{call_idx}:{salt}"
+                    digest = sha256_text(tag)[:12]
+                    candidate = f"{fixed_placeholder_prefix}{digest}_"
+                    if candidate not in source_text:
+                        return candidate
+                    salt += 1
             while True:
-                counter["n"] += 1
-                candidate = f"{fixed_placeholder_prefix}{counter['n']:04d}_"
+                fallback_counter["n"] += 1
+                candidate = f"{fixed_placeholder_prefix}global_{fallback_counter['n']:04d}_"
                 if candidate not in source_text:
                     return candidate
 
         setattr(term_preparation, "new_placeholder_prefix", deterministic_prefix)
         setattr(sentence, "new_placeholder_prefix", deterministic_prefix)
 
-    current_state: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
-        "probe_state", default=None
-    )
-
     doc_stages: dict[str, dict[str, Any]] = {}
 
+    orig_prepare_term_segment = term_preparation.prepare_term_segment
     orig_lock = sentence.SentenceTranslator._lock_terms_with_references
     orig_build_spec = translation_plan.build_translation_request_spec
+
+    def _record_prepared(
+        seg_rec: dict[str, Any],
+        prepared_text: str,
+        locked_text: str,
+        locks: Sequence[Any],
+        references: Sequence[Any],
+        ambiguous: Sequence[Any],
+    ) -> None:
+        seg_rec["prepared_text_sha256"] = sha256_text(prepared_text)
+        seg_rec["locked_text_sha256"] = sha256_text(locked_text)
+        seg_rec["locks_count"] = len(locks)
+        seg_rec["locks_sha256"] = sha256_bytes(
+            canonical_json([list(lock) for lock in locks])
+        )
+        serialized_refs = _serialize_refs(references)
+        seg_rec["references_count"] = len(serialized_refs)
+        seg_rec["references_sha256"] = sha256_bytes(canonical_json(serialized_refs))
+        seg_rec["ambiguous_count"] = len(ambiguous)
+
+    def wrapped_prepare_term_segment(text: str, *args: Any, **kwargs: Any) -> Any:
+        prepared = orig_prepare_term_segment(text, *args, **kwargs)
+        state = current_state.get()
+        if state is not None:
+            seg_rec = state["segments"][state["seg_idx"]]
+            _record_prepared(
+                seg_rec,
+                text,
+                prepared.locked_text,
+                prepared.locks,
+                prepared.references,
+                getattr(prepared, "ambiguous", ()),
+            )
+            seg_rec["saw_prepare_term_segment"] = True
+        return prepared
 
     def wrapped_lock(
         self: Any,
         text: str,
-        *,
-        to_chinese: bool,
-        allow_plural_inflection: bool = False,
-        allow_nfkc_spelling: bool = False,
-        single_newline_paragraphs: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
-        # Call prepare_term_segment identically to capture full PreparedTerms (including ambiguous count)
-        lockable, nfkc_sources = self._eligible_lockable_snapshot()
-        if not allow_nfkc_spelling:
-            nfkc_sources = frozenset()
-        prefix = term_preparation.new_placeholder_prefix(text)
-        prepared = term_preparation.prepare_term_segment(
-            text,
-            lockable=lockable,
-            context_text=text,
-            context_offset=0,
-            categories=self._source_categories(),
-            reference_only=self._reference_only_sources(),
-            to_chinese=to_chinese,
-            allow_plural_inflection=allow_plural_inflection,
-            nfkc_spelling_sources=nfkc_sources,
-            placeholder_prefix=prefix,
-            placeholder_offset=0,
-            reference_candidates=self._reference_candidates(),
-            context_gated_reference_only=self._context_gated_reference_only_sources(),
-            single_newline_paragraphs=single_newline_paragraphs,
-            skill_refs=self._skill_references() if to_chinese is False else (),
-        )
         state = current_state.get()
         if state is not None:
+            state["segments"][state["seg_idx"]]["saw_prepare_term_segment"] = False
+        locked = orig_lock(self, text, *args, **kwargs)
+        if state is not None:
             seg_rec = state["segments"][state["seg_idx"]]
-            seg_rec["prepared_text_sha256"] = sha256_text(text)
-            seg_rec["locked_text_sha256"] = sha256_text(prepared.locked_text)
-            seg_rec["locks_count"] = len(prepared.locks)
-            seg_rec["locks_sha256"] = sha256_bytes(
-                canonical_json([list(lock) for lock in prepared.locks])
+            ambiguous_count = (
+                seg_rec["ambiguous_count"] if seg_rec.get("saw_prepare_term_segment") else 0
             )
-            serialized_refs = _serialize_refs(prepared.references)
-            seg_rec["references_count"] = len(serialized_refs)
-            seg_rec["references_sha256"] = sha256_bytes(canonical_json(serialized_refs))
-            seg_rec["ambiguous_count"] = len(getattr(prepared, "ambiguous", ()))
-        return sentence.LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
+            _record_prepared(
+                seg_rec,
+                text,
+                locked.locked_text,
+                locked.locks,
+                locked.references,
+                () if ambiguous_count == 0 else [None] * ambiguous_count,
+            )
+        return locked
 
     def wrapped_build_spec(plan: Any, **kwargs: Any) -> Any:
         spec = orig_build_spec(plan, **kwargs)
@@ -720,6 +754,8 @@ def _probe_stages_in_process(
             )
         return spec
 
+    setattr(term_preparation, "prepare_term_segment", wrapped_prepare_term_segment)
+    setattr(sentence, "prepare_term_segment", wrapped_prepare_term_segment)
     setattr(sentence.SentenceTranslator, "_lock_terms_with_references", wrapped_lock)
     setattr(translation_plan, "build_translation_request_spec", wrapped_build_spec)
     setattr(sentence, "build_translation_request_spec", wrapped_build_spec)
@@ -830,6 +866,7 @@ def _probe_stages_in_process(
                             "references_count": 0,
                             "references_sha256": None,
                             "ambiguous_count": 0,
+                            "prefix_calls": 0,
                             "transport_posts": 0,
                             "requests": [],
                         }
@@ -887,6 +924,8 @@ def _probe_stages_in_process(
         with probe_env():
             asyncio.run(run_all())
     finally:
+        setattr(term_preparation, "prepare_term_segment", orig_prepare_term_segment)
+        setattr(sentence, "prepare_term_segment", orig_prepare_term_segment)
         setattr(sentence.SentenceTranslator, "_lock_terms_with_references", orig_lock)
         setattr(translation_plan, "build_translation_request_spec", orig_build_spec)
         setattr(sentence, "build_translation_request_spec", orig_build_spec)
@@ -978,12 +1017,27 @@ def localize_document_stages(
 
     if len(attempts_a) != len(attempts_b):
         note("attempt", "attempt_count")
+        unmatched_attempts = (
+            attempts_a[len(attempts_b) :] if len(attempts_a) > len(attempts_b) else attempts_b[len(attempts_a) :]
+        )
+        for att in unmatched_attempts:
+            for seg in att.get("segments") or []:
+                n_reqs = len(seg.get("requests") or [])
+                fixed_nonce_requests_compared += n_reqs
+                fixed_nonce_request_diffs += n_reqs
 
     for att_a, att_b in zip(attempts_a, attempts_b):
         segs_a = att_a.get("segments") or []
         segs_b = att_b.get("segments") or []
         if len(segs_a) != len(segs_b):
             note("segmentation", "segment_count")
+            unmatched_segs = (
+                segs_a[len(segs_b) :] if len(segs_a) > len(segs_b) else segs_b[len(segs_a) :]
+            )
+            for seg in unmatched_segs:
+                n_reqs = len(seg.get("requests") or [])
+                fixed_nonce_requests_compared += n_reqs
+                fixed_nonce_request_diffs += n_reqs
         for seg_a, seg_b in zip(segs_a, segs_b):
             ambiguous_counts_a += int(seg_a.get("ambiguous_count", 0))
             ambiguous_counts_b += int(seg_b.get("ambiguous_count", 0))
@@ -1006,6 +1060,9 @@ def localize_document_stages(
             reqs_b = seg_b.get("requests") or []
             if len(reqs_a) != len(reqs_b):
                 note("request_spec", "request_count")
+                extra = abs(len(reqs_a) - len(reqs_b))
+                fixed_nonce_requests_compared += extra
+                fixed_nonce_request_diffs += extra
             for req_a, req_b in zip(reqs_a, reqs_b):
                 fixed_nonce_requests_compared += 1
                 req_diff = False
@@ -1243,6 +1300,16 @@ def compare_scenario_outputs(
                 pb = probe_b["documents"].get(doc_id)
                 if pa is None or pb is None:
                     continue
+                entry_a = docs_a.get(doc_id)
+                entry_b = docs_b.get(doc_id)
+                probe_posts_a = _doc_post_count(pa)
+                probe_posts_b = _doc_post_count(pb)
+                if entry_a is not None and probe_posts_a != _doc_post_count(entry_a):
+                    doc_eval_issues[doc_id].append("probe_post_count_mismatch_a")
+                    bump("probe_post_count_mismatch_a")
+                if entry_b is not None and probe_posts_b != _doc_post_count(entry_b):
+                    doc_eval_issues[doc_id].append("probe_post_count_mismatch_b")
+                    bump("probe_post_count_mismatch_b")
                 loc = localize_document_stages(pa, pb)
                 stage_localization_by_doc[doc_id] = loc
                 counts["fixed_nonce_requests_verified"] += int(
@@ -1298,26 +1365,52 @@ def compare_scenario_outputs(
 # ------------------------------------------------ static reachability summary
 
 
-def build_static_reachability_summary(tree_a: Path, tree_b: Path) -> dict[str, Any]:
-    """Inspect changed ``src/`` files between ``tree_a`` and ``tree_b`` and verify reachability."""
+def _src_tree_file_hashes(src_root: Path) -> dict[str, str]:
+    if not src_root.is_dir():
+        raise DiffToolError(f"missing src directory: {src_root}")
+    hashes: dict[str, str] = {}
+    for path in sorted(src_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(src_root.parent)
+        if "__pycache__" in rel.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        hashes[rel.as_posix()] = sha256_file(path)
+    return hashes
+
+
+def build_static_reachability_summary(
+    tree_a: Path,
+    tree_b: Path,
+    *,
+    src_a: str | None = None,
+    src_b: str | None = None,
+) -> dict[str, Any]:
+    """Compute actual ``src/`` file diffs between ``tree_a`` and ``tree_b``.
+
+    The curated ``v0.13.0 -> v0.14.0`` static reachability notes are attached
+    only when ``src_a`` and ``src_b`` match the pinned baseline SHAs.
+    """
     commit_a = git_rev_parse(tree_a, "HEAD")
     commit_b = git_rev_parse(tree_b, "HEAD")
-    changed_files: list[str] = []
-    # Check git diff if tree_b shares object DB with tree_a (worktrees do)
-    proc = subprocess.run(
-        ["git", "-C", str(tree_b), "diff", "--name-only", f"{commit_a}..{commit_b}", "--", "src/"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode == 0 and proc.stdout.strip():
-        changed_files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    resolved_src_a = src_a or git_rev_parse(tree_a, "HEAD:src")
+    resolved_src_b = src_b or git_rev_parse(tree_b, "HEAD:src")
 
-    return {
-        "commit_a": commit_a,
-        "commit_b": commit_b,
-        "changed_src_files": changed_files,
-        "default_translation_path_analysis": {
+    hashes_a = _src_tree_file_hashes(tree_a / "src")
+    hashes_b = _src_tree_file_hashes(tree_b / "src")
+    changed_files = [
+        rel
+        for rel in sorted(set(hashes_a) | set(hashes_b))
+        if hashes_a.get(rel) != hashes_b.get(rel)
+    ]
+
+    pinned_baseline_match = (
+        resolved_src_a == PINNED_V013_SRC_TREE
+        and resolved_src_b == PINNED_V014_SRC_TREE
+    )
+    analysis: dict[str, str] | None = None
+    if pinned_baseline_match:
+        analysis = {
             "cjk_span.py": (
                 "Only MATCHER_REVISION bumped (v10 -> v11); matcher functions, _WORDS lexicon, "
                 "and single-character name sets are unchanged."
@@ -1348,7 +1441,16 @@ def build_static_reachability_summary(tree_a: Path, tree_b: Path) -> dict[str, A
                 "Added ambiguous-mention-v1 review header and POST /v1/structure-checks; "
                 "translation routes untouched."
             ),
-        },
+        }
+
+    return {
+        "commit_a": commit_a,
+        "commit_b": commit_b,
+        "src_tree_a": resolved_src_a,
+        "src_tree_b": resolved_src_b,
+        "pinned_v013_v014_baseline": pinned_baseline_match,
+        "changed_src_files": changed_files,
+        "default_translation_path_analysis": analysis,
     }
 
 
@@ -1595,7 +1697,10 @@ def execute_differential(
         "scenarios": scenario_reports,
         "v014_api_verification": api_check,
         "static_reachability": build_static_reachability_summary(
-            target_a.bound_tree, target_b.bound_tree
+            target_a.bound_tree,
+            target_b.bound_tree,
+            src_a=src_a,
+            src_b=src_b,
         ),
         "differential_clean": not any_inconsistent,
     }
