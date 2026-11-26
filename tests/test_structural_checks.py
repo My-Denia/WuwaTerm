@@ -295,9 +295,33 @@ def test_structure_checks_report_changed_numeric_facts(source, target, expected)
         ("S1赛季第12层", "Floor 12 in Season 1"),
         ("1+1=2", "1+1=2"),
         ("伤害提升5+1倍", "DMG +5+1x"),
+        ("造成5+1倍伤害", "Deals 5+1x DMG"),
+        ("造成5+1倍伤害", "Deals 5+1X DMG"),
         ("1+2×3", "1+2*3"),
-        # A trailing `and below` that opens the next number is not this one's.
+        # A trailing `and below` that opens the next number is not this one's,
+        # even across a markup tag.
         ("持续至少3回合，生命值低于50%时", "Lasts 3 turns and below 50% HP"),
+        (
+            "持续至少3回合，生命值低于<color=Red>50%</color>时",
+            "Lasts 3 turns and below <color=Red>50%</color> HP",
+        ),
+        (
+            "持续3回合，生命值低于<color=Red>50%</color>",
+            "Lasts 3 turns and below <color=Red>50%</color>",
+        ),
+        # Client `{Cus:...}` template directives are masked from number reading
+        # without entering placeholder comparison.
+        ("最多叠加{0}层", "Stacks up to {0} {Cus:Sap,S=stack P=stacks SapTag=0}"),
+        ("按任意键继续", "Press {Cus:Ipt,PC=Space Mobile=Tap} to continue"),
+        # Digits glued after an ASCII letter excuse only, never report alone.
+        ("索拉等级", "SOL3 Phase"),
+        ("锁天工", "T-G0NG"),
+        ("普通文本", "Ax2"),
+        # Standalone uppercase ASCII Roman numerals (1-39) excuse only.
+        ("伤痕2", "Scar II"),
+        ("体能训练4", "Physical Training IV"),
+        ("挑战39", "Challenge XXXIX"),
+        ("挑战2", "LVIV_A_II"),
         # Month names account for the month of a date.
         ("11月26日06:00", "November 26, 06:00"),
         ("4月{0}日开启", "Available Apr {0}"),
@@ -325,6 +349,55 @@ def test_numbers_of_one_value_pair_as_many_as_their_facets_allow():
 
 def test_extract_numbers_keeps_reading_digits_only():
     assert extract_numbers("+20% 与 S0R1 和 3+1") == ("20", "0", "1", "3", "1")
+    assert extract_numbers("{Cus:Sap,S=stack P=stacks SapTag=0}") == ("0",)
+    assert missing_numbers("每2秒可触发1次", "triggered {Cus:Sap,S=time P=times SapTag=1} every 2s") == ()
+
+
+def test_cus_template_masking_does_not_excuse_real_numbers():
+    # `SapTag=1` inside `{Cus:Sap,...}` must neither raise a finding on its own
+    # nor excuse the missing `1` on the Chinese side. `<SapTag=1>` / `</SapTag>`
+    # remain ordinary markup tags on the placeholder track.
+    result = findings(
+        "每2秒可触发1次",
+        "triggered <SapTag=1>{1}</SapTag> {Cus:Sap,S=time P=times SapTag=1} every {0}s",
+    )
+    number_findings = [(rule, text) for rule, text in result if rule.startswith("number_")]
+    placeholder_findings = [
+        (rule, text) for rule, text in result if rule.startswith("placeholder_")
+    ]
+    assert number_findings == [("number_missing", "2秒"), ("number_missing", "1")]
+    assert ("placeholder_unexpected", "<SapTag=1>") in placeholder_findings
+    assert ("placeholder_unexpected", "</SapTag>") in placeholder_findings
+    assert all("{Cus:" not in (text or "") for _, text in placeholder_findings)
+
+
+def test_letter_glued_digits_and_roman_boundaries():
+    # Glued `3` in `SOL3` excuses Chinese `3`, while the real 3 != 4 mismatch stays flagged.
+    assert findings("索拉等级3阶", "SOL3 Phase 4") == [("number_unexpected", "4")]
+    # Exception (b): glued digits carrying an attached percent or unit are still reported.
+    assert findings("生命值40%", "HP50%") == [
+        ("number_missing", "40%"),
+        ("number_unexpected", "50%"),
+    ]
+    # Exception (a): standalone `x`/`X` multiplier prefix is still reported.
+    assert findings("枢芯×1", "Kernel x2") == [
+        ("number_missing", "×1"),
+        ("number_unexpected", "x2"),
+    ]
+    # Trailing `and below` before a tagged number does not attach to `3` or widen its span.
+    assert findings(
+        "持续4回合，生命值低于<color=Red>50%</color>",
+        "Lasts 3 turns and below <color=Red>50%</color>",
+    ) == [("number_missing", "4"), ("number_unexpected", "3")]
+    # Pronoun `I` followed by English prose does not excuse `1`, and `I have 1 apple` still flags `1`.
+    assert findings("我有苹果", "I have 1 apple") == [("number_unexpected", "1")]
+    assert findings("我有1个苹果", "I have an apple") == [("number_missing", "1")]
+    assert findings("我有1个苹果", "I’ve got an apple") == [("number_missing", "1")]
+    # `LVIV` is not a Roman numeral (preceded/joined with letters); only `II` excuses 2.
+    assert findings("挑战4", "LVIV_A_II") == [("number_missing", "4")]
+    # L/C/D/M are excluded from ASCII Roman numeral excuses.
+    assert findings("等级50", "Tier L") == [("number_missing", "50")]
+    assert findings("数量100", "Rank C") == [("number_missing", "100")]
 
 
 @pytest.mark.parametrize(
@@ -338,6 +411,8 @@ def test_extract_numbers_keeps_reading_digits_only():
         ("".join(f"+{n}% {n}秒 >{n} " for n in range(1000))[:2000],
          "".join(f"-{n}% {n}m <{n} " for n in range(1000))[:2000]),
         ("9" * 2000, "亿" * 2000),
+        (("{Cus:Sap,S=stack P=stacks SapTag=0} " * 60)[:2000], ("{Cus:Sap," + "a" * 1990)[:2000]),
+        (("XXXVIII IV I have " * 120)[:2000], ("SOL3 T-G0NG HP50% " * 120)[:2000]),
     ],
 )
 def test_numeric_facts_stay_linear_on_adversarial_sides(pair):
