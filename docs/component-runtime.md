@@ -50,6 +50,11 @@ commit. Adoption may run an isolated, network-disabled legacy image probe to
 identify the installed Core version. The result reports polling health as
 unconfirmed.
 
+A deployment adopted before the recipe carried the API memory reservation and
+OOM score records them with `refresh-runtime-options`, a metadata-only
+transaction; see
+[API resource settings on an adopted deployment](deployment.md#api-resource-settings-on-an-adopted-deployment).
+
 ### 2. Build a sealed delivery bundle
 
 Delivery bundles are built outside the deployment lock without holding or

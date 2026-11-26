@@ -85,13 +85,13 @@ services:
     # Both live in this file because deploy/vps-update.sh recreates from it
     # alone; an override file would not be read. A container adopted by a
     # release that records these fields has both recorded, and updates keep and
-    # replay them. A deployment adopted earlier keeps its existing record,
-    # which lacks them: an update copies the running container's host
-    # configuration and keeps that record, so a container recreated through
-    # Compose with these settings, or given a memory reservation with
-    # `docker update` (which cannot set the OOM score), is reported as
-    # "observed container recipe differs". `adopt` refuses an already adopted
-    # deployment, so there is no migration path for the old record yet.
+    # replay them from the recorded recipe. A deployment adopted earlier has a
+    # record without them: a container recreated through Compose with these
+    # settings, or given a memory reservation with `docker update` (which
+    # cannot set the OOM score), is reported as "observed container recipe
+    # differs" until `deploy/product-update.sh refresh-runtime-options`
+    # records them. `adopt` still refuses an already adopted deployment. See
+    # "API resource settings on an adopted deployment" in docs/deployment.md.
     mem_reservation: 96m
     oom_score_adj: -500
     network_mode: host

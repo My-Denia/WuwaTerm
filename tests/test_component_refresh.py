@@ -488,7 +488,7 @@ def test_replaced_container_without_a_new_option_is_not_rebound(deployment) -> N
     assert record.authority() == before
 
 
-def test_unadopted_root_and_missing_api_are_refused(deployment) -> None:
+def test_unadopted_root_is_refused(deployment) -> None:
     record = deployment()
     (record.root / ".deploy_current").unlink()
     with pytest.raises(JournalError, match="adopted and reconciled|pointer"):
