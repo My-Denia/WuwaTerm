@@ -29,10 +29,11 @@ once more from the start; the final attempt is the one that counts.
 Safety. Nothing is sent unless exactly one of ``--fake-transport`` or
 ``--live --owner-approval-token TOKEN`` is given. ``--owner-approval-token`` is a
 configuration anti-drift digest only (never a budget or spend authorization);
-``--live`` separately requires ``--ledger-budget-usd`` (or ``--max-cost-usd``),
-``--price-input-per-1m`` and ``--price-output-per-1m``, plus valid
-``h3-acceptance-v1`` (``verdict == "pass"``) and ``h3-judges-v1`` files among
-``--freeze``. ``--fake-transport`` routes every request to an in-process
+``--live`` separately requires both ``--ledger-budget-usd`` (whole-ledger cap)
+and ``--max-cost-usd`` (per-run cap), ``--price-input-per-1m`` and
+``--price-output-per-1m``, plus valid ``h3-acceptance-v1`` (``verdict == "pass"``)
+and ``h3-judges-v1`` files among ``--freeze`` / ``--acceptance-receipt`` /
+``--judges``. ``--fake-transport`` routes every request to an in-process
 deterministic gateway (``httpx.MockTransport``), points the gateway variables at
 ``.invalid`` and refuses ``--proxy``. Every POST is charged to ``h3-ledger.json``
 by the transport pre-send hook before it is sent and refused once ``--max-calls``,
@@ -129,8 +130,8 @@ PLACEHOLDER_JUDGE_MODELS = frozenset(
 )
 APPROVAL_TOKEN_NOTE = (
     "--owner-approval-token is a configuration anti-drift digest only, NOT a "
-    "budget or spend authorization; live runs separately enforce "
-    "--ledger-budget-usd/--max-cost-usd and token prices."
+    "budget or spend authorization; live runs separately require both "
+    "--ledger-budget-usd and --max-cost-usd together with token prices."
 )
 
 # §6 call budget.
@@ -512,31 +513,36 @@ def parse_cost_config(
     price_input_per_1m: float | None,
     price_output_per_1m: float | None,
 ) -> CostConfig | None:
-    budget = ledger_budget_usd if ledger_budget_usd is not None else max_cost_usd
-    given = (budget is not None, price_input_per_1m is not None, price_output_per_1m is not None)
+    given = (
+        ledger_budget_usd is not None,
+        max_cost_usd is not None,
+        price_input_per_1m is not None,
+        price_output_per_1m is not None,
+    )
     if live:
         if not all(given):
             raise Refused(
-                "--live requires --ledger-budget-usd (or --max-cost-usd), "
+                "--live requires --ledger-budget-usd, --max-cost-usd, "
                 "--price-input-per-1m and --price-output-per-1m"
             )
     elif not any(given):
         return None
     elif not all(given):
         raise Refused(
-            "give --ledger-budget-usd (or --max-cost-usd) together with "
-            "--price-input-per-1m and --price-output-per-1m"
+            "give --ledger-budget-usd, --max-cost-usd, "
+            "--price-input-per-1m and --price-output-per-1m together"
         )
-    assert budget is not None and price_input_per_1m is not None and price_output_per_1m is not None
-    validated_budget = _positive_finite(budget, "--ledger-budget-usd/--max-cost-usd")
-    validated_run_cap = (
-        _positive_finite(max_cost_usd, "--max-cost-usd") if max_cost_usd is not None else None
+    assert (
+        ledger_budget_usd is not None
+        and max_cost_usd is not None
+        and price_input_per_1m is not None
+        and price_output_per_1m is not None
     )
     return CostConfig(
-        ledger_budget_usd=validated_budget,
+        ledger_budget_usd=_positive_finite(ledger_budget_usd, "--ledger-budget-usd"),
         price_input_per_1m=_positive_finite(price_input_per_1m, "--price-input-per-1m"),
         price_output_per_1m=_positive_finite(price_output_per_1m, "--price-output-per-1m"),
-        max_cost_usd=validated_run_cap,
+        max_cost_usd=_positive_finite(max_cost_usd, "--max-cost-usd"),
     )
 
 
@@ -1967,9 +1973,9 @@ def write_outputs(cfg: RunConfig, record: dict[str, Any], results: Sequence[DocR
 def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
     """Run one stage of one arm. Every refusal happens before a client exists."""
     cfg.proxy = validate_proxy_url(cfg.proxy, live=cfg.live)
-    if cfg.live and cfg.cost is None:
+    if cfg.live and (cfg.cost is None or cfg.cost.max_cost_usd is None):
         raise Refused(
-            "--live requires --ledger-budget-usd (or --max-cost-usd), "
+            "--live requires --ledger-budget-usd, --max-cost-usd, "
             "--price-input-per-1m and --price-output-per-1m"
         )
     if cfg.stage == "pilot":
@@ -2386,7 +2392,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cost-usd",
         type=float,
         metavar="USD",
-        help="per-run pre-send USD cap (when passed alone without --ledger-budget-usd, also sets ledger_budget_usd)",
+        help="per-run pre-send USD budget gate: a POST is sent only while record.spent_usd + reserve <= max_cost_usd (required for --live)",
     )
     run.add_argument(
         "--price-input-per-1m",

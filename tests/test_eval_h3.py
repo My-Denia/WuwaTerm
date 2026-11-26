@@ -555,7 +555,10 @@ def _write_live_preconditions(
 
 
 def test_live_mode_is_refused_without_a_matching_approval(h3, env, capsys, monkeypatch, no_network):
-    cost_flags = ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+    cost_flags = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
     code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--live"), capsys)
     assert code == 1 and "--owner-approval-token" in err
     code, err = _run(h3, env["args"]("pilot", "raw_baseline", "--live", "--fake-transport"), capsys)
@@ -615,15 +618,19 @@ def test_live_missing_cost_params_refused_before_client_construction(h3, env, ca
 
     base = env["args"]("pilot", "raw_baseline", "--live", "--owner-approval-token", "h3-live-000000000000000000000000")
     cases = [
-        [],  # missing budget and both prices
-        ["--max-cost-usd", "5.0"],  # missing both prices
-        ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5"],  # missing output price
-        ["--ledger-budget-usd", "5.0", "--price-output-per-1m", "2.0"],  # missing input price
-        ["--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing budget
-        ["--max-cost-usd", "0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero budget
+        [],  # missing both limits and both prices
+        ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing --max-cost-usd
+        ["--max-cost-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing --ledger-budget-usd
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0"],  # missing both prices
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0", "--price-input-per-1m", "0.5"],  # missing output price
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0", "--price-output-per-1m", "2.0"],  # missing input price
+        ["--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing both budget limits
+        ["--ledger-budget-usd", "0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero ledger budget
         ["--ledger-budget-usd", "5.0", "--max-cost-usd", "0",
          "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero per-run cap
-        ["--max-cost-usd", "5.0", "--price-input-per-1m", "-0.5", "--price-output-per-1m", "2.0"],  # negative price
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "-0.5", "--price-output-per-1m", "2.0"],  # negative price
     ]
     for extra in cases:
         code, err = _run(h3, [*base, *extra], capsys)
@@ -655,7 +662,8 @@ def test_cost_cap_pre_send_refusal_exits_3_and_keeps_transport_posts_equal(h3, e
         h3,
         env["args"](
             "pilot", "raw_baseline", "--fake-transport", "--fake-scenario", str(scenario),
-            "--max-cost-usd", str(budget), "--price-input-per-1m", "10.0", "--price-output-per-1m", "40.0",
+            "--ledger-budget-usd", str(budget), "--max-cost-usd", str(budget),
+            "--price-input-per-1m", "10.0", "--price-output-per-1m", "40.0",
         ),
         capsys,
     )
@@ -704,7 +712,8 @@ def test_failed_and_timeout_posts_charge_full_reserve_and_ok_settles_actual(h3, 
         ["run", *env["pins"], *env["freeze"], "--run-dir", str(env["run_dir"]), "--manifest", str(one_doc),
          "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "10",
          "--fake-transport", "--fake-scenario", str(scenario),
-         "--ledger-budget-usd", "10.0", "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out)],
+         "--ledger-budget-usd", "10.0", "--max-cost-usd", "10.0",
+         "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out)],
         capsys,
     )
     assert code == 0, summary
@@ -733,7 +742,8 @@ def test_missing_usage_charges_full_reserve_and_stops_immediately(h3, env, capsy
         h3,
         env["args"](
             "pilot", "raw_baseline", "--fake-transport", "--fake-scenario", str(scenario),
-            "--ledger-budget-usd", "10.0", "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out),
+            "--ledger-budget-usd", "10.0", "--max-cost-usd", "10.0",
+            "--price-input-per-1m", str(price_in), "--price-output-per-1m", str(price_out),
         ),
         capsys,
     )
@@ -753,7 +763,10 @@ def test_missing_usage_charges_full_reserve_and_stops_immediately(h3, env, capsy
 
 
 def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_network):
-    cost = ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+    cost = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
     code, summary = _run(
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "zh->en", *cost), capsys
     )
@@ -765,14 +778,20 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
     assert ledger["spent_usd"] == pytest.approx(summary["spent_usd"])
 
     # Subsequent run with a different budget must be refused (exit 1).
-    changed_cost = ["--ledger-budget-usd", "6.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+    changed_cost = [
+        "--ledger-budget-usd", "6.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
     code, err = _run(
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *changed_cost), capsys
     )
     assert code == 1 and "immutable" in err
 
     # Subsequent run with lower token prices must be refused (exit 1).
-    lower_prices = ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.25", "--price-output-per-1m", "1.0"]
+    lower_prices = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.25", "--price-output-per-1m", "1.0",
+    ]
     code, err = _run(
         h3, env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh", *lower_prices), capsys
     )
@@ -785,7 +804,8 @@ def test_ledger_budget_usd_is_immutable_and_tamper_evident(h3, env, capsys, no_n
     code, err = _run(
         h3,
         env["args"]("pilot", "raw_baseline", "--fake-transport", "--direction", "en->zh",
-                    "--ledger-budget-usd", "500.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"),
+                    "--ledger-budget-usd", "500.0", "--max-cost-usd", "5.0",
+                    "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"),
         capsys,
     )
     assert code == 1 and "ledger_budget_usd" in err
@@ -821,7 +841,10 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
     monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
     pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
-    cost_flags = ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+    cost_flags = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
 
     def run_preflight(*extra_freeze: Path) -> dict:
         out = env["tmp"] / f"pf-{len(list(env['tmp'].glob('pf-*.json')))}.json"
@@ -979,7 +1002,8 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
         h3,
         env["args"](
             "full", "raw_baseline", "--live", "--owner-approval-token", "h3-live-000000000000000000000000",
-            "--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+            "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+            "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
             "--proxy", "socks5://proxy.internal.invalid:1080",
         ),
         capsys,
@@ -1040,7 +1064,8 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
         ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_proxy), "--manifest", str(two_docs),
          "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
          "--live", "--owner-approval-token", token,
-         "--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+         "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
          "--proxy", secret_proxy],
         capsys,
     )
@@ -1062,7 +1087,8 @@ def test_proxy_refused_in_fake_mode_and_mounted_in_live_without_leaking_url(h3, 
         ["run", *pinned_args, *freeze_all, "--run-dir", str(run_dir_direct), "--manifest", str(two_docs),
          "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
          "--live", "--owner-approval-token", token,
-         "--max-cost-usd", "9.5", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],
+         "--ledger-budget-usd", "9.5", "--max-cost-usd", "4.0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],
         capsys,
     )
     assert code2 == 0, summary2
@@ -1150,7 +1176,10 @@ def test_pilot_stage_live_path_with_full_manifest_acceptance_receipt(h3, env, ca
         lambda *a, **kw: httpx.MockTransport(h3.FakeGateway("wuwaterm_prod", [])),
     )
     live_dir = env["tmp"] / "live_all_stages"
-    cost_flags = ["--ledger-budget-usd", "10.0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"]
+    cost_flags = [
+        "--ledger-budget-usd", "10.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
 
     # Stage 1 pilot (without --full-manifest, then with --full-manifest) succeeds and binds pilot_manifest_sha256.
     code, p_prod = _run(
