@@ -144,7 +144,7 @@ Before the **first** live model call of `H3`, an automated pre-freeze check (the
 
 1. **Zero shared uncleared 12-scalar windows**: Run the 12-Unicode-scalar sliding window check (`scripts/eval_usability.py` `scan` semantics, raw text without normalization) of every `H3` candidate source and reference paragraph against **all** prior evaluation corpora: `H1`, `H2`, `D`, `R`, `A1–A6`, `B1–B3`, `S01–S18`, `M-Gold`, and the sealed Core trees (§2.4.1). **Requirement: `0` shared uncleared windows** after the mechanical clearance of §2.4.1 (candidate paragraphs with an uncleared window are pruned or replaced before freeze, never carried forward like `H1`/`H2` announcement templates).
 2. **Source ID and key disjointness**: Every Kuro article ID, TextMap key, story quest line, and community URL/author series appearing in `H1`, `H2`, `D`, `R`, `A1–A6`, `B1–B3`, `S01–S18`, or `M-Gold` is excluded.
-3. **Cutoff and version isolation**: Community texts and announcements must satisfy the pre-`3.8` window (on or before `2026-11-06 19:45 +08:00`) and contain **no mention of game version `3.8` or later**, matching the pinned `3.7.0 / 3.7.8` dictionary (`9218d612`).
+3. **Cutoff and version isolation**: Community texts and announcements must satisfy the pre-`3.8` window (before `2026-11-06 19:45 +08:00`, not including it; the first article titled for version 3.8, ADR 0020) and contain **no mention of game version `3.8` or later**, matching the pinned `3.7.0 / 3.7.8` dictionary (`9218d612`).
 4. **Intra-set deduplication**: Zero normalized duplicate paragraphs within `H3` (NFKC + casefold + strip whitespace/punctuation), and each bilingual pair appears in one direction only.
 5. **PII / ID scrubbing**: Player UIDs, contact handles, and personal identifiers are removed before freeze; any document that cannot be cleaned cleanly is discarded.
 
@@ -203,7 +203,7 @@ The corpus checker that revision (c) adds, `scripts/eval_h3_corpus.py`, must run
 | `C4` | `uncleared == 0` after M1, M2 and M3 against the sealed sets (§2.4 rule 1, §2.4.1) |
 | `C5` | No normalized duplicate paragraph within `H3`, and each bilingual pair in one direction only (§2.4 rule 4) |
 | `C6` | Source ids, series and authors disjoint from every prior set (§2.4 rule 2) |
-| `C7` | Every text on or before the cutoff `2026-11-06 19:45 +08:00`, with no mention of game version `3.8` or later (§2.4 rule 3) |
+| `C7` | Every text published before the cutoff `2026-11-06 19:45 +08:00` (not including it), with no mention of game version `3.8` or later (§2.4 rule 3) |
 | `C8` | `0` PII hits (§2.4 rule 5) |
 | `C9` | Official-name and community-term annotations complete from both annotators, with the adjudication (§5.3) |
 | `C10` | The receipt binds the SHA-256 of every input and tool, both sealed Core commits (`core_tag_commit` `2737530` and `freeze_core_commit`), the bound tree and `terms.db`, and states the `verdict` |
