@@ -1,0 +1,101 @@
+{
+  "schema": "h3-community-names-v1",
+  "occurrences": [
+    {
+      "occ": "com-002",
+      "paragraph": "syn-zh-gui-01-p00",
+      "start": 15,
+      "end": 17,
+      "surface": "主C",
+      "term_id": "comm-main-dps",
+      "accepted_forms": [
+        "main DPS",
+        "carry"
+      ]
+    },
+    {
+      "occ": "com-004",
+      "paragraph": "syn-zh-gui-02-p00",
+      "start": 14,
+      "end": 16,
+      "surface": "主C",
+      "term_id": "comm-main-dps",
+      "accepted_forms": [
+        "main DPS",
+        "carry"
+      ]
+    },
+    {
+      "occ": "com-010",
+      "paragraph": "syn-zh-mix-01-p00",
+      "start": 14,
+      "end": 16,
+      "surface": "主C",
+      "term_id": "comm-main-dps",
+      "accepted_forms": [
+        "main DPS",
+        "carry"
+      ]
+    },
+    {
+      "occ": "com-012",
+      "paragraph": "syn-zh-mix-02-p00",
+      "start": 14,
+      "end": 16,
+      "surface": "主C",
+      "term_id": "comm-main-dps",
+      "accepted_forms": [
+        "main DPS",
+        "carry"
+      ]
+    },
+    {
+      "occ": "com-014",
+      "paragraph": "syn-en-gui-01-p00",
+      "start": 39,
+      "end": 48,
+      "surface": "quickswap",
+      "term_id": "comm-quickswap",
+      "accepted_forms": [
+        "合轴",
+        "速切"
+      ]
+    },
+    {
+      "occ": "com-016",
+      "paragraph": "syn-en-gui-02-p00",
+      "start": 34,
+      "end": 43,
+      "surface": "quickswap",
+      "term_id": "comm-quickswap",
+      "accepted_forms": [
+        "合轴",
+        "速切"
+      ]
+    },
+    {
+      "occ": "com-022",
+      "paragraph": "syn-en-mix-01-p00",
+      "start": 35,
+      "end": 44,
+      "surface": "quickswap",
+      "term_id": "comm-quickswap",
+      "accepted_forms": [
+        "合轴",
+        "速切"
+      ]
+    },
+    {
+      "occ": "com-024",
+      "paragraph": "syn-en-mix-02-p00",
+      "start": 36,
+      "end": 45,
+      "surface": "quickswap",
+      "term_id": "comm-quickswap",
+      "accepted_forms": [
+        "合轴",
+        "速切"
+      ]
+    }
+  ]
+}

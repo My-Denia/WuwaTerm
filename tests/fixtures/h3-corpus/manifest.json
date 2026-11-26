@@ -1,0 +1,102 @@
+{
+  "schema": "h3-manifest-v1",
+  "set": "H3-synth",
+  "documents": [
+    {
+      "doc_id": "syn-zh-gui-01",
+      "direction": "zh->en",
+      "genre": "guide",
+      "text": "合成甲标九：晴岚与今汐在兰舟以主C节奏流转海浪。\n\n甲002：云帆漫过微风并轻拂浅湾，冷却约3.8秒。\n\n甲003：霜林漫过云帆并流转浅湾，对应3.7版本记录。\n\n甲004：兰舟漫过竹影并轻拂浅湾。\n\n甲005：芦洲漫过晨雾并流转浅湾。\n\n甲006：素笺漫过浅渚并轻拂浅湾。\n\n甲007：晚潮漫过枫亭并流转浅湾。\n\n甲008：溪桥漫过晚潮并轻拂浅湾。\n\n甲009：浅渚漫过翠岭并流转浅湾。\n\n甲010：星砂漫过芦洲并轻拂浅湾。\n\n甲011：竹影漫过松径并流转浅湾。\n\n甲012：烟渚漫过霜林并轻拂浅湾。\n\n甲013：微风漫过烟渚并流转浅湾。\n\n甲014：松径漫过晴岚并轻拂浅湾。\n\n甲015：石阶漫过星砂并流转浅湾。\n\n甲016：翠岭漫过清泉并轻拂浅湾。\n\n甲017：月浦漫过溪桥并流转浅湾。\n\n甲018：枫亭漫过月浦并轻拂浅湾。\n\n甲019：清泉漫过素笺并流转浅湾。\n\n甲020：晨雾漫过石阶并轻拂浅湾。\n\n甲021：晴岚漫过兰舟并流转浅湾。\n\n甲022：云帆漫过微风并轻拂浅湾。\n\n甲023：霜林漫过云帆并流转浅湾。\n\n甲024：兰舟漫过竹影并轻拂浅湾。\n\n甲025：芦洲漫过晨雾并流转浅湾。\n\n今汐\n\n--- 123 ---"
+    },
+    {
+      "doc_id": "syn-zh-gui-02",
+      "direction": "zh->en",
+      "genre": "guide",
+      "text": "甲026：素笺与今汐在浅渚以主C节奏轻拂海浪。\n\n甲027：晚潮漫过枫亭并流转浅湾。\n\n甲028：溪桥漫过晚潮并轻拂浅湾。\n\n甲029：浅渚漫过翠岭并流转浅湾。\n\n甲030：星砂漫过芦洲并轻拂浅湾。\n\n甲031：竹影漫过松径并流转浅湾。\n\n甲032：烟渚漫过霜林并轻拂浅湾。\n\n甲033：微风漫过烟渚并流转浅湾。\n\n甲034：松径漫过晴岚并轻拂浅湾。\n\n甲035：石阶漫过星砂并流转浅湾。\n\n甲036：翠岭漫过清泉并轻拂浅湾。\n\n甲037：月浦漫过溪桥并流转浅湾。\n\n甲038：枫亭漫过月浦并轻拂浅湾。\n\n甲039：清泉漫过素笺并流转浅湾。\n\n甲040：晨雾漫过石阶并轻拂浅湾。\n\n甲041：晴岚漫过兰舟并流转浅湾。\n\n甲042：云帆漫过微风并轻拂浅湾。\n\n甲043：霜林漫过云帆并流转浅湾。\n\n甲044：兰舟漫过竹影并轻拂浅湾。\n\n甲045：芦洲漫过晨雾并流转浅湾。\n\n甲046：素笺漫过浅渚并轻拂浅湾。\n\n甲047：晚潮漫过枫亭并流转浅湾。\n\n甲048：溪桥漫过晚潮并轻拂浅湾。\n\n甲049：浅渚漫过翠岭并流转浅湾。\n\n甲050：星砂漫过芦洲并轻拂浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-ann-01",
+      "direction": "zh->en",
+      "genre": "announcement",
+      "text": "甲051：竹影与今汐在松径流转长风。\n\n甲052：烟渚漫过霜林并轻拂浅湾。\n\n甲053：微风漫过烟渚并流转浅湾。\n\n甲054：松径漫过晴岚并轻拂浅湾。\n\n甲055：石阶漫过星砂并流转浅湾。\n\n甲056：翠岭漫过清泉并轻拂浅湾。\n\n甲057：月浦漫过溪桥并流转浅湾。\n\n甲058：枫亭漫过月浦并轻拂浅湾。\n\n甲059：清泉漫过素笺并流转浅湾。\n\n甲060：晨雾漫过石阶并轻拂浅湾。\n\n甲061：晴岚漫过兰舟并流转浅湾。\n\n甲062：云帆漫过微风并轻拂浅湾。\n\n甲063：霜林漫过云帆并流转浅湾。\n\n甲064：兰舟漫过竹影并轻拂浅湾。\n\n甲065：芦洲漫过晨雾并流转浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-ann-02",
+      "direction": "zh->en",
+      "genre": "announcement",
+      "text": "甲066：素笺与今汐在浅渚轻拂长风。\n\n甲067：晚潮漫过枫亭并流转浅湾。\n\n甲068：溪桥漫过晚潮并轻拂浅湾。\n\n甲069：浅渚漫过翠岭并流转浅湾。\n\n甲070：星砂漫过芦洲并轻拂浅湾。\n\n甲071：竹影漫过松径并流转浅湾。\n\n甲072：烟渚漫过霜林并轻拂浅湾。\n\n甲073：微风漫过烟渚并流转浅湾。\n\n甲074：松径漫过晴岚并轻拂浅湾。\n\n甲075：石阶漫过星砂并流转浅湾。\n\n甲076：翠岭漫过清泉并轻拂浅湾。\n\n甲077：月浦漫过溪桥并流转浅湾。\n\n甲078：枫亭漫过月浦并轻拂浅湾。\n\n甲079：清泉漫过素笺并流转浅湾。\n\n甲080：晨雾漫过石阶并轻拂浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-sto-01",
+      "direction": "zh->en",
+      "genre": "story",
+      "text": "甲081：晴岚与今汐在兰舟流转长风。\n\n甲082：云帆漫过微风并轻拂浅湾。\n\n甲083：霜林漫过云帆并流转浅湾。\n\n甲084：兰舟漫过竹影并轻拂浅湾。\n\n甲085：芦洲漫过晨雾并流转浅湾。\n\n甲086：素笺漫过浅渚并轻拂浅湾。\n\n甲087：晚潮漫过枫亭并流转浅湾。\n\n甲088：溪桥漫过晚潮并轻拂浅湾。\n\n甲089：浅渚漫过翠岭并流转浅湾。\n\n甲090：星砂漫过芦洲并轻拂浅湾。\n\n甲091：竹影漫过松径并流转浅湾。\n\n甲092：烟渚漫过霜林并轻拂浅湾。\n\n甲093：微风漫过烟渚并流转浅湾。\n\n甲094：松径漫过晴岚并轻拂浅湾。\n\n甲095：石阶漫过星砂并流转浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-sto-02",
+      "direction": "zh->en",
+      "genre": "story",
+      "text": "甲096：翠岭与今汐在清泉轻拂长风。\n\n甲097：月浦漫过溪桥并流转浅湾。\n\n甲098：枫亭漫过月浦并轻拂浅湾。\n\n甲099：清泉漫过素笺并流转浅湾。\n\n甲100：晨雾漫过石阶并轻拂浅湾。\n\n甲101：晴岚漫过兰舟并流转浅湾。\n\n甲102：云帆漫过微风并轻拂浅湾。\n\n甲103：霜林漫过云帆并流转浅湾。\n\n甲104：兰舟漫过竹影并轻拂浅湾。\n\n甲105：芦洲漫过晨雾并流转浅湾。\n\n甲106：素笺漫过浅渚并轻拂浅湾。\n\n甲107：晚潮漫过枫亭并流转浅湾。\n\n甲108：溪桥漫过晚潮并轻拂浅湾。\n\n甲109：浅渚漫过翠岭并流转浅湾。\n\n甲110：星砂漫过芦洲并轻拂浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-mix-01",
+      "direction": "zh->en",
+      "genre": "mixed",
+      "text": "甲111：竹影与今汐在松径以主C节奏流转海浪。\n\n甲112：烟渚漫过霜林并轻拂浅湾。\n\n甲113：微风漫过烟渚并流转浅湾。\n\n甲114：松径漫过晴岚并轻拂浅湾。\n\n甲115：石阶漫过星砂并流转浅湾。\n\n甲116：翠岭漫过清泉并轻拂浅湾。\n\n甲117：月浦漫过溪桥并流转浅湾。\n\n甲118：枫亭漫过月浦并轻拂浅湾。\n\n甲119：清泉漫过素笺并流转浅湾。\n\n甲120：晨雾漫过石阶并轻拂浅湾。\n\n甲121：晴岚漫过兰舟并流转浅湾。\n\n甲122：云帆漫过微风并轻拂浅湾。\n\n甲123：霜林漫过云帆并流转浅湾。\n\n甲124：兰舟漫过竹影并轻拂浅湾。\n\n甲125：芦洲漫过晨雾并流转浅湾。"
+    },
+    {
+      "doc_id": "syn-zh-mix-02",
+      "direction": "zh->en",
+      "genre": "mixed",
+      "text": "甲126：素笺与今汐在浅渚以主C节奏轻拂海浪。\n\n甲127：晚潮漫过枫亭并流转浅湾。\n\n甲128：溪桥漫过晚潮并轻拂浅湾。\n\n甲129：浅渚漫过翠岭并流转浅湾。\n\n甲130：星砂漫过芦洲并轻拂浅湾。\n\n甲131：竹影漫过松径并流转浅湾。\n\n甲132：烟渚漫过霜林并轻拂浅湾。\n\n甲133：微风漫过烟渚并流转浅湾。\n\n甲134：松径漫过晴岚并轻拂浅湾。\n\n甲135：石阶漫过星砂并流转浅湾。\n\n甲136：翠岭漫过清泉并轻拂浅湾。\n\n甲137：月浦漫过溪桥并流转浅湾。\n\n甲138：枫亭漫过月浦并轻拂浅湾。\n\n甲139：清泉漫过素笺并流转浅湾。\n\n甲140：晨雾漫过石阶并轻拂浅湾。"
+    },
+    {
+      "doc_id": "syn-en-gui-01",
+      "direction": "en->zh",
+      "genre": "guide",
+      "text": "SYNTHCANARYEN [breeze] Jinhsi executes quickswap beside timber and glides softly.\n\nSYNEN002 [willow] twilight across juniper drifts quietly within 3.8s.\n\nSYNEN003 [velvet] twilight across canyon glides quietly for v3.7 notes.\n\nSYNEN004 [solstice] twilight across solstice drifts quietly.\n\nSYNEN005 [cobble] twilight across spruce glides quietly.\n\nSYNEN006 [juniper] twilight across willow drifts quietly.\n\nSYNEN007 [meadow] twilight across ripple glides quietly.\n\nSYNEN008 [orchard] twilight across harbor drifts quietly.\n\nSYNEN009 [glacier] twilight across glacier glides quietly.\n\nSYNEN010 [quartz] twilight across thicket drifts quietly.\n\nSYNEN011 [ripple] twilight across meadow glides quietly.\n\nSYNEN012 [clover] twilight across terrace drifts quietly.\n\nSYNEN013 [spruce] twilight across cobble glides quietly.\n\nSYNEN014 [pebble] twilight across pebble drifts quietly.\n\nSYNEN015 [canyon] twilight across velvet glides quietly.\n\nSYNEN016 [terrace] twilight across clover drifts quietly.\n\nSYNEN017 [timber] twilight across breeze glides quietly.\n\nSYNEN018 [thicket] twilight across quartz drifts quietly.\n\nShorekeeper\n\n*** 456 ***"
+    },
+    {
+      "doc_id": "syn-en-gui-02",
+      "direction": "en->zh",
+      "genre": "guide",
+      "text": "SYNEN019 [linden] Jinhsi executes quickswap beside linden and glides softly.\n\nSYNEN020 [harbor] twilight across orchard drifts quietly.\n\nSYNEN021 [breeze] twilight across timber glides quietly.\n\nSYNEN022 [willow] twilight across juniper drifts quietly.\n\nSYNEN023 [velvet] twilight across canyon glides quietly.\n\nSYNEN024 [solstice] twilight across solstice drifts quietly.\n\nSYNEN025 [cobble] twilight across spruce glides quietly.\n\nSYNEN026 [juniper] twilight across willow drifts quietly.\n\nSYNEN027 [meadow] twilight across ripple glides quietly.\n\nSYNEN028 [orchard] twilight across harbor drifts quietly.\n\nSYNEN029 [glacier] twilight across glacier glides quietly.\n\nSYNEN030 [quartz] twilight across thicket drifts quietly.\n\nSYNEN031 [ripple] twilight across meadow glides quietly.\n\nSYNEN032 [clover] twilight across terrace drifts quietly.\n\nSYNEN033 [spruce] twilight across cobble glides quietly.\n\nSYNEN034 [pebble] twilight across pebble drifts quietly.\n\nSYNEN035 [canyon] twilight across velvet glides quietly."
+    },
+    {
+      "doc_id": "syn-en-ann-01",
+      "direction": "en->zh",
+      "genre": "announcement",
+      "text": "SYNEN036 [terrace] Jinhsi observes clover as morning dew drifts calmly.\n\nSYNEN037 [timber] twilight across breeze glides quietly.\n\nSYNEN038 [thicket] twilight across quartz drifts quietly.\n\nSYNEN039 [linden] twilight across linden glides quietly.\n\nSYNEN040 [harbor] twilight across orchard drifts quietly.\n\nSYNEN041 [breeze] twilight across timber glides quietly.\n\nSYNEN042 [willow] twilight across juniper drifts quietly.\n\nSYNEN043 [velvet] twilight across canyon glides quietly.\n\nSYNEN044 [solstice] twilight across solstice drifts quietly.\n\nSYNEN045 [cobble] twilight across spruce glides quietly.\n\nSYNEN046 [juniper] twilight across willow drifts quietly.\n\nSYNEN047 [meadow] twilight across ripple glides quietly.\n\nSYNEN048 [orchard] twilight across harbor drifts quietly.\n\nSYNEN049 [glacier] twilight across glacier glides quietly.\n\nSYNEN050 [quartz] twilight across thicket drifts quietly.\n\nSYNEN051 [ripple] twilight across meadow glides quietly.\n\nSYNEN052 [clover] twilight across terrace drifts quietly.\n\nSYNEN053 [spruce] twilight across cobble glides quietly."
+    },
+    {
+      "doc_id": "syn-en-ann-02",
+      "direction": "en->zh",
+      "genre": "announcement",
+      "text": "SYNEN054 [pebble] Jinhsi observes pebble as morning dew drifts calmly.\n\nSYNEN055 [canyon] twilight across velvet glides quietly.\n\nSYNEN056 [terrace] twilight across clover drifts quietly.\n\nSYNEN057 [timber] twilight across breeze glides quietly.\n\nSYNEN058 [thicket] twilight across quartz drifts quietly.\n\nSYNEN059 [linden] twilight across linden glides quietly.\n\nSYNEN060 [harbor] twilight across orchard drifts quietly.\n\nSYNEN061 [breeze] twilight across timber glides quietly.\n\nSYNEN062 [willow] twilight across juniper drifts quietly.\n\nSYNEN063 [velvet] twilight across canyon glides quietly.\n\nSYNEN064 [solstice] twilight across solstice drifts quietly.\n\nSYNEN065 [cobble] twilight across spruce glides quietly.\n\nSYNEN066 [juniper] twilight across willow drifts quietly.\n\nSYNEN067 [meadow] twilight across ripple glides quietly.\n\nSYNEN068 [orchard] twilight across harbor drifts quietly.\n\nSYNEN069 [glacier] twilight across glacier glides quietly.\n\nSYNEN070 [quartz] twilight across thicket drifts quietly."
+    },
+    {
+      "doc_id": "syn-en-sto-01",
+      "direction": "en->zh",
+      "genre": "story",
+      "text": "SYNEN071 [ripple] Jinhsi observes meadow as morning dew glides calmly.\n\nSYNEN072 [clover] twilight across terrace drifts quietly.\n\nSYNEN073 [spruce] twilight across cobble glides quietly.\n\nSYNEN074 [pebble] twilight across pebble drifts quietly.\n\nSYNEN075 [canyon] twilight across velvet glides quietly.\n\nSYNEN076 [terrace] twilight across clover drifts quietly.\n\nSYNEN077 [timber] twilight across breeze glides quietly.\n\nSYNEN078 [thicket] twilight across quartz drifts quietly.\n\nSYNEN079 [linden] twilight across linden glides quietly.\n\nSYNEN080 [harbor] twilight across orchard drifts quietly.\n\nSYNEN081 [breeze] twilight across timber glides quietly.\n\nSYNEN082 [willow] twilight across juniper drifts quietly.\n\nSYNEN083 [velvet] twilight across canyon glides quietly.\n\nSYNEN084 [solstice] twilight across solstice drifts quietly.\n\nSYNEN085 [cobble] twilight across spruce glides quietly.\n\nSYNEN086 [juniper] twilight across willow drifts quietly.\n\nSYNEN087 [meadow] twilight across ripple glides quietly.\n\nSYNEN088 [orchard] twilight across harbor drifts quietly."
+    },
+    {
+      "doc_id": "syn-en-sto-02",
+      "direction": "en->zh",
+      "genre": "story",
+      "text": "SYNEN089 [glacier] Jinhsi observes glacier as morning dew glides calmly.\n\nSYNEN090 [quartz] twilight across thicket drifts quietly.\n\nSYNEN091 [ripple] twilight across meadow glides quietly.\n\nSYNEN092 [clover] twilight across terrace drifts quietly.\n\nSYNEN093 [spruce] twilight across cobble glides quietly.\n\nSYNEN094 [pebble] twilight across pebble drifts quietly.\n\nSYNEN095 [canyon] twilight across velvet glides quietly.\n\nSYNEN096 [terrace] twilight across clover drifts quietly.\n\nSYNEN097 [timber] twilight across breeze glides quietly.\n\nSYNEN098 [thicket] twilight across quartz drifts quietly.\n\nSYNEN099 [linden] twilight across linden glides quietly.\n\nSYNEN100 [harbor] twilight across orchard drifts quietly.\n\nSYNEN101 [breeze] twilight across timber glides quietly.\n\nSYNEN102 [willow] twilight across juniper drifts quietly.\n\nSYNEN103 [velvet] twilight across canyon glides quietly.\n\nSYNEN104 [solstice] twilight across solstice drifts quietly.\n\nSYNEN105 [cobble] twilight across spruce glides quietly."
+    },
+    {
+      "doc_id": "syn-en-mix-01",
+      "direction": "en->zh",
+      "genre": "mixed",
+      "text": "SYNEN106 [juniper] Jinhsi executes quickswap beside willow and drifts softly.\n\nSYNEN107 [meadow] twilight across ripple glides quietly.\n\nSYNEN108 [orchard] twilight across harbor drifts quietly.\n\nSYNEN109 [glacier] twilight across glacier glides quietly.\n\nSYNEN110 [quartz] twilight across thicket drifts quietly.\n\nSYNEN111 [ripple] twilight across meadow glides quietly.\n\nSYNEN112 [clover] twilight across terrace drifts quietly.\n\nSYNEN113 [spruce] twilight across cobble glides quietly.\n\nSYNEN114 [pebble] twilight across pebble drifts quietly.\n\nSYNEN115 [canyon] twilight across velvet glides quietly.\n\nSYNEN116 [terrace] twilight across clover drifts quietly.\n\nSYNEN117 [timber] twilight across breeze glides quietly.\n\nSYNEN118 [thicket] twilight across quartz drifts quietly.\n\nSYNEN119 [linden] twilight across linden glides quietly.\n\nSYNEN120 [harbor] twilight across orchard drifts quietly.\n\nSYNEN121 [breeze] twilight across timber glides quietly.\n\nSYNEN122 [willow] twilight across juniper drifts quietly.\n\nSYNEN123 [velvet] twilight across canyon glides quietly."
+    },
+    {
+      "doc_id": "syn-en-mix-02",
+      "direction": "en->zh",
+      "genre": "mixed",
+      "text": "SYNEN124 [solstice] Jinhsi executes quickswap beside solstice and drifts softly.\n\nSYNEN125 [cobble] twilight across spruce glides quietly.\n\nSYNEN126 [juniper] twilight across willow drifts quietly.\n\nSYNEN127 [meadow] twilight across ripple glides quietly.\n\nSYNEN128 [orchard] twilight across harbor drifts quietly.\n\nSYNEN129 [glacier] twilight across glacier glides quietly.\n\nSYNEN130 [quartz] twilight across thicket drifts quietly.\n\nSYNEN131 [ripple] twilight across meadow glides quietly.\n\nSYNEN132 [clover] twilight across terrace drifts quietly.\n\nSYNEN133 [spruce] twilight across cobble glides quietly.\n\nSYNEN134 [pebble] twilight across pebble drifts quietly.\n\nSYNEN135 [canyon] twilight across velvet glides quietly.\n\nSYNEN136 [terrace] twilight across clover drifts quietly.\n\nSYNEN137 [timber] twilight across breeze glides quietly.\n\nSYNEN138 [thicket] twilight across quartz drifts quietly.\n\nSYNEN139 [linden] twilight across linden glides quietly.\n\nSYNEN140 [harbor] twilight across orchard drifts quietly."
+    }
+  ]
+}

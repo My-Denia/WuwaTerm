@@ -1,0 +1,181 @@
+{
+  "schema": "usability-names-v1",
+  "occurrences": [
+    {
+      "occ": "off-001",
+      "paragraph": "syn-zh-gui-01-p00",
+      "start": 9,
+      "end": 11,
+      "surface": "今汐",
+      "name_id": "syn-zh-gui-01-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-003",
+      "paragraph": "syn-zh-gui-02-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-gui-02-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-005",
+      "paragraph": "syn-zh-ann-01-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-ann-01-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-006",
+      "paragraph": "syn-zh-ann-02-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-ann-02-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-007",
+      "paragraph": "syn-zh-sto-01-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-sto-01-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-008",
+      "paragraph": "syn-zh-sto-02-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-sto-02-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-009",
+      "paragraph": "syn-zh-mix-01-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-mix-01-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-011",
+      "paragraph": "syn-zh-mix-02-p00",
+      "start": 8,
+      "end": 10,
+      "surface": "今汐",
+      "name_id": "syn-zh-mix-02-jinhsi",
+      "official_forms": [
+        "Jinhsi"
+      ]
+    },
+    {
+      "occ": "off-013",
+      "paragraph": "syn-en-gui-01-p00",
+      "start": 23,
+      "end": 29,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-gui-01-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-015",
+      "paragraph": "syn-en-gui-02-p00",
+      "start": 18,
+      "end": 24,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-gui-02-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-017",
+      "paragraph": "syn-en-ann-01-p00",
+      "start": 19,
+      "end": 25,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-ann-01-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-018",
+      "paragraph": "syn-en-ann-02-p00",
+      "start": 18,
+      "end": 24,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-ann-02-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-019",
+      "paragraph": "syn-en-sto-01-p00",
+      "start": 18,
+      "end": 24,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-sto-01-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-020",
+      "paragraph": "syn-en-sto-02-p00",
+      "start": 19,
+      "end": 25,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-sto-02-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-021",
+      "paragraph": "syn-en-mix-01-p00",
+      "start": 19,
+      "end": 25,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-mix-01-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    },
+    {
+      "occ": "off-023",
+      "paragraph": "syn-en-mix-02-p00",
+      "start": 20,
+      "end": 26,
+      "surface": "Jinhsi",
+      "name_id": "syn-en-mix-02-jinhsi",
+      "official_forms": [
+        "今汐"
+      ]
+    }
+  ]
+}
