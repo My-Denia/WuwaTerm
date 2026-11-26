@@ -16,6 +16,23 @@ does not distribute generated game data or generated SQLite databases.
 - The Core CI client pins move to Web `v0.5.0` (`6cd0a7c5`) and Windows
   `v0.7.0` (`d87a66c3`), the releases that carry `wuwaterm-manuscript-v5`.
 
+### Structure Checks
+
+- Reduced false alarms and fixed boundary cases in `/v1/structure-checks`
+  (`structure-check-v1`, MY-515,
+  [ADR 0022](docs/adr/0022-deterministic-structure-checks.md), #341):
+  `{Cus:<Kind>,…}` client template arguments are masked from number reading
+  without adding `{Cus:…}` to placeholder matching; digits immediately preceded
+  by an ASCII letter (`SOL3`, `T-G0NG`) and standalone uppercase ASCII Roman
+  numerals 1–39 (`II`, `IV`, excluding `L`/`C`/`D`/`M` and skipping English
+  pronoun `I`) act as excuse-only values while standalone `x`/`X` multiplier
+  prefixes (`Kernel x2`) and attached percent/unit forms (`HP50%`) remain
+  reportable; bare `N+M` followed by `x`/`X` (`5+1x`) stays arithmetic rather
+  than a build marker; and trailing comparison lookahead skips markup tags
+  (`and below <color=Red>50%</color>`). On the 27,385-pair 3.7.8 official
+  corpus, flagged pairs dropped from 2,270 to 990 per direction (−56.4%) with
+  0 / 128 fixture false alarms and 82 / 82 detections.
+
 ## 0.14.0 - 2026-11-26
 
 ### Review & Terms

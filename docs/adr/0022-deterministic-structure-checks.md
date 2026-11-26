@@ -105,8 +105,9 @@ section records the rules a schema cannot express.
   NFKC, digits of any script count as ASCII digits, and characters inside
   placeholders, markup tags, and client-side `{Cus:<Kind>,…}` template
   directives (such as `{Cus:Sap,S=stack P=stacks SapTag=0}`) are not read;
-  `{Cus:…}` directives are language-specific and stay outside placeholder
-  matching. `1,000` and `1000` are the same number,
+  this rule does not add `{Cus:…}` to placeholder matching, so
+  space-containing `{Cus:…}` directives (all occurrences in the 3.7.8 corpus)
+  are not treated as placeholders. `1,000` and `1000` are the same number,
   as are `1.50` and `1.5`. A digit number followed by `十百千万亿` or by
   `thousand`, `million` or `billion` also reads as that multiple, so `1.5万`
   matches `15,000`. A source number the target does not account for is
@@ -251,12 +252,15 @@ rollout (MY-504) and the subsequent false-alarm reduction and boundary fixes
     per direction (−56.4%: 1,282 cleared, 2 newly flagged), and total number
     findings dropped from 2,863 to 1,291 per direction (−1,572 net: 1,580
     removed, 8 added across 8 keys). Every one of the 8 added findings is a
-    Chinese `1` or `0` previously masked by a leaked `SapTag=N` argument inside
-    `{Cus:Sap,…}`: 1 direct numeric difference
-    (`ResonantChain_31035_Attributes`, fixed digits vs placeholders) and 7
-    implicit `1`/`0` renderings (`RogueBuffPool_335101_BuffDesc` and
-    `RogueResSynergyDesc_1001002_1` newly flagged, plus 5 already-flagged keys
-    whose leaked `SapTag` findings were replaced). The script prints counts and
+    Chinese `1` or `0` previously excused by a leaked `SapTag=N` argument
+    inside `{Cus:Sap,…}`: 1 direct numeric difference
+    (`ResonantChain_31035_Attributes`, fixed digits vs placeholders), while the
+    other 7 are new false alarms: the English renders the `1` or `0` implicitly
+    (`a stack`, `a wave`, `no Divine Voice`), and they passed before only
+    because a leaked `SapTag=N` excused them by accident
+    (`RogueBuffPool_335101_BuffDesc` and `RogueResSynergyDesc_1001002_1` newly
+    flagged, plus 5 already-flagged keys whose leaked `SapTag` findings were
+    replaced). The script prints counts and
     identifiers only; no corpus text is written anywhere.
 - **Time.** The slowest of 23 adversarial pairs with both sides at 2,000
   scalars (including `{Cus:Sap,…}` templates, uppercase ASCII Roman numerals,

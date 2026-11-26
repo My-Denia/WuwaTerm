@@ -359,9 +359,11 @@ _MARKUP_RE = re.compile(
     r"[diouxXeEfFgGcrs](?![A-Za-z0-9])"
 )
 # Client-side custom template directives (`{Cus:Sap,S=stack P=stacks SapTag=0}`,
-# `{Cus:Ipt,...}`) are language-specific and must not enter placeholder matching,
-# but their internal arguments (such as `SapTag=0`) are masked from number
-# reading so they neither raise false alarms nor excuse real numbers.
+# `{Cus:Ipt,...}`) are masked from number reading so internal arguments such as
+# `SapTag=0` neither raise false alarms nor excuse real numbers. This pattern is
+# not added to `_MARKUP_RE`: space-containing `{Cus:...}` directives (all
+# occurrences in the 3.7.8 corpus) are not treated as placeholders, while
+# whitespace-free `{...}` forms stay under the existing plain-brace rule.
 _CUS_TEMPLATE_RE = re.compile(r"\{Cus:[A-Za-z]{1,16},[^{}<>\n]{0,160}\}")
 
 _DIGIT_NUMBER_RE = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+(?![0-9])|[0-9]+)(?:\.[0-9]+)*")
