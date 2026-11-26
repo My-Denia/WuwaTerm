@@ -84,7 +84,7 @@
         "commit": "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
         "tree": "ac381d4ae5a764a4b8a94c8b52396b0eeb400df4",
         "status": "success",
-        "status_note": "The v0.14.1 release source (#343, chore(release): prepare Core 0.14.1), which is also this repository's main when this snapshot was recorded. ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed on this commit; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1."
+        "status_note": "The v0.14.1 release source (#343, chore(release): prepare Core 0.14.1). ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed on this commit; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1. This repository's main has since moved on (#344)."
       },
       "source_version": "0.14.1",
       "release": {
@@ -166,7 +166,7 @@
         "commit": "c4f6a8101e22a735f5c0bb88bea60aa9515c6f69",
         "tree": "e6e5e1f7bb17ba135962cc8dfdbefd1da140aab7",
         "status": "success",
-        "status_note": "The v0.6.0 release source (#48), which is also this repository's main. Main CI push run 45684222505, Dependency audit run 45684222415 and release workflow run 45684277127 all passed on this commit."
+        "status_note": "The v0.6.0 release source (#48). Main CI push run 45684222505, Dependency audit run 45684222415 and release workflow run 45684277127 all passed on this commit. This repository's main has since moved on (#49)."
       },
       "source_version": "0.6.0",
       "release": {
