@@ -215,7 +215,10 @@ command runs only when all of this holds:
   transaction verifies in every respect other than the recorded API;
 - the named container is the only container of the recorded API project and
   service. A rollback container that an earlier update has not yet retired
-  counts as a second one;
+  counts as a second one. If an update reported `"retirement": "pending"`, retire
+  it before changing the API container, with `recover --transaction-id <id>` of
+  that committed update: once the live container has the new settings, that
+  recovery no longer verifies;
 - its image, command, entrypoint, mounts, network, ports, restart policy, user,
   working directory, every other runtime option, name and running state match
   the record, and its environment equals what the recorded env file references
@@ -239,6 +242,10 @@ and `.deploy_commit` to the checkout that ran it. No container is created,
 started, stopped or removed, and no readiness is claimed. Later updates keep and
 replay the recorded values. Running it again prints `"status": "unchanged"` and
 publishes nothing.
+
+The journal action is new. After a refresh, an operations checkout older than
+the release that added it cannot read the journal and refuses component
+operations with `component runtime journal is unknown`.
 
 If publication fails, the previous pointers are restored. The container still
 differs from the previous record, so run the refresh again after fixing the

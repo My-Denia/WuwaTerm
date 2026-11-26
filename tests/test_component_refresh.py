@@ -61,7 +61,7 @@ class Deployment:
         self.root = root
         sample = journal_fixture.__wrapped__(root)
         database = sample["database"]["binding"]
-        data, state, api_state = root, root / "state", root / "state-api"
+        data, state, api_state = root / "terms.db", root / "state", root / "state-api"
         state.mkdir()
         api_state.mkdir()
         (api_state / "devices.db").write_bytes(b"synthetic-device-store\n")
@@ -76,13 +76,13 @@ class Deployment:
             OLD_ID: _raw(OLD_ID, service="wuwaterm-api", name="wuwaterm-api",
                          image=components["api"]["image"]["id"], command=["api"],
                          env=[database_env, "WUWATERM_API_STATE_DIR=/app/state-api"],
-                         mounts=[(data, "/app/data", False), (api_state, "/app/state-api", True)])}
+                         mounts=[(data, "/app/data/terms.db", False), (api_state, "/app/state-api", True)])}
         if telegram:
             self.containers[TG_ID] = _raw(
                 TG_ID, service="wuwaterm-telegram", name="wuwaterm-telegram",
                 image=components["telegram"]["image"]["id"], command=["bot"],
                 env=[database_env, "WUWATERM_STATE_DIR=/app/state"],
-                mounts=[(data, "/app/data", False), (state, "/app/state", True)])
+                mounts=[(data, "/app/data/terms.db", False), (state, "/app/state", True)])
         self.environment = {raw["Config"]["Labels"]["com.docker.compose.service"]: list(raw["Config"]["Env"])
                             for raw in self.containers.values()}
         self.revisions = {item["image"]["id"]: item["image"]["revision"]
@@ -162,8 +162,12 @@ class Deployment:
         for name, value in shared.items():
             for module in (operations, transaction):
                 monkeypatch.setattr(module, name, value)
-        for module in (adoption, terminal_ops, transaction, admission, prepare, operations):
+        for module in (adoption, terminal_ops, __import__("component_terminal_full"), transaction,
+                       admission, prepare, operations):
             monkeypatch.setattr(module, "CODE_ROOT", self.root)
+        # Full-record routes also require their modules to come from that root.
+        for name in ("component_terminal_full", "component_state_endpoint"):
+            monkeypatch.setattr(__import__(name), "__file__", str(self.root / "scripts" / (name + ".py")))
         monkeypatch.setattr(admission, "require_lock", lambda root: None)
         monkeypatch.setattr(admission, "_DOCKER_SOCKET", str(self.root / "absent.sock"))
         monkeypatch.setattr(recovery, "safe_git", lambda root, *args, **kwargs: (
@@ -354,6 +358,110 @@ def test_update_preparation_is_refused_before_and_accepted_after_the_refresh(dep
     target = operations._snapshot(record.root, journal["target"]["manifest"]["components"]["api"])
     assert target["runtime_options"]["memory_reservation"] == RESERVATION
     assert target["runtime_options"]["oom_score_adj"] == OOM_SCORE
+
+    refresh_raw = record.journal_path.read_bytes()
+    transaction.write_initial_journal(record.root, journal, predecessor_raw=refresh_raw, compose_path=COMPOSE)
+    assert record.journal()["transaction_id"] == journal["transaction_id"]
+    assert (record.root / journal["predecessor"]["archive_path"]).read_bytes() == refresh_raw
+    __import__("component_handoff").verify_predecessor(record.root, successor_kind="runtime", successor=journal)
+
+
+@pytest.mark.parametrize("telegram", [False, True])
+def test_full_update_route_accepts_the_refresh_record(deployment, telegram) -> None:
+    record = deployment(telegram=telegram)
+    record.apply_options(OLD_ID, memory_reservation=RESERVATION)
+    record.refresh()
+
+    assert terminal_ops.verify_terminal_for_full4(record.root, compose_path=COMPOSE) is not None
+
+
+def _commit_full_update(record: Deployment) -> dict:
+    """Leave a committed schema-3 full update as the terminal record."""
+    import hashlib
+    import shutil
+
+    import component_full_db as full_db
+    import component_journal_full as full
+
+    previous = copy.deepcopy(record.adoption["target"]["manifest"])
+    database_path = Path(previous["database"]["path"])
+    predecessor_raw = record.journal_path.read_bytes()
+    reference = runtime.predecessor_reference("runtime", previous["deployment_id"], predecessor_raw)
+    archive = record.root / reference["archive_path"]
+    archive.parent.mkdir()
+    archive.write_bytes(predecessor_raw)
+    archive.chmod(0o400)
+    record.journal_path.unlink()
+
+    identifier = "20261107T080000Z-" + "5" * 32
+    target = copy.deepcopy(previous)
+    target["deployment_id"] = identifier
+    candidate_path = f".deployments/component-full-candidates/{identifier}.db"
+    candidate = {**previous["database"], "path": str(record.root / candidate_path)}
+    permissions = full_db.permissions(database_path)
+    stat = pm.verify_database_binding(previous["database"])
+    old_hash = previous["database"]["sha256"]
+    backup_path = (f"data/deployment-backups/terms.{identifier[:16]}-{int(identifier[17:], 16)}."
+                   f"{old_hash}.db")
+    backup = record.root / backup_path
+    backup.parent.mkdir(parents=True)
+    shutil.copy2(database_path, backup)
+    stage = str(database_path.parent / f".component-full-promote-{identifier}.db")
+    restore = str(database_path.parent / f".component-full-restore-{identifier}.db")
+    containers = copy.deepcopy(record.adoption["target"]["containers"])
+    pointers = {
+        "old": copy.deepcopy(record.adoption["pointers"]["target"]),
+        "target": {".deploy_commit": {"present": True, "bytes": A + "\n"},
+                   ".deploy_current": {"present": True, "bytes": identifier + "\n"}},
+    }
+    value = {
+        "schema_version": 3, "kind": "component-full", "transaction_id": identifier,
+        "action": "update", "status": "committed", "phase": "committed",
+        "source": copy.deepcopy(record.source), "predecessor": reference, "selection": [],
+        "before": {"manifest": previous, "topology": copy.deepcopy(previous["components"]),
+                   "containers": containers},
+        "target": {"manifest": target, "containers": copy.deepcopy(containers)},
+        "database": {
+            "old": {"binding": previous["database"], "stat": stat, "permissions": permissions},
+            "candidate": {"path": candidate_path, "binding": candidate, "stat": stat,
+                          "verification": copy.deepcopy(full._VERIFY)},
+            "backup": {"path": backup_path, "sha256": old_hash, "permissions": permissions,
+                       "stat": pm.verify_database_binding({**previous["database"], "path": str(backup)})},
+            "stage": {"path": stage, "sha256": old_hash, "stat": stat, "permissions": permissions},
+            "restore": {"path": restore, "sha256": old_hash, "stat": None, "permissions": permissions},
+            "promoted_stat": stat, "restored_stat": None,
+        },
+        "api_identity": previous["api_identity"], "migrations": {"status": "not-applicable", "items": []},
+        "pointers": pointers,
+        "manifest": {"deployment_id": identifier, "path": f".deployments/products/{identifier}.json",
+                     "sha256": hashlib.sha256(pm._encode(target)).hexdigest()},
+    }
+    full.validate_journal(value)
+    pm.write_manifest(record.root, target)
+    (record.root / ".deployments" / admission.COMPONENT_FULL).write_bytes(pm._encode(value))
+    for name, pointer in pointers["target"].items():
+        (record.root / name).write_text(pointer["bytes"], encoding="ascii")
+    return value
+
+
+def test_record_from_a_full_update_is_refreshed_and_handed_over(deployment, monkeypatch) -> None:
+    record = deployment(telegram=False)
+    full_record = _commit_full_update(record)
+    full_path = record.root / ".deployments" / admission.COMPONENT_FULL
+    full_raw = full_path.read_bytes()
+    assert record.strict_terminal()[1]["kind"] == "component-full"
+    record.compose_recreate(memory_reservation=RESERVATION, oom_score_adj=OOM_SCORE)
+    with pytest.raises(Exception, match="cannot be verified"):
+        record.strict_terminal()
+
+    result = record.refresh(NEW_ID)
+
+    journal = record.journal()
+    assert journal["predecessor"]["kind"] == "full"
+    assert journal["predecessor"]["transaction_id"] == full_record["transaction_id"]
+    assert (record.root / journal["predecessor"]["archive_path"]).read_bytes() == full_raw
+    assert not full_path.exists()
+    _assert_gap_closed(monkeypatch, record, NEW_ID, result["added"])
 
 
 def test_record_from_a_completed_artifact_update_is_refreshed_as_schema_five(deployment, monkeypatch) -> None:
