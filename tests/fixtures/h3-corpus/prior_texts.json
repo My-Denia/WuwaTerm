@@ -1,0 +1,53 @@
+{
+  "schema": "h3-prior-texts-v1",
+  "sets": [
+    {
+      "set": "H1",
+      "texts": [
+        "Prior held-out one synthetic archive entry alpha."
+      ]
+    },
+    {
+      "set": "H2",
+      "texts": [
+        "Prior held-out two synthetic archive entry beta."
+      ]
+    },
+    {
+      "set": "D",
+      "texts": [
+        "Development synthetic diagnostic sentence gamma."
+      ]
+    },
+    {
+      "set": "R",
+      "texts": [
+        "Reserve synthetic verification passage delta."
+      ]
+    },
+    {
+      "set": "A1-A6",
+      "texts": [
+        "Earlier announcement synthetic baseline epsilon."
+      ]
+    },
+    {
+      "set": "B1-B3",
+      "texts": [
+        "Earlier community synthetic baseline zeta."
+      ]
+    },
+    {
+      "set": "S01-S18",
+      "texts": [
+        "Set two synthetic regression phrase eta."
+      ]
+    },
+    {
+      "set": "M-Gold",
+      "texts": [
+        "Frozen gold synthetic terminology item theta."
+      ]
+    }
+  ]
+}

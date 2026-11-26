@@ -1,0 +1,25 @@
+{
+  "schema": "h3-community-lexicon-v1",
+  "terms": [
+    {
+      "term": "主C",
+      "accepted_forms": [
+        "main DPS",
+        "carry"
+      ]
+    },
+    {
+      "term": "quickswap",
+      "accepted_forms": [
+        "合轴",
+        "速切"
+      ]
+    },
+    {
+      "term": "合成社区专有长词条十六字甲乙丙丁",
+      "accepted_forms": [
+        "Synthetic Long Community Term"
+      ]
+    }
+  ]
+}

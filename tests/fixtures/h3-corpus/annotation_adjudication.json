@@ -1,0 +1,25 @@
+{
+  "schema": "h3-annotation-adjudication-v1",
+  "official": {
+    "annotators": [
+      "ann-alpha",
+      "ann-beta"
+    ],
+    "adjudicator": "adj-gamma",
+    "units_reviewed": 280,
+    "agreement_rate": 0.985,
+    "adjudicated_count": 4,
+    "unresolved_disagreements": 0
+  },
+  "community": {
+    "annotators": [
+      "ann-alpha",
+      "ann-beta"
+    ],
+    "adjudicator": "adj-gamma",
+    "units_reviewed": 150,
+    "agreement_rate": 0.98,
+    "adjudicated_count": 3,
+    "unresolved_disagreements": 0
+  }
+}

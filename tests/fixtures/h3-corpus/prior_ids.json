@@ -1,0 +1,17 @@
+{
+  "schema": "h3-prior-ids-v1",
+  "source_ids": [
+    "prior-src-901",
+    "prior-src-902"
+  ],
+  "textmap_keys": [
+    "PriorTextMap_36_001",
+    "PriorTextMap_36_002"
+  ],
+  "series": [
+    "prior-series-901"
+  ],
+  "authors": [
+    "prior-author-901"
+  ]
+}

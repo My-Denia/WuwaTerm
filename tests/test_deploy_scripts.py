@@ -5,9 +5,12 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -984,6 +987,67 @@ def _make_deploy_harness(tmp_path):
     return root, env, old_hash, new_hash
 
 
+# Seconds without a new external command after which the deployment script is
+# treated as hung. This is not a duration budget: a run that keeps working is
+# never interrupted, however long the host takes to give it CPU.
+DEPLOYMENT_STALL_SECONDS = 90.0
+
+
+def _actions_taken(root: Path) -> int:
+    """How many external commands the fixture has seen the deployment run."""
+    try:
+        return len((root / "actions.log").read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        return 0
+
+
+def _run_vps_update(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the deployment script and wait for it to finish or to stop moving.
+
+    A wall-clock limit on the whole script measures the host rather than the
+    deployment: the same run takes about four seconds on an idle machine and
+    twenty under parallel load, so at thirty seconds the limit gives up on a
+    correct deployment and reports a timeout that says nothing about the code
+    under test. What the assertions below need is proof that the script still
+    reaches its end, so the bound is on progress: every external command the
+    deployment runs is recorded in the fixture's actions.log, and a run that
+    adds none for DEPLOYMENT_STALL_SECONDS has stopped making progress and is
+    killed here instead of being read as slow.
+    """
+    command = ["sh", str(root / "deploy" / "vps-update.sh")]
+    with (
+        tempfile.TemporaryFile("w+t", encoding="utf-8") as output,
+        tempfile.TemporaryFile("w+t", encoding="utf-8") as error,
+    ):
+        # Its own session, so a hung run is signalled as one process group and
+        # cannot leave anything behind.
+        process = subprocess.Popen(command, cwd=root, env=env, text=True,
+                                   stdout=output, stderr=error, start_new_session=True)
+        progressed, taken = time.monotonic(), _actions_taken(root)
+        try:
+            while process.poll() is None:
+                time.sleep(0.2)
+                current = _actions_taken(root)
+                if current != taken:
+                    progressed, taken = time.monotonic(), current
+                elif time.monotonic() - progressed > DEPLOYMENT_STALL_SECONDS:
+                    raise AssertionError(
+                        "deploy/vps-update.sh made no progress for "
+                        f"{DEPLOYMENT_STALL_SECONDS:g}s: it is hung, not slow"
+                    )
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            output.seek(0)
+            error.seek(0)
+            captured = output.read(), error.read()
+    return subprocess.CompletedProcess(command, process.returncode, *captured)
+
+
 @pytest.mark.parametrize(
     "failure_step",
     (
@@ -1006,15 +1070,7 @@ def test_vps_update_failure_injection_preserves_previous_binding(
     root, env, old_hash, _new_hash = deploy_harness
     env["WUWATERM_FAIL_STEP"] = failure_step
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stderr
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
@@ -1029,15 +1085,7 @@ def test_vps_update_refuses_promotion_when_backup_durability_is_uncertain(
     root, env, old_hash, _new_hash = deploy_harness
     env["FAKE_DB_BACKUP_DURABILITY_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 98
     assert "injected database backup durability failure" in result.stderr
@@ -1069,15 +1117,7 @@ def test_vps_update_rolls_back_after_replace_before_durability_confirmation(
     root, env, old_hash, _new_hash = deploy_harness
     env[failure_env] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == returncode, result.stderr
     assert (
@@ -1093,15 +1133,7 @@ def test_vps_update_surfaces_rollback_durability_failure(deploy_harness):
     env["WUWATERM_FAIL_STEP"] = "pointer"
     env["FAKE_DB_ROLLBACK_DURABILITY_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97
     assert "injected rollback durability failure" in result.stderr
@@ -1131,15 +1163,7 @@ def test_vps_update_reports_pointer_rollback_durability_failure(deploy_harness):
     env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
     env["FAKE_POINTER_ROLLBACK_DURABILITY_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 96
     assert "injected pointer rollback durability failure" in result.stderr
@@ -1159,15 +1183,7 @@ def test_vps_update_stops_replacement_when_old_database_cannot_be_restored(
     env["WUWATERM_FAIL_STEP"] = "pointer"
     env["FAKE_DB_ROLLBACK_CONTENT_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97
     assert "injected rollback content failure" in result.stderr
@@ -1208,15 +1224,7 @@ def test_vps_update_removes_new_pointer_when_no_previous_pointer_existed(
     (root / ".deployments" / f"{OLD_COMMIT}.json").unlink()
     env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 96, result.stderr
     assert (
@@ -1230,15 +1238,7 @@ def test_vps_update_removes_new_pointer_when_no_previous_pointer_existed(
 def test_vps_update_success_publishes_verified_immutable_binding(deploy_harness):
     root, env, _old_hash, new_hash = deploy_harness
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stderr
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == new_hash
@@ -1261,15 +1261,7 @@ def test_vps_update_does_not_promote_candidate_rejected_by_real_verifier(
     root, env, old_hash, _new_hash = deploy_harness
     env["FAKE_CORRUPT_CANDIDATE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode != 0
     assert "missing or empty categories: item" in result.stderr
@@ -1397,15 +1389,7 @@ def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
     (root / "api-running").write_text("false\n", encoding="ascii")
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
     docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
@@ -1432,15 +1416,7 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     root, env, _old_hash, _new_hash = deploy_harness
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
     actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
@@ -1480,15 +1456,7 @@ def test_vps_update_refuses_to_deploy_over_a_store_at_the_old_path(deploy_harnes
     current.mkdir(parents=True, exist_ok=True)
     (current / "devices.db").write_bytes(b"SQLite format 3\x00")
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "state/api/devices.db" in result.stderr
@@ -1509,15 +1477,7 @@ def test_vps_update_restores_an_api_only_host(deploy_harness):
     env["FAKE_NO_BOT_CONTAINER"] = "1"
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
     rollback_ups = [
@@ -1571,15 +1531,7 @@ def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
     (root / "bot-running").write_text("false\n", encoding="ascii")
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
     rollback_ups = [
@@ -1604,15 +1556,7 @@ def test_vps_update_reports_a_failed_stop_before_the_database_moves(
     root, env, old_hash, _new_hash = deploy_harness
     env["FAKE_ALL_STOPS_FAIL"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode != 0
     assert "could not be stopped" in result.stderr
@@ -1638,15 +1582,7 @@ def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
     env["WUWATERM_FAIL_STEP"] = "smoke"
     env["FAKE_ROLLBACK_STOP_FAILURE"] = "1"
 
-    result = subprocess.run(
-        ["sh", str(root / "deploy" / "vps-update.sh")],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
     assert "could not be stopped" in result.stderr
@@ -1676,15 +1612,7 @@ def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
     root, env, _old_hash, _new_hash = deploy_harness
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=600,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     docker_log = (root / "docker.log").read_text(encoding="utf-8")
@@ -2046,15 +1974,7 @@ def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
     root, env, old_hash, _new_hash = deploy_harness
     (root / "telegram-running").write_text("true\n", encoding="ascii")
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "stop legacy wuwaterm-bot first" in result.stderr
@@ -2095,15 +2015,7 @@ def test_vps_update_refuses_a_poller_named_after_its_compose_project(deploy_harn
         "deploy-wuwaterm-telegram-1\n", encoding="ascii"
     )
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "stop legacy wuwaterm-bot first" in result.stderr
@@ -2155,15 +2067,7 @@ def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
     # No in-Core bot container on this host: `docker inspect` proves absence.
     env["FAKE_NO_BOT_CONTAINER"] = "1"
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     commands = [
@@ -2196,15 +2100,7 @@ def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harne
     (root / "bot-running").write_text("false\n", encoding="ascii")
     (root / "api-running").write_text("false\n", encoding="ascii")
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "neither wuwaterm-bot nor wuwaterm-api is running" in result.stderr
@@ -2245,15 +2141,7 @@ def test_vps_update_refuses_when_labelled_poller_inspect_errors(
     )
     env["FAKE_TELEGRAM_AUTO_INSPECT_ERROR"] = "1"
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert (

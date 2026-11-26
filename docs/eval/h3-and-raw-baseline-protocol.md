@@ -3,10 +3,11 @@
 - Status: **Frozen design spec — `Pending Owner Authorization` (0 live LLM calls executed)**.
 - Revision 2026-11-26 (before any `H3` call): pins Core `v0.13.0`, `wuwaterm-cjk-matcher-v10`, the production dictionary and the frozen evaluation tools (§0); adds the `en->zh` `raw_matched` thinking ablation (§3.2), the paired comparison metrics (§4.1) and a pre-registered decision rule (§4.2); re-itemizes the call budget and defers Arm C at `0` POSTs (§6).
 - Revision 2026-11-26 (b), still before any `H3` call (MY-489): adds the frozen runner, arm-scores exporter and judging addendum with their SHA-256 (§0, §0.1); states `raw_matched` → `wuwaterm_prod` as the full-pipeline gain at the matched final thinking mode (§3.2, §4.1); clarifies that §3.2 rule 3 reads a rerun document's final attempt; adds the critical-error non-worsening gate to the decision rule (§4.2); completes the community-term judging rules (§5.3).
-- Target Core under test: `v0.13.0` (tag commit `e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8`, `src` tree `9e23fd5975caeab024dcb00267e20a6266f4678e`), `wuwaterm-cjk-matcher-v10`, pinned `3.7.0` / `3.7.8` data commit `9218d612ad815e398e064e577e42aaf878899968`. Full bindings in §0.
+- Revision 2026-11-26 (c), before any `H3` candidate is scanned and before any `H3` call (MY-518): retargets the Core under test to `v0.14.0` and adds the `v0.13.0` / `v0.14.0` offline differential check and the pinned tool worktree (§0.2); makes the 12-scalar clearance mechanical, with the tagged and the freeze-time Core trees as sealed sets and `T = 24` (§2.4.1); adds the announcement collection ladder (§2.5) and the acceptance receipt and judge roster as freeze gates (§2.6); adds the post-freeze leakage scan (§2.1); takes the pilot slice from `D` (§6.1); separates the real-dollar spend cap from the approval token and adds the explicit proxy (§6.8). The §0 table keeps the revision (b) values until the PR that closes revision (c) (§0.2).
+- Target Core under test: `v0.14.0` (tag commit `2737530187f1e1c3a6b8758de357c8d32d21dfc7`, `src` tree `8e6bd426bfc12625f050c03ed14e419d3dba145f`), `wuwaterm-cjk-matcher-v11`, pinned `3.7.0` / `3.7.8` data commit `9218d612ad815e398e064e577e42aaf878899968` (revision (c), §0.2). The §0 table still lists the revision (b) binding to `v0.13.0` until the closing PR.
 - Ledger separation: **Strictly separate** from the completed `q8` / `v0.11.0` ledger (`602/606` closed). A fresh `H3` ledger (`h3-ledger.json` + append-only `h3-ledger-log.jsonl`) is initialized only after owner authorization.
 - Precondition: `MY-229` (`scripts/eval_semantic.py` audit) — **satisfied** by #316 (`5bc809c`, merged to `main` 2026-11-25).
-- Related: `MY-380`, `MY-18`, `MY-229`, `MY-489`, [ADR 0017](../adr/0017-contextual-term-references.md), [ADR 0019](../adr/0019-document-context-and-human-precedents.md), [ADR 0020](../adr/0020-held-out-usability-evaluation.md), [ADR 0021](../adr/0021-local-user-termbase.md), [usability-judging.md](usability-judging.md), [q8-candidate-plan.md](q8-candidate-plan.md).
+- Related: `MY-380`, `MY-18`, `MY-229`, `MY-489`, `MY-517`, `MY-518`, [ADR 0017](../adr/0017-contextual-term-references.md), [ADR 0019](../adr/0019-document-context-and-human-precedents.md), [ADR 0020](../adr/0020-held-out-usability-evaluation.md), [ADR 0021](../adr/0021-local-user-termbase.md), [usability-judging.md](usability-judging.md), [q8-candidate-plan.md](q8-candidate-plan.md).
 
 ## 0. Pinned Bindings
 
@@ -71,6 +72,36 @@ python scripts/eval_h3_export.py decide --ledger <run dir>/h3-ledger.json \
 - **Frozen annotations.** Each `--freeze` file (the sample, the official-name and the community-term annotations of §5.3) is hashed into the bindings, so every run of the ledger must pass the same files, and `export-scores` refuses an annotation file whose SHA-256 differs from the frozen one.
 - **Rerun.** A failed document is run once more from the start in every arm; the final attempt is the one that is judged and copied (§3.2).
 
+### 0.2 Revision (c): Core `v0.14.0`, Differential Check and Pinned Tool Worktree
+
+**Why `v0.14.0`.** Core `v0.14.0` was published on 2026-11-26 and the production API runs it (`releases/r14`, [products](../products.md)). `H3` measures long-document translation, the workload of the Web and Windows clients, which call that API; `wuwaterm_prod` therefore has to be the Core the API serves. No `H3` call has been made, so the rebinding costs one new `--fake-transport` dry run. Telegram `0.6.0` stays locked to Core `0.13.0` on its own release line; this revision does not move it.
+
+Target bindings of revision (c):
+
+| Binding | Revision (c) value | Where it comes from |
+| --- | --- | --- |
+| Core release under test | `v0.14.0` ([release](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.14.0); lightweight tag) | GitHub release, published 2026-11-26 |
+| Tag commit | `2737530187f1e1c3a6b8758de357c8d32d21dfc7` | `git rev-parse 'v0.14.0^{commit}'` |
+| `src` tree under test | `8e6bd426bfc12625f050c03ed14e419d3dba145f` | `git rev-parse 'v0.14.0:src'`; the same tree at `main` `d50919e` |
+| Matcher | `wuwaterm-cjk-matcher-v11`, `MATCHER_REVISION = 286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664` | `wuwaterm.cjk_span.MATCHER_REVISION` at the tag; v11 changes no matcher input over v10, and the new label changes the revision hash |
+| Game data, `terms.db`, dictionary revision | unchanged from §0: `9218d612…`, `9ddee819…`, `d9f5e4ae…` | `v0.14.0` changes neither the schema, the pinned data nor the `terms.db` content ([products](../products.md)) |
+
+Every frozen file whose SHA-256 the §0 table records has that SHA-256 at the tag and at `main` `d50919e`. The revision (c) tool PRs change the runner (§2.6, §6.8, the pins above) and add the corpus checker `scripts/eval_h3_corpus.py` (§2.6); `main` has neither change until they merge.
+
+**Differential check `v0.13.0` → `v0.14.0`.** Between the two tags `src` changes in eight files (#323, #325, #326, #331), term preparation among them, which the translation path calls. The revision (c) tool PRs add an offline differential check that must run the translation path of both trees with `--fake-transport` and compare what they send and return. Fixers run it only on corpora they may read; the `H3`-side run belongs to the curator (§2.1) and reports counts only. The check answers one question: does an `H3` result for `v0.14.0` also hold for Telegram, which runs Core `0.13.0`? It does not choose the binding:
+
+- No difference, or only intended changes: `H3` stays on `v0.14.0`, and the report states whether, and on which differences, the result carries over to Telegram's Core `0.13.0`.
+- An unintended regression: it is fixed in Core `v0.14.1`, and `H3` is rebound to that tag before the closing PR. A regression first seen after the closing PR stops `H3` before any live call; the rebinding then needs a new protocol revision and a new acceptance receipt.
+- `H3` never falls back to `0.13.0`, which would measure a Core the production API no longer serves.
+
+**Pinned tool worktree.** `frozen_file_hashes()` hashes the frozen files of the checkout the runner runs from, not of `--bound-tree`, and those hashes are part of the bindings and of the approval token. Run from a `main` checkout that has moved past a change to a frozen file, the runner would compute other bindings, and the ledger and the token would refuse it. After the closing PR merges, a detached worktree is therefore created at its merge commit. `preflight`, every `run --live`, and the export and decision steps of the `H3` ledger run from that worktree only. `--bound-tree` stays a separate detached checkout of the tag under test. Both worktrees stay until `H3` is reported.
+
+**Closing PR.** The runner PR of revision (c) moves `PINNED_SRC_TREE` and `PINNED_MATCHER_REVISION` to the values above. After the tool PRs and this rules revision merge, one closing PR updates, against the merged files:
+
+- the §0 table: the Core release, tag commit, `src` tree and matcher rows to the values above, the frozen-file rows to the merged SHA-256 values with a row for `scripts/eval_h3_corpus.py`, and the notes under the table;
+- §0.1: the bound-tree value, the `<v0.13.0 checkout>` placeholders, the `--freeze` lists (adding the `h3-acceptance-v1` receipt and the `h3-judges-v1` roster, replacing `<same three files>`) and the `run` flags `--ledger-budget-usd`, `--max-cost-usd` and `--proxy`;
+- the Status line and the result of the differential check.
+
 ## 1. Status of Prior Held-Out Corpora (`H1` and `H2`)
 
 - **`H1` and `H2` remain permanently marked `held-out used`.**
@@ -84,15 +115,17 @@ python scripts/eval_h3_export.py decide --ledger <run dir>/h3-ledger.json \
 - All raw `H3` documents, manifests, name/term annotations, arm outputs, and judge packets live in a private evaluation directory **outside every repository and worktree**.
 - Only frozen protocol specifications, aggregate metric tables, non-text window-scan counts, and SHA-256 hashes enter this repository or the evaluation ledger.
 - Fixers and engine contributors never read `H3` source texts, references, or raw judge packets prior to freeze sign-off.
+- The **curator** assembles, annotates and freezes `H3` and runs every scan against it. The curator never changes Core and reports only counts, SHA-256 values, exit codes and rule ids.
+- **Post-freeze leakage scan** (revision (c)): before every Core PR that merges after `freeze_core_commit` (the `main` commit sealed at the freeze, §2.4.1), the curator scans the inputs of the ADR 0020 [leakage scan](../adr/0020-held-out-usability-evaluation.md#leakage-scan) (the PR's added lines, the PR body, the translation prompt templates, new or changed dictionary rows) against `H3` and returns counts only. A hit is handled under that scan's stop rule. This keeps `H3` blind for the later Arm C evaluation (§3.3).
 
 ### 2.2 Genres and Sample Weighting
 
-`H3` retains the four mechanical genre definitions from [ADR 0020](../adr/0020-held-out-usability-evaluation.md#genres-and-sources), weighted to address the real user bottlenecks identified in `MY-380` and `H1` (where `zh->en` guides scored `71/87`):
+`H3` retains the four mechanical genre definitions from [ADR 0020](../adr/0020-held-out-usability-evaluation.md#genres-and-sources), weighted to address the real user bottlenecks identified in `MY-380` and `H1` (where `zh->en` guides scored `71/87`). Revision (c) widens one source: when the `L0` / `L1` official website announcements fall short, `announcement` may also take the `L2` notice key families of the pinned TextMaps, under the ladder of §2.5, and every report keeps the levels apart:
 
 | Genre | Code | Source & Scope | Weighting Rationale |
 | --- | --- | --- | --- |
 | 攻略 Guide | `guide` | Community builds, rotations, mechanics, walkthroughs, farming, pulling advice (TapTap `zh`, Steam guides `en`), rich in shorthand (`3+1`, `S0R1`), skill stems, and community jargon | **Weighted highest on `zh->en`** (`>= 50` scored units) to target the `71/87` `H1` bottleneck |
-| 公告 Announcement | `announcement` | Official Kuro website announcement JSON (`zh`/`en` editions), using distinct non-boilerplate sections where possible | Measures official terminology and formatting fidelity |
+| 公告 Announcement | `announcement` | Official Kuro website announcement JSON (`zh`/`en` editions), using distinct non-boilerplate sections where possible; under revision (c), when the `L0` / `L1` website articles fall short, also `L2` notice key families of the pinned `3.7` TextMaps (§2.5) | Measures official terminology and formatting fidelity |
 | 剧情 Story | `story` | Dialogue and narration scenes from pinned `3.7` TextMaps (`9218d612`) disjoint from all earlier sets | Measures pronoun/elided-subject continuity, speaker disambiguation, and tone |
 | 混合语境 Mixed | `mixed` | Community discussion, reviews, UI/event notices mixing official names with everyday words (`心`, `椿`, `tuner`, `energy core`) | Measures homograph isolation and zero false-positive priming |
 
@@ -107,13 +140,77 @@ Every document is segmented identically by `segmentation-v1` (`L = 1800`, `wuwat
 
 ### 2.4 Pre-Freeze Deduplication and Freshness Rules
 
-Before the **first** live model call of `H3`, an automated pre-freeze check must pass with **zero** violations:
+Before the **first** live model call of `H3`, an automated pre-freeze check (the corpus checker, §2.6) must pass with **zero** violations:
 
-1. **Zero shared 12-scalar windows**: Run the 12-Unicode-scalar sliding window check (`scripts/eval_usability.py` `scan` semantics, raw text without normalization) of every `H3` candidate source and reference paragraph against **all** prior evaluation corpora: `H1`, `H2`, `D`, `R`, `A1–A6`, `B1–B3`, `S01–S18`, `M-Gold`, and the Core source tree at the freeze commit. **Requirement: `0` shared uncleared windows** (candidates with shared boilerplate or overlapping windows are pruned or replaced before freeze, never carried forward like `H1`/`H2` announcement templates).
+1. **Zero shared uncleared 12-scalar windows**: Run the 12-Unicode-scalar sliding window check (`scripts/eval_usability.py` `scan` semantics, raw text without normalization) of every `H3` candidate source and reference paragraph against **all** prior evaluation corpora: `H1`, `H2`, `D`, `R`, `A1–A6`, `B1–B3`, `S01–S18`, `M-Gold`, and the sealed Core trees (§2.4.1). **Requirement: `0` shared uncleared windows** after the mechanical clearance of §2.4.1 (candidate paragraphs with an uncleared window are pruned or replaced before freeze, never carried forward like `H1`/`H2` announcement templates).
 2. **Source ID and key disjointness**: Every Kuro article ID, TextMap key, story quest line, and community URL/author series appearing in `H1`, `H2`, `D`, `R`, `A1–A6`, `B1–B3`, `S01–S18`, or `M-Gold` is excluded.
-3. **Cutoff and version isolation**: Community texts and announcements must satisfy the pre-`3.8` window (before `2026-11-06 19:45 +08:00`) and contain **no mention of game version `3.8` or later**, matching the pinned `3.7.0 / 3.7.8` dictionary (`9218d612`).
+3. **Cutoff and version isolation**: Community texts and announcements must satisfy the pre-`3.8` window (before `2026-11-06 19:45 +08:00`, not including it; the first article titled for version 3.8, ADR 0020) and contain **no mention of game version `3.8` or later**, matching the pinned `3.7.0 / 3.7.8` dictionary (`9218d612`).
 4. **Intra-set deduplication**: Zero normalized duplicate paragraphs within `H3` (NFKC + casefold + strip whitespace/punctuation), and each bilingual pair appears in one direction only.
 5. **PII / ID scrubbing**: Player UIDs, contact handles, and personal identifiers are removed before freeze; any document that cannot be cleaned cleanly is discarded.
+
+#### 2.4.1 Mechanical Clearance of 12-Scalar Hits (revision (c))
+
+These rules were registered before any `H3` candidate was scanned against a sealed set; `T` was set from `D` alone.
+
+- **Sealed sets.** Every source and reference paragraph of the prior corpora of rule 1, and two Core trees:
+  - every text blob of the `v0.14.0` tag commit `2737530` (`core_tag_commit`, 350 text blobs), so a file changed after the tag keeps its tagged text in the scan;
+  - every text blob of the `main` commit at the freeze (`freeze_core_commit`), so text merged into Core after the tag and before the freeze, fixtures included, is scanned too.
+
+  A text blob is a tracked blob that is not a symlink or submodule, holds no NUL byte and decodes as UTF-8, the rule of the scorer's `git_blob_texts`; at the tag the six PNG images drop out. ADR 0020's merge scan uses the Core tree the other way round, as a clearing source (`--clear-git`). Here both trees are sealed: Core must not already hold `H3` text, and nothing in this scan is cleared against them. Such text would most likely sit in tests and fixtures, so whole trees are scanned, not only `src/`. Core PRs that merge after `freeze_core_commit` are covered by the post-freeze leakage scan (§2.1).
+- **Windows.** 12 Unicode scalars of the raw text, no normalization, the scorer's `windows()`. The frozen `scan` takes only sample files as `--sealed` and no git tree, so this scan is check `C4` of the corpus checker that revision (c) adds (§2.6), which must load the scorer's window function only after checking the scorer's SHA-256.
+- **Shared fragment.** The shared fragment of a hit window is the longest run of consecutive window positions of the candidate paragraph that are all hits and include that window. Its length in scalars is the number of windows in the run plus `11`; a lone hit window gives `12`.
+- **Noise calibration on `D`**, scanned against `H1`, `H2` and the tag tree `2737530` before any `H3` candidate was scanned:
+
+  | `D` side | Texts | Source scalars | Hits per 1,000 scalars | Longest shared fragment (scalars) |
+  | --- | --- | --- | --- | --- |
+  | English | 129 | 7,700 | 37.0 (4.4 against `H1` + `H2` alone) | p50 13, p90 17, p95 17.6, p99 20.9, max 22 |
+  | Chinese | 174 | 7,290 | 0 | — |
+
+  Of the English hit windows, 0.35% hold an `Nd` digit and 9.8% hold a dictionary surface at least 2 scalars long. The Core tree brings most of the English noise; Chinese has none. `T = 24` lies above every shared fragment seen on `D` (max 22).
+- **Clearance classes.** Each hit window is tested against M1, then M2, then M3; the first class that applies clears it and is the class recorded:
+  - **M1, declared names**: the window lies wholly inside one entry of a declared name set, frozen and bound in the acceptance receipt: the official names (ADR 0020's frozen upstream name file) or the `H3` community lexicon (§5.3).
+  - **M2, generic English phrase**: the window holds no CJK character (Unicode scripts Han, Hiragana, Katakana, Hangul), holds no Unicode `Nd` character, holds no term surface of the bound dictionary (`terms.db` `9ddee819…`) at least 2 scalars long, and its shared fragment is shorter than `T = 24` scalars. `T` was calibrated on English hits only (Chinese had none on `D`), so a hit window with CJK text clears only by M1 or M3.
+  - **M3, `upstream_data`**: the window is on the frozen clearance list, whose every entry names it by window SHA-256 and location and attributes it to `upstream_data` (game data outside the sealed paragraphs, as in ADR 0020). The list holds no other class.
+  - Every other hit is **uncleared**. ADR 0020's hand-classified *ordinary wording* clearance is not used for `H3`; M2 replaces it.
+- **Pruning and freeze.** At assembly, a paragraph with an uncleared window is removed whole, with its aligned reference, never rewritten around the window. The freeze requires `uncleared == 0` (`C4`). The receipt gives the counts per class (M1, M2, M3, uncleared) and the longest shared fragment; window SHA-256 values and locations are kept, never the text.
+
+### 2.5 Announcement Collection Ladder (revision (c))
+
+Announcements are the scarce genre: after 2024 the Chinese site carries maintenance notices and update notes only, in two template families (ADR 0020). Collection takes a lower level only when the level above is exhausted. Each announcement document records its level, and the receipt and every report give announcement scored units per level, so `L2` game text is never counted as website announcements.
+
+| Level | Source |
+| --- | --- |
+| `L0` | Official website articles, `zh` and `en` editions, published from 2025-01-01 to the cutoff (§2.4 rule 3), used in no prior set |
+| `L1` | The same source before 2025-01-01 |
+| `L2` | Official notice key families of the pinned `3.7` TextMaps (`9218d612`) with both a `zh` and an `en` text, under the key disjointness of §2.4 rule 2 |
+
+At every level:
+
+- **Template pruning.** Paragraphs of a shared template (text that recurs across the announcements of one family) are cut. An article with fewer than `3` paragraphs left is dropped and the next one is taken.
+- **Collection compliance.** No bypassing of anti-bot measures or CAPTCHAs, `robots.txt` honoured, requests rate-limited, and no content that needs a login.
+
+**`L3` is the owner's decision.** If announcements stay below `30` scored units in a direction after `L0`–`L2`, the curator does not lower the floor. The gap, in scored units per direction, goes to the owner as a decision item of the approval request (§6.7) with this proposal: an announcement floor of `20` in that direction, the other genres filling the direction to `>= 140`, and that direction's announcement results marked underpowered. `L3` takes effect only with the owner's approval, recorded in a protocol revision before the freeze; until then the floors of §2.3 stand and `C3` checks them.
+
+### 2.6 Freeze Gates: Acceptance Receipt and Judge Roster (revision (c))
+
+The corpus checker that revision (c) adds, `scripts/eval_h3_corpus.py`, must run the checks below on the assembled set and write an `h3-acceptance-v1` receipt. Its output must hold counts, SHA-256 values and rule ids, never text.
+
+| Check | Rule |
+| --- | --- |
+| `C1` | The manifest and the sample agree (documents, directions, genres, texts) |
+| `C2` | The ADR 0020 exclusion labels (dictionary-answered alone, no-letter, duplicate), recomputed with the bound tree and dictionary, equal the sample's |
+| `C3` | The floors of §2.3: `>= 140` scored units per direction, `>= 30` per genre and direction, `>= 50` in `zh->en` `guide` |
+| `C4` | `uncleared == 0` after M1, M2 and M3 against the sealed sets (§2.4 rule 1, §2.4.1) |
+| `C5` | No normalized duplicate paragraph within `H3`, and each bilingual pair in one direction only (§2.4 rule 4) |
+| `C6` | Source ids, series and authors disjoint from every prior set (§2.4 rule 2) |
+| `C7` | Every text published before the cutoff `2026-11-06 19:45 +08:00` (not including it), with no mention of game version `3.8` or later (§2.4 rule 3) |
+| `C8` | `0` PII hits (§2.4 rule 5) |
+| `C9` | Official-name and community-term annotations complete from both annotators, with the adjudication (§5.3) |
+| `C10` | The receipt binds the SHA-256 of every input and tool, both sealed Core commits (`core_tag_commit` `2737530` and `freeze_core_commit`), the bound tree and `terms.db`, and states the `verdict` |
+
+The judge roster `h3-judges-v1` pins the independent strong-pool judges `j1` and `j2` and the arbitrator `adj` (§5.3), each a fresh context, before the freeze. The manifest has no field for them.
+
+Both files are `--freeze` inputs, so their SHA-256 values enter the bindings and the approval token. The revision (c) runner must print an approval token from `preflight` only when the `--freeze` inputs hold a valid `h3-acceptance-v1` with `verdict == "pass"` for the same manifest and an `h3-judges-v1`, and print none otherwise. `run --live` must make the same check and refuse before any client exists.
 
 ## 3. Experimental Arms (2-Arm Primary + `en->zh` `raw_matched` Ablation; Arm C Deferred)
 
@@ -121,12 +218,12 @@ All arms run in this revision (`raw_baseline`, `raw_matched`, `wuwaterm_prod`) r
 
 | Property | Arm Raw (`raw_baseline`) | Ablation Arm (`raw_matched`, `en->zh` only) | Arm WuwaTerm (`wuwaterm_prod`) |
 | --- | --- | --- | --- |
-| Code / Pipeline | Standalone minimal harness calling `llm_transport.post_chat_completion` directly | Same harness and prompt as `raw_baseline` | Core `v0.13.0` (`e5b7f1a`, `src` tree `9e23fd59…`): `application._translate_long_plain_text` + `TranslationPlan` / `OperationExecutionBudget` |
+| Code / Pipeline | Standalone minimal harness calling `llm_transport.post_chat_completion` directly | Same harness and prompt as `raw_baseline` | Core `v0.14.0` (`2737530`, `src` tree `8e6bd426…`, §0.2): `application._translate_long_plain_text` + `TranslationPlan` / `OperationExecutionBudget` |
 | Directions | `zh->en` and `en->zh` | `en->zh` only | `zh->en` and `en->zh` |
 | Model & Gateway | Same production `WUWATERM_OPENAI_MODEL` (`deepseek-flash`) & `WUWATERM_OPENAI_BASE_URL`, `temperature=0` | Same | Same |
 | Timeouts | `45 s` model timeout / `90 s` request budget | `45 s` model timeout / `90 s` request budget | `45 s` model timeout / `90 s` request budget |
 | Segmentation | `segmentation-v1` (`L = 1800`) identical segment cores | `segmentation-v1` (`L = 1800`) identical segment cores | `segmentation-v1` (`L = 1800`) identical segment cores |
-| Dictionary (`terms.db`) | **None** (no exact lookup, no locks, no references) | **None** | Production `terms.db` (`9ddee819…`, revision `d9f5e4ae…`) + `wuwaterm-cjk-matcher-v10` |
+| Dictionary (`terms.db`) | **None** (no exact lookup, no locks, no references) | **None** | Production `terms.db` (`9ddee819…`, revision `d9f5e4ae…`) + `wuwaterm-cjk-matcher-v11` |
 | Local User Termbase | **None** | **None** | **None** |
 | Context / Precedents | **None** (no `before` segment, no precedents, no context rules) | **None** | `translation-context-v1` (`before` read-only segment; precedents off unless enabled) |
 | Thinking (`zh->en`) | `disabled` (explicit `thinking: {"type": "disabled"}`) — **exact parity with `wuwaterm_prod`** | not run | `disabled` (`TRANSLATION_THINKING_ZH_EN_DEFAULT`) |
@@ -248,7 +345,7 @@ The four metric families, per direction:
 
 ### 5.1 Precondition
 
-`MY-229` (`scripts/eval_semantic.py` audit) is satisfied (#316, merged to `main`), and all protocol files, rubric weights, manifests, term annotations, `OperationIdentity` specs, the pinned bindings and frozen tools of §0 (including the `H3` runner, the arm-scores exporter and the judging addendum), and the decision rule, gate ceiling and seed of §4.2 are SHA-256 hashed into `h3-ledger.json` before the first live POST.
+`MY-229` (`scripts/eval_semantic.py` audit) is satisfied (#316, merged to `main`), and all protocol files, rubric weights, manifests, term annotations, `OperationIdentity` specs, the pinned bindings and frozen tools of §0 (including the `H3` runner, the arm-scores exporter and the judging addendum), the acceptance receipt and the judge roster (§2.6), and the decision rule, gate ceiling and seed of §4.2 are SHA-256 hashed into `h3-ledger.json` before the first live POST.
 
 ### 5.2 Blinding and Randomization
 
@@ -257,7 +354,7 @@ The four metric families, per direction:
 
 ### 5.3 Independent Strong-Pool Judging, Arbitration and Community Terms
 
-- Two independent strong-pool judges (`j1`, `j2` — distinct fresh strong-model contexts pinned in the frozen run manifest) grade every item independently using the frozen rubric. `usability-judging.md` remains unmodified; the community-term rules below are given to judges as [h3-judging-addendum.md](h3-judging-addendum.md), hashed in §0 and into `h3-ledger.json`. MQM severity points are computed deterministically by the scorer.
+- Two independent strong-pool judges (`j1`, `j2` — distinct fresh strong-model contexts pinned, with `adj`, in the frozen `h3-judges-v1` roster, §2.6) grade every item independently using the frozen rubric. `usability-judging.md` remains unmodified; the community-term rules below are given to judges as [h3-judging-addendum.md](h3-judging-addendum.md), hashed in §0 and into `h3-ledger.json`. MQM severity points are computed deterministically by the scorer.
 - Any disagreement on grade, critical error categories/counts, naturalness, or any official/community term `label`, `misleading` flag, or normalized `rendering` routes the full item to an unseen third strong-pool arbitrator (`adj`). Agreed items must never have `adj` records (invalid per `eval_usability.py` rules, applied by the exporter to the community fields as well).
 
 Community-term rules (§4 item 3):
@@ -280,12 +377,12 @@ Every attempted POST to the product model gateway counts, retries and failures i
 
 ### 6.1 Stage 1: Pre-H3 Sanity & Parity Pilot (Optional Gate Before Full H3)
 
-Verifies `raw_baseline` vs `wuwaterm_prod` segment alignment, `OperationExecutionBudget` logging, thinking-mode wire parity (including the `raw_matched` mode copy of §3.2), and token `usage` capture on a small frozen diagnostic slice before spending the full `H3` budget.
+Verifies `raw_baseline` vs `wuwaterm_prod` segment alignment, `OperationExecutionBudget` logging, thinking-mode wire parity (including the `raw_matched` mode copy of §3.2), and token `usage` capture on a small frozen diagnostic slice before spending the full `H3` budget. The slice is 8 documents of `D` (revision (c)), never `H3` text, so it needs no acceptance receipt of its own.
 
 | Line Item | Scope | `zh->en` POSTs | `en->zh` POSTs | Retry Headroom | Subtotal POSTs |
 | --- | --- | --- | --- | --- | --- |
-| `raw_baseline` pilot | 8 diagnostic docs (~8 segments/dir) | 8 | 8 | +2 | 18 |
-| `wuwaterm_prod` pilot | Same 8 docs (`v0.13.0`, `en->zh=auto`) | 8 | 8 | +4 (`auto` corrective cap) | 20 |
+| `raw_baseline` pilot | 8 diagnostic `D` docs (~8 segments/dir) | 8 | 8 | +2 | 18 |
+| `wuwaterm_prod` pilot | Same 8 docs (`v0.14.0`, `en->zh=auto`) | 8 | 8 | +4 (`auto` corrective cap) | 20 |
 | `raw_matched` pilot | Same 8 docs, `en->zh` only, modes copied from the `wuwaterm_prod` pilot | 0 | 8 | +0 | 8 |
 | **Stage 1 Pilot Subtotal** | **Sanity & wire-parity gate** | **16** | **24** | **+6** | **46** (hard cap **56**) |
 
@@ -350,3 +447,20 @@ The approval request carries:
 2. The amount computed from the official price page at the time of the request (`scripts/eval_h3.py cost-estimate` prices the dry run's estimated tokens per stage and at each hard cap).
 3. The subscription judging quota estimate of §6.6.
 4. The exact per-stage POST counts from `scripts/eval_h3.py preflight` on the frozen `H3` manifest, with the approval token it prints for that manifest.
+5. The proposed `--ledger-budget-usd`, for the owner to set. The approval token authorizes no amount (§6.8).
+6. The acceptance receipt summary (§2.6): scored units per direction and genre, with announcement scored units reported separately for `L0`, `L1` and `L2` (§2.5), clearance counts per class (M1, M2, M3) and the longest shared fragment.
+7. The result of the `v0.13.0` / `v0.14.0` differential check and whether the `H3` result carries over to Telegram's Core `0.13.0` (§0.2).
+8. Any announcement gap left after `L0`–`L2`, with the `L3` proposal, as a separate decision for the owner (§2.5).
+
+### 6.8 Real-Dollar Spend Cap and Proxy (revision (c))
+
+Requirements on the revision (c) runner:
+
+- **The token is not a budget.** `--owner-approval-token` is a tamper digest of the frozen configuration (§0.1) and authorizes no amount. Money is capped by two hard limits that a live run must be given, and neither enters the token digest, so changing an amount needs no new `preflight`:
+  - `--ledger-budget-usd`, the budget of the whole `H3` ledger. The first live run writes it into `h3-ledger.json`. It never changes after that, and a later run that passes another value is refused.
+  - `--max-cost-usd`, the cap of one run.
+- **Pricing.** Each POST is priced conservatively at the gateway's peak-hour cache-miss input and output prices.
+- **Pre-send check.** Before each POST, the transport pre-send hook reserves a conservative cost for it. If what was spent plus that reservation would pass either limit, the POST is refused before it reaches the transport and the run stops (exit `3`), as with the call caps.
+- **Charging.** A POST answered with `usage` is charged by its `usage`. A failed or timed-out POST is charged its full reservation. A POST answered without `usage` is charged its full reservation, and the run stops at once (exit `3`).
+- **No change on the wire.** The spend cap only counts. It adds no request field and changes no request byte, so `wuwaterm_prod` stays the production path.
+- **Proxy.** An explicit `--proxy` is accepted only with `--live`; given with `--fake-transport` it is refused. The ledger records only the boolean `proxy_enabled`, never the URL or credentials. The proxy is not a binding and does not change the token.
