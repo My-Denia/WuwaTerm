@@ -28,6 +28,17 @@ does not distribute generated game data or generated SQLite databases.
   `v0.13.0`) and Web `v0.4.5`, the releases `contracts/products.json` now
   records.
 
+### Evaluation & Research
+
+- Add the frozen H3 evaluation tools (MY-489): `scripts/eval_h3.py` runs
+  `raw_baseline`, `wuwaterm_prod` and `raw_matched` with a `--fake-transport`
+  dry run, per-stage call caps counted before each POST, and an owner approval
+  token for live runs, and offers `preflight` and `cost-estimate`;
+  `scripts/eval_h3_export.py` writes `usability-arm-scores-v1` files and applies
+  the pre-registered decision rule. The protocol adds a critical-error
+  non-worsening gate and the community-term judging rules
+  (`docs/eval/h3-judging-addendum.md`). No runtime path uses them.
+
 ## 0.13.0 - 2026-11-26
 
 ### Translation Direction & Prose Preservation
