@@ -3,6 +3,19 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Installer
+
+- `deploy/setup.sh` defaults the installer to Web `v0.5.0`, the release
+  `contracts/products.json` now records. The Telegram default stays `v0.6.0`
+  (pinning Core `v0.13.0`).
+
+### Contract Pins
+
+- The Core CI client pins move to Web `v0.5.0` (`6cd0a7c5`) and Windows
+  `v0.7.0` (`d87a66c3`), the releases that carry `wuwaterm-manuscript-v5`.
+
 ## 0.14.0 - 2026-11-26
 
 ### Review & Terms
