@@ -6,11 +6,13 @@ Subcommands
 
 ``accept``          run mechanical checks C1-C10 over a candidate H3 corpus
                     (``h3-manifest-v1``, ``usability-sample-v1``, metadata,
-                    official/community annotations, prior texts/IDs, bound Core
-                    tree and production ``terms.db``) and emit a structured
-                    ``h3-acceptance-v1`` receipt JSON with zero corpus text.
+                    official/community annotations + adjudication, prior
+                    texts/IDs, bound Core tree and production ``terms.db``) and
+                    emit a structured ``h3-acceptance-v1`` receipt JSON with
+                    zero corpus text.
 ``verify-receipt``  validate an existing ``h3-acceptance-v1`` receipt file using
-                    ``validate_acceptance_receipt``.
+                    ``validate_acceptance_receipt`` (pinned defaults, fail-closed
+                    on any non-default parameter unless explicitly allowed).
 
 Exit codes:
   0  all checks C1-C10 passed (``verdict == "pass"``) / valid receipt
@@ -25,6 +27,7 @@ import datetime as _dt
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sqlite3
@@ -54,6 +57,7 @@ MANIFEST_SCHEMA = "h3-manifest-v1"
 SAMPLE_SCHEMA = "usability-sample-v1"
 OFFICIAL_NAMES_SCHEMA = "usability-names-v1"
 COMMUNITY_NAMES_SCHEMA = "h3-community-names-v1"
+ANNOTATION_ADJUDICATION_SCHEMA = "h3-annotation-adjudication-v1"
 METADATA_SCHEMA = "h3-corpus-metadata-v1"
 PRIOR_TEXTS_SCHEMA = "h3-prior-texts-v1"
 PRIOR_IDS_SCHEMA = "h3-prior-ids-v1"
@@ -69,6 +73,7 @@ DIRECTION_ALIASES = {
     "en-zh": "en->zh",
 }
 GENRES = ("announcement", "story", "guide", "mixed")
+COMMUNITY_GENRES = ("guide", "mixed")
 EXCLUSIONS = ("dictionary", "no_letter", "duplicate")
 
 # C3 default thresholds.
@@ -76,11 +81,26 @@ DEFAULT_PER_DIRECTION_FLOOR = 140
 DEFAULT_PER_GENRE_FLOOR = 30
 DEFAULT_ZH_EN_GUIDE_FLOOR = 50
 
-# C4 defaults.
+# C4 defaults & required prior sets (§2.4 rule 1).
 WINDOW_SIZE = 12
 DEFAULT_M2_MAX_SHARED_SPAN = 24
+REQUIRED_PRIOR_SETS = (
+    "H1",
+    "H2",
+    "D",
+    "R",
+    "A1-A6",
+    "B1-B3",
+    "S01-S18",
+    "M-Gold",
+)
+_GROUPED_PRIOR_SET_MEMBERS: dict[str, tuple[str, ...]] = {
+    "A1-A6": tuple(f"A{i}" for i in range(1, 7)),
+    "B1-B3": tuple(f"B{i}" for i in range(1, 4)),
+    "S01-S18": tuple(f"S{i:02d}" for i in range(1, 19)),
+}
 
-# C7 cutoff.
+# C7 cutoff (strictly < cutoff per ADR 0020).
 DEFAULT_CUTOFF_ISO = "2026-11-06T19:45:00+08:00"
 MIN_FORBIDDEN_VERSION = (3, 8)
 
@@ -88,6 +108,7 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
+_DEFAULT_GATE_SHA = object()
 _HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]+")
@@ -233,6 +254,44 @@ def _has_unicode_nd_digit(text: str) -> bool:
     return any(unicodedata.category(ch) == "Nd" for ch in text)
 
 
+def _is_cjk_char(ch: str) -> bool:
+    """Unicode Han (incl. non-BMP ext + 々/〇), Hiragana, Katakana (incl. halfwidth), Hangul."""
+    code = ord(ch)
+    return (
+        # Han: CJK Unified Ideographs, Ext A, Compatibility, Radicals, 々/〇/Hangzhou numerals, Ext B-I
+        0x4E00 <= code <= 0x9FFF
+        or 0x3400 <= code <= 0x4DBF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x2E80 <= code <= 0x2EFF
+        or 0x2F00 <= code <= 0x2FDF
+        or code in (0x3005, 0x3007)
+        or 0x3021 <= code <= 0x3029
+        or 0x3038 <= code <= 0x303B
+        or 0x20000 <= code <= 0x323AF
+        # Hiragana
+        or 0x3040 <= code <= 0x309F
+        or 0x1B001 <= code <= 0x1B11F
+        or code in (0x1B132, 0x1B150, 0x1B151, 0x1B152)
+        # Katakana (incl. Phonetic Extensions, Halfwidth Katakana, Kana Extended)
+        or 0x30A0 <= code <= 0x30FF
+        or 0x31F0 <= code <= 0x31FF
+        or 0xFF65 <= code <= 0xFF9F
+        or code in (0x1B000, 0x1B120, 0x1B121, 0x1B122, 0x1B155, 0x1B164, 0x1B165, 0x1B166, 0x1B167)
+        or 0x1AFF0 <= code <= 0x1AFFF
+        # Hangul (Jamo, Compatibility Jamo, Ext-A, Syllables, Ext-B, Halfwidth Hangul)
+        or 0x1100 <= code <= 0x11FF
+        or 0x3130 <= code <= 0x318F
+        or 0xA960 <= code <= 0xA97F
+        or 0xAC00 <= code <= 0xD7AF
+        or 0xD7B0 <= code <= 0xD7FF
+        or 0xFFA0 <= code <= 0xFFDF
+    )
+
+
+def _has_cjk_char(text: str) -> bool:
+    return any(_is_cjk_char(ch) for ch in text)
+
+
 def _normalize_id_token(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().casefold()
 
@@ -264,30 +323,45 @@ def _read_until_nul(stream: Any) -> bytes | None:
         buf.extend(ch)
 
 
-def iter_git_commit_text_blobs(repo: Path, commit: str) -> tuple[str, list[str]]:
-    """Resolve ``commit`` and read all tracked UTF-8 non-binary blobs in one cat-file batch."""
-    rc, out, _ = _git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}")
-    if rc != 0:
-        raise _CheckError("git_commit_invalid", "cannot resolve core commit")
-    resolved = out.decode("utf-8").strip()
+def iter_git_commits_text_blobs(repo: Path, commits: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Resolve one or more commits and read the union of tracked UTF-8 non-binary blobs.
 
-    rc, listing, _ = _git(repo, "ls-tree", "-r", "-z", resolved)
-    if rc != 0:
-        raise _CheckError("git_ls_tree_failed", "git ls-tree failed")
+    Uses the exact blob-filtering rule of ``eval_usability.git_blob_texts``:
+    tracked regular blobs (not symlinks ``120000`` or submodules), no NUL byte,
+    valid UTF-8. Duplicate blob OIDs across commits are read once.
+    """
+    resolved_list: list[str] = []
+    unique_resolved: list[str] = []
+    for commit in commits:
+        rc, out, _ = _git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}")
+        if rc != 0:
+            raise _CheckError("git_commit_invalid", "cannot resolve core commit")
+        resolved = out.decode("utf-8").strip()
+        resolved_list.append(resolved)
+        if resolved not in unique_resolved:
+            unique_resolved.append(resolved)
 
     oids: list[bytes] = []
-    for entry in listing.split(b"\0"):
-        if not entry:
-            continue
-        meta, _, _path = entry.partition(b"\t")
-        fields = meta.split()
-        if len(fields) != 3 or fields[1] != b"blob" or fields[0] == b"120000":
-            continue
-        oids.append(fields[2])
+    seen_oids: set[bytes] = set()
+    for resolved in unique_resolved:
+        rc, listing, _ = _git(repo, "ls-tree", "-r", "-z", resolved)
+        if rc != 0:
+            raise _CheckError("git_ls_tree_failed", "git ls-tree failed")
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            meta, _, _path = entry.partition(b"\t")
+            fields = meta.split()
+            if len(fields) != 3 or fields[1] != b"blob" or fields[0] == b"120000":
+                continue
+            oid = fields[2]
+            if oid not in seen_oids:
+                seen_oids.add(oid)
+                oids.append(oid)
 
     texts: list[str] = []
     if not oids:
-        return resolved, texts
+        return resolved_list, texts
 
     proc = subprocess.Popen(
         ["git", "-C", str(repo), "cat-file", "--batch", "-Z"],
@@ -328,7 +402,7 @@ def iter_git_commit_text_blobs(repo: Path, commit: str) -> tuple[str, list[str]]
         rc = proc.wait()
     if rc != 0:
         raise _CheckError("git_cat_file_failed", "git cat-file exited non-zero")
-    return resolved, texts
+    return resolved_list, texts
 
 
 @dataclass
@@ -805,7 +879,6 @@ def check_c2(
         declared_label = "scored" if para.scored else str(para.exclusion)
         declared_counts[declared_label] += 1
 
-        # Verify segmentation-v1 core matches the standalone paragraph unit.
         seg_units = core.segmentation.segment_text(para.source)
         seg_cores = [para.source[s.core_start : s.core_end] for s in seg_units if s.core_start < s.core_end]
         unit_text = seg_cores[0] if len(seg_cores) == 1 else para.source
@@ -867,32 +940,60 @@ def check_c2(
 # --------------------------------------------------------------- check C3
 
 
+def resolve_announcement_floors(
+    *,
+    announcement_floor: int | None,
+    announcement_floor_zh_en: int | None,
+    announcement_floor_en_zh: int | None,
+) -> tuple[int, int, str | None]:
+    """Resolve effective per-direction announcement floors or return an error code."""
+    eff_zh = announcement_floor_zh_en if announcement_floor_zh_en is not None else announcement_floor
+    eff_en = announcement_floor_en_zh if announcement_floor_en_zh is not None else announcement_floor
+    if announcement_floor is not None:
+        if announcement_floor_zh_en is not None and announcement_floor_zh_en != announcement_floor:
+            return DEFAULT_PER_GENRE_FLOOR, DEFAULT_PER_GENRE_FLOOR, "conflicting_announcement_floor_flags"
+        if announcement_floor_en_zh is not None and announcement_floor_en_zh != announcement_floor:
+            return DEFAULT_PER_GENRE_FLOOR, DEFAULT_PER_GENRE_FLOOR, "conflicting_announcement_floor_flags"
+    val_zh = DEFAULT_PER_GENRE_FLOOR if eff_zh is None else eff_zh
+    val_en = DEFAULT_PER_GENRE_FLOOR if eff_en is None else eff_en
+    if val_zh < 0 or val_en < 0:
+        return val_zh, val_en, "invalid_announcement_floor"
+    return val_zh, val_en, None
+
+
 def check_c3(
     *,
     sample_paragraphs: Sequence[SampleParagraph],
-    announcement_floor: int | None,
+    announcement_floor_zh_en: int,
+    announcement_floor_en_zh: int,
+    floor_config_error: str | None = None,
 ) -> dict[str, Any]:
-    if announcement_floor is not None and announcement_floor < 0:
+    if floor_config_error is not None:
         return {
             "status": "fail",
-            "floor_profile": f"invalid:announcement={announcement_floor}",
+            "floor_profile": f"invalid:{floor_config_error}",
             "non_default_floor": True,
-            "shortfalls": [{"code": "invalid_announcement_floor"}],
+            "shortfalls_count": 1,
+            "shortfalls": [{"code": floor_config_error}],
         }
 
-    eff_ann = DEFAULT_PER_GENRE_FLOOR if announcement_floor is None else announcement_floor
-    non_default = announcement_floor is not None and announcement_floor != DEFAULT_PER_GENRE_FLOOR
-    floor_profile = f"custom:announcement={eff_ann}" if non_default else "default"
+    custom_parts: list[str] = []
+    if announcement_floor_zh_en != DEFAULT_PER_GENRE_FLOOR:
+        custom_parts.append(f"announcement[zh->en]={announcement_floor_zh_en}")
+    if announcement_floor_en_zh != DEFAULT_PER_GENRE_FLOOR:
+        custom_parts.append(f"announcement[en->zh]={announcement_floor_en_zh}")
+    non_default = bool(custom_parts)
+    floor_profile = f"custom:{','.join(custom_parts)}" if non_default else "default"
 
     per_genre_floors: dict[str, dict[str, int]] = {
         "zh->en": {
-            "announcement": eff_ann,
+            "announcement": announcement_floor_zh_en,
             "story": DEFAULT_PER_GENRE_FLOOR,
             "guide": DEFAULT_ZH_EN_GUIDE_FLOOR,
             "mixed": DEFAULT_PER_GENRE_FLOOR,
         },
         "en->zh": {
-            "announcement": eff_ann,
+            "announcement": announcement_floor_en_zh,
             "story": DEFAULT_PER_GENRE_FLOOR,
             "guide": DEFAULT_PER_GENRE_FLOOR,
             "mixed": DEFAULT_PER_GENRE_FLOOR,
@@ -996,7 +1097,6 @@ class _DictionarySurfaceMatcher:
 
     def term_spans(self, text: str) -> list[tuple[int, int]]:
         spans: list[tuple[int, int]] = []
-        # 1) Substring matches (zh terms and non-Latin terms of length >= 2).
         text_len = len(text)
         for idx in range(text_len - 1):
             candidates = self._substr_by_prefix2.get(text[idx : idx + 2])
@@ -1006,7 +1106,6 @@ class _DictionarySurfaceMatcher:
                 if text.startswith(surface, idx):
                     spans.append((idx, idx + len(surface)))
                     break
-        # 2) English word-boundary matches (length >= 2).
         tokens = [(m.start(), m.end(), m.group().casefold()) for m in _LATIN_WORD_RE.finditer(text)]
         n = len(tokens)
         for i in range(n):
@@ -1072,61 +1171,90 @@ def _load_prior_texts(paths: Sequence[Path]) -> tuple[list[tuple[str, str]], lis
     return entries, sets_seen, issues
 
 
+def _missing_required_prior_sets(prior_sets: Sequence[str]) -> list[str]:
+    present = set(prior_sets)
+    missing: list[str] = []
+    for req in REQUIRED_PRIOR_SETS:
+        if req in present:
+            continue
+        members = _GROUPED_PRIOR_SET_MEMBERS.get(req)
+        if members is not None and all(m in present for m in members):
+            continue
+        missing.append(req)
+    return missing
+
+
+def _extract_lexicon_strings(parsed: Any) -> list[str] | None:
+    items = parsed
+    if isinstance(parsed, dict):
+        items = parsed.get("entries", parsed.get("terms", parsed.get("names")))
+    if not isinstance(items, list):
+        return None
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            if item:
+                out.append(item)
+        elif isinstance(item, dict):
+            found_any = False
+            for key in ("surface", "term", "name"):
+                val = item.get(key)
+                if isinstance(val, str) and val:
+                    out.append(val)
+                    found_any = True
+            for key in ("forms", "accepted_forms", "official_forms", "aliases"):
+                vals = item.get(key)
+                if isinstance(vals, list) and all(isinstance(v, str) for v in vals):
+                    out.extend(v for v in vals if v)
+                    found_any = True
+            if not found_any:
+                return None
+        else:
+            return None
+    return out
+
+
 def _load_m1_name_strings(
     clear_name_paths: Sequence[Path],
-    official_names_raw: Any,
-    community_names_raw: Any,
+    community_lexicon_paths: Sequence[Path],
 ) -> tuple[list[str], list[dict[str, Any]]]:
+    """Load M1 declared names strictly from frozen upstream name files and explicit community lexicons.
+
+    H3's own ``names.json`` / ``community_names.json`` occurrences are never
+    accepted as M1 sources so candidate annotations cannot self-exempt hits.
+    """
     names: list[str] = []
     issues: list[dict[str, Any]] = []
-    for path in clear_name_paths:
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            issues.append({"code": "unreadable_clear_names_file", "artifact": path.name})
-            continue
-        if path.suffix.lower() == ".json":
+    for kind, paths in (("clear_names", clear_name_paths), ("community_lexicon", community_lexicon_paths)):
+        for path in paths:
             try:
-                parsed = json.loads(raw_text)
-            except ValueError:
-                issues.append({"code": "invalid_clear_names_json", "artifact": path.name})
+                raw_text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                issues.append({"code": f"unreadable_{kind}_file", "artifact": path.name})
                 continue
-            items = parsed
-            if isinstance(parsed, dict):
-                items = parsed.get("names", parsed.get("terms"))
-            if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
-                issues.append({"code": "invalid_clear_names_structure", "artifact": path.name})
-                continue
-            names.extend(x for x in items if x)
-        else:
-            names.extend(line for line in raw_text.splitlines() if line)
-
-    if isinstance(official_names_raw, dict) and isinstance(official_names_raw.get("occurrences"), list):
-        for occ in official_names_raw["occurrences"]:
-            if not isinstance(occ, dict):
-                continue
-            if isinstance(occ.get("surface"), str) and occ["surface"]:
-                names.append(occ["surface"])
-            if isinstance(occ.get("official_forms"), list):
-                names.extend(f for f in occ["official_forms"] if isinstance(f, str) and f)
-
-    if isinstance(community_names_raw, dict) and isinstance(community_names_raw.get("occurrences"), list):
-        for occ in community_names_raw["occurrences"]:
-            if not isinstance(occ, dict):
-                continue
-            if isinstance(occ.get("surface"), str) and occ["surface"]:
-                names.append(occ["surface"])
-            for key in ("accepted_forms", "official_forms"):
-                if isinstance(occ.get(key), list):
-                    names.extend(f for f in occ[key] if isinstance(f, str) and f)
+            if path.suffix.lower() == ".json":
+                try:
+                    parsed = json.loads(raw_text)
+                except ValueError:
+                    issues.append({"code": f"invalid_{kind}_json", "artifact": path.name})
+                    continue
+                extracted = _extract_lexicon_strings(parsed)
+                if extracted is None:
+                    issues.append({"code": f"invalid_{kind}_structure", "artifact": path.name})
+                    continue
+                names.extend(extracted)
+            else:
+                names.extend(line for line in raw_text.splitlines() if line)
     return names, issues
 
 
-def _load_m3_upstream_clearances(
-    path: Path | None,
-    windows_fn: Any,
-) -> tuple[set[str], list[dict[str, Any]]]:
-    """Return (set of cleared 12-scalar window SHA-256 digests, issues)."""
+def _load_m3_upstream_clearances(path: Path | None) -> tuple[set[str], list[dict[str, Any]]]:
+    """Return (set of cleared 12-scalar window SHA-256 digests, issues).
+
+    Strict §2.4.1 M3 rules: every entry must carry ``classification == "upstream_data"``,
+    a 64-hex ``window_sha256``, and a non-empty ``location``. ``text`` entries and
+    ``reason`` aliases are rejected.
+    """
     cleared_digests: set[str] = set()
     issues: list[dict[str, Any]] = []
     if path is None:
@@ -1143,40 +1271,73 @@ def _load_m3_upstream_clearances(
     if not isinstance(raw_entries, list):
         issues.append({"code": "invalid_upstream_clearances_entries", "artifact": path.name})
         return cleared_digests, issues
+
+    allowed_keys = {"classification", "window_sha256", "location", "source_ref"}
     for idx, entry in enumerate(raw_entries):
         if not isinstance(entry, dict):
             issues.append({"code": "invalid_upstream_clearance_item", "index": idx})
             continue
-        classification = entry.get("classification", entry.get("reason"))
-        if classification != "upstream_data":
+        if "text" in entry:
+            issues.append({"code": "upstream_clearance_text_forbidden", "index": idx})
+            continue
+        if "reason" in entry:
+            issues.append({"code": "upstream_clearance_reason_alias_forbidden", "index": idx})
+            continue
+        if not set(entry) <= allowed_keys:
+            issues.append({"code": "unknown_upstream_clearance_key", "index": idx})
+            continue
+        if entry.get("classification") != "upstream_data":
             issues.append({"code": "non_upstream_data_clearance_rejected", "index": idx})
             continue
         win_sha = entry.get("window_sha256")
-        win_text = entry.get("text")
-        if isinstance(win_sha, str):
-            if not _HEX64_RE.match(win_sha):
-                issues.append({"code": "invalid_window_sha256", "index": idx})
-                continue
-            cleared_digests.add(win_sha)
-        elif isinstance(win_text, str) and len(win_text) >= WINDOW_SIZE:
-            for w in windows_fn(win_text, WINDOW_SIZE):
-                cleared_digests.add(sha256_text(w))
-        else:
-            issues.append({"code": "missing_window_sha256_or_text", "index": idx})
+        if not isinstance(win_sha, str) or not _HEX64_RE.match(win_sha):
+            issues.append({"code": "invalid_window_sha256", "index": idx})
+            continue
+        location = entry.get("location")
+        if not isinstance(location, str) or not location.strip():
+            issues.append({"code": "missing_upstream_clearance_location", "index": idx})
+            continue
+        if "source_ref" in entry and (not isinstance(entry["source_ref"], str) or not entry["source_ref"].strip()):
+            issues.append({"code": "invalid_upstream_clearance_source_ref", "index": idx})
+            continue
+        cleared_digests.add(win_sha)
     return cleared_digests, issues
 
 
-def _extend_shared_span(h3_text: str, i: int, target_text: str, j: int, size: int) -> int:
-    """Exact maximal contiguous shared substring length covering ``h3_text[i:i+size] == target_text[j:j+size]``."""
-    left = 0
-    while i - left > 0 and j - left > 0 and h3_text[i - left - 1] == target_text[j - left - 1]:
-        left += 1
-    right = size
-    len_h3 = len(h3_text)
-    len_tgt = len(target_text)
-    while i + right < len_h3 and j + right < len_tgt and h3_text[i + right] == target_text[j + right]:
-        right += 1
-    return left + right
+def _compute_fragment_lengths(
+    h3_units: Sequence[tuple[str, str, str]],
+    hit_windows: set[str],
+    windows_fn: Any,
+) -> dict[str, int]:
+    """§2.4.1 shared fragment length per hit window: ``consecutive_hit_windows + 11``.
+
+    Computed over each candidate paragraph's hit positions across ALL sealed sets
+    combined, so adjacent/overlapping hits from distinct sealed sets merge into
+    one contiguous shared fragment.
+    """
+    max_frag_by_window: dict[str, int] = {}
+    if not hit_windows:
+        return max_frag_by_window
+    for _pid, _field, text in h3_units:
+        hit_positions: list[tuple[int, str]] = [
+            (pos, w) for pos, w in enumerate(windows_fn(text, WINDOW_SIZE)) if w in hit_windows
+        ]
+        if not hit_positions:
+            continue
+        run_start = 0
+        n = len(hit_positions)
+        while run_start < n:
+            run_end = run_start
+            while run_end + 1 < n and hit_positions[run_end + 1][0] == hit_positions[run_end][0] + 1:
+                run_end += 1
+            frag_len = (run_end - run_start + 1) + (WINDOW_SIZE - 1)
+            for idx in range(run_start, run_end + 1):
+                w = hit_positions[idx][1]
+                prev = max_frag_by_window.get(w, 0)
+                if frag_len > prev:
+                    max_frag_by_window[w] = frag_len
+            run_start = run_end + 1
+    return max_frag_by_window
 
 
 def check_c4(
@@ -1189,14 +1350,18 @@ def check_c4(
     prior_issues: Sequence[dict[str, Any]],
     core_repo: Path,
     core_commit: str,
+    freeze_core_commit: str | None,
     clear_name_paths: Sequence[Path],
-    official_names_raw: Any,
-    community_names_raw: Any,
+    community_lexicon_paths: Sequence[Path],
     upstream_clearances_path: Path | None,
     terms_db: Path,
     m2_threshold: int,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = list(prior_issues)
+    missing_prior = _missing_required_prior_sets(prior_sets)
+    if missing_prior:
+        issues.append({"code": "missing_required_prior_sets", "missing": missing_prior})
+
     actual_scorer_sha = sha256_file(scorer_path) if scorer_path.is_file() else None
     if m2_threshold < WINDOW_SIZE:
         issues.append({"code": "invalid_m2_threshold"})
@@ -1212,13 +1377,16 @@ def check_c4(
             "scorer_sha256_expected": expected_scorer_sha256,
             "scorer_sha256_ok": False,
             "core_commit": None,
+            "freeze_core_commit": None,
             "core_blobs_scanned": 0,
             "prior_sets_scanned": list(prior_sets),
+            "required_prior_sets_complete": not missing_prior,
             "m2_max_shared_span_threshold": m2_threshold,
             "windows_hit": 0,
             "cleared_counts": {"M1": 0, "M2": 0, "M3": 0},
             "windows_uncleared": 0,
             "max_shared_span_length": 0,
+            "hit_windows": [],
             "uncleared_windows": [],
             "issues_count": len(issues),
             "issues": issues,
@@ -1228,15 +1396,20 @@ def check_c4(
     if getattr(ev, "DEFAULT_WINDOW", WINDOW_SIZE) != WINDOW_SIZE:
         issues.append({"code": "scorer_window_size_mismatch"})
 
+    commits_to_scan = [core_commit]
+    if freeze_core_commit is not None and freeze_core_commit != core_commit:
+        commits_to_scan.append(freeze_core_commit)
     try:
-        resolved_commit, core_blobs = iter_git_commit_text_blobs(core_repo, core_commit)
+        resolved_commits, core_blobs = iter_git_commits_text_blobs(core_repo, commits_to_scan)
+        resolved_core = resolved_commits[0]
+        resolved_freeze = resolved_commits[-1]
     except _CheckError as exc:
         issues.append({"code": exc.code})
-        resolved_commit, core_blobs = "", []
+        resolved_core, resolved_freeze, core_blobs = "", "", []
 
-    m1_names, m1_issues = _load_m1_name_strings(clear_name_paths, official_names_raw, community_names_raw)
+    m1_names, m1_issues = _load_m1_name_strings(clear_name_paths, community_lexicon_paths)
     issues.extend(m1_issues)
-    m3_digests, m3_issues = _load_m3_upstream_clearances(upstream_clearances_path, windows_fn)
+    m3_digests, m3_issues = _load_m3_upstream_clearances(upstream_clearances_path)
     issues.extend(m3_issues)
 
     # Index H3 units: (pid, field, text)
@@ -1253,25 +1426,15 @@ def check_c4(
 
     h3_windows = set(h3_window_locs)
 
-    # Scan prior texts and Core commit tracked text blobs.
+    # Scan prior texts and Core commit(s) tracked text blobs.
     hit_targets: dict[str, set[str]] = {}
-    max_span_by_window: dict[str, int] = {}
 
     def _scan_target(target_label: str, target_text: str) -> None:
         if len(target_text) < WINDOW_SIZE or not h3_windows:
             return
-        # Fast filter: only examine positions whose 12-scalar window exists in H3.
-        for j, w in enumerate(windows_fn(target_text, WINDOW_SIZE)):
-            if w not in h3_windows:
-                continue
-            hit_targets.setdefault(w, set()).add(target_label)
-            best = max_span_by_window.get(w, WINDOW_SIZE)
-            for unit_idx, i in h3_window_locs[w]:
-                h3_text = h3_units[unit_idx][2]
-                span_len = _extend_shared_span(h3_text, i, target_text, j, WINDOW_SIZE)
-                if span_len > best:
-                    best = span_len
-            max_span_by_window[w] = best
+        for w in windows_fn(target_text, WINDOW_SIZE):
+            if w in h3_windows:
+                hit_targets.setdefault(w, set()).add(target_label)
 
     for set_label, text in prior_entries:
         _scan_target(f"prior:{set_label}", text)
@@ -1279,7 +1442,8 @@ def check_c4(
         _scan_target("core_tree", blob_text)
 
     hit_windows = set(hit_targets)
-    global_max_span = max(max_span_by_window.values()) if max_span_by_window else 0
+    max_frag_by_window = _compute_fragment_lengths(h3_units, hit_windows, windows_fn)
+    global_max_frag = max(max_frag_by_window.values()) if max_frag_by_window else 0
 
     # Build M1 cleared window set (only for hit windows).
     m1_cleared_windows: set[str] = set()
@@ -1311,36 +1475,41 @@ def check_c4(
     m1_count = 0
     m2_count = 0
     m3_count = 0
+    hit_windows_audit: list[dict[str, Any]] = []
     uncleared_records: list[dict[str, Any]] = []
 
-    # Clearance order: M1 (name/term list) -> M2 (generic phrase auto-clear) -> M3 (upstream_data).
+    # Clearance order (§2.4.1): M1 -> M2 -> M3 -> uncleared.
     for w in sorted(hit_windows, key=sha256_text):
         digest = sha256_text(w)
-        span_len = max_span_by_window[w]
+        frag_len = max_frag_by_window[w]
+        pids = sorted({h3_units[u_idx][0] for u_idx, _ in h3_window_locs[w]})
+        targets = sorted(hit_targets[w])
         if w in m1_cleared_windows:
+            cls = "M1"
             m1_count += 1
-            continue
-        # M2: no Unicode Nd digit, no dictionary surface (len >= 2), contiguous max shared span < T.
-        m2_ok = (
-            span_len < m2_threshold
+        elif (
+            frag_len < m2_threshold
+            and not _has_cjk_char(w)
             and not _has_unicode_nd_digit(w)
             and not _overlaps_dict_surface(w)
-        )
-        if m2_ok:
+        ):
+            cls = "M2"
             m2_count += 1
-            continue
-        if digest in m3_digests:
+        elif digest in m3_digests:
+            cls = "M3"
             m3_count += 1
-            continue
-        pids = sorted({h3_units[u_idx][0] for u_idx, _ in h3_window_locs[w]})
-        uncleared_records.append(
-            {
-                "window_sha256": digest,
-                "max_shared_span_length": span_len,
-                "targets": sorted(hit_targets[w]),
-                "paragraph_ids": pids,
-            }
-        )
+        else:
+            cls = "uncleared"
+        record = {
+            "sha256": digest,
+            "class": cls,
+            "paragraph_ids": pids,
+            "targets": targets,
+            "fragment_len": frag_len,
+        }
+        hit_windows_audit.append(record)
+        if cls == "uncleared":
+            uncleared_records.append(record)
 
     passed = not issues and len(uncleared_records) == 0
     return {
@@ -1349,14 +1518,17 @@ def check_c4(
         "scorer_sha256": verified_sha,
         "scorer_sha256_expected": expected_scorer_sha256,
         "scorer_sha256_ok": True,
-        "core_commit": resolved_commit or None,
+        "core_commit": resolved_core or None,
+        "freeze_core_commit": resolved_freeze or None,
         "core_blobs_scanned": len(core_blobs),
         "prior_sets_scanned": list(prior_sets),
+        "required_prior_sets_complete": not missing_prior,
         "m2_max_shared_span_threshold": m2_threshold,
         "windows_hit": len(hit_windows),
         "cleared_counts": {"M1": m1_count, "M2": m2_count, "M3": m3_count},
         "windows_uncleared": len(uncleared_records),
-        "max_shared_span_length": global_max_span,
+        "max_shared_span_length": global_max_frag,
+        "hit_windows": hit_windows_audit,
         "uncleared_windows": uncleared_records,
         "issues_count": len(issues),
         "issues": issues,
@@ -1374,7 +1546,6 @@ def check_c5(
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
 
-    # 1. Intra-set normalized paragraph deduplication.
     seen_norm: dict[str, str] = {}
     for para in sample_paragraphs:
         norm = normalize_dedup(para.source)
@@ -1393,7 +1564,6 @@ def check_c5(
         else:
             seen_norm[norm] = para.pid
 
-    # 2. Each bilingual pair appears in a single direction only.
     doc_dir = {d.doc_id: d.direction for d in manifest_docs}
     pair_dirs: dict[tuple[str, str], dict[str, list[str]]] = {}
 
@@ -1425,7 +1595,6 @@ def check_c5(
                 }
             )
 
-    # Cross-direction text-level reference == source collision check.
     source_by_dir: dict[str, dict[str, str]] = {d: {} for d in DIRECTIONS}
     for para in sample_paragraphs:
         norm = normalize_dedup(para.source)
@@ -1499,10 +1668,14 @@ def check_c6(
             ("series", "series", (meta.series,) if meta.series else ()),
             ("author", "authors", (meta.author,) if meta.author else ()),
         ]
+        non_empty_id_count = 0
         for singular, plural, values in checks:
             for val in values:
                 norm = _normalize_id_token(val)
-                if norm and norm in prior_sets[plural]:
+                if not norm:
+                    continue
+                non_empty_id_count += 1
+                if norm in prior_sets[plural]:
                     issues.append(
                         {
                             "code": "prior_id_overlap",
@@ -1511,6 +1684,8 @@ def check_c6(
                             "value_sha256": sha256_text(norm),
                         }
                     )
+        if non_empty_id_count == 0:
+            issues.append({"code": "missing_doc_identifiers", "doc_id": doc.doc_id})
 
     return {
         "status": "pass" if not issues else "fail",
@@ -1583,10 +1758,11 @@ def check_c7(
             else:
                 if pub_dt.tzinfo is None:
                     issues.append({"code": "naive_published_timestamp", "doc_id": doc.doc_id})
-                elif pub_dt > cutoff_dt:
+                elif pub_dt >= cutoff_dt:
+                    # Strictly < cutoff per ADR 0020 ("up to, not including, 2026-11-06 19:45 +08:00").
                     issues.append(
                         {
-                            "code": "published_after_cutoff",
+                            "code": "published_at_or_after_cutoff",
                             "doc_id": doc.doc_id,
                             "published": meta.published,
                         }
@@ -1604,6 +1780,7 @@ def check_c7(
     return {
         "status": "pass" if not issues else "fail",
         "cutoff": cutoff_iso,
+        "cutoff_comparison": "strictly_before",
         "min_forbidden_version": "3.8",
         "documents_checked": len(manifest_docs),
         "paragraphs_checked": len(sample_paragraphs),
@@ -1665,25 +1842,116 @@ def check_c8(
 # --------------------------------------------------------------- check C9
 
 
+def _validate_adjudication_block(
+    *,
+    block: Any,
+    kind: str,
+    target_unit_count: int,
+    units_with_occurrences: int,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    issues: list[dict[str, Any]] = []
+    if not isinstance(block, dict):
+        issues.append({"code": "missing_or_invalid_adjudication", "kind": kind})
+        return None, issues
+
+    annotators = block.get("annotators")
+    if (
+        not isinstance(annotators, list)
+        or len(annotators) != 2
+        or not all(isinstance(a, str) and a.strip() for a in annotators)
+        or len({a.strip() for a in annotators}) != 2
+    ):
+        issues.append({"code": "invalid_adjudication_annotators", "kind": kind})
+        annotators_clean: list[str] = []
+    else:
+        annotators_clean = [a.strip() for a in annotators]
+
+    adjudicator = block.get("adjudicator")
+    if not isinstance(adjudicator, str) or not adjudicator.strip():
+        issues.append({"code": "invalid_adjudication_adjudicator", "kind": kind})
+        adj_clean = ""
+    else:
+        adj_clean = adjudicator.strip()
+        if adj_clean in annotators_clean:
+            issues.append({"code": "adjudicator_not_independent", "kind": kind})
+
+    units_reviewed = block.get("units_reviewed")
+    if type(units_reviewed) is not int or units_reviewed != target_unit_count:
+        issues.append(
+            {
+                "code": "adjudication_units_reviewed_mismatch",
+                "kind": kind,
+                "observed": units_reviewed if type(units_reviewed) is int else None,
+                "expected": target_unit_count,
+            }
+        )
+
+    agreement_rate = block.get("agreement_rate")
+    if (
+        type(agreement_rate) is bool
+        or not isinstance(agreement_rate, (int, float))
+        or not math.isfinite(float(agreement_rate))
+        or not (0.0 <= float(agreement_rate) <= 1.0)
+    ):
+        issues.append({"code": "invalid_adjudication_agreement_rate", "kind": kind})
+        agreement_val: float | None = None
+    else:
+        agreement_val = float(agreement_rate)
+
+    adjudicated_count = block.get("adjudicated_count")
+    if type(adjudicated_count) is not int or adjudicated_count < 0 or adjudicated_count > target_unit_count:
+        issues.append({"code": "invalid_adjudication_count", "kind": kind})
+        adj_count_val: int | None = None
+    else:
+        adj_count_val = adjudicated_count
+
+    unresolved = block.get("unresolved_disagreements")
+    if type(unresolved) is not int or unresolved != 0:
+        issues.append(
+            {
+                "code": "unresolved_annotation_disagreements",
+                "kind": kind,
+                "unresolved_disagreements": unresolved if type(unresolved) is int else None,
+            }
+        )
+
+    if "zero_occurrence_units" in block:
+        zero_units = block["zero_occurrence_units"]
+        if type(zero_units) is not int or zero_units < 0 or units_with_occurrences + zero_units != target_unit_count:
+            issues.append({"code": "invalid_zero_occurrence_units_count", "kind": kind})
+
+    summary = {
+        "annotators_count": len(annotators_clean),
+        "adjudicator_present": bool(adj_clean),
+        "units_reviewed": units_reviewed if type(units_reviewed) is int else None,
+        "units_with_occurrences": units_with_occurrences,
+        "zero_occurrence_units": max(target_unit_count - units_with_occurrences, 0),
+        "agreement_rate": agreement_val,
+        "adjudicated_count": adj_count_val,
+        "unresolved_disagreements": unresolved if type(unresolved) is int else None,
+    }
+    return summary, issues
+
+
 def _validate_annotation_file(
     *,
     raw_data: Any,
     expected_schema: str,
     kind: str,
     paragraphs_by_id: Mapping[str, SampleParagraph],
-    scored_ids: set[str],
+    target_ids: set[str],
     seen_occs: set[str],
     seen_spans: dict[tuple[str, int, int], str],
-) -> tuple[int, int, list[dict[str, Any]]]:
+) -> tuple[int, set[str], list[dict[str, Any]]]:
     issues: list[dict[str, Any]] = []
     if not isinstance(raw_data, dict) or raw_data.get("schema") != expected_schema:
         issues.append({"code": "invalid_annotation_schema", "kind": kind})
-        return 0, 0, issues
+        return 0, set(), issues
 
     raw_occs = raw_data.get("occurrences")
     if not isinstance(raw_occs, list):
         issues.append({"code": "invalid_occurrences_array", "kind": kind})
-        return 0, 0, issues
+        return 0, set(), issues
 
     occ_paragraphs: set[str] = set()
     valid_occs = 0
@@ -1723,6 +1991,17 @@ def _validate_annotation_file(
         para = paragraphs_by_id[pid]
         if not para.scored:
             issues.append({"code": "unscored_paragraph_annotated", "kind": kind, "occ": occ_id, "paragraph_id": pid})
+            continue
+        if pid not in target_ids:
+            issues.append(
+                {
+                    "code": "community_occurrence_outside_guide_mixed",
+                    "kind": kind,
+                    "occ": occ_id,
+                    "paragraph_id": pid,
+                    "genre": para.genre,
+                }
+            )
             continue
 
         if type(start) is not int or type(end) is not int or not (0 <= start < end <= len(para.source)):
@@ -1771,34 +2050,19 @@ def _validate_annotation_file(
         occ_paragraphs.add(pid)
         valid_occs += 1
 
-    # Coverage of all scored units.
-    if "annotated_paragraphs" in raw_data:
-        raw_cov = raw_data["annotated_paragraphs"]
-        if not isinstance(raw_cov, list) or not all(isinstance(x, str) for x in raw_cov):
-            issues.append({"code": "invalid_annotated_paragraphs", "kind": kind})
-            covered: set[str] = set()
+    # Optional explicit zero-occurrence coverage list if present in external files: validate if given, never required.
+    if "zero_occurrence_paragraphs" in raw_data:
+        raw_zeros = raw_data["zero_occurrence_paragraphs"]
+        if not isinstance(raw_zeros, list) or not all(isinstance(x, str) for x in raw_zeros):
+            issues.append({"code": "invalid_zero_occurrence_paragraphs", "kind": kind})
         else:
-            if len(set(raw_cov)) != len(raw_cov):
-                issues.append({"code": "duplicate_annotated_paragraph", "kind": kind})
-            covered = set(raw_cov)
-            for pid in sorted(covered - scored_ids):
-                issues.append({"code": "non_scored_in_annotated_paragraphs", "kind": kind, "paragraph_id": pid})
-            for pid in sorted(occ_paragraphs - covered):
-                issues.append({"code": "occurrence_outside_annotated_paragraphs", "kind": kind, "paragraph_id": pid})
-    else:
-        covered = occ_paragraphs
+            zero_set = set(raw_zeros)
+            for pid in sorted(zero_set - target_ids):
+                issues.append({"code": "out_of_scope_zero_occurrence_paragraph", "kind": kind, "paragraph_id": pid})
+            for pid in sorted(zero_set & occ_paragraphs):
+                issues.append({"code": "paragraph_in_both_occurrences_and_zero_list", "kind": kind, "paragraph_id": pid})
 
-    missing_scored = sorted(scored_ids - covered)
-    if missing_scored:
-        issues.append(
-            {
-                "code": "incomplete_scored_unit_coverage",
-                "kind": kind,
-                "missing_count": len(missing_scored),
-                "missing_paragraph_ids_sample": missing_scored[:20],
-            }
-        )
-    return valid_occs, len(covered & scored_ids), issues
+    return valid_occs, occ_paragraphs, issues
 
 
 def check_c9(
@@ -1808,51 +2072,99 @@ def check_c9(
     official_load_error: str | None,
     community_names_raw: Any,
     community_load_error: str | None,
+    adjudication_raw: Any,
+    adjudication_load_error: str | None,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     if official_load_error is not None:
         issues.append({"code": official_load_error, "kind": "official"})
     if community_load_error is not None:
         issues.append({"code": community_load_error, "kind": "community"})
+    if adjudication_load_error is not None:
+        issues.append({"code": adjudication_load_error, "kind": "adjudication"})
 
     paragraphs_by_id = {p.pid: p for p in sample_paragraphs}
     scored_ids = {p.pid for p in sample_paragraphs if p.scored}
+    community_target_ids = {p.pid for p in sample_paragraphs if p.scored and p.genre in COMMUNITY_GENRES}
+
+    if not scored_ids:
+        issues.append({"code": "no_scored_units"})
+
     seen_occs: set[str] = set()
     seen_spans: dict[tuple[str, int, int], str] = {}
 
-    off_occs = off_cov = 0
+    off_occs = 0
+    off_occ_pids: set[str] = set()
     if official_load_error is None:
-        off_occs, off_cov, off_issues = _validate_annotation_file(
+        off_occs, off_occ_pids, off_issues = _validate_annotation_file(
             raw_data=official_names_raw,
             expected_schema=OFFICIAL_NAMES_SCHEMA,
             kind="official",
             paragraphs_by_id=paragraphs_by_id,
-            scored_ids=scored_ids,
+            target_ids=scored_ids,
             seen_occs=seen_occs,
             seen_spans=seen_spans,
         )
         issues.extend(off_issues)
 
-    com_occs = com_cov = 0
+    com_occs = 0
+    com_occ_pids: set[str] = set()
     if community_load_error is None:
-        com_occs, com_cov, com_issues = _validate_annotation_file(
+        com_occs, com_occ_pids, com_issues = _validate_annotation_file(
             raw_data=community_names_raw,
             expected_schema=COMMUNITY_NAMES_SCHEMA,
             kind="community",
             paragraphs_by_id=paragraphs_by_id,
-            scored_ids=scored_ids,
+            target_ids=community_target_ids,
             seen_occs=seen_occs,
             seen_spans=seen_spans,
         )
         issues.extend(com_issues)
 
+    # Resolve dual-annotation adjudication blocks (explicit file OR embedded in annotation files).
+    off_adj_raw: Any = None
+    com_adj_raw: Any = None
+    if adjudication_raw is not None:
+        if not isinstance(adjudication_raw, dict) or adjudication_raw.get("schema") != ANNOTATION_ADJUDICATION_SCHEMA:
+            issues.append({"code": "invalid_adjudication_schema", "kind": "adjudication"})
+        else:
+            off_adj_raw = adjudication_raw.get("official")
+            com_adj_raw = adjudication_raw.get("community")
+    else:
+        if isinstance(official_names_raw, dict):
+            off_adj_raw = official_names_raw.get("adjudication")
+        if isinstance(community_names_raw, dict):
+            com_adj_raw = community_names_raw.get("adjudication")
+
+    off_adj_summary, off_adj_issues = _validate_adjudication_block(
+        block=off_adj_raw,
+        kind="official",
+        target_unit_count=len(scored_ids),
+        units_with_occurrences=len(off_occ_pids),
+    )
+    issues.extend(off_adj_issues)
+
+    com_adj_summary, com_adj_issues = _validate_adjudication_block(
+        block=com_adj_raw,
+        kind="community",
+        target_unit_count=len(community_target_ids),
+        units_with_occurrences=len(com_occ_pids),
+    )
+    issues.extend(com_adj_issues)
+
     return {
         "status": "pass" if not issues else "fail",
         "scored_units_total": len(scored_ids),
+        "community_target_genres": list(COMMUNITY_GENRES),
+        "community_target_scored_units": len(community_target_ids),
         "official_occurrences": off_occs,
-        "official_covered_scored_units": off_cov,
+        "official_units_with_occurrences": len(off_occ_pids),
         "community_occurrences": com_occs,
-        "community_covered_scored_units": com_cov,
+        "community_units_with_occurrences": len(com_occ_pids),
+        "adjudication": {
+            "official": off_adj_summary,
+            "community": com_adj_summary,
+        },
         "issues_count": len(issues),
         "issues": issues,
     }
@@ -1872,7 +2184,9 @@ def build_bindings_and_c10(
     bound_tree: Path,
     core_repo: Path,
     core_commit: str,
+    freeze_core_commit: str | None,
     expected_core_commit: str,
+    expected_freeze_core_commit: str | None,
     expected_src_tree: str,
     expected_matcher_revision: str,
     terms_db: Path,
@@ -1883,11 +2197,14 @@ def build_bindings_and_c10(
     sample_path: Path,
     names_path: Path,
     community_names_path: Path,
+    annotation_adjudication_path: Path | None,
     metadata_path: Path | None,
     prior_ids_path: Path,
     prior_text_paths: Sequence[Path],
     clear_name_paths: Sequence[Path],
+    community_lexicon_paths: Sequence[Path],
     upstream_clearances_path: Path | None,
+    non_default_parameters: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], BoundCore | None]:
     issues: list[dict[str, Any]] = []
 
@@ -1914,7 +2231,7 @@ def build_bindings_and_c10(
     if rc_st != 0 or out_st.strip():
         issues.append({"code": "bound_tree_dirty"})
 
-    # Core commit verification.
+    # Core commit + freeze Core commit verification.
     rc_cc, out_cc, _ = _git(core_repo, "rev-parse", "--verify", f"{core_commit}^{{commit}}")
     resolved_core_commit = out_cc.decode("utf-8").strip() if rc_cc == 0 else None
     if resolved_core_commit is None:
@@ -1928,7 +2245,21 @@ def build_bindings_and_c10(
             }
         )
 
-    # Import bound Core (only if src dir exists).
+    effective_freeze_rev = freeze_core_commit if freeze_core_commit is not None else core_commit
+    rc_fc, out_fc, _ = _git(core_repo, "rev-parse", "--verify", f"{effective_freeze_rev}^{{commit}}")
+    resolved_freeze_commit = out_fc.decode("utf-8").strip() if rc_fc == 0 else None
+    if resolved_freeze_commit is None:
+        issues.append({"code": "freeze_core_commit_unresolvable"})
+    elif expected_freeze_core_commit is not None and resolved_freeze_commit != expected_freeze_core_commit:
+        issues.append(
+            {
+                "code": "freeze_core_commit_mismatch",
+                "actual": resolved_freeze_commit,
+                "expected": expected_freeze_core_commit,
+            }
+        )
+
+    # Import bound Core.
     core: BoundCore | None = None
     actual_matcher_rev: str | None = None
     try:
@@ -1987,10 +2318,14 @@ def build_bindings_and_c10(
         "sample": _file_binding(sample_path),
         "names": _file_binding(names_path),
         "community_names": _file_binding(community_names_path),
+        "annotation_adjudication": (
+            _file_binding(annotation_adjudication_path) if annotation_adjudication_path is not None else None
+        ),
         "metadata": _file_binding(metadata_path) if metadata_path is not None else None,
         "prior_ids": _file_binding(prior_ids_path),
         "prior_texts": [_file_binding(p) for p in prior_text_paths],
         "clear_names": [_file_binding(p) for p in clear_name_paths],
+        "community_lexicon": [_file_binding(p) for p in community_lexicon_paths],
         "upstream_clearances": (
             _file_binding(upstream_clearances_path) if upstream_clearances_path is not None else None
         ),
@@ -2001,16 +2336,22 @@ def build_bindings_and_c10(
             issues.append({"code": "missing_input_file", "input": key})
     if not inputs_sha256["prior_texts"] or any(x["sha256"] is None for x in inputs_sha256["prior_texts"]):
         issues.append({"code": "missing_input_file", "input": "prior_texts"})
+    if annotation_adjudication_path is not None and inputs_sha256["annotation_adjudication"]["sha256"] is None:
+        issues.append({"code": "missing_input_file", "input": "annotation_adjudication"})
     if metadata_path is not None and inputs_sha256["metadata"]["sha256"] is None:
         issues.append({"code": "missing_input_file", "input": "metadata"})
     if any(x["sha256"] is None for x in inputs_sha256["clear_names"]):
         issues.append({"code": "missing_input_file", "input": "clear_names"})
+    if any(x["sha256"] is None for x in inputs_sha256["community_lexicon"]):
+        issues.append({"code": "missing_input_file", "input": "community_lexicon"})
     if upstream_clearances_path is not None and inputs_sha256["upstream_clearances"]["sha256"] is None:
         issues.append({"code": "missing_input_file", "input": "upstream_clearances"})
 
     bindings: dict[str, Any] = {
         "core_commit": resolved_core_commit,
+        "freeze_core_commit": resolved_freeze_commit,
         "expected_core_commit": expected_core_commit,
+        "expected_freeze_core_commit": expected_freeze_core_commit,
         "bound_tree_commit": bound_head,
         "bound_tree_src_sha": bound_src_sha,
         "expected_src_tree": expected_src_tree,
@@ -2018,6 +2359,7 @@ def build_bindings_and_c10(
         "expected_matcher_revision": expected_matcher_revision,
         "terms_db_sha256": terms_sha,
         "expected_terms_sha256": expected_terms_sha256,
+        "non_default_parameters": dict(sorted(non_default_parameters.items())),
         "tools_sha256": tools_sha256,
         "inputs_sha256": inputs_sha256,
     }
@@ -2033,6 +2375,20 @@ def build_bindings_and_c10(
 # ---------------------------------------------- public receipt validator API
 
 
+_NON_DEFAULT_FLOOR_KEYS = frozenset({"announcement_floor_zh_en", "announcement_floor_en_zh"})
+_NON_DEFAULT_M2_KEYS = frozenset({"m2_max_shared_span"})
+_NON_DEFAULT_CUTOFF_KEYS = frozenset({"cutoff"})
+_NON_DEFAULT_BINDING_KEYS = frozenset(
+    {
+        "expected_core_commit",
+        "expected_src_tree",
+        "expected_matcher_revision",
+        "expected_terms_sha256",
+        "expected_scorer_sha256",
+    }
+)
+
+
 def validate_acceptance_receipt(
     receipt_dict: Any,
     *,
@@ -2041,19 +2397,24 @@ def validate_acceptance_receipt(
     expected_names_sha256: str | None = None,
     expected_community_names_sha256: str | None = None,
     expected_metadata_sha256: str | None = None,
-    expected_src_tree: str | None = None,
-    expected_core_commit: str | None = None,
-    expected_terms_sha256: str | None = None,
-    expected_matcher_revision: str | None = None,
+    expected_src_tree: str | None = PINNED_SRC_TREE,
+    expected_core_commit: str | None = PINNED_CORE_COMMIT,
+    expected_freeze_core_commit: str | None = None,
+    expected_terms_sha256: str | None = PINNED_TERMS_DB_SHA256,
+    expected_matcher_revision: str | None = PINNED_MATCHER_REVISION,
     expected_scorer_sha256: str | None = PINNED_SCORER_SHA256,
+    expected_gate_sha256: str | None | object = _DEFAULT_GATE_SHA,
     allow_non_default_floor: bool = False,
+    allow_non_default_m2_threshold: bool = False,
+    allow_non_default_cutoff: bool = False,
+    allow_non_default_bindings: bool = False,
     require_pass: bool = True,
 ) -> dict[str, Any]:
     """Validate an ``h3-acceptance-v1`` receipt dict for reuse by ``eval_h3.py``.
 
-    Raises ``ReceiptValidationError`` (a ``ValueError`` subclass) when any
-    structural, integrity, hash, floor-profile, or verdict constraint fails.
-    Returns ``receipt_dict`` unchanged on success.
+    Defaults bind to the pinned v0.14.0 Core/dictionary/scorer/gate constants and
+    fail closed on any non-empty ``non_default_parameters`` unless the matching
+    ``allow_*`` flag is explicitly True.
     """
     if not isinstance(receipt_dict, dict):
         raise ReceiptValidationError("receipt must be a JSON object")
@@ -2097,7 +2458,13 @@ def validate_acceptance_receipt(
     if not isinstance(declared_bindings_sha, str) or declared_bindings_sha != computed_bindings_sha:
         raise ReceiptValidationError("bindings_sha256 does not match canonical bindings")
 
-    for sha40_key in ("core_commit", "bound_tree_src_sha"):
+    non_default_top = receipt_dict.get("non_default_parameters")
+    if not isinstance(non_default_top, dict):
+        raise ReceiptValidationError("non_default_parameters must be an object")
+    if bindings.get("non_default_parameters") != non_default_top:
+        raise ReceiptValidationError("non_default_parameters disagrees with hashed bindings")
+
+    for sha40_key in ("core_commit", "freeze_core_commit", "bound_tree_src_sha"):
         val = bindings.get(sha40_key)
         if require_pass and (not isinstance(val, str) or not _HEX40_RE.match(val)):
             raise ReceiptValidationError(f"bindings.{sha40_key} must be a 40-hex git SHA")
@@ -2132,19 +2499,44 @@ def validate_acceptance_receipt(
         ):
             raise ReceiptValidationError(f"bindings.inputs_sha256.prior_texts[{idx}] has invalid sha256")
 
-    # C4 invariants.
+    c3 = checks["C3"]
     c4 = checks["C4"]
+    c7 = checks["C7"]
     if require_pass:
         if c4.get("windows_uncleared") != 0:
             raise ReceiptValidationError("C4 windows_uncleared must be 0 for a passing receipt")
         if c4.get("scorer_sha256_ok") is not True:
             raise ReceiptValidationError("C4 scorer_sha256_ok must be true for a passing receipt")
+        if c4.get("required_prior_sets_complete") is not True:
+            raise ReceiptValidationError("C4 required_prior_sets_complete must be true for a passing receipt")
 
-    # C3 floor-profile check.
-    c3 = checks["C3"]
-    if require_pass and not allow_non_default_floor:
-        if c3.get("non_default_floor") is not False or c3.get("floor_profile") != "default":
+    # Fail closed on non-default parameters (check both recorded dict and actual check fields).
+    if require_pass:
+        allowed_keys: set[str] = set()
+        if allow_non_default_floor:
+            allowed_keys |= _NON_DEFAULT_FLOOR_KEYS
+        if allow_non_default_m2_threshold:
+            allowed_keys |= _NON_DEFAULT_M2_KEYS
+        if allow_non_default_cutoff:
+            allowed_keys |= _NON_DEFAULT_CUTOFF_KEYS
+        if allow_non_default_bindings:
+            allowed_keys |= _NON_DEFAULT_BINDING_KEYS
+
+        disallowed = sorted(set(non_default_top) - allowed_keys)
+        if disallowed:
+            raise ReceiptValidationError(
+                f"non_default_parameters not explicitly allowed: {', '.join(disallowed)}"
+            )
+        if not allow_non_default_floor and (
+            c3.get("non_default_floor") is not False or c3.get("floor_profile") != "default"
+        ):
             raise ReceiptValidationError("non-default C3 floor_profile requires allow_non_default_floor=True")
+        if not allow_non_default_m2_threshold and c4.get("m2_max_shared_span_threshold") != DEFAULT_M2_MAX_SHARED_SPAN:
+            raise ReceiptValidationError(
+                "non-default C4 m2_max_shared_span_threshold requires allow_non_default_m2_threshold=True"
+            )
+        if not allow_non_default_cutoff and c7.get("cutoff") != DEFAULT_CUTOFF_ISO:
+            raise ReceiptValidationError("non-default C7 cutoff requires allow_non_default_cutoff=True")
 
     if require_pass and verdict != "pass":
         raise ReceiptValidationError(f"receipt verdict is 'fail' (failed_rules={failed_rules})")
@@ -2153,6 +2545,10 @@ def validate_acceptance_receipt(
     def _check_expected(label: str, actual: Any, expected: str | None) -> None:
         if expected is not None and actual != expected:
             raise ReceiptValidationError(f"{label} mismatch")
+
+    eff_gate_sha: str | None = (
+        sha256_file(SELF_PATH) if expected_gate_sha256 is _DEFAULT_GATE_SHA else expected_gate_sha256  # type: ignore[assignment]
+    )
 
     _check_expected("manifest_sha256", inputs_sha["manifest"].get("sha256"), expected_manifest_sha256)
     _check_expected("sample_sha256", inputs_sha["sample"].get("sha256"), expected_sample_sha256)
@@ -2166,9 +2562,11 @@ def validate_acceptance_receipt(
         _check_expected("metadata_sha256", actual_meta, expected_metadata_sha256)
     _check_expected("bound_tree_src_sha", bindings.get("bound_tree_src_sha"), expected_src_tree)
     _check_expected("core_commit", bindings.get("core_commit"), expected_core_commit)
+    _check_expected("freeze_core_commit", bindings.get("freeze_core_commit"), expected_freeze_core_commit)
     _check_expected("terms_db_sha256", bindings.get("terms_db_sha256"), expected_terms_sha256)
     _check_expected("matcher_revision", bindings.get("matcher_revision"), expected_matcher_revision)
     _check_expected("scorer_sha256", tools_sha.get("scripts/eval_usability.py"), expected_scorer_sha256)
+    _check_expected("gate_sha256", tools_sha.get("scripts/eval_h3_corpus.py"), eff_gate_sha)
 
     return receipt_dict
 
@@ -2182,30 +2580,64 @@ def run_acceptance(
     sample_path: Path,
     names_path: Path,
     community_names_path: Path,
-    metadata_path: Path | None,
+    annotation_adjudication_path: Path | None = None,
+    metadata_path: Path | None = None,
     prior_text_paths: Sequence[Path],
     prior_ids_path: Path,
     bound_tree: Path,
     core_repo: Path,
     core_commit: str,
+    freeze_core_commit: str | None = None,
     terms_db: Path,
     expected_core_commit: str = PINNED_CORE_COMMIT,
+    expected_freeze_core_commit: str | None = None,
     expected_src_tree: str = PINNED_SRC_TREE,
     expected_matcher_revision: str = PINNED_MATCHER_REVISION,
     expected_terms_sha256: str = PINNED_TERMS_DB_SHA256,
     scorer_path: Path = SCORER_PATH,
     expected_scorer_sha256: str = PINNED_SCORER_SHA256,
     clear_name_paths: Sequence[Path] = (),
+    community_lexicon_paths: Sequence[Path] = (),
     upstream_clearances_path: Path | None = None,
     announcement_floor: int | None = None,
+    announcement_floor_zh_en: int | None = None,
+    announcement_floor_en_zh: int | None = None,
     m2_max_shared_span: int = DEFAULT_M2_MAX_SHARED_SPAN,
     cutoff_iso: str = DEFAULT_CUTOFF_ISO,
 ) -> dict[str, Any]:
+    eff_ann_zh, eff_ann_en, floor_err = resolve_announcement_floors(
+        announcement_floor=announcement_floor,
+        announcement_floor_zh_en=announcement_floor_zh_en,
+        announcement_floor_en_zh=announcement_floor_en_zh,
+    )
+
+    non_default_parameters: dict[str, Any] = {}
+    if m2_max_shared_span != DEFAULT_M2_MAX_SHARED_SPAN:
+        non_default_parameters["m2_max_shared_span"] = m2_max_shared_span
+    if cutoff_iso != DEFAULT_CUTOFF_ISO:
+        non_default_parameters["cutoff"] = cutoff_iso
+    if eff_ann_zh != DEFAULT_PER_GENRE_FLOOR:
+        non_default_parameters["announcement_floor_zh_en"] = eff_ann_zh
+    if eff_ann_en != DEFAULT_PER_GENRE_FLOOR:
+        non_default_parameters["announcement_floor_en_zh"] = eff_ann_en
+    if expected_core_commit != PINNED_CORE_COMMIT:
+        non_default_parameters["expected_core_commit"] = expected_core_commit
+    if expected_src_tree != PINNED_SRC_TREE:
+        non_default_parameters["expected_src_tree"] = expected_src_tree
+    if expected_matcher_revision != PINNED_MATCHER_REVISION:
+        non_default_parameters["expected_matcher_revision"] = expected_matcher_revision
+    if expected_terms_sha256 != PINNED_TERMS_DB_SHA256:
+        non_default_parameters["expected_terms_sha256"] = expected_terms_sha256
+    if expected_scorer_sha256 != PINNED_SCORER_SHA256:
+        non_default_parameters["expected_scorer_sha256"] = expected_scorer_sha256
+
     bindings, c10, core = build_bindings_and_c10(
         bound_tree=bound_tree,
         core_repo=core_repo,
         core_commit=core_commit,
+        freeze_core_commit=freeze_core_commit,
         expected_core_commit=expected_core_commit,
+        expected_freeze_core_commit=expected_freeze_core_commit,
         expected_src_tree=expected_src_tree,
         expected_matcher_revision=expected_matcher_revision,
         terms_db=terms_db,
@@ -2216,11 +2648,14 @@ def run_acceptance(
         sample_path=sample_path,
         names_path=names_path,
         community_names_path=community_names_path,
+        annotation_adjudication_path=annotation_adjudication_path,
         metadata_path=metadata_path,
         prior_ids_path=prior_ids_path,
         prior_text_paths=prior_text_paths,
         clear_name_paths=clear_name_paths,
+        community_lexicon_paths=community_lexicon_paths,
         upstream_clearances_path=upstream_clearances_path,
+        non_default_parameters=non_default_parameters,
     )
 
     manifest_label, manifest_docs, manifest_issues = _load_manifest_data(manifest_path)
@@ -2243,6 +2678,16 @@ def run_acceptance(
         community_raw = load_json_strict(community_names_path, label=community_names_path.name)
     except _CheckError as exc:
         community_err = exc.code
+
+    adjudication_raw: Any = None
+    adjudication_err: str | None = None
+    if annotation_adjudication_path is not None:
+        try:
+            adjudication_raw = load_json_strict(
+                annotation_adjudication_path, label=annotation_adjudication_path.name
+            )
+        except _CheckError as exc:
+            adjudication_err = exc.code
 
     manifest_sha = bindings["inputs_sha256"]["manifest"]["sha256"] or ""
     sample_sha = bindings["inputs_sha256"]["sample"]["sha256"] or ""
@@ -2272,7 +2717,9 @@ def run_acceptance(
     )
     c3 = check_c3(
         sample_paragraphs=sample_paragraphs,
-        announcement_floor=announcement_floor,
+        announcement_floor_zh_en=eff_ann_zh,
+        announcement_floor_en_zh=eff_ann_en,
+        floor_config_error=floor_err,
     )
     c4 = check_c4(
         sample_paragraphs=sample_paragraphs,
@@ -2283,9 +2730,9 @@ def run_acceptance(
         prior_issues=prior_issues,
         core_repo=core_repo,
         core_commit=core_commit,
+        freeze_core_commit=freeze_core_commit,
         clear_name_paths=clear_name_paths,
-        official_names_raw=official_raw,
-        community_names_raw=community_raw,
+        community_lexicon_paths=community_lexicon_paths,
         upstream_clearances_path=upstream_clearances_path,
         terms_db=terms_db,
         m2_threshold=m2_max_shared_span,
@@ -2316,6 +2763,8 @@ def run_acceptance(
         official_load_error=official_err,
         community_names_raw=community_raw,
         community_load_error=community_err,
+        adjudication_raw=adjudication_raw,
+        adjudication_load_error=adjudication_err,
     )
 
     checks = {
@@ -2337,6 +2786,7 @@ def run_acceptance(
         "created_at": now_iso(),
         "verdict": verdict,
         "failed_rules": failed_rules,
+        "non_default_parameters": dict(sorted(non_default_parameters.items())),
         "bindings": bindings,
         "bindings_sha256": sha256_bytes(canonical(bindings)),
         "checks": checks,
@@ -2360,6 +2810,11 @@ def build_parser() -> argparse.ArgumentParser:
     acc.add_argument(
         "--community-names", required=True, metavar="COMMUNITY.json", help="h3-community-names-v1 file"
     )
+    acc.add_argument(
+        "--annotation-adjudication",
+        metavar="ADJUDICATION.json",
+        help="h3-annotation-adjudication-v1 dual-annotation adjudication summary (or embed in annotation files)",
+    )
     acc.add_argument("--metadata", metavar="METADATA.json", help="h3-corpus-metadata-v1 file")
     acc.add_argument(
         "--prior-texts",
@@ -2379,7 +2834,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--core-commit",
         default=PINNED_CORE_COMMIT,
         metavar="SHA",
-        help=f"Core commit scanned by C4 (default: {PINNED_CORE_COMMIT})",
+        help=f"Core tag commit scanned by C4 (default: {PINNED_CORE_COMMIT})",
+    )
+    acc.add_argument(
+        "--freeze-core-commit",
+        default=None,
+        metavar="SHA",
+        help="optional freeze-time main commit; when different from --core-commit, C4 scans the union of tracked text blobs",
     )
     acc.add_argument("--terms-db", required=True, metavar="TERMS.db", help="bound production terms.db")
     acc.add_argument(
@@ -2387,6 +2848,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=PINNED_CORE_COMMIT,
         metavar="SHA",
         help="expected Core commit SHA for C10",
+    )
+    acc.add_argument(
+        "--expected-freeze-core-commit",
+        default=None,
+        metavar="SHA",
+        help="optional expected freeze-time Core commit SHA for C10",
     )
     acc.add_argument(
         "--expected-src-tree",
@@ -2423,7 +2890,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="M1 declared official/community name/term list file (repeatable)",
+        help="M1 frozen upstream official name file (repeatable)",
+    )
+    acc.add_argument(
+        "--community-lexicon",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="M1 explicit frozen H3 community lexicon file (repeatable)",
     )
     acc.add_argument(
         "--upstream-clearances",
@@ -2435,20 +2909,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="explicit override for C3 announcement floor (recorded as non-default in receipt)",
+        help="explicit override for both directions' C3 announcement floor (recorded in non_default_parameters)",
+    )
+    acc.add_argument(
+        "--announcement-floor-zh-en",
+        type=int,
+        default=None,
+        metavar="N",
+        help="explicit L3 override for zh->en C3 announcement floor",
+    )
+    acc.add_argument(
+        "--announcement-floor-en-zh",
+        type=int,
+        default=None,
+        metavar="N",
+        help="explicit L3 override for en->zh C3 announcement floor",
     )
     acc.add_argument(
         "--m2-max-shared-span",
         type=int,
         default=DEFAULT_M2_MAX_SHARED_SPAN,
         metavar="T",
-        help=f"C4 M2 max contiguous shared span threshold (strictly < T; default: {DEFAULT_M2_MAX_SHARED_SPAN})",
+        help=f"C4 M2 max shared fragment length threshold (strictly < T; default: {DEFAULT_M2_MAX_SHARED_SPAN})",
     )
     acc.add_argument(
         "--cutoff",
         default=DEFAULT_CUTOFF_ISO,
         metavar="ISO8601",
-        help=f"C7 publication cutoff (default: {DEFAULT_CUTOFF_ISO})",
+        help=f"C7 strict publication cutoff (< cutoff; default: {DEFAULT_CUTOFF_ISO})",
     )
     acc.add_argument("--json-out", metavar="RECEIPT.json", help="write h3-acceptance-v1 receipt to file")
 
@@ -2458,12 +2946,18 @@ def build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--expected-sample-sha256", metavar="SHA")
     ver.add_argument("--expected-names-sha256", metavar="SHA")
     ver.add_argument("--expected-community-names-sha256", metavar="SHA")
-    ver.add_argument("--expected-src-tree", metavar="SHA")
-    ver.add_argument("--expected-core-commit", metavar="SHA")
-    ver.add_argument("--expected-terms-sha256", metavar="SHA")
-    ver.add_argument("--expected-matcher-revision", metavar="SHA")
+    ver.add_argument("--expected-metadata-sha256", metavar="SHA")
+    ver.add_argument("--expected-src-tree", default=PINNED_SRC_TREE, metavar="SHA")
+    ver.add_argument("--expected-core-commit", default=PINNED_CORE_COMMIT, metavar="SHA")
+    ver.add_argument("--expected-freeze-core-commit", default=None, metavar="SHA")
+    ver.add_argument("--expected-terms-sha256", default=PINNED_TERMS_DB_SHA256, metavar="SHA")
+    ver.add_argument("--expected-matcher-revision", default=PINNED_MATCHER_REVISION, metavar="SHA")
     ver.add_argument("--expected-scorer-sha256", default=PINNED_SCORER_SHA256, metavar="SHA")
+    ver.add_argument("--expected-gate-sha256", default=None, metavar="SHA")
     ver.add_argument("--allow-non-default-floor", action="store_true")
+    ver.add_argument("--allow-non-default-m2-threshold", action="store_true")
+    ver.add_argument("--allow-non-default-cutoff", action="store_true")
+    ver.add_argument("--allow-non-default-bindings", action="store_true")
     return parser
 
 
@@ -2475,22 +2969,30 @@ def cmd_accept(args: argparse.Namespace) -> int:
         sample_path=Path(args.sample).resolve(),
         names_path=Path(args.names).resolve(),
         community_names_path=Path(args.community_names).resolve(),
+        annotation_adjudication_path=(
+            Path(args.annotation_adjudication).resolve() if args.annotation_adjudication else None
+        ),
         metadata_path=Path(args.metadata).resolve() if args.metadata else None,
         prior_text_paths=[Path(p).resolve() for p in args.prior_texts],
         prior_ids_path=Path(args.prior_ids).resolve(),
         bound_tree=bound_tree,
         core_repo=core_repo,
         core_commit=args.core_commit,
+        freeze_core_commit=args.freeze_core_commit,
         terms_db=Path(args.terms_db).resolve(),
         expected_core_commit=args.expected_core_commit,
+        expected_freeze_core_commit=args.expected_freeze_core_commit,
         expected_src_tree=args.expected_src_tree,
         expected_matcher_revision=args.expected_matcher_revision,
         expected_terms_sha256=args.expected_terms_sha256,
         scorer_path=Path(args.scorer_path).resolve(),
         expected_scorer_sha256=args.expected_scorer_sha256,
         clear_name_paths=[Path(p).resolve() for p in args.clear_names],
+        community_lexicon_paths=[Path(p).resolve() for p in args.community_lexicon],
         upstream_clearances_path=Path(args.upstream_clearances).resolve() if args.upstream_clearances else None,
         announcement_floor=args.announcement_floor,
+        announcement_floor_zh_en=args.announcement_floor_zh_en,
+        announcement_floor_en_zh=args.announcement_floor_en_zh,
         m2_max_shared_span=args.m2_max_shared_span,
         cutoff_iso=args.cutoff,
     )
@@ -2504,18 +3006,25 @@ def cmd_verify_receipt(args: argparse.Namespace) -> int:
     path = Path(args.receipt)
     try:
         data = load_json_strict(path, label=path.name)
+        gate_sha = _DEFAULT_GATE_SHA if args.expected_gate_sha256 is None else args.expected_gate_sha256
         validate_acceptance_receipt(
             data,
             expected_manifest_sha256=args.expected_manifest_sha256,
             expected_sample_sha256=args.expected_sample_sha256,
             expected_names_sha256=args.expected_names_sha256,
             expected_community_names_sha256=args.expected_community_names_sha256,
+            expected_metadata_sha256=args.expected_metadata_sha256,
             expected_src_tree=args.expected_src_tree,
             expected_core_commit=args.expected_core_commit,
+            expected_freeze_core_commit=args.expected_freeze_core_commit,
             expected_terms_sha256=args.expected_terms_sha256,
             expected_matcher_revision=args.expected_matcher_revision,
             expected_scorer_sha256=args.expected_scorer_sha256,
+            expected_gate_sha256=gate_sha,
             allow_non_default_floor=args.allow_non_default_floor,
+            allow_non_default_m2_threshold=args.allow_non_default_m2_threshold,
+            allow_non_default_cutoff=args.allow_non_default_cutoff,
+            allow_non_default_bindings=args.allow_non_default_bindings,
         )
     except (_CheckError, ReceiptValidationError) as exc:
         print(f"invalid receipt: {exc}", file=sys.stderr)
