@@ -1,0 +1,158 @@
+{
+  "schema": "h3-corpus-metadata-v1",
+  "set": "H3-synth",
+  "documents": [
+    {
+      "doc_id": "syn-zh-gui-01",
+      "source_id": "syn-src-001",
+      "textmap_keys": [],
+      "series": "syn-series-001",
+      "author": "syn-author-001",
+      "bilingual_pair_id": null,
+      "published": "2026-11-06T19:45:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-gui-02",
+      "source_id": "syn-src-002",
+      "textmap_keys": [],
+      "series": "syn-series-002",
+      "author": "syn-author-002",
+      "bilingual_pair_id": null,
+      "published": "2026-11-06T11:45:00+00:00"
+    },
+    {
+      "doc_id": "syn-zh-ann-01",
+      "source_id": "syn-src-003",
+      "textmap_keys": [],
+      "series": "syn-series-003",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-003",
+      "published": "2026-10-03T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-ann-02",
+      "source_id": "syn-src-004",
+      "textmap_keys": [],
+      "series": "syn-series-004",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-004",
+      "published": "2026-10-04T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-sto-01",
+      "source_id": "syn-src-005",
+      "textmap_keys": [
+        "SynTextMap_37_005"
+      ],
+      "series": "syn-series-005",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-005",
+      "published": "2026-10-05T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-sto-02",
+      "source_id": "syn-src-006",
+      "textmap_keys": [
+        "SynTextMap_37_006"
+      ],
+      "series": "syn-series-006",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-006",
+      "published": "2026-10-06T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-mix-01",
+      "source_id": "syn-src-007",
+      "textmap_keys": [],
+      "series": "syn-series-007",
+      "author": "syn-author-007",
+      "bilingual_pair_id": null,
+      "published": "2026-10-07T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-zh-mix-02",
+      "source_id": "syn-src-008",
+      "textmap_keys": [],
+      "series": "syn-series-008",
+      "author": "syn-author-008",
+      "bilingual_pair_id": null,
+      "published": "2026-10-08T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-gui-01",
+      "source_id": "syn-src-009",
+      "textmap_keys": [],
+      "series": "syn-series-009",
+      "author": "syn-author-009",
+      "bilingual_pair_id": null,
+      "published": "2026-10-09T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-gui-02",
+      "source_id": "syn-src-010",
+      "textmap_keys": [],
+      "series": "syn-series-010",
+      "author": "syn-author-010",
+      "bilingual_pair_id": null,
+      "published": "2026-10-10T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-ann-01",
+      "source_id": "syn-src-011",
+      "textmap_keys": [],
+      "series": "syn-series-011",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-011",
+      "published": "2026-10-11T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-ann-02",
+      "source_id": "syn-src-012",
+      "textmap_keys": [],
+      "series": "syn-series-012",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-012",
+      "published": "2026-10-12T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-sto-01",
+      "source_id": "syn-src-013",
+      "textmap_keys": [
+        "SynTextMap_37_013"
+      ],
+      "series": "syn-series-013",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-013",
+      "published": "2026-10-13T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-sto-02",
+      "source_id": "syn-src-014",
+      "textmap_keys": [
+        "SynTextMap_37_014"
+      ],
+      "series": "syn-series-014",
+      "author": null,
+      "bilingual_pair_id": "syn-pair-014",
+      "published": "2026-10-14T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-mix-01",
+      "source_id": "syn-src-015",
+      "textmap_keys": [],
+      "series": "syn-series-015",
+      "author": "syn-author-015",
+      "bilingual_pair_id": null,
+      "published": "2026-10-15T10:00:00+08:00"
+    },
+    {
+      "doc_id": "syn-en-mix-02",
+      "source_id": "syn-src-016",
+      "textmap_keys": [],
+      "series": "syn-series-016",
+      "author": "syn-author-016",
+      "bilingual_pair_id": null,
+      "published": "2026-10-16T10:00:00+08:00"
+    }
+  ]
+}
