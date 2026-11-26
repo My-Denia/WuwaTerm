@@ -125,8 +125,8 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     for source in (successor, synthetic_merge):
         result = epoch.resolve(source, config)
         assert result["source_epoch"] == "split"
-        assert result["web_revision"] == "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131"
-        assert result["windows_revision"] == "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+        assert result["web_revision"] == "6cd0a7c5c65243c3d2cd741dc567690fa941f460"
+        assert result["windows_revision"] == "d87a66c37b1d4809774774c45bc5731f6ebb66d2"
         assert result["required_jobs"][-1] == "API to Windows contract"
     # Newer split CONTROL does not change the target's legacy source epoch.
     assert epoch.resolve(LAST, config)["source_epoch"] == "legacy"
