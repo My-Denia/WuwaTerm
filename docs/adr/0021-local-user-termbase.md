@@ -1,6 +1,7 @@
 # ADR 0021: Local user termbase (`wuwaterm-termbase-v1`) and Core engine next-step research
 
-- Status: **Proposed (architecture and format spec; pending implementation)**
+- Status: **Proposed (format and candidates implemented behind default-off code;
+  adoption pending `H3`)**
 - Date: 2026-11-25
 - Related: `MY-380`, `MY-18`, `MY-489`, `MY-491`,
   [ADR 0006](0006-dictionary-first-before-llm.md),
@@ -135,3 +136,26 @@ A minimal, portable UTF-8 JSON format shared across `WuwaTerm-Windows`,
 - Community and personal terms gain a portable, schema-validated `wuwaterm-termbase-v1` representation without polluting `terms.db`, leaking across anonymous Web visits, or weakening `ADR 0017`/`ADR 0019` guards.
 - `WuwaTerm-Windows`, `WuwaTerm-Web`, and Core `/v1` can adopt `wuwaterm-termbase-v1` incrementally behind explicit capability/schema checks without breaking existing `.wuwaterm` manuscripts or `/v1/translations` callers.
 - Any Core engine adoption of `zh->en` adaptive thinking, `user_glossary` prompt injection, or read-only section/entity anchors remains blocked until evaluated under frozen `H3` (`Arm C` vs `wuwaterm_prod` and `raw_baseline`) after `MY-229` merges.
+
+## Implementation status (2026-11-26)
+
+Core now carries the format and the three candidates as code that is off until a
+caller asks for it:
+
+- `src/wuwaterm/termbase.py` — `parse_termbase` (the §2 schema, every bound and
+  every rejection), `match_user_glossary`, and `select_prompt_references`, the
+  gate that drops an entry whose surface the segment's own official locks or
+  references already own.
+- `src/wuwaterm/document_anchor.py` — `DocumentAnchor`, `bounded_anchor_fields`
+  and `extract_document_anchor`, with the 280-scalar total bound and a
+  deterministic, dictionary-free extraction.
+- `src/wuwaterm/translation_plan.py` — `select_zh_en_auto_thinking` and
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN=auto`, mirroring the `en->zh` selector and
+  its one shared corrective call.
+
+Production defaults are unchanged: `TRANSLATION_THINKING_ZH_EN_DEFAULT` is still
+`disabled`, no `/v1` request field was added (§4 leaves the wire extension to a
+later opt-in), and a request that carries none of the two new context members
+keeps its prompt and operation identity byte for byte. The `H3` gate above still
+decides adoption: `Arm C` against `wuwaterm_prod` and `raw_baseline` has not been
+run, so none of this is switched on for a real request.

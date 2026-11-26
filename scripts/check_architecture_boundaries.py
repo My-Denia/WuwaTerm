@@ -6,7 +6,8 @@ Intended layers (must stay aligned with docs/architecture.md):
   domain core:     lookup, normalize, models, review, cjk_span, protected_text,
                    english_plural, segmentation, semantic_review_contract,
                    single_char_context, skill_references, term_classification,
-                   term_matching, term_preparation, text_spans
+                   term_matching, term_preparation, termbase, text_spans,
+                   document_anchor
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
@@ -62,7 +63,7 @@ nested subpackages discovered via rglob):
 11. Pure matching modules (``term_matching``, ``term_preparation``,
    ``cjk_span``, ``protected_text``, ``segmentation``, ``english_plural``,
    ``single_char_context``, ``skill_references``, ``term_classification``,
-   ``text_spans``) must not import
+   ``termbase``, ``text_spans``, ``document_anchor``) must not import
    storage ``db``, storage-coupled modules (``lookup``, ``review``), or
    ``sqlite3`` (including under ``TYPE_CHECKING``).
 12. Dynamic tool imports in ``scripts/deployment_admission.py`` via
@@ -120,7 +121,9 @@ DOMAIN_CORE = frozenset(
         "term_classification",
         "term_matching",
         "term_preparation",
+        "termbase",
         "text_spans",
+        "document_anchor",
     }
 )
 DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semantic_review"})
@@ -138,7 +141,9 @@ PURE_MATCHING = frozenset(
         "skill_references",
         "structural_checks",
         "term_classification",
+        "termbase",
         "text_spans",
+        "document_anchor",
     }
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.

@@ -5,8 +5,8 @@ Every case reads the JSON body the real transport POSTs to an ``httpx.MockTransp
 Into English the mode is an instruction and is sent as written. Into Chinese the
 default is ``omit``: an unconfigured deployment sends no reasoning field and the
 provider decides, the request shape it has always sent. ``auto`` is the opt-in
-that makes the request pick a mode for itself from its own shape, and any value
-an operator names explicitly replaces ``auto`` too.
+that makes the request pick a mode for itself from its own shape, in either
+direction, and any value an operator names explicitly replaces ``auto`` too.
 """
 
 from __future__ import annotations
@@ -284,15 +284,17 @@ def test_an_unknown_mode_warns_naming_the_variable_and_uses_that_directions_defa
     assert [r.getMessage() for r in caplog.records] == [f"unknown {var}; using {fallback}"]
 
 
-def test_auto_is_unknown_into_english_and_warns(monkeypatch, caplog):
-    """There is no request shape into English to adapt, so `auto` is a typo there."""
-    default = _post(monkeypatch, False)
+def test_auto_into_english_is_opt_in_and_unset_still_sends_disabled(monkeypatch, caplog):
+    """`auto` into English is the ADR 0021 candidate; the default stays `disabled`."""
+    unset, unset_kwargs = _post(monkeypatch, False)
+    assert unset_kwargs == {"purpose": "translation", "extra_body": DISABLED}
 
     with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
-        typo = _post(monkeypatch, False, {ZH_EN: "auto"})
+        short, short_kwargs = _post(monkeypatch, False, {ZH_EN: "auto"})
 
-    assert typo == default
-    assert [r.getMessage() for r in caplog.records] == [f"unknown {ZH_EN}; using disabled"]
+    assert "auto" not in short.get("reasoning_effort", "")
+    assert short_kwargs == {"purpose": "translation", "extra_body": LOW}
+    assert caplog.records == []  # an accepted value, not a typo
 
 
 @pytest.mark.parametrize("var", [ZH_EN, EN_ZH])

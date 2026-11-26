@@ -85,6 +85,14 @@ translation (at most 400 scalars each) and the listed precedents go into the
 same model request. Long texts that Core cuts itself (Telegram channel posts
 over the per-call limit) carry the previous segment the same way.
 
+Two further context members ([ADR 0021](adr/0021-local-user-termbase.md)) are
+not on the wire yet; they exist on Core's own `TranslationContext` for opt-in
+clients and offline evaluation. A `document_anchor` adds at most 280 scalars of
+document topic, active heading and entity names, and `user_glossary_references`
+adds at most 16 entries of a user-local termbase as non-binding preferences.
+Neither is written, logged or stored; they reach the prompt only when a caller
+sets them, and a request that sets neither sends the bytes it sent before.
+
 Every HTTP attempt to the model gateway, from any path, writes one log line
 with its purpose (`translation` or `semantic_review`), outcome class, HTTP
 status and elapsed time: no URL, key, model name, prompt or output. It exists
@@ -113,8 +121,8 @@ Optional LLM environment variables:
 - `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into
   English) and `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese),
   default `disabled` into English and `omit` into Chinese; `disabled`, `low`,
-  `high` and `omit` are accepted in both directions and `auto` only into
-  Chinese. `omit` sends neither field, so the provider default applies, which on
+  `high`, `omit` and `auto` are accepted in both directions. `omit` sends neither
+  field, so the provider default applies, which on
   DeepSeek is high-effort thinking and can outlast
   `WUWATERM_LLM_TIMEOUT_SECONDS` on a long segment. `disabled` sends
   `thinking: {"type": "disabled"}`. `low` and `high` turn thinking on at that
@@ -128,9 +136,14 @@ Optional LLM environment variables:
   lock-dense documents ran past the model timeout with thinking on and answered
   in about 3 s with it off, while a 23-paragraph document answered in 20.7 s
   under `low` — and a full held-out run scored it at or above every frozen gate,
-  including the long documents that used to time out. Setting any explicit
-  `omit`, `disabled`, `low` or `high` replaces `auto` in that direction, so a
-  deployment that opted in can pin one mode without unsetting `auto`. Known
+  including the long documents that used to time out. Into English `auto` is a
+  candidate under [ADR 0021](adr/0021-local-user-termbase.md), not an adopted
+  setting: it sends a segment longer than 900 scalars, or with 25 or more
+  paragraphs, or with 4 or more locked official terms, `disabled`, and anything
+  shorter `low`; the default there stays `disabled` until the H3 evaluation
+  shows the gain. Setting any explicit `omit`, `disabled`, `low` or `high`
+  replaces `auto` in that direction, so a deployment that opted in can pin one
+  mode without unsetting `auto`. Known
   regression with `disabled` into English: a character-mechanic name that
   contains a one-character resonator name may be rendered with the resonator
   name; set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous

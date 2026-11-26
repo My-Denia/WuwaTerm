@@ -394,9 +394,10 @@ plus the timeout and concurrency bounds beside them and
 `WUWATERM_TRANSLATION_THINKING_ZH_EN` and `WUWATERM_TRANSLATION_THINKING_EN_ZH`
 (default `disabled` into English and `omit` into Chinese; `omit` sends no reasoning
 field, so the provider default applies, and any explicit `disabled`, `low` or
-`high` names a mode. Into Chinese `auto` is the opt-in that picks `disabled` or
-`low` from the request's own paragraph and lock count —
-`WUWATERM_TRANSLATION_THINKING_EN_ZH=auto`). Known regression
+`high` names a mode. `auto` is the opt-in that picks `disabled` or `low` from the
+request's own shape — `WUWATERM_TRANSLATION_THINKING_EN_ZH=auto` by paragraph and
+lock count, and, as the ADR 0021 candidate, `WUWATERM_TRANSLATION_THINKING_ZH_EN=auto`
+by scalar length, paragraph count and lock count into English). Known regression
 with `disabled` into English: a character-mechanic name that contains a
 one-character resonator name may be rendered with the resonator name; set
 `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.

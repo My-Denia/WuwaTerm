@@ -77,6 +77,8 @@ from .semantic_review import (
     thinking_request_options as _thinking_request_options,
 )
 from . import structural_checks as _structural_checks
+from .document_anchor import DocumentAnchor as DocumentAnchor
+from .document_anchor import extract_document_anchor as extract_document_anchor
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -90,6 +92,9 @@ from .sentence import (
     safe_llm_failure_diagnostic,
 )
 from .translation_plan import OperationExecutionBudget as OperationExecutionBudget
+from .termbase import TermbaseEntry as TermbaseEntry
+from .termbase import UserGlossaryReference as UserGlossaryReference
+from .termbase import parse_termbase as parse_termbase
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
 
 
@@ -195,10 +200,25 @@ class TranslationContext:
     ``precedents`` are human choices scoped to one earlier occurrence
     (ADR 0019). A present context, even an empty one, also switches on the
     context prompt rules; ``None`` keeps the original prompt byte for byte.
+
+    Two further members are read-only prompt background and carry the same
+    promise: an absent or empty value renders nothing, so a request that does
+    not set them keeps its bytes.
+
+    * ``document_anchor`` — the bounded active heading, document topic and
+      recent entity mentions (ADR 0021 Companion Design 2). It never enters
+      ``term_preparation`` or ``skill_references`` admission and never creates a
+      lock.
+    * ``user_glossary_references`` — matched ``wuwaterm-termbase-v1`` entries
+      (ADR 0021 §3). They render as non-binding preference lines, never as
+      ``__WUWA_TERM_...__`` placeholders, and an entry that collides with an
+      official surface in the same segment is dropped.
     """
 
     before: ContextBefore | None = None
     precedents: tuple[Precedent, ...] = ()
+    document_anchor: DocumentAnchor | None = None
+    user_glossary_references: tuple[UserGlossaryReference, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -540,6 +560,11 @@ async def _translate_long_plain_text(
     pieces: list[str] = []
     before = context.before if context is not None else None
     precedents = context.precedents if context is not None else ()
+    # Request-scoped read-only background is forwarded unchanged: it describes
+    # the document, not one neighbouring segment, and rendering it per segment
+    # is what a caller who set it asked for. Nothing here is added by default.
+    document_anchor = context.document_anchor if context is not None else None
+    glossary = context.user_glossary_references if context is not None else ()
     with op_budget.activate():
         for segment in segments:
             core = text[segment.core_start : segment.core_end]
@@ -560,7 +585,12 @@ async def _translate_long_plain_text(
                     to_chinese=to_chinese,
                     propagate_errors=True,
                     before_llm_call=before_llm_call,
-                    context=TranslationContext(before=before, precedents=precedents),
+                    context=TranslationContext(
+                        before=before,
+                        precedents=precedents,
+                        document_anchor=document_anchor,
+                        user_glossary_references=glossary,
+                    ),
                     execution_budget=op_budget,
                 )
             except LLMTranslationError as exc:
