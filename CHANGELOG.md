@@ -52,17 +52,18 @@ does not distribute generated game data or generated SQLite databases.
   corpus text, and `verify-receipt` revalidates one fail-closed against the
   pinned defaults. `--freeze-core-commit` is required and must be a strict
   descendant of `--core-commit`; an announcement document carries a level in
-  `L0`-`L2`, and the receipt reports block and unique blob counts per
-  direction.
+  `L0`-`L2` with scored units reported by level per direction, and C4 records
+  Core blob-entry and unique-blob scan counts.
 - Pre-register and close H3 protocol revision (c) (#338, #339): the Core under
   test moves to `v0.14.0` (`2737530`, matcher `wuwaterm-cjk-matcher-v11`), the
   tool worktree pins to the closing pull request's merge commit, the 12-scalar
-  clearance becomes mechanical (M1 declared names, M2 no `Nd` digit and no
-  two-scalar dictionary surface and a shared fragment shorter than `T = 24`,
-  M3 a listed upstream source), the announcement ladder `L0`-`L2` carries
-  template pruning with `L3` left to the owner, the `h3-acceptance-v1`
-  receipt and the `h3-judges-v1` roster freeze before the approval token, and
-  the pilot slice is taken from `D` with a post-freeze leakage scan.
+  clearance becomes mechanical (M1 declared names, M2 no CJK character, no
+  `Nd` digit, no two-scalar dictionary surface and a shared fragment shorter
+  than `T = 24`, M3 a listed upstream source), the announcement ladder
+  `L0`-`L2` carries template pruning with `L3` left to the owner, the
+  `h3-acceptance-v1` receipt and the `h3-judges-v1` roster freeze before the
+  approval token, and the pilot slice is taken from `D` with a post-freeze
+  leakage scan.
   `scripts/eval_h3.py` gains a USD budget cap over locked ledger prices, a
   live proxy path that requires both that budget and a per-run cost cap, and
   the corpus receipt check.
@@ -85,8 +86,8 @@ does not distribute generated game data or generated SQLite databases.
   the frozen tree, because a two-millisecond `/proc` poll could miss a
   verifier that lives a fraction of a second and lose a `SIGSTOP` aimed at an
   exited pid; its last wait ends on the verifier's own exit and the pipes are
-  closed instead of awaiting `communicate()`. The sixteen
-  `deploy/vps-update.sh` failure-injection runs fail only when no external
+  closed instead of awaiting `communicate()`. All 22 `deploy/vps-update.sh`
+  harness runs in `tests/test_deploy_scripts.py` fail only when no external
   command is recorded for 90 seconds, which is a hang and not a slow host.
   `docs/release-checklist.md` loses a stale "Before it is `v0.13.0`" line.
 
