@@ -412,13 +412,22 @@ def _stop_group(pid: int) -> list[int] | None:
     to freeze.
     """
     for _ in range(2000):
+        if _state(pid) in (None, "Z"):
+            # An exited deployment, or one already waiting to be reaped, has
+            # nothing left to freeze. SIGSTOP to a group that holds only that
+            # process still succeeds and changes nothing, so waiting on it
+            # would burn the whole loop before reporting the wrong problem.
+            return None
         try:
             os.killpg(pid, signal.SIGSTOP)
         except ProcessLookupError:
             return None
         members = _descendants(pid)
         if all(_state(member) in (None, "T", "Z", "D") for member in members):
-            return members
+            # With no child to read, the deployment process itself is the only
+            # member whose stop has to be confirmed.
+            if members or _state(pid) in ("T", "D"):
+                return members
         time.sleep(0.0005)
     raise AssertionError("the deployment process group did not stop")
 
@@ -504,7 +513,6 @@ def test_real_verifier_inherits_fd9_after_parent_death(tmp_path: Path) -> None:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.kill(stopped, signal.SIGCONT)
-            verifier = None
             # The verifier's own exit ends this wait: the descriptor it
             # inherited is closed then, and the lock with it. A stopwatch
             # reading of how busy the host is would say nothing about either,

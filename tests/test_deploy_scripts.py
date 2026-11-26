@@ -1612,15 +1612,7 @@ def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
     root, env, _old_hash, _new_hash = deploy_harness
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=600,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     docker_log = (root / "docker.log").read_text(encoding="utf-8")
@@ -1982,15 +1974,7 @@ def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
     root, env, old_hash, _new_hash = deploy_harness
     (root / "telegram-running").write_text("true\n", encoding="ascii")
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "stop legacy wuwaterm-bot first" in result.stderr
@@ -2031,15 +2015,7 @@ def test_vps_update_refuses_a_poller_named_after_its_compose_project(deploy_harn
         "deploy-wuwaterm-telegram-1\n", encoding="ascii"
     )
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "stop legacy wuwaterm-bot first" in result.stderr
@@ -2091,15 +2067,7 @@ def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
     # No in-Core bot container on this host: `docker inspect` proves absence.
     env["FAKE_NO_BOT_CONTAINER"] = "1"
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     commands = [
@@ -2132,15 +2100,7 @@ def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harne
     (root / "bot-running").write_text("false\n", encoding="ascii")
     (root / "api-running").write_text("false\n", encoding="ascii")
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert "neither wuwaterm-bot nor wuwaterm-api is running" in result.stderr
@@ -2181,15 +2141,7 @@ def test_vps_update_refuses_when_labelled_poller_inspect_errors(
     )
     env["FAKE_TELEGRAM_AUTO_INSPECT_ERROR"] = "1"
 
-    result = subprocess.run(
-        ["sh", "deploy/vps-update.sh"],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
+    result = _run_vps_update(root, env)
 
     assert result.returncode == 1
     assert (
