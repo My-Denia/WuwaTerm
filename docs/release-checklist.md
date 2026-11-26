@@ -12,7 +12,20 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The latest published Core release is `v0.14.0`, a
+  published tag. The latest published Core release is `v0.14.1`, a patch
+  release on top of `v0.14.0`: `POST /v1/structure-checks` reports fewer number
+  findings after the template-argument masking, Roman-numeral, multiplier and
+  markup boundary fixes (#341, MY-515) without moving a rule id, a finding
+  category or a response field; the offline H3 corpus gate, tree-differential
+  harness, protocol revision (c) work and structure-attribution prototype add no
+  request path and made no live model call (#336, #337, #338, #339, #342); two
+  subprocess tests are bounded by progress instead of wall clock (#340); and the
+  installer defaults to Web `v0.5.0` with the Core CI client pins moved to Web
+  `v0.5.0` and Windows `v0.7.0` (#335). `docs/api/openapi.json` differs from
+  `v0.14.0` only in `info.version`; schema `2`, pinned data `9218d612`, matcher
+  `wuwaterm-cjk-matcher-v11` and thinking defaults (`omit` / `disabled`) are
+  unchanged from `v0.14.0`, so `v0.14.0` deployments keep their `terms.db` and
+  upgrade with `--runtime-only`. Its predecessor is `v0.14.0`, a
   review-evidence, structure-check and deployment release on top of `v0.13.0`:
   the opt-in `review-v2` feature `ambiguous-mention-v1` reports an unsettled
   one-character resonator name that the submitted text supports as a
@@ -161,23 +174,23 @@ release. That boundary has not moved.
   `NEXT_VERSION` to the derived tag explicitly before any release command
   below.
 - `contracts/products.json` is a dated snapshot of releases that exist, not a
-  target-version file. Core `0.14.0` and its published asset hashes are recorded
+  target-version file. Core `0.14.1` and its published asset hashes are recorded
   there. For a future release, update `products.core.release` only after it is
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
   `products.telegram` entry on its published release.
   `products.telegram` records the published Telegram `v0.6.0`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.5.0`, because the installer
+  `products.web` records the published Web `v0.5.1`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.7.0`.
+  published Windows `v0.7.1`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` and the
-  `v0.14.0` tag record and print `v0.6.0`, the Telegram release that pins Core
-  `v0.13.0`, while the
+  `docs/self-hosting.md` name the same published release: `main`, the `v0.14.1`
+  tag and the `v0.14.0` tag record and print `v0.6.0`, the Telegram release that
+  pins Core `v0.13.0`, while the
   `v0.13.0` tag records `v0.5.0` (pinning Core `v0.12.0`) and the `v0.10.2`,
   `v0.10.3`, `v0.11.0` and `v0.12.0` tags record `v0.4.1` (pinning Core
   `v0.10.1`). A Core tag can only record a
@@ -196,18 +209,19 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` records and installs Web `v0.5.0`, the `v0.14.0` tag records
-  and installs Web `v0.4.5`, the `v0.13.0` tag records and
+  they differ. `main` records and installs Web `v0.5.1`, the `v0.14.1` tag records
+  and installs Web `v0.5.0`, the `v0.14.0` tag records and installs Web `v0.4.5`,
+  the `v0.13.0` tag records and
   installs Web `v0.4.4`, and the `v0.10.3`, `v0.11.0` and `v0.12.0` tags record
   and install Web `v0.4.3`; the `v0.10.1` and
   `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.5.0` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.5.1` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.7.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.7.0), released independently.
+- Windows product: [v0.7.1](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.7.1), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -350,15 +364,17 @@ The 0.8.0 capability checks still apply to this release:
   Web `v0.4.2` (`262d715527eeb7c64ee9c6d922b3c34d7722813b`) and Windows `v0.6.2`
   (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), and `0.10.3` moved them to the
   two revisions above, together with the installer's default Web release. `main`
-  after `v0.14.0` moved them to Web `v0.5.0`
-  (`6cd0a7c5c65243c3d2cd741dc567690fa941f460`) and Windows `v0.7.0`
-  (`d87a66c37b1d4809774774c45bc5731f6ebb66d2`), the two consumers of
+  and the `v0.14.1` tag pin Web `v0.5.1`
+  (`13faa392cd6f4826d2115ae8ad04117a95577ffe`) and Windows `v0.7.1`
+  (`1ada119a0ff9284359fff2740f887140f6324545`); the `v0.14.0` tag pins Web
+  `v0.5.0` (`6cd0a7c5c65243c3d2cd741dc567690fa941f460`) and Windows `v0.7.0`
+  (`d87a66c37b1d4809774774c45bc5731f6ebb66d2`), the first pair of consumers of
   `wuwaterm-manuscript-v5`; `ci_pins` in `contracts/products.json` names the same
-  revisions.
+  revisions as the pins this release carries.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.6.0 pins the published Core
   `v0.13.0` wheel and is deployed, so the 0.13.0 library reaches Telegram users
-  through that product's own release. A later Core release, `v0.14.0` included,
+  through that product's own release. A later Core release, `v0.14.1` included,
   reaches Telegram users only after WuwaTerm-Telegram moves its lock to the new
   tag and
   releases, which this checklist does not assume.
