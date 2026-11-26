@@ -74,6 +74,7 @@ import contextvars
 import datetime as _dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -120,14 +121,9 @@ RESERVE_MIN_OUTPUT_TOKENS = 8_192
 
 ALLOWED_PROXY_SCHEMES = ("http", "https")
 REQUIRED_JUDGE_ROLES = ("j1", "j2", "adj")
-ACCEPTANCE_RULES = tuple(f"C{i}" for i in range(1, 11))
-ACCEPTANCE_TOOLS = ("scripts/eval_h3_corpus.py", "scripts/eval_usability.py")
-ACCEPTANCE_REQUIRED_INPUTS = ("manifest", "sample", "names", "community_names", "prior_ids")
 SAMPLE_SCHEMA = "usability-sample-v1"
 NAMES_SCHEMA = "usability-names-v1"
 COMMUNITY_NAMES_SCHEMA = "h3-community-names-v1"
-HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
-HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 PLACEHOLDER_JUDGE_MODELS = frozenset(
     {"", "tbd", "todo", "pending", "unknown", "none", "null", "placeholder"}
 )
@@ -190,6 +186,7 @@ RAW_SYSTEM_PROMPTS = {
 FROZEN_FILES = (
     "scripts/eval_h3.py",
     "scripts/eval_h3_corpus.py",
+    "scripts/eval_h3_tree_diff.py",
     "scripts/eval_h3_export.py",
     "scripts/eval_usability.py",
     "scripts/eval_semantic.py",
@@ -446,6 +443,7 @@ class CostConfig:
     ledger_budget_usd: float
     price_input_per_1m: float
     price_output_per_1m: float
+    max_cost_usd: float | None = None
 
     def reserve_usd(self, core_text: str | None) -> float:
         """Conservative USD reserve (not an upper bound: translation requests set no max_tokens)."""
@@ -514,8 +512,6 @@ def parse_cost_config(
     price_input_per_1m: float | None,
     price_output_per_1m: float | None,
 ) -> CostConfig | None:
-    if ledger_budget_usd is not None and max_cost_usd is not None and ledger_budget_usd != max_cost_usd:
-        raise Refused("--ledger-budget-usd and --max-cost-usd must match when both are given")
     budget = ledger_budget_usd if ledger_budget_usd is not None else max_cost_usd
     given = (budget is not None, price_input_per_1m is not None, price_output_per_1m is not None)
     if live:
@@ -532,10 +528,15 @@ def parse_cost_config(
             "--price-input-per-1m and --price-output-per-1m"
         )
     assert budget is not None and price_input_per_1m is not None and price_output_per_1m is not None
+    validated_budget = _positive_finite(budget, "--ledger-budget-usd/--max-cost-usd")
+    validated_run_cap = (
+        _positive_finite(max_cost_usd, "--max-cost-usd") if max_cost_usd is not None else None
+    )
     return CostConfig(
-        ledger_budget_usd=_positive_finite(budget, "--ledger-budget-usd/--max-cost-usd"),
+        ledger_budget_usd=validated_budget,
         price_input_per_1m=_positive_finite(price_input_per_1m, "--price-input-per-1m"),
         price_output_per_1m=_positive_finite(price_output_per_1m, "--price-output-per-1m"),
+        max_cost_usd=validated_run_cap,
     )
 
 
@@ -645,6 +646,25 @@ def _validate_judges_manifest(
     return name, None
 
 
+def _load_corpus_gate() -> Any:
+    """Load ``scripts/eval_h3_corpus.py`` from ``ROOT`` for receipt validation."""
+    gate_path = (ROOT / "scripts" / "eval_h3_corpus.py").resolve()
+    if not gate_path.is_file():
+        raise Refused("missing frozen tool file(s): scripts/eval_h3_corpus.py")
+    name = "eval_h3_corpus"
+    loaded = sys.modules.get(name)
+    if loaded is not None and getattr(loaded, "__file__", None):
+        if Path(str(loaded.__file__)).resolve() == gate_path:
+            return loaded
+    spec = importlib.util.spec_from_file_location(name, gate_path)
+    if spec is None or spec.loader is None:
+        raise Refused("scripts/eval_h3_corpus.py could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _collect_input_hashes(inputs_sha: Mapping[str, Any]) -> set[str]:
     hashes: set[str] = set()
     for val in inputs_sha.values():
@@ -668,10 +688,11 @@ def _validate_acceptance_receipt(
     frozen_hashes: Mapping[str, str],
     frozen_by_schema: Mapping[str, list[tuple[str, str]]],
     judges_name: str | None,
-) -> tuple[str | None, str | None]:
-    """Validate an ``h3-acceptance-v1`` receipt (compatible with ``eval_h3_corpus``).
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate an ``h3-acceptance-v1`` receipt via ``eval_h3_corpus.validate_acceptance_receipt``
+    plus ``--freeze`` cross-binding for external clearance/adjudication inputs.
 
-    Returns ``(accepted_full_manifest_sha256, error)``.
+    Returns ``(acceptance_evidence, error)``.
     """
     if not acceptances:
         return None, f"missing {ACCEPTANCE_SCHEMA} in --freeze"
@@ -698,112 +719,109 @@ def _validate_acceptance_receipt(
     else:
         return None, f"multiple {ACCEPTANCE_SCHEMA} receipts in --freeze; pass --full-manifest to disambiguate"
 
-    verdict = data.get("verdict")
-    if verdict != "pass":
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} verdict must be 'pass'"
-
-    failed_rules = data.get("failed_rules")
-    if (
-        not isinstance(failed_rules, list)
-        or len(failed_rules) != 0
-        or not all(isinstance(r, str) and r in ACCEPTANCE_RULES for r in failed_rules)
-    ):
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} failed_rules must be an empty list"
-
-    checks = data.get("checks")
-    if not isinstance(checks, Mapping) or set(checks) != set(ACCEPTANCE_RULES):
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} checks must contain exact keys C1..C10"
-    for rule in ACCEPTANCE_RULES:
-        block = checks[rule]
-        if not isinstance(block, Mapping) or block.get("status") != "pass":
-            return None, f"{name}: {ACCEPTANCE_SCHEMA} checks[{rule!r}].status must be 'pass'"
-
-    c3 = checks["C3"]
-    if c3.get("non_default_floor") is not False or c3.get("floor_profile") != "default":
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} non-default C3 floor_profile is not allowed"
-
-    c4 = checks["C4"]
-    if c4.get("windows_uncleared") != 0:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} C4 windows_uncleared must be 0"
-    if c4.get("scorer_sha256_ok") is not True:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} C4 scorer_sha256_ok must be true"
-
-    bindings = data.get("bindings")
-    if not isinstance(bindings, Mapping):
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings must be an object"
-    declared_bsha = data.get("bindings_sha256")
-    computed_bsha = sha256_bytes(canonical(bindings))
-    if not isinstance(declared_bsha, str) or declared_bsha != computed_bsha:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings_sha256 does not match canonical bindings"
-
-    core_commit = bindings.get("core_commit")
-    if not isinstance(core_commit, str) or not HEX40_RE.match(core_commit) or core_commit != PINNED_TAG_COMMIT:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.core_commit does not match pinned tag commit"
-    bound_src = bindings.get("bound_tree_src_sha")
-    if not isinstance(bound_src, str) or not HEX40_RE.match(bound_src) or bound_src != src_tree:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.bound_tree_src_sha does not match bound tree"
-    rec_terms = bindings.get("terms_db_sha256")
-    if not isinstance(rec_terms, str) or not HEX64_RE.match(rec_terms) or rec_terms != terms_db_sha256:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.terms_db_sha256 does not match --terms-db"
-    rec_matcher = bindings.get("matcher_revision")
-    if not isinstance(rec_matcher, str) or not HEX64_RE.match(rec_matcher) or rec_matcher != matcher_revision:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.matcher_revision does not match bound tree"
-
-    tools_sha = bindings.get("tools_sha256")
-    if not isinstance(tools_sha, Mapping):
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256 must be an object"
-    for tool_key in ACCEPTANCE_TOOLS:
-        tval = tools_sha.get(tool_key)
-        expected_tool = frozen_files_sha256.get(tool_key)
-        if not isinstance(tval, str) or not HEX64_RE.match(tval) or tval != expected_tool:
-            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.tools_sha256[{tool_key!r}] mismatch"
-
-    inputs_sha = bindings.get("inputs_sha256")
-    if not isinstance(inputs_sha, Mapping):
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256 must be an object"
-    for inp_key in ACCEPTANCE_REQUIRED_INPUTS:
-        entry = inputs_sha.get(inp_key)
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("sha256"), str) or not HEX64_RE.match(
-            entry["sha256"]
-        ):
-            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}].sha256 must be a 64-hex SHA-256"
-    prior_texts = inputs_sha.get("prior_texts")
-    if not isinstance(prior_texts, list) or not prior_texts:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts must be a non-empty list"
-    for idx, entry in enumerate(prior_texts):
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("sha256"), str) or not HEX64_RE.match(
-            entry["sha256"]
-        ):
-            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256.prior_texts[{idx}] has invalid sha256"
-
-    accepted_manifest_sha = str(inputs_sha["manifest"]["sha256"])
-    if expected_manifest_sha256 is not None and accepted_manifest_sha != expected_manifest_sha256:
-        return None, f"{name}: {ACCEPTANCE_SCHEMA} manifest_sha256 does not match manifest"
-
     schema_to_key = (
         (SAMPLE_SCHEMA, "sample"),
         (NAMES_SCHEMA, "names"),
         (COMMUNITY_NAMES_SCHEMA, "community_names"),
     )
-    verified_names: set[str] = {n for n, _ in acceptances}
-    if judges_name is not None:
-        verified_names.add(judges_name)
+    resolved_required: dict[str, tuple[str, str]] = {}
     for schema_id, inp_key in schema_to_key:
         entries = frozen_by_schema.get(schema_id) or []
         if len(entries) != 1:
             return None, f"{name}: --freeze must contain exactly one {schema_id} file matching {ACCEPTANCE_SCHEMA}"
-        fname, actual_sha = entries[0]
-        if inputs_sha[inp_key]["sha256"] != actual_sha:
-            return None, f"{name}: {ACCEPTANCE_SCHEMA} bindings.inputs_sha256[{inp_key!r}] does not match --freeze {fname}"
-        verified_names.add(fname)
+        resolved_required[inp_key] = entries[0]
 
+    metadata_entries = frozen_by_schema.get("h3-corpus-metadata-v1") or []
+    if len(metadata_entries) > 1:
+        return None, f"{name}: --freeze contains multiple h3-corpus-metadata-v1 files"
+    expected_metadata_sha = metadata_entries[0][1] if metadata_entries else None
+
+    gate = _load_corpus_gate()
+    use_pinned_defaults = (
+        src_tree == gate.PINNED_SRC_TREE
+        and terms_db_sha256 == gate.PINNED_TERMS_DB_SHA256
+        and matcher_revision == gate.PINNED_MATCHER_REVISION
+    )
+    validate_kwargs: dict[str, Any] = {
+        "expected_manifest_sha256": expected_manifest_sha256,
+        "expected_sample_sha256": resolved_required["sample"][1],
+        "expected_names_sha256": resolved_required["names"][1],
+        "expected_community_names_sha256": resolved_required["community_names"][1],
+        "expected_metadata_sha256": expected_metadata_sha,
+    }
+    if not use_pinned_defaults:
+        validate_kwargs["expected_src_tree"] = src_tree
+        validate_kwargs["expected_terms_sha256"] = terms_db_sha256
+        validate_kwargs["expected_matcher_revision"] = matcher_revision
+    try:
+        gate.validate_acceptance_receipt(data, **validate_kwargs)
+    except gate.ReceiptValidationError as exc:
+        return None, f"{name}: {exc}"
+    if frozen_files_sha256.get("scripts/eval_usability.py") != gate.PINNED_SCORER_SHA256:
+        return None, f"{name}: scripts/eval_usability.py SHA-256 differs from pinned scorer"
+
+    bindings = data["bindings"]
+    inputs_sha = bindings["inputs_sha256"]
+    frozen_sha_values = set(frozen_hashes.values())
+
+    # Verify external clearance, lexicon, adjudication, and metadata inputs recorded in the
+    # receipt are frozen and match on-disk SHA-256 (validate_acceptance_receipt does not
+    # re-hash external clearance files on disk).
+    for single_key in ("metadata", "annotation_adjudication", "upstream_clearances"):
+        entry = inputs_sha.get(single_key)
+        if isinstance(entry, Mapping) and isinstance(entry.get("sha256"), str):
+            if entry["sha256"] not in frozen_sha_values:
+                return (
+                    None,
+                    f"{name}: {ACCEPTANCE_SCHEMA} binds {single_key} ({entry.get('name') or single_key}) "
+                    "which is missing or mismatched in --freeze",
+                )
+    for list_key in ("clear_names", "community_lexicon"):
+        entries = inputs_sha.get(list_key)
+        if isinstance(entries, list):
+            for idx, entry in enumerate(entries):
+                if isinstance(entry, Mapping) and isinstance(entry.get("sha256"), str):
+                    if entry["sha256"] not in frozen_sha_values:
+                        return (
+                            None,
+                            f"{name}: {ACCEPTANCE_SCHEMA} binds {list_key}[{idx}] "
+                            "which is missing or mismatched in --freeze",
+                        )
+
+    verified_names: set[str] = {n for n, _ in acceptances}
+    verified_names.update(fname for fname, _ in resolved_required.values())
+    if judges_name is not None:
+        verified_names.add(judges_name)
     known_input_hashes = _collect_input_hashes(inputs_sha)
     for fname, actual_sha in frozen_hashes.items():
         if fname in verified_names:
             continue
         if actual_sha not in known_input_hashes:
             return None, f"{name}: {ACCEPTANCE_SCHEMA} does not bind --freeze file {fname}"
-    return accepted_manifest_sha, None
+
+    c3 = data["checks"]["C3"]
+    c4 = data["checks"]["C4"]
+    evidence = {
+        "acceptance_file": name,
+        "acceptance_sha256": frozen_hashes.get(name),
+        "acceptance_bindings_sha256": data["bindings_sha256"],
+        "core_tag_commit": bindings["core_tag_commit"],
+        "freeze_core_commit": bindings["freeze_core_commit"],
+        "accepted_manifest_sha256": str(inputs_sha["manifest"]["sha256"]),
+        "announcement_units_by_level": c3.get("announcement_units_by_level"),
+        "c4_counts": {
+            k: c4.get(k)
+            for k in (
+                "windows_hit",
+                "windows_cleared_m1",
+                "windows_cleared_m2",
+                "windows_cleared_m3",
+                "windows_uncleared",
+            )
+            if k in c4
+        },
+    }
+    return evidence, None
 
 
 def validate_live_preconditions(
@@ -815,7 +833,7 @@ def validate_live_preconditions(
     frozen_files_sha256: Mapping[str, str],
     frozen_hashes: Mapping[str, str],
     frozen_paths: Mapping[str, Path],
-) -> str | None:
+) -> tuple[dict[str, Any] | None, str | None]:
     """Validate frozen ``h3-acceptance-v1`` and ``h3-judges-v1`` preconditions.
 
     Both files are checked against the same accepted H3 full manifest (for
@@ -823,8 +841,8 @@ def validate_live_preconditions(
     ``--full-manifest`` or derived from the verified ``h3-acceptance-v1``
     receipt and cross-checked against ``h3-judges-v1``).
 
-    Returns ``None`` when both are present and valid for the current bindings,
-    otherwise a concise refusal/unavailable reason string.
+    Returns ``(preconditions_evidence, error)``; ``error`` is ``None`` when
+    both are present and valid for the current bindings.
     """
     acceptances: list[tuple[str, dict[str, Any]]] = []
     judges_files: list[tuple[str, dict[str, Any]]] = []
@@ -846,7 +864,7 @@ def validate_live_preconditions(
             judges_files.append((name, data))
 
     judges_name = judges_files[0][0] if len(judges_files) == 1 else None
-    accepted_manifest_sha, acceptance_err = _validate_acceptance_receipt(
+    evidence, acceptance_err = _validate_acceptance_receipt(
         acceptances,
         expected_manifest_sha256=expected_full_manifest_sha256,
         src_tree=src_tree,
@@ -858,11 +876,18 @@ def validate_live_preconditions(
         judges_name=judges_name,
     )
     if acceptance_err is not None:
-        return acceptance_err
-    _, judges_err = _validate_judges_manifest(
-        judges_files, manifest_sha256=expected_full_manifest_sha256 or accepted_manifest_sha
+        return None, acceptance_err
+    assert evidence is not None
+    resolved_judges_name, judges_err = _validate_judges_manifest(
+        judges_files,
+        manifest_sha256=expected_full_manifest_sha256 or evidence["accepted_manifest_sha256"],
     )
-    return judges_err
+    if judges_err is not None:
+        return None, judges_err
+    assert resolved_judges_name is not None
+    evidence["judges_file"] = resolved_judges_name
+    evidence["judges_sha256"] = frozen_hashes.get(resolved_judges_name)
+    return evidence, None
 
 
 # ---------------------------------------------------------------------- ledger
@@ -1060,10 +1085,17 @@ class Ledger:
         }
         if self.cost is not None:
             log_fields["ledger_budget_usd"] = self.cost.ledger_budget_usd
+            if self.cost.max_cost_usd is not None:
+                log_fields["max_cost_usd"] = self.cost.max_cost_usd
             log_fields["prices_usd_per_1m"] = {
                 "input": self.cost.price_input_per_1m,
                 "output": self.cost.price_output_per_1m,
             }
+        preconditions = record.get("preconditions")
+        if isinstance(preconditions, Mapping):
+            log_fields["acceptance_bindings_sha256"] = preconditions.get("acceptance_bindings_sha256")
+            log_fields["freeze_core_commit"] = preconditions.get("freeze_core_commit")
+            log_fields["judges_sha256"] = preconditions.get("judges_sha256")
         self.log("record_open", **log_fields)
         self.save()
         return record
@@ -1078,6 +1110,7 @@ class Ledger:
         stage = record["stage"]
         reserved_usd = self.cost.reserve_usd(core_text) if self.cost is not None else 0.0
         current_spent = float(self.data.get("spent_usd", 0.0))
+        current_rec_spent = float(record.get("spent_usd", 0.0))
         reason = None
         if self.max_calls is not None and record["posts"] + 1 > self.max_calls:
             reason = "max_calls"
@@ -1086,6 +1119,12 @@ class Ledger:
         elif self.data["posts_total"] + 1 > TOTAL_CAP:
             reason = "total_cap"
         elif self.cost is not None and current_spent + reserved_usd > self.cost.ledger_budget_usd:
+            reason = "cost_cap"
+        elif (
+            self.cost is not None
+            and self.cost.max_cost_usd is not None
+            and current_rec_spent + reserved_usd > self.cost.max_cost_usd
+        ):
             reason = "cost_cap"
         if reason is not None:
             self.cap_reached = True
@@ -1100,8 +1139,11 @@ class Ledger:
             }
             if self.cost is not None:
                 refusal_fields["spent_usd"] = current_spent
+                refusal_fields["record_spent_usd"] = current_rec_spent
                 refusal_fields["reserved_usd"] = reserved_usd
                 refusal_fields["ledger_budget_usd"] = self.cost.ledger_budget_usd
+                if self.cost.max_cost_usd is not None:
+                    refusal_fields["max_cost_usd"] = self.cost.max_cost_usd
             self.log("post_refused", **refusal_fields)
             self.save()
             raise CapReached(reason)
@@ -1943,13 +1985,14 @@ def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
     if not docs:
         raise Refused("the manifest has no document in the selected directions")
     core, bindings = prepare(cfg)
+    preconditions: dict[str, Any] | None = None
     if cfg.live:
         if cfg.stage == "pilot" and bindings.get("pilot_manifest_sha256") != cfg.manifest.sha256:
             raise Refused("pilot manifest SHA-256 does not match bindings.pilot_manifest_sha256")
         expected_full_manifest = (
             cfg.full_manifest_sha256 if cfg.stage == "pilot" else cfg.manifest.sha256
         )
-        precondition_error = validate_live_preconditions(
+        preconditions, precondition_error = validate_live_preconditions(
             expected_full_manifest_sha256=expected_full_manifest,
             src_tree=bindings["src_tree"],
             terms_db_sha256=bindings["terms_db_sha256"],
@@ -1973,11 +2016,17 @@ def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
                 raise Refused("no model gateway configured (environment or --env-file)")
             if model != PINNED_MODEL:
                 raise Refused(f"live runs use the pinned model {PINNED_MODEL}")
-        return _execute(cfg, core, bindings, docs, model)
+        return _execute(cfg, core, bindings, docs, model, preconditions=preconditions)
 
 
 def _execute(
-    cfg: RunConfig, core: Core, bindings: dict[str, Any], docs: Sequence[Document], model: str
+    cfg: RunConfig,
+    core: Core,
+    bindings: dict[str, Any],
+    docs: Sequence[Document],
+    model: str,
+    *,
+    preconditions: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ledger = Ledger(cfg.run_dir)
     ledger.acquire()
@@ -2028,10 +2077,14 @@ def _execute(
         }
         if cfg.cost is not None:
             record_fields["ledger_budget_usd"] = cfg.cost.ledger_budget_usd
+            if cfg.cost.max_cost_usd is not None:
+                record_fields["max_cost_usd"] = cfg.cost.max_cost_usd
             record_fields["prices_usd_per_1m"] = {
                 "input": cfg.cost.price_input_per_1m,
                 "output": cfg.cost.price_output_per_1m,
             }
+        if preconditions is not None:
+            record_fields["preconditions"] = preconditions
         record = ledger.open_record(**record_fields)
         ledger.max_calls = cfg.max_calls
         active = record
@@ -2158,6 +2211,7 @@ def preflight(
     plan += [("full", manifest), ("ablation", manifest)]
     rows: list[dict[str, Any]] = []
     tokens: dict[str, str] = {}
+    preconditions_evidence: dict[str, Any] | None = None
     stopped = False
     paths_map = dict(frozen_paths or {})
     for stage, stage_manifest in plan:
@@ -2191,7 +2245,7 @@ def preflight(
         elif bindings["overrides"]:
             tokens[stage] = "unavailable (bindings overridden)"
         else:
-            precondition_error = validate_live_preconditions(
+            evidence, precondition_error = validate_live_preconditions(
                 expected_full_manifest_sha256=manifest.sha256,
                 src_tree=bindings["src_tree"],
                 terms_db_sha256=bindings["terms_db_sha256"],
@@ -2203,6 +2257,7 @@ def preflight(
             if precondition_error is not None:
                 tokens[stage] = f"unavailable ({precondition_error})"
             else:
+                preconditions_evidence = evidence
                 tokens[stage] = approval_token(bindings, stage_manifest.sha256)
         if stopped:
             break
@@ -2233,6 +2288,7 @@ def preflight(
                   and all(s["within_cap"] is not False for s in stages)},
         "approval_tokens": tokens,
         "approval_token_note": APPROVAL_TOKEN_NOTE,
+        "preconditions": preconditions_evidence,
     }
 
 
@@ -2278,7 +2334,11 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expected-src-tree", default=PINNED_SRC_TREE, help="dry runs only")
     parser.add_argument("--expected-terms-sha256", default=PINNED_TERMS_DB_SHA256, help="dry runs only")
     parser.add_argument("--freeze", action="append", default=[], metavar="FILE",
-                        help="a frozen input (sample, name/community annotations, h3-acceptance-v1, h3-judges-v1)")
+                        help="a frozen input (sample, name/community annotations, clearances, h3-acceptance-v1, h3-judges-v1)")
+    parser.add_argument("--acceptance-receipt", metavar="RECEIPT.json",
+                        help="h3-acceptance-v1 receipt file (also hashed into frozen_inputs)")
+    parser.add_argument("--judges", metavar="JUDGES.json",
+                        help="h3-judges-v1 independent judge roster file (also hashed into frozen_inputs)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2326,7 +2386,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cost-usd",
         type=float,
         metavar="USD",
-        help="alias for --ledger-budget-usd (required for --live if --ledger-budget-usd is omitted)",
+        help="per-run pre-send USD cap (when passed alone without --ledger-budget-usd, also sets ledger_budget_usd)",
     )
     run.add_argument(
         "--price-input-per-1m",
@@ -2362,17 +2422,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def frozen_input_paths(paths: Sequence[str]) -> tuple[dict[str, str], dict[str, Path]]:
+def frozen_input_paths(
+    paths: Sequence[str],
+    *,
+    acceptance_receipt: str | None = None,
+    judges: str | None = None,
+) -> tuple[dict[str, str], dict[str, Path]]:
     hashes: dict[str, str] = {}
     resolved: dict[str, Path] = {}
-    for text in paths:
+
+    def _add(text: str, *, flag: str, expected_schema: str | None = None) -> None:
         path = Path(text).resolve()
-        if path.name in hashes:
-            raise Refused(f"two --freeze files are named {path.name}")
         if not path.is_file():
-            raise Refused(f"--freeze {path.name} is not a file")
+            raise Refused(f"{flag} {path.name} is not a file")
+        if expected_schema is not None:
+            data = load_json(path)
+            if not isinstance(data, dict) or data.get("schema") != expected_schema:
+                raise Refused(f"{flag} {path.name}: schema must be {expected_schema}")
+        if path.name in hashes:
+            if resolved[path.name] == path:
+                return
+            raise Refused(f"two frozen input files are named {path.name}")
         hashes[path.name] = sha256_file(path)
         resolved[path.name] = path
+
+    for text in paths:
+        _add(text, flag="--freeze")
+    if acceptance_receipt is not None:
+        _add(acceptance_receipt, flag="--acceptance-receipt", expected_schema=ACCEPTANCE_SCHEMA)
+    if judges is not None:
+        _add(judges, flag="--judges", expected_schema=JUDGES_SCHEMA)
     return hashes, resolved
 
 
@@ -2406,7 +2485,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     bound_tree = Path(args.bound_tree).resolve()
     if run_dir.is_relative_to(ROOT) or run_dir.is_relative_to(bound_tree):
         raise Refused("--run-dir must lie outside this repository and the bound tree")
-    freeze_hashes, freeze_paths = frozen_input_paths(args.freeze)
+    freeze_hashes, freeze_paths = frozen_input_paths(
+        args.freeze,
+        acceptance_receipt=args.acceptance_receipt,
+        judges=args.judges,
+    )
     manifest = load_manifest(Path(args.manifest))
     pilot_manifest_sha256 = (
         load_manifest(Path(args.pilot_manifest)).sha256 if args.pilot_manifest else None
@@ -2454,7 +2537,11 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     else:
         work = Path(tempfile.mkdtemp(prefix="h3-preflight-"))
         cleanup = work
-    freeze_hashes, freeze_paths = frozen_input_paths(args.freeze)
+    freeze_hashes, freeze_paths = frozen_input_paths(
+        args.freeze,
+        acceptance_receipt=args.acceptance_receipt,
+        judges=args.judges,
+    )
     try:
         report = preflight(
             manifest=manifest, pilot_manifest=pilot, bound_tree=Path(args.bound_tree).resolve(),

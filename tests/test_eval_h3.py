@@ -130,20 +130,7 @@ def _annotations(tmp: Path) -> dict[str, Path]:
 
 
 @pytest.fixture()
-def env(tmp_path, sample_db, h3, monkeypatch):
-    if not (ROOT / "scripts" / "eval_h3_corpus.py").is_file():
-        # Mirror FROZEN_FILES into a sibling directory (not an ancestor of run_dir)
-        # when scripts/eval_h3_corpus.py is not yet present on this branch.
-        frozen_root = tmp_path / "_frozen_repo"
-        for rel in h3.FROZEN_FILES:
-            dest = frozen_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            src = ROOT / rel
-            if src.is_file():
-                dest.write_bytes(src.read_bytes())
-            else:
-                dest.write_text("# test placeholder for eval_h3_corpus.py\n", encoding="utf-8")
-        monkeypatch.setattr(h3, "ROOT", frozen_root)
+def env(tmp_path, sample_db):
     annotations = _annotations(tmp_path)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"schema": "h3-manifest-v1", "set": "H3-test", "documents": DOCS},
@@ -447,12 +434,17 @@ def _write_live_preconditions(
     verdict: str = "pass",
     matcher_revision: str | None = None,
     core_commit: str | None = None,
+    freeze_core_commit: str | None = None,
     non_default_floor: bool = False,
     floor_profile: str = "default",
+    non_default_parameters: dict[str, object] | None = None,
     windows_uncleared: int = 0,
     tamper_bindings_sha256: bool = False,
     tools_sha256_override: dict[str, str] | None = None,
     failed_rules: list[str] | None = None,
+    upstream_clearances: Path | None = None,
+    community_lexicon: Path | None = None,
+    annotation_adjudication: Path | None = None,
 ) -> tuple[Path, Path]:
     matcher = matcher_revision or sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION
     frozen_tools = h3.frozen_file_hashes()
@@ -462,28 +454,74 @@ def _write_live_preconditions(
     }
     if tools_sha256_override:
         tools_sha.update(tools_sha256_override)
+    tag_commit = core_commit or h3.PINNED_TAG_COMMIT
+    freeze_commit = freeze_core_commit or ("a" * 40)
+    non_default = dict(non_default_parameters or {})
+    if non_default_floor and not non_default:
+        non_default["announcement_floor_zh_en"] = 10
+    inputs_sha: dict[str, object] = {
+        "manifest": {"name": manifest.name, "sha256": _sha256(manifest)},
+        "sample": {"name": annotations["sample.json"].name, "sha256": _sha256(annotations["sample.json"])},
+        "names": {"name": annotations["names.json"].name, "sha256": _sha256(annotations["names.json"])},
+        "community_names": {
+            "name": annotations["community.json"].name,
+            "sha256": _sha256(annotations["community.json"]),
+        },
+        "annotation_adjudication": (
+            {"name": annotation_adjudication.name, "sha256": _sha256(annotation_adjudication)}
+            if annotation_adjudication is not None
+            else None
+        ),
+        "metadata": None,
+        "prior_ids": {"name": "prior_ids.json", "sha256": "1" * 64},
+        "prior_texts": [{"name": "prior_texts.json", "sha256": "2" * 64}],
+        "clear_names": [],
+        "community_lexicon": (
+            [{"name": community_lexicon.name, "sha256": _sha256(community_lexicon)}]
+            if community_lexicon is not None
+            else []
+        ),
+        "upstream_clearances": (
+            {"name": upstream_clearances.name, "sha256": _sha256(upstream_clearances)}
+            if upstream_clearances is not None
+            else None
+        ),
+    }
     bindings = {
-        "core_commit": core_commit or h3.PINNED_TAG_COMMIT,
+        "core_tag_commit": tag_commit,
+        "core_commit": tag_commit,
+        "freeze_core_commit": freeze_commit,
         "bound_tree_src_sha": src_tree,
         "terms_db_sha256": _sha256(terms_db),
         "matcher_revision": matcher,
+        "non_default_parameters": non_default,
         "tools_sha256": tools_sha,
-        "inputs_sha256": {
-            "manifest": {"sha256": _sha256(manifest)},
-            "sample": {"sha256": _sha256(annotations["sample.json"])},
-            "names": {"sha256": _sha256(annotations["names.json"])},
-            "community_names": {"sha256": _sha256(annotations["community.json"])},
-            "prior_ids": {"sha256": "1" * 64},
-            "prior_texts": [{"sha256": "2" * 64}],
-        },
+        "inputs_sha256": inputs_sha,
     }
     rules_failed = list(failed_rules) if failed_rules is not None else ([] if verdict == "pass" else ["C8"])
     checks = {
         f"C{i}": {"status": "fail" if f"C{i}" in rules_failed else "pass"}
         for i in range(1, 11)
     }
-    checks["C3"].update({"floor_profile": floor_profile, "non_default_floor": non_default_floor})
-    checks["C4"].update({"windows_uncleared": windows_uncleared, "scorer_sha256_ok": True})
+    checks["C3"].update({
+        "floor_profile": floor_profile,
+        "non_default_floor": non_default_floor,
+        "announcement_units_by_level": {
+            "zh->en": {"L0": 30, "L1": 0, "L2": 0},
+            "en->zh": {"L0": 30, "L1": 0, "L2": 0},
+        },
+    })
+    checks["C4"].update({
+        "windows_hit": 0,
+        "windows_cleared_m1": 0,
+        "windows_cleared_m2": 0,
+        "windows_cleared_m3": 0,
+        "windows_uncleared": windows_uncleared,
+        "scorer_sha256_ok": True,
+        "required_prior_sets_complete": True,
+        "m2_max_shared_span_threshold": 24,
+    })
+    checks["C7"].update({"cutoff": "2026-11-06T19:45:00+08:00"})
     bindings_sha = h3.sha256_bytes(h3.canonical(bindings))
     if tamper_bindings_sha256:
         bindings_sha = "0" * 64
@@ -491,6 +529,7 @@ def _write_live_preconditions(
         "schema": "h3-acceptance-v1",
         "verdict": verdict,
         "failed_rules": rules_failed,
+        "non_default_parameters": non_default,
         "checks": checks,
         "bindings": bindings,
         "bindings_sha256": bindings_sha,
@@ -581,9 +620,9 @@ def test_live_missing_cost_params_refused_before_client_construction(h3, env, ca
         ["--ledger-budget-usd", "5.0", "--price-input-per-1m", "0.5"],  # missing output price
         ["--ledger-budget-usd", "5.0", "--price-output-per-1m", "2.0"],  # missing input price
         ["--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # missing budget
-        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "4.0",
-         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # conflicting aliases
         ["--max-cost-usd", "0", "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero budget
+        ["--ledger-budget-usd", "5.0", "--max-cost-usd", "0",
+         "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0"],  # zero per-run cap
         ["--max-cost-usd", "5.0", "--price-input-per-1m", "-0.5", "--price-output-per-1m", "2.0"],  # negative price
     ]
     for extra in cases:
@@ -851,15 +890,15 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     assert pf_tampered["approval_tokens"]["full"].startswith("unavailable")
     assert "bindings_sha256" in pf_tampered["approval_tokens"]["full"]
 
-    # 6. Non-default C3 floor override -> unavailable.
+    # 6. Non-default C3 floor override -> unavailable (fail-closed in validate_acceptance_receipt).
     custom_floor_acc, _ = _write_live_preconditions(
         h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
         terms_db=env["db"], annotations=env["annotations"],
-        non_default_floor=True, floor_profile="custom:announcement=10",
+        non_default_floor=True, floor_profile="custom:announcement[zh->en]=10",
     )
     pf_floor = run_preflight(custom_floor_acc, judges)
     assert pf_floor["approval_tokens"]["full"].startswith("unavailable")
-    assert "floor_profile" in pf_floor["approval_tokens"]["full"]
+    assert "non_default_parameters" in pf_floor["approval_tokens"]["full"] or "floor_profile" in pf_floor["approval_tokens"]["full"]
 
     # 7. C4 windows_uncleared > 0 -> unavailable.
     uncleared_acc, _ = _write_live_preconditions(
@@ -870,7 +909,7 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     assert pf_c4["approval_tokens"]["full"].startswith("unavailable")
     assert "windows_uncleared" in pf_c4["approval_tokens"]["full"]
 
-    # 8. Mismatched tools_sha256 -> unavailable.
+    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 mismatch).
     bad_tool_acc, _ = _write_live_preconditions(
         h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
         terms_db=env["db"], annotations=env["annotations"],
@@ -878,9 +917,38 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     )
     pf_tool = run_preflight(bad_tool_acc, judges)
     assert pf_tool["approval_tokens"]["full"].startswith("unavailable")
-    assert "tools_sha256" in pf_tool["approval_tokens"]["full"]
+    assert "gate_sha256" in pf_tool["approval_tokens"]["full"]
 
-    # 9. Valid acceptance + valid judges -> issues h3-live-... token; cost cap does NOT enter token.
+    # 8b. freeze_core_commit equal to core_tag_commit -> unavailable.
+    same_commit_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        freeze_core_commit=h3.PINNED_TAG_COMMIT,
+    )
+    pf_same = run_preflight(same_commit_acc, judges)
+    assert pf_same["approval_tokens"]["full"].startswith("unavailable")
+    assert "freeze_core_commit" in pf_same["approval_tokens"]["full"]
+
+    # 8c. External clearance/adjudication files recorded in receipt must be frozen and untampered.
+    clearances = env["tmp"] / "upstream_clearances.json"
+    clearances.write_text(json.dumps({"schema": "h3-upstream-clearances-v1", "entries": []}), encoding="utf-8")
+    lexicon = env["tmp"] / "community_lexicon.json"
+    lexicon.write_text(json.dumps({"schema": "h3-community-lexicon-v1", "terms": []}), encoding="utf-8")
+    acc_with_ext, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        upstream_clearances=clearances, community_lexicon=lexicon,
+    )
+    pf_missing_ext = run_preflight(acc_with_ext, judges)
+    assert pf_missing_ext["approval_tokens"]["full"].startswith("unavailable")
+    assert "upstream_clearances" in pf_missing_ext["approval_tokens"]["full"]
+    pf_ok_ext = run_preflight(acc_with_ext, judges, clearances, lexicon)
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", pf_ok_ext["approval_tokens"]["full"])
+    assert pf_ok_ext["preconditions"]["acceptance_bindings_sha256"] == json.loads(
+        acc_with_ext.read_text(encoding="utf-8")
+    )["bindings_sha256"]
+
+    # 9. Valid acceptance + valid judges via --acceptance-receipt and --judges flags -> issues h3-live-... token.
     good_acc, judges = _write_live_preconditions(
         h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
         terms_db=env["db"], annotations=env["annotations"], verdict="pass",
@@ -890,6 +958,13 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     token = pf_ok["approval_tokens"]["full"]
     assert re.fullmatch(r"h3-live-[0-9a-f]{24}", token), token
     assert pf_ok["approval_tokens"]["ablation"] == token
+    pf_flags_out = env["tmp"] / "pf_flags.json"
+    assert h3.main(
+        ["preflight", *pinned_args, *env["freeze"],
+         "--acceptance-receipt", str(good_acc), "--judges", str(judges),
+         "--manifest", str(env["manifest"]), "--json-out", str(pf_flags_out)]
+    ) == 0
+    assert json.loads(pf_flags_out.read_text(encoding="utf-8"))["approval_tokens"]["full"] == token
     assert no_network == []
 
 
@@ -1124,6 +1199,10 @@ def test_pilot_stage_live_path_with_full_manifest_acceptance_receipt(h3, env, ca
     assert ledger["mode"] == "live"
     assert ledger["bindings"]["pilot_manifest_sha256"] == _sha256(pilot_manifest)
     assert len(ledger["records"]) == 6
+    assert ledger["records"][0]["preconditions"]["acceptance_bindings_sha256"] == json.loads(
+        good_acc.read_text(encoding="utf-8")
+    )["bindings_sha256"]
+    assert ledger["records"][0]["preconditions"]["judges_sha256"] == _sha256(judges)
 
     # Negative check: mismatched --full-manifest on pilot is refused (exit 1).
     code_bad, err_bad = _run(
@@ -1182,16 +1261,18 @@ def test_preflight_and_cost_estimate_itemize_the_dry_run(h3, env, capsys, no_net
     assert no_network == []
 
 
-def test_protocol_records_the_sha256_of_the_frozen_h3_tools(h3):
+def test_protocol_records_the_sha256_of_the_frozen_h3_tools():
     text = PROTOCOL.read_text(encoding="utf-8")
-    for rel in ("scripts/eval_h3_export.py", "docs/eval/h3-judging-addendum.md", "scripts/eval_usability.py"):
+    for rel in (
+        "scripts/eval_h3.py",
+        "scripts/eval_h3_corpus.py",
+        "scripts/eval_h3_tree_diff.py",
+        "scripts/eval_h3_export.py",
+        "scripts/eval_usability.py",
+        "scripts/eval_semantic.py",
+        "docs/eval/usability-judging.md",
+        "docs/eval/h3-judging-addendum.md",
+    ):
         recorded = re.findall(rf"`{re.escape(rel)}` SHA-256 `([0-9a-f]{{64}})`", text)
         assert recorded, rel
         assert set(recorded) == {_sha256(ROOT / rel)}, rel
-    # scripts/eval_h3.py is rebound to Core v0.14.0 while the protocol doc update
-    # lands separately; once the protocol doc pins PINNED_SRC_TREE, enforce exact
-    # SHA-256 equality automatically.
-    h3_recorded = re.findall(r"`scripts/eval_h3\.py` SHA-256 `([0-9a-f]{64})`", text)
-    assert h3_recorded, "scripts/eval_h3.py"
-    if h3.PINNED_SRC_TREE in text:
-        assert set(h3_recorded) == {_sha256(ROOT / "scripts" / "eval_h3.py")}
