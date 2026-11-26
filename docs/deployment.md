@@ -229,8 +229,9 @@ command runs only when all of this holds:
   present on the container and absent from the record. A recorded value is never
   changed or removed, and a replacement container that adds neither is not
   rebound;
-- the Telegram component, if installed, matches its record exactly. It cannot
-  carry either setting through this command.
+- the Telegram component, if installed, keeps its recorded container binding,
+  recipe and environment; its running state is re-read, as an update does. It
+  cannot carry either setting through this command.
 
 A refusal leaves the recorded manifest, journal and pointers as they were; a
 field difference is reported by name, without values. On success the command
