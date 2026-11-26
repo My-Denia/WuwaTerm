@@ -363,14 +363,17 @@ The 0.8.0 capability checks still apply to this release:
   move is one commit over all four files. `main` after `v0.10.2` moved them to
   Web `v0.4.2` (`262d715527eeb7c64ee9c6d922b3c34d7722813b`) and Windows `v0.6.2`
   (`f60e14618b60eacf9841c4b1aca5d3e427fa37a0`), and `0.10.3` moved them to the
-  two revisions above, together with the installer's default Web release. `main`
-  and the `v0.14.1` tag pin Web `v0.5.1`
+  two revisions above, together with the installer's default Web release. The
+  `v0.14.1` tag pins Web `v0.5.0`
+  (`6cd0a7c5c65243c3d2cd741dc567690fa941f460`) and Windows `v0.7.0`
+  (`d87a66c37b1d4809774774c45bc5731f6ebb66d2`), the first pair of consumers of
+  `wuwaterm-manuscript-v5`, and `main` after `v0.14.1` moved them to Web `v0.5.1`
   (`13faa392cd6f4826d2115ae8ad04117a95577ffe`) and Windows `v0.7.1`
   (`1ada119a0ff9284359fff2740f887140f6324545`); the `v0.14.0` tag pins Web
-  `v0.5.0` (`6cd0a7c5c65243c3d2cd741dc567690fa941f460`) and Windows `v0.7.0`
-  (`d87a66c37b1d4809774774c45bc5731f6ebb66d2`), the first pair of consumers of
-  `wuwaterm-manuscript-v5`; `ci_pins` in `contracts/products.json` names the same
-  revisions as the pins this release carries.
+  `v0.4.3` (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
+  (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`). `ci_pins` in
+  `contracts/products.json` names the same revisions as the pins this release
+  carries.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
   own lock is moved and released. Telegram 0.6.0 pins the published Core
   `v0.13.0` wheel and is deployed, so the 0.13.0 library reaches Telegram users
