@@ -2,7 +2,7 @@
 
 - Status: Accepted (contract and engine)
 - Date: 2026-11-26
-- Related: `MY-490`, `MY-504`,
+- Related: `MY-490`, `MY-504`, `MY-515`,
   [ADR 0018](0018-semantic-review.md),
   [segmentation-v1](../segmentation-v1.md)
 
@@ -103,7 +103,10 @@ section records the rules a schema cannot express.
   `tag_unbalanced`.
 - **Numbers.** Only Arabic-digit numbers are reported. Both sides are read in
   NFKC, digits of any script count as ASCII digits, and characters inside
-  placeholders and tags are not read. `1,000` and `1000` are the same number,
+  placeholders, markup tags, and client-side `{Cus:<Kind>,…}` template
+  directives (such as `{Cus:Sap,S=stack P=stacks SapTag=0}`) are not read;
+  `{Cus:…}` directives are language-specific and stay outside placeholder
+  matching. `1,000` and `1000` are the same number,
   as are `1.50` and `1.5`. A digit number followed by `十百千万亿` or by
   `thousand`, `million` or `billion` also reads as that multiple, so `1.5万`
   matches `15,000`. A source number the target does not account for is
@@ -131,7 +134,8 @@ section records the rules a schema cannot express.
     before the number, with only spaces or tags between them; a trailing one
     follows the number and its unit, with at most one classifier or word
     between (`3层以上`, `3 stacks or more`), and is not followed by another
-    number (`3 turns and below 50%` gives `below` to `50%`). Strictness is not compared:
+    number even across markup tags (`3 turns and below 50%` and
+    `3 turns and below <color=Red>50%</color>` both give `below` to `50%`). Strictness is not compared:
     `大于` matches `at least`.
   - Time and distance units written on both sides agree: `秒`/`s`/`sec`,
     `分钟`/`min`, `小时`/`h`, `米`/`meter`; a bare `m` reads as metres or
@@ -150,7 +154,7 @@ section records the rules a schema cannot express.
   `S0R5` or `S0`. A marker the other side spells out as plain numbers (`S3R1`
   as `Sequence 3, Refinement 1`) is accounted for by those numbers. `N+M` is
   a marker only for chain 0 to 6 and refinement 1 to 5 standing alone, so
-  `1+1=2`, `3+1+1`, `5+1倍` and `1+2×3` stay arithmetic.
+  `1+1=2`, `3+1+1`, `5+1倍`, `5+1x`, `5+1X` and `1+2×3` stay arithmetic.
 - **Spans of number findings.** A number finding's span covers the number as
   written: an explicit sign, an attached percent sign, multiplier or unit,
   and a comparison word, as far as they are contiguous text outside markup
@@ -167,7 +171,13 @@ section records the rules a schema cannot express.
   `百分之五十`), spelled English numbers (`twenty-one`, `two hundred and five`,
   `twice`, `triple`), English month names (`November` for `11月`), list labels
   at the start of a line (`1.`, `2)`, `(3)`, `4、`), compatibility numerals
-  (`①`, `²`, `½`, `Ⅳ`) and the `:00` of a clock time are never reported. They
+  (`①`, `²`, `½`, `Ⅳ`), the `:00` of a clock time, digits immediately
+  preceded by an ASCII letter (`SOL3`, `T-G0NG`) unless the letter is a
+  standalone `x`/`X` multiplier prefix (`Kernel x2`) or the digits carry an
+  attached percent/unit (`HP50%`), and standalone uppercase ASCII Roman
+  numerals 1–39 (`II`, `IV`, `XXXIX`; `L`/`C`/`D`/`M` are excluded, and a bare
+  `I` followed by English prose such as `I have` or `I'm` is skipped as a
+  pronoun) are never reported. They
   only account for a digit number of the same value on the other side, and
   they do so whatever its facts. The fullwidth comma `，` separates list
   items, so `100，200` is two numbers, and an ASCII `100,200` also matches the
@@ -197,52 +207,64 @@ section records the rules a schema cannot express.
   `b50abdd`) call the endpoint on their main branches. Web `v0.4.5` and
   Windows `v0.6.6`, the latest releases, were cut before either change.
 
-## Measured false alarms and misses (MY-504)
+## Measured false alarms and misses (MY-504, MY-515)
 
 `python scripts/eval_structure_checks.py` measures the number rule offline
-with no model call. Numbers below are for this change's head.
+with no model call. Numbers below cover both the initial numeric-facts
+rollout (MY-504) and the subsequent false-alarm reduction and boundary fixes
+(MY-515).
 
-- **Fixture.** `tests/fixtures/structure-numeric-facts.json` holds 96
+- **Fixture.** `tests/fixtures/structure-numeric-facts.json` holds 108
   hand-written guide, announcement, skill and story pairs, labelled before the
-  rules were written: 57 natural translations (27 of them hard negatives
-  such as ranges, `3次`/`3 times`, `-` against `−`, a dropped `至少`, and
-  `percent` spelled out), 36 pairs with one injected error each (percent or
-  multiplier lost, sign flipped, comparison flipped, build marker changed,
-  unit changed, number added, dropped or changed), and 3 attribution swaps.
+  rules they measure were implemented: the original 96 pairs from MY-504 (57
+  natural translations including 27 hard negatives, 36 pairs with one injected
+  error each, and 3 attribution swaps) plus 12 synthetic pairs for `{Cus:Sap,…}`
+  masking, ASCII letter-glued digits (`SOL3`, `T-G0NG`, `HP50%`, `Kernel x2`),
+  `5+1x` arithmetic, tagged trailing comparison lookahead, and uppercase ASCII
+  Roman numerals with pronoun `I` protection (7 hard negatives and 5 positives).
   Every case runs in both directions. A positive counts as found only when a
   number finding overlaps the injected error.
 
-  | | Before (`fe4555f`) | After |
-  |---|---|---|
-  | False alarms on natural pairs | 2 / 114 (1.8%) | 0 / 114 (0%) |
-  | Missed errors | 48 / 72 (66.7%) | 0 / 72 (0%) |
-  | Attribution swaps found (not claimed) | 0 / 6 | 0 / 6 |
+  | | Before MY-504 (`fe4555f`, 96 cases) | After MY-504 (`1550de7`, 108 cases) | Current (108 cases) |
+  |---|---|---|---|
+  | False alarms on natural pairs | 2 / 114 (1.8%) | 14 / 128 (10.9%; 0 / 114 on original 96) | 0 / 128 (0%) |
+  | Missed errors | 48 / 72 (66.7%) | 2 / 82 (2.4%; 0 / 72 on original 96) | 0 / 82 (0%) |
+  | Attribution swaps found (not claimed) | 0 / 6 | 0 / 6 | 0 / 6 |
 
-  The two earlier false alarms were the month name in `11月26日` /
-  `November 26`. The labels were committed before any rule, but the fixture
-  is not blind: its first run against the new rules found 70 of 72 errors
-  with 2 false alarms, and two changes followed from it (the lettered build
-  form takes any digit so `S1R0` is one marker, and month names account for
-  a month). The official corpus below is the measure the rules were not
-  tuned on.
-- **Official corpus.** With `--textmap-root data/wutheringdata/Textmaps
-  --baseline-ref fe4555f`, the 27,385 zh-Hans/en pairs of the official game
-  text (data `9218d61`, 3.7.8) that hold a digit are read in both
-  directions. Official translations rarely change a number, so a pair this
-  change newly flags is read as a false alarm unless the two texts really
-  disagree. Flagged pairs went from 2,337 to 2,270 per direction: 75 stopped
-  being flagged, each for a month name (63 dates with `N月` against the
-  English month, and the 12 birthday-month labels `1` / `Jan` to `12` /
-  `Dec`); 8 are newly flagged, and each of the 8
-  is a real difference in the official text: `热熔伤害提升10%` translated as
-  `Gain 10 Fusion DMG Bonus` in four item texts, `0%` against `0` or `0.0` in
-  two, `0` against `0%` and `+0.02` against `0.02%`. The script prints counts and
-  identifiers only; no corpus text is written anywhere.
-- **Time.** The slowest of 20 adversarial pairs with both sides at 2,000
-  scalars (signs, percents, build markers, comparison words, units, ranges,
-  tags, many ways of writing one value, long digit runs) took 12.0 ms on
-  Python 3.11 and 10.7 ms on 3.13, best of 5, on the development machine. The test suite bounds each at 100 ms, to
-  catch a superlinear path without failing on a slow shared runner.
+  In MY-504, the two earlier false alarms were the month name in `11月26日` /
+  `November 26`; its labels were committed before any rule, though the fixture
+  was not blind (two adjustments followed from its first run: any-digit lettered
+  build markers and month names). The 12 cases added for MY-515 were committed
+  before the rule changes; all 7 new negatives failed on `1550de7`, along with
+  the `{Cus:Sap,…}` leakage positive where `SapTag=1` excused a missing `1`.
+  All 96 original cases remain 0 / 114 false alarms and 72 / 72 detections.
+- **Official corpus.** With `--textmap-root data/wutheringdata/Textmaps`, the
+  27,385 zh-Hans/en pairs of the official game text (data `9218d61`, 3.7.8)
+  that hold a digit are read in both directions.
+  - **MY-504 (`fe4555f` → `1550de7`).** Flagged pairs went from 2,337 to 2,270
+    per direction: 75 stopped being flagged (63 `N月` dates and 12
+    birthday-month labels `1`/`Jan` to `12`/`Dec`), and 8 were newly flagged,
+    each a real difference in the official text (`热熔伤害提升10%` against
+    `Gain 10 Fusion DMG Bonus` in four items, `0%` against `0`/`0.0` in two,
+    `0` against `0%`, and `+0.02` against `0.02%`).
+  - **MY-515 (`1550de7` → current).** Flagged pairs dropped from 2,270 to 990
+    per direction (−56.4%: 1,282 cleared, 2 newly flagged), and total number
+    findings dropped from 2,863 to 1,291 per direction (−1,572 net: 1,580
+    removed, 8 added across 8 keys). Every one of the 8 added findings is a
+    Chinese `1` or `0` previously masked by a leaked `SapTag=N` argument inside
+    `{Cus:Sap,…}`: 1 direct numeric difference
+    (`ResonantChain_31035_Attributes`, fixed digits vs placeholders) and 7
+    implicit `1`/`0` renderings (`RogueBuffPool_335101_BuffDesc` and
+    `RogueResSynergyDesc_1001002_1` newly flagged, plus 5 already-flagged keys
+    whose leaked `SapTag` findings were replaced). The script prints counts and
+    identifiers only; no corpus text is written anywhere.
+- **Time.** The slowest of 23 adversarial pairs with both sides at 2,000
+  scalars (including `{Cus:Sap,…}` templates, uppercase ASCII Roman numerals,
+  letter-glued digits, signs, percents, build markers, comparison words, units,
+  ranges, tags, many ways of writing one value, and long digit runs) took
+  12.23 ms on Python 3.11 (best of 5) on the development machine, with the
+  three new pattern pairs each under 7 ms. The test suite bounds each at
+  100 ms, to catch a superlinear path without failing on a slow shared runner.
 
 ## Evidence
 

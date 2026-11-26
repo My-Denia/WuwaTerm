@@ -91,6 +91,27 @@ def test_structure_check_reports_each_segment_in_request_order(tmp_path, sample_
     assert again["segments"] == body["segments"]
 
 
+def test_structure_check_api_handles_false_alarm_and_boundary_cases(tmp_path, sample_db):
+    app, _, token = structure_app(tmp_path, sample_db)
+    segments = [
+        {"segment_id": "cus", "source": "最多叠加{0}层。", "target": "Stacks up to {0} {Cus:Sap,S=stack P=stacks SapTag=0}."},
+        {"segment_id": "glued", "source": "索拉等级提升", "target": "SOL3 Phase increased"},
+        {"segment_id": "arith", "source": "造成5+1倍伤害", "target": "Deals 5+1x DMG"},
+        {
+            "segment_id": "tag-polarity",
+            "source": "持续至少3回合，生命值低于<color=Red>50%</color>",
+            "target": "Lasts 3 turns and below <color=Red>50%</color> HP",
+        },
+        {"segment_id": "roman", "source": "伤痕2", "target": "Scar II"},
+    ]
+    response = check(app, token, segments)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["check_version"] == "structure-check-v1"
+    assert body["checks"] == ["empty_target", "numbers", "placeholders", "paragraphs"]
+    assert [item["findings"] for item in body["segments"]] == [[], [], [], [], []]
+
+
 def test_structure_check_caps_findings_per_segment(tmp_path, sample_db):
     app, _, token = structure_app(tmp_path, sample_db)
     source = " ".join(str(number) for number in range(100, 120))

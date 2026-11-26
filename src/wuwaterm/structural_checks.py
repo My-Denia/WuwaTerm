@@ -295,10 +295,12 @@ def check_placeholder_integrity(source: str, answer: str) -> bool:
 # any normalization, so a client can highlight exactly what was flagged.
 #
 # The number check reports only Arabic-digit numbers. Chinese numerals, spelled
-# English numbers, list labels and enumerated symbols are never reported on
-# their own; they only excuse a digit number with the same value on the other
-# side. A number that only some reading of the other side accounts for is
-# treated as accounted for: a missed error is cheaper here than a false alarm.
+# English numbers, list labels, enumerated symbols, digits glued to an ASCII
+# letter (like `SOL3`), and standalone uppercase ASCII Roman numerals (1-39)
+# are never reported on their own; they only excuse a digit number with the
+# same value on the other side. A number that only some reading of the other
+# side accounts for is treated as accounted for: a missed error is cheaper here
+# than a false alarm.
 #
 # Two numbers of the same value still do not account for each other when they
 # are written as different facts: a percentage and a plain number, a multiplier
@@ -356,6 +358,11 @@ _MARKUP_RE = re.compile(
     r"|(?<![A-Za-z0-9])%(?:\d+\$)?[+\-#]*0*(?:[1-9]\d*)?(?:\.\d+)?"
     r"[diouxXeEfFgGcrs](?![A-Za-z0-9])"
 )
+# Client-side custom template directives (`{Cus:Sap,S=stack P=stacks SapTag=0}`,
+# `{Cus:Ipt,...}`) are language-specific and must not enter placeholder matching,
+# but their internal arguments (such as `SapTag=0`) are masked from number
+# reading so they neither raise false alarms nor excuse real numbers.
+_CUS_TEMPLATE_RE = re.compile(r"\{Cus:[A-Za-z]{1,16},[^{}<>\n]{0,160}\}")
 
 _DIGIT_NUMBER_RE = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+(?![0-9])|[0-9]+)(?:\.[0-9]+)*")
 _EN_SCALE_AFTER_RE = re.compile(r"[ \t]*(thousand|million|billion)\b", re.IGNORECASE)
@@ -419,6 +426,14 @@ _EN_SCALES = {
     "million": 10**6, "millionth": 10**6, "billion": 10**9, "billionth": 10**9,
 }
 _EN_WORD_RE = re.compile(r"[A-Za-z]+")
+# Standalone uppercase ASCII Roman numerals (1-39) only excuse an Arabic digit
+# of the same value on the other side; L/C/D/M are excluded. A bare `I`
+# followed by English prose (`I have`, `I'm`) is skipped as a pronoun.
+_ASCII_ROMAN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?=[IVX])(X{0,3}(?:IX|IV|V?I{0,3}))(?![A-Za-z0-9])"
+)
+_PRONOUN_I_AFTER_RE = re.compile(r"[ \t]*[A-Za-z'’]")
+_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10}
 
 # Masked markup in the facet view. Nothing is read across a placeholder; only a
 # comparison word may be read across a tag, as in `低于<color=Red>50%`.
@@ -505,8 +520,9 @@ _POLARITY_AFTER_RE = re.compile(
     r"[ \t]*(?:[㐀-鿿][ \t]*)?(?P<cn>[及或]?以[上下内])"
     r"|[ \t]+(?:[A-Za-z]{1,16}[ \t]+)?(?P<en>(?:or|and)[ \t]+"
     r"(?:more|above|higher|greater|over|up|less|below|lower|fewer|under))(?![A-Za-z])"
-    # `3 turns and below 50% HP`: the word opens the next number, not this one.
-    r"(?![ \t]*[+\-−–]?[0-9])",
+    # `3 turns and below 50% HP` (even across a tag): the word opens the next
+    # number, not this one.
+    r"(?![ \t\x01]*[+\-−–]?[0-9])",
     re.IGNORECASE,
 )
 _GREATER_AFTER_WORDS = ("more", "above", "higher", "greater", "over", "up")
@@ -518,12 +534,12 @@ _RANGE_JOIN_RE = re.compile(r"[ \t]*[-–—~〜至到/][ \t]*|[ \t]+to[ \t]+")
 # `S0R1`, `C6`, `S6 R5`, `R1`, `0+1` (chain + refinement), `6链`, `0链1精`.
 # The lettered form, and a refinement right after `链`, take any digit, so a
 # wrong `S1R0` or `6链0精` is still one marker. The bare forms take only real
-# chain (0-6) and refinement (1-5) levels, and `1+1=2`, `3+1+1`, `5+1倍` or
-# `1+2×3` is arithmetic left to the number rule.
+# chain (0-6) and refinement (1-5) levels, and `1+1=2`, `3+1+1`, `5+1倍`,
+# `5+1x` or `1+2×3` is arithmetic left to the number rule.
 _BUILD_RE = re.compile(
     r"(?<![A-Za-z0-9])[SsCc](?P<s1>[0-9])(?:[ \t]?[Rr](?P<r1>[0-9]))?(?![A-Za-z0-9])"
     r"|(?<![A-Za-z0-9])[Rr](?P<r2>[0-9])(?![A-Za-z0-9])"
-    r"|(?<![0-9.+\-−–×*/=<>])(?P<s3>[0-6])\+(?P<r3>[1-5])(?![0-9.+\-−–×*/=<>%倍])"
+    r"|(?<![0-9.+\-−–×*/=<>])(?P<s3>[0-6])\+(?P<r3>[1-5])(?![0-9.+\-−–×*/=<>%倍xX])"
     r"|(?<![0-9.])(?P<s4>[0-6])链(?:(?P<r4>[0-9])精)?(?![接条])"
 )
 
@@ -713,6 +729,17 @@ def _english_number_runs(text: str) -> list[str]:
         previous_end = match.end()
     close()
     return values
+
+
+def _roman_value(token: str) -> int:
+    """Integer value of an uppercase ASCII Roman numeral matched by :data:`_ASCII_ROMAN_RE`."""
+    total = 0
+    previous = 0
+    for char in reversed(token):
+        value = _ROMAN_VALUES[char]
+        total += -value if value < previous else value
+        previous = value
+    return total
 
 
 def _numeric_view(
@@ -946,11 +973,24 @@ def _number_tokens(
             if scale:
                 factor = _EN_SCALES[scale.group(1).casefold()]
                 values.add(_canonical(_EXACT.multiply(number, Decimal(factor))))
-        # A list label, or the `:00` of a clock time that the other language
-        # writes as `4点`, is never reported on its own.
+        # A list label, the `:00` of a clock time that the other language writes
+        # as `4点`, or digits glued directly after an ASCII letter (such as
+        # `SOL3` or `T-G0NG`, excluding a standalone `x`/`X` multiplier prefix
+        # and digits carrying an attached percent or unit like `HP50%`) is never
+        # reported on its own.
         label = _is_list_label(view, start, end, token)
         clock_zero = start > 0 and view[start - 1] == ":" and set(token) == {"0"}
-        if label or clock_zero:
+        letter_glued = (
+            start > 0
+            and view[start - 1].isascii()
+            and view[start - 1].isalpha()
+            and not (
+                view[start - 1] in "xX"
+                and not (start >= 2 and fence[start - 2].isascii() and fence[start - 2].isalnum())
+            )
+            and _UNIT_ATTACHED_RE.match(fence, end) is None
+        )
+        if label or clock_zero or letter_glued:
             excuses.append(frozenset(values))
             continue
         facets, head, tail = _read_facets(fence, reversed_fence, start, end)
@@ -982,6 +1022,11 @@ def _number_tokens(
         if value is not None:
             excuses.append(frozenset({value}))
     excuses.extend(frozenset({value}) for value in _english_number_runs(view))
+    for match in _ASCII_ROMAN_RE.finditer(view):
+        token = match.group()
+        if token == "I" and _PRONOUN_I_AFTER_RE.match(view, match.end()):
+            continue
+        excuses.append(frozenset({str(_roman_value(token))}))
     return reportable, builds, [values for values in excuses if values]
 
 
@@ -1379,6 +1424,13 @@ def _finding_order(finding: StructureFinding) -> tuple[int, int]:
     return _RULE_ORDER[finding.rule_id], -1 if span is None else span.start
 
 
+def _number_masked(text: str, markup: Sequence[_Token]) -> list[tuple[int, int]]:
+    return [
+        *((token.span.start, token.span.end) for token in markup),
+        *(match.span() for match in _CUS_TEMPLATE_RE.finditer(text)),
+    ]
+
+
 def check_segment_structure(source: str, target: str) -> SegmentStructureReport:
     """Layer 1 deterministic checks for one paired segment (structure-check-v1).
 
@@ -1404,8 +1456,8 @@ def check_segment_structure(source: str, target: str) -> SegmentStructureReport:
     findings += _number_findings(
         source,
         target,
-        [(token.span.start, token.span.end) for token in source_markup],
-        [(token.span.start, token.span.end) for token in target_markup],
+        _number_masked(source, source_markup),
+        _number_masked(target, target_markup),
     )
     return SegmentStructureReport(
         findings=tuple(sorted(findings, key=_finding_order)), layout=layout

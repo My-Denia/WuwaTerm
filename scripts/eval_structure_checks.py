@@ -179,6 +179,10 @@ def adversarial_pairs() -> list[tuple[str, str, str]]:
          fill("".join(f"{p}1{u} " for p in ("大于", "<", "") for u in ("%", "x", " times", "s", ""))),),
         ("distinct values", "".join(f"+{n}% {n}秒 >{n} " for n in range(1000))[:MAX_SIDE],
          "".join(f"-{n}% {n}m <{n} " for n in range(1000))[:MAX_SIDE]),
+        ("cus templates", fill("{Cus:Sap,S=stack P=stacks SapTag=0} "),
+         fill("{Cus:Sap,S=time P=times SapTag=1} ")),
+        ("roman numerals", fill("XXXVIII IV I have "), fill("38 4 1 ")),
+        ("letter glued", fill("SOL3 T-G0NG HP50% "), fill("3 0 50% ")),
     ]
 
 
