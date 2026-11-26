@@ -5,6 +5,8 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.14.1 - 2026-11-26
+
 ### Installer
 
 - `deploy/setup.sh` defaults the installer to Web `v0.5.0`, the release
@@ -32,6 +34,79 @@ does not distribute generated game data or generated SQLite databases.
   (`and below <color=Red>50%</color>`). On the 27,385-pair 3.7.8 official
   corpus, flagged pairs dropped from 2,270 to 990 per direction (−56.4%) with
   0 / 128 fixture false alarms and 82 / 82 detections.
+
+### Evaluation & Research
+
+- Add the offline Core tree differential harness for H3 (#336):
+  `scripts/eval_h3_tree_diff.py` runs `scripts/eval_h3.py run
+  --fake-transport` over the same manifests under three deterministic
+  scenarios (`default`, `timeout_fallback`, `paragraph_repair`) and compares
+  prompt, payload and output SHA-256 values, thinking mode, attempt kind and
+  POST counts, then probes `PreparedTerms`, `TranslationPlan` and
+  `TranslationRequestSpec` in isolated subprocesses whenever a difference
+  appears. Its report carries digests, counts and difference classes only,
+  never corpus or translation text.
+- Add the H3 corpus acceptance gate and receipt validator (#337):
+  `scripts/eval_h3_corpus.py accept` runs mechanical checks C1-C10 over a
+  candidate corpus and writes an `h3-acceptance-v1` receipt that holds no
+  corpus text, and `verify-receipt` revalidates one fail-closed against the
+  pinned defaults. `--freeze-core-commit` is required and must be a strict
+  descendant of `--core-commit`; an announcement document carries a level in
+  `L0`-`L2` with scored units reported by level per direction, and C4 records
+  Core blob-entry and unique-blob scan counts.
+- Pre-register and close H3 protocol revision (c) (#338, #339): the Core under
+  test moves to `v0.14.0` (`2737530`, matcher `wuwaterm-cjk-matcher-v11`), the
+  tool worktree pins to the closing pull request's merge commit, the 12-scalar
+  clearance becomes mechanical (M1 declared names, M2 no CJK character, no
+  `Nd` digit, no two-scalar dictionary surface and a shared fragment shorter
+  than `T = 24`, M3 a listed upstream source), the announcement ladder
+  `L0`-`L2` carries template pruning with `L3` left to the owner, the
+  `h3-acceptance-v1` receipt and the `h3-judges-v1` roster freeze before the
+  approval token, and the pilot slice is taken from `D` with a post-freeze
+  leakage scan.
+  `scripts/eval_h3.py` gains a USD budget cap over locked ledger prices, a
+  live proxy path that requires both that budget and a per-run cost cap, and
+  the corpus receipt check.
+- Add the offline structure-attribution candidate signal for Layer 2 (#342):
+  an `attribution` mode of `scripts/eval_structure_checks.py` names a
+  language-neutral slot for each stat a sentence quantifies on each side and
+  declines to pair when a clause leaves two equally close numbers or two slots
+  claim one number, so a candidate needs two named slots on both sides with
+  the same value multiset and at least one moved, and the hint lists the slots
+  that moved. Measured without a model call: 21 of 21 swaps on 54 synthetic
+  pairs with no candidate on the 33 reorder and clean multi-stat negatives, 2
+  candidates in 54,770 official runs over the 27,385 pairs that hold a digit
+  (0.0037%), and under 3.1 ms worst case on the adversarial 2,000-scalar
+  input. It adds no API field, schema, rule id or finding category.
+
+### Tests
+
+- Bound two subprocess tests by progress instead of wall clock (#340): the
+  real verifier test runs the deployment in a session of its own and reads
+  the frozen tree, because a two-millisecond `/proc` poll could miss a
+  verifier that lives a fraction of a second and lose a `SIGSTOP` aimed at an
+  exited pid; its last wait ends on the verifier's own exit and the pipes are
+  closed instead of awaiting `communicate()`. All 22 `deploy/vps-update.sh`
+  harness runs in `tests/test_deploy_scripts.py` fail only when no external
+  command is recorded for 90 seconds, which is a hang and not a slow host.
+  `docs/release-checklist.md` loses a stale "Before it is `v0.13.0`" line.
+
+### Upgrade & Compatibility
+
+- The HTTP contract does not change: `docs/api/openapi.json` differs from
+  `v0.14.0` only in `info.version`, and `structure-check-v1` keeps its rule
+  ids, finding categories and fields while reporting fewer number findings
+  from the boundary fixes above. The H3 tools and the attribution prototype
+  are offline only: no request path calls them, and no live model call was
+  made to add them.
+- Dictionary builder logic, SQLite schema (`2`), pinned game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`), the `terms.db` contents, matcher
+  `wuwaterm-cjk-matcher-v11` and the thinking defaults (`omit` / `disabled`)
+  are unchanged from `v0.14.0`, so a `v0.14.0` deployment can keep its
+  `terms.db` and upgrade with `deploy/vps-update.sh --runtime-only`.
+- `deploy/setup.sh` defaults the installer to Web `v0.5.0`, the Core CI client
+  pins name Web `v0.5.0` and Windows `v0.7.0`, and the Telegram default stays
+  `v0.6.0`, as recorded above.
 
 ## 0.14.0 - 2026-11-26
 
