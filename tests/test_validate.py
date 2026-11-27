@@ -38,6 +38,7 @@ def test_server_steps_declared_sequence_and_structure() -> None:
         "hygiene",
         "architecture",
         "api-contract",
+        "release-manifest",
         "ruff",
         "typing",
         "pytest",
@@ -117,7 +118,14 @@ def test_quick_excludes_pytest_suite_and_preserves_fast_gates(monkeypatch: pytes
     ret = validate.main(["--quick"])
     assert ret == 0
 
-    expected_fast_names = ["hygiene", "architecture", "api-contract", "ruff", "typing"]
+    expected_fast_names = [
+        "hygiene",
+        "architecture",
+        "api-contract",
+        "release-manifest",
+        "ruff",
+        "typing",
+    ]
     assert len(executed_commands) == len(expected_fast_names)
 
     for command, expected_step in zip(executed_commands, expected_fast_names):

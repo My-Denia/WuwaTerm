@@ -75,6 +75,12 @@ SERVER_STEPS: list[Step] = [
         ROOT,
     ),
     Step(
+        "release-manifest",
+        "contracts/products.json drifted from pyproject.toml, openapi.json, client pins, or docs/products.md",
+        ["scripts/check_release_manifest.py"],
+        ROOT,
+    ),
+    Step(
         "ruff",
         "the linter reports an error under the rule set pinned in pyproject.toml",
         ["-m", "ruff", "check", "."],

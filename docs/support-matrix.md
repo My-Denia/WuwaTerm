@@ -40,7 +40,7 @@ green at roughly 1028 tests.
 ## Desktop client and API compatibility
 
 [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop source, builds, support and
-release process. The independent [v0.4.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.4.0) is unsigned.
+release process. The independent [v0.9.0 release](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.9.0) is unsigned.
 Core CI tests the current `/v1` API and a real nonempty review report against
 the pinned Windows consumer, without importing Qt or the client transport.
 The `api_version` in `/v1/meta` identifies the protocol; `service_version`
@@ -55,7 +55,7 @@ see [Web Presentation Layer](web-presentation-layer.md) and [Public Beta Site](s
 
 | | |
 | --- | --- |
-| Tree | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.6.0 (release `v0.6.0`) |
+| Tree | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.7.0 (release `v0.7.0`) |
 | Tested in CI | Web repository job `web` on `ubuntu-latest` with Node 24: `npm ci`, the full and production-only npm audits, `npm test`, typecheck, lint, production build, `verify:no-client-secret`, the built-artifact suite (`test:built`), a Playwright Chromium install, and the browser suite against the emitted bundle (`WUWATERM_BROWSER_BUILT=1 npm run test:browser`) |
 | Public service status | Best-effort anonymous beta at <https://wuwaterm.denia-official.chatgpt.site>; no account and no SLA, fixed-availability promise or per-visitor fairness guarantee |
 | Not in `scripts/validate.py` | by design; the server matrix does not install Node |

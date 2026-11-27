@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-27",
+  "observed_on": "2026-11-28",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256. Here each product's release is also the one its release page marks latest, and for Telegram and Web the tag this checkout's installer names.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -47,8 +47,8 @@
         "windows",
         "web"
       ],
-      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/contracts/manuscript-v5/SPEC.md",
-      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4, then v5). v5 adds a review_features list, the ambiguous_mention reason and segmentation-v1-gaps segment records and otherwise keeps v4; it ships in Web 0.5.0, 0.5.1, 0.6.0 and Windows 0.7.0, 0.7.1, 0.8.0, and Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject a v5 file. The v4 contract ships in Web 0.4.0, 0.4.1 and 0.4.2 and in Windows 0.6.0, 0.6.1 and 0.6.2, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
+      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0/contracts/manuscript-v5/SPEC.md",
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4, then v5). v5 adds a review_features list, the ambiguous_mention reason and segmentation-v1-gaps segment records and otherwise keeps v4; it ships in Web 0.5.0 through 0.7.0 and Windows 0.7.0 through 0.9.0, and Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject a v5 file. The v4 contract ships in Web 0.4.0, 0.4.1 and 0.4.2 and in Windows 0.6.0, 0.6.1 and 0.6.2, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -81,13 +81,36 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
-        "tree": "6d48c25b3849256595e8fbfba39d5b9463a3638d",
+        "commit": "8565b48b628addb6a01569cee00503f1547077c8",
+        "tree": "553e4312309c1d9d6d340e508f49bfab6b9b1a07",
         "status": "success",
-        "status_note": "The v0.15.0 release source (#349, chore(release): prepare Core 0.15.0), which is also this repository's main when this snapshot was recorded. ci.yml main push run 45959452344, CodeQL run 45959452198 and Dependency audit run 45959452110 all passed on this commit; release.yml (dry_run=false) run 45961013922 created the v0.15.0 release draft, and after public release publication the release event triggered promote-images run 45961311451 to tag the images."
+        "status_note": "The v0.16.0 release source (#352, chore(release): prepare Core 0.16.0), which is also this repository's main baseline when this snapshot was recorded. ci.yml main push run 46024212081 and Dependency audit run 46024211552 passed on this commit; release.yml (dry_run=false) run 46028904470 built the v0.16.0 release, and after public release publication the release event triggered promote-images run 46029422614 to tag the images."
       },
-      "source_version": "0.15.0",
+      "source_version": "0.16.0",
       "release": {
+        "version": "0.16.0",
+        "tag": "v0.16.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.16.0",
+        "published_at": "2026-11-27T15:57:21Z",
+        "source_commit": "8565b48b628addb6a01569cee00503f1547077c8",
+        "source_tree": "553e4312309c1d9d6d340e508f49bfab6b9b1a07",
+        "assets": [
+          "wuwaterm-0.16.0-py3-none-any.whl",
+          "wuwaterm-0.16.0.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.16.0-py3-none-any.whl": "5343448bae10b9f88f686b81936b680f9ea68dfa6690f12957929204d191d628",
+          "wuwaterm-0.16.0.tar.gz": "46bc53c3209fa336e65fd0a8628490ce75b5e3042e9264ad9151c17c23c79788",
+          "release-manifest.json": "e421841e6e58d854102cf2a2547c225d48e6f468b3771b473f09c8e9f0e2585c",
+          "SHA256SUMS": "a9d1a77dee4e77dc7095ffb2971c0d24032b7f8f0d340ad4b4ca4041b6e2289f"
+        },
+        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T15:53:53Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:c7fef726bf1f1019f8c22363f18a800801fa68c55cd5a2185214672b857d69c9 and builder sha256:4ca8a9a88b2d20d749b1680b3b11161fb1b333e1c2427269325552b6bba0db45. Both were first pushed under sha-8565b48 and promoted after publication.",
+        "note": "v0.16.0 adds GET /v1/dictionary (DictionaryIdentityResponseBody, scoped to SCOPE_META) and advertises dictionary-identity-v1 in GET /v1/capabilities (#351, MY-491), records the v0.15.0 / v0.6.0 / v0.8.0 / v0.6.1 snapshot (#350), and updates ADR 0023, CHANGELOG.md, docs/api/openapi.json (info.version 0.16.0), pyproject.toml and uv.lock (#352). All experimental and candidate flags stay off by default, and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged, so v0.14.x and v0.15.0 hosts keep their terms.db and upgrade with --runtime-only. On source_commit 8565b48b, ci.yml main push run 46024212081 and Dependency audit run 46024211552 passed; release.yml (dry_run=false) run 46028904470 and release-triggered promote-images run 46029422614 succeeded. Published assets: wuwaterm-0.16.0-py3-none-any.whl (589,987 bytes), wuwaterm-0.16.0.tar.gz (572,642 bytes), release-manifest.json (861 bytes), SHA256SUMS (188 bytes)."
+      },
+      "previous_release": {
         "version": "0.15.0",
         "tag": "v0.15.0",
         "status": "released",
@@ -108,30 +131,7 @@
           "SHA256SUMS": "90d014647f0c48ce6eaade69b85e33d7d5e7895e6cee11afc0162cf8c01c817c"
         },
         "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T07:48:39Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:ef1cdfd519eeb7e44bf988dd87fa3b6e9fe2a67c131f740d13212f33e11d84d3 and builder sha256:a93c3988bf59faa44488011ea2acd820b7fc4a9d3aafda8a54e0305ea7bcf5d9. Both were first pushed under sha-122870b and promoted to v0.15.0 and 0.15 after publication; the historical version tags were retained.",
-        "note": "v0.15.0 adds opt-in, default-off review, translation-memory and engine candidates on top of v0.14.1 (#344, #345, #346, #347, #348, #349). #344 extracts attribution-candidates-v1 (src/wuwaterm/attribution_candidates.py), gates the semantic-review hint behind WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS (default off), and adds ADR 0023 and ADR 0024; #347 refines ADR 0023 TM freshness and context_exact rules and passes prepared_scalars into RequestPolicy.paragraph_repair_thinking_mode; #345 adds opt-in, default-off engine candidates C1 (wuwaterm-termbase-v1), C3 (DocumentAnchor) and C4 (WUWATERM_TRANSLATION_THINKING_ZH_EN=auto behind zh_en_auto_thinking=False); #346 records the v0.14.1, v0.5.1 and v0.7.1 releases and moves the CI client pins; #348 adds H3 Protocol Revision (d) --expected-model binding and bindings.tools_sha256 receipt verification; #349 prepares release 0.15.0. All experimental and candidate flags stay off by default, docs/api/openapi.json differs from v0.14.1 only in info.version (0.15.0), and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged from v0.14.1, so v0.14.x hosts keep their terms.db and upgrade with --runtime-only. On source_commit 122870b1, ci.yml main push run 45959452344, CodeQL run 45959452198 and Dependency audit run 45959452110 passed; release.yml (dry_run=false) run 45961013922 created the v0.15.0 release draft, and after public release publication the release event triggered promote-images run 45961311451 to tag the images. All four published assets (wuwaterm-0.15.0-py3-none-any.whl 589,060 bytes, wuwaterm-0.15.0.tar.gz 571,769 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) are published with the digests above."
-      },
-      "previous_release": {
-        "version": "0.14.1",
-        "tag": "v0.14.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.14.1",
-        "published_at": "2026-11-26T16:04:32Z",
-        "source_commit": "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
-        "source_tree": "ac381d4ae5a764a4b8a94c8b52396b0eeb400df4",
-        "assets": [
-          "wuwaterm-0.14.1-py3-none-any.whl",
-          "wuwaterm-0.14.1.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.14.1-py3-none-any.whl": "6406571363eebd4dc82d4ddd6aa24518204fef704cf5144714145d3cd4260537",
-          "wuwaterm-0.14.1.tar.gz": "bb1c43a96ec4ec91431a89e260f4e8159935c931fdd0a278f957f9dbaa642368",
-          "release-manifest.json": "b27ef99ce05bccb9dfefdec176c290b90f5f3575d231e3f77375116b81c60342",
-          "SHA256SUMS": "0daec0065c90aef28769783394f2984dfd8279aed4ac486db01d7c4baa6f552e"
-        },
-        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-26T15:42:30Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:a9353ec6c7d30500aca989d8937af474df88891ded8a339361d580efab0bd199 and builder sha256:884f1f260c8b6ca048143a7f62abb162980a579bff758a59e39f532768e33e15. Both were first pushed under sha-1949f8d and promoted to v0.14.1 and 0.14 after publication; the historical version tags were retained.",
-        "note": "v0.14.1 is a patch release on top of v0.14.0 (#335, #336, #337, #338, #339, #340, #341, #342, #343). #341 reduces false alarms and fixes boundary cases in POST /v1/structure-checks (structure-check-v1, MY-515): {Cus:<Kind>,...} template arguments are masked from number reading, digits immediately preceded by an ASCII letter and standalone uppercase Roman numerals 1-39 act as excuse-only values, attached percent and unit forms stay reportable, bare N+M followed by x stays arithmetic rather than a build marker, and trailing comparison lookahead skips markup tags; on the 27,385-pair 3.7.8 official corpus flagged pairs dropped from 2,270 to 990 per direction (-56.4%) with 0/128 fixture false alarms and 82/82 detections, and the rule ids, finding categories and response fields are unchanged. #335 records the three v0.14.0-era releases in this file, moves the Core CI client pins to Web v0.5.0 (6cd0a7c5) and Windows v0.7.0 (d87a66c3), defaults the installer to Web v0.5.0 and updates the version statements in the README, self-hosting, release-checklist, support-matrix and SECURITY pages. #336, #337, #338, #339 and #342 add the offline H3 corpus gate, tree-differential harness and protocol revision (c) work plus the structure-attribution candidate signal; no request path calls them and no live model call was made to add them. #340 bounds two subprocess tests by progress instead of wall clock. The HTTP contract does not change: docs/api/openapi.json differs from v0.14.0 only in info.version. SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, the wuwaterm-cjk-matcher-v11 matcher and the en->zh omit and zh->en disabled defaults are unchanged from v0.14.0, so a v0.14.0 host keeps its terms.db and upgrades with --runtime-only. On source_commit 1949f8d, ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1. No dry-run dispatch was made for this version, so the real run is the only execution recorded for this source. All four published assets (wuwaterm-0.14.1-py3-none-any.whl 569,831 bytes, wuwaterm-0.14.1.tar.gz 554,830 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) were downloaded anonymously and the wheel and sdist verified via sha256sum -c SHA256SUMS; the wheel METADATA reports Version 0.14.1. Kept as history after v0.15.0; the release and its assets are still published."
+        "note": "v0.15.0 adds opt-in, default-off review, translation-memory and engine candidates on top of v0.14.1 (#344, #345, #346, #347, #348, #349). Kept as history after v0.16.0; the release and its assets are still published."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -151,11 +151,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "not_deployed",
-      "adoption_note": "Production VPS API wuwaterm-api still runs r15 (Core v0.14.1, .deploy_commit 1949f8ddf9c81dfd02b2bbea59bc8799d4943728, locally built image wuwaterm-runtime:1949f8d..., verified 2026-11-26); Core v0.15.0 (122870b) is published and has not yet been deployed to the production VPS. On r15, /openapi.json reports info.version 0.14.1, /healthz and /readyz answer 200, /v1/capabilities answers 401 without a device token, HostConfig.MemoryReservation is 100663296 (96 MiB), OomScoreAdj is -500, system.slice keeps memory.low 134217728 (128 MiB), RestartCount is 0, .env keeps mode 0600 (7b50817a...), data/terms.db keeps sha256 9ddee819..., and rollback point r14 (2737530, Core v0.14.0) is retained.",
+      "adoption_note": "Production VPS API wuwaterm-api still runs r15 (Core v0.14.1, .deploy_commit 1949f8ddf9c81dfd02b2bbea59bc8799d4943728, locally built image wuwaterm-runtime:1949f8d..., verified 2026-11-26); Core v0.16.0 (8565b48) is published and has not yet been deployed to the production VPS. On r15, /openapi.json reports info.version 0.14.1, /healthz and /readyz answer 200, /v1/capabilities answers 401 without a device token, HostConfig.MemoryReservation is 100663296 (96 MiB), OomScoreAdj is -500, system.slice keeps memory.low 134217728 (128 MiB), RestartCount is 0, .env keeps mode 0600 (7b50817a...), data/terms.db keeps sha256 9ddee819..., and rollback point r14 (2737530, Core v0.14.0) is retained.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/122870b1eb20195f4e790c2899e0fa6d73bbb020/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/122870b1eb20195f4e790c2899e0fa6d73bbb020/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/8565b48b628addb6a01569cee00503f1547077c8/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/8565b48b628addb6a01569cee00503f1547077c8/docs/data-refresh.md"
       ]
     },
     {
@@ -245,12 +245,46 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "97c659e22b97f05b9a817c0740ca19d4add63441",
-        "tree": "625046a828000dd53c9f04b9a801de18a49647eb",
+        "commit": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+        "tree": "8c2ecad03029f574e03281696ede18a0b0a2fb8b",
         "status": "success",
-        "status_note": "The v0.8.0 release source (#65, chore(release): prepare Windows 0.8.0), which is also this repository's main when this snapshot was recorded. CI push run 45956691400, Dependency audit run 45956691402 and release run 45957285553 all passed on this commit."
+        "status_note": "The v0.9.0 release source (#68, chore(release): prepare Windows 0.9.0), which is also this repository's main when this snapshot was recorded. CI push run 46030012407, Dependency audit run 46030012572 and release run 46030874805 all passed on this commit."
       },
       "release": {
+        "version": "0.9.0",
+        "tag": "v0.9.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.9.0",
+        "published_at": "2026-11-27T16:14:16Z",
+        "source_commit": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+        "source_tree": "8c2ecad03029f574e03281696ede18a0b0a2fb8b",
+        "assets": [
+          "WuwaTerm-0.9.0-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.9.0-windows-x64.zip": "838441db1aba770e483b4e03431f161b956cc51ad1201185c5381200d3fa93a6",
+          "manifest.json": "7094c59ff6ec72a0f4312aa4760d2279d625cc0413c2f804555ddc3e2b974617",
+          "SHA256SUMS": "5a13ef1bfb389b38a696cfa1eff0ac72e3b1773a3fd9f58d1adfde53abf918df"
+        },
+        "zip_sha256": "838441db1aba770e483b4e03431f161b956cc51ad1201185c5381200d3fa93a6",
+        "signed": false,
+        "note": "v0.9.0 adds GET /v1/dictionary (dictionary-identity-v1) client integration on top of v0.8.0 (#66, #68). #66 reads the served dictionary identity from GET /v1/dictionary (MY-491); #68 bumps the package version to 0.9.0 in pyproject.toml, wuwaterm_client.__version__ and uv.lock. contracts/sources.json pins Core commit b7abb953b8e997328344064e85c9db28f55f40aa (with /v1/dictionary) and keeps Web v0.5.0 (6cd0a7c5). Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 58,563,224 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from e6835f38; release run 46030874805 succeeded."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v5",
+        "note": "The client reads wuwaterm-manuscript-v1 through v5 and writes the lowest format that holds the content: v5 only for a recorded review feature or gap-tolerant segment records. Windows 0.6.6 and earlier reject v5 files. The structure check and the single-character list need a service that lists structure-check-v1 and ambiguous-mention-v1; reading the served dictionary identity directly needs dictionary-identity-v1. Local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.9.0: main CI push run 46030012407 and Dependency audit run 46030012572 passed on e6835f38, and release run 46030874805 passed on the same commit. GitHub Release metadata records WuwaTerm-0.9.0-windows-x64.zip (58,563,224 bytes, sha256 838441db...), manifest.json (283 bytes, sha256 7094c59f...) and SHA256SUMS (97 bytes, sha256 5a13ef1b...), matching the downloaded manifest.json (source_commit e6835f38, validation_run_id 46030012407, signed false) and SHA256SUMS. No physical Windows desktop run is recorded for 0.9.0 yet.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/e6835f38dfcc0ac217bc0cc8c608ad6570668428/README.md"
+      ],
+      "source_version": "0.9.0",
+      "previous_release": {
         "version": "0.8.0",
         "tag": "v0.8.0",
         "status": "released",
@@ -270,56 +304,63 @@
         },
         "zip_sha256": "d6ffa4893b1b4a6c77fb13dec9bd36a1844e55ae36585faf5fd94e53baff7191",
         "signed": false,
-        "note": "v0.8.0 adds local SQLite translation memory and workbench controls on top of v0.7.1 (#60, #61, #62, #63, #64, #65). #60 adds the local SQLite translation memory MVP and manager dialog (MY-491); #61 adds in-editor find/replace, termbase promotion and default unhandled filters (MY-16, MY-201); #62 wires the local confirmed translation memory panel into the workbench (MY-491); #63 enforces context-exact fresh reuse, 3-state freshness, auto L1 check and incremental skip (MY-491); #64 separates live service meta/review provenance from historical workfiles (MY-491); #65 bumps the package version to 0.8.0 in pyproject.toml, wuwaterm_client.__version__ and uv.lock and updates DocumentRunController._tm_provenance() docstring. contracts/sources.json keeps the Core v0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) pins, so this release names no new contract source. Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 58,549,622 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 97c659e2; release run 45957285553 succeeded."
+        "note": "v0.8.0 adds local SQLite translation memory and workbench controls on top of v0.7.1 (#60, #61, #62, #63, #64, #65). Kept as history after v0.9.0; v0.8.0 and earlier remain published."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v5",
-        "note": "The client reads wuwaterm-manuscript-v1 through v5 and writes the lowest format that holds the content: v5 only for a recorded review feature or gap-tolerant segment records. Windows 0.6.6 and earlier reject v5 files. The structure check and the single-character list need a service that lists structure-check-v1 and ambiguous-mention-v1. Local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.8.0: main CI push run 45956691400 (including windows-latest offscreen Qt workbench verification) and Dependency audit run 45956691402 passed on 97c659e2, and release run 45957285553 passed on the same commit. WuwaTerm-0.8.0-windows-x64.zip (58,549,622 bytes) was downloaded anonymously, verified via sha256sum -c SHA256SUMS and passed unzip -tq, and all three published assets' SHA-256 digests (WuwaTerm-0.8.0-windows-x64.zip, manifest.json 283 bytes, SHA256SUMS 97 bytes) match GitHub Release metadata. The manifest records source_commit 97c659e2, validation_run_id 45956691400 and signed false. No physical Windows desktop run is recorded for 0.8.0 yet.",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/97c659e22b97f05b9a817c0740ca19d4add63441/README.md"
-      ],
-      "source_version": "0.8.0",
-      "previous_release": {
-        "version": "0.7.1",
-        "tag": "v0.7.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.7.1",
-        "published_at": "2026-11-26T14:01:48Z",
-        "source_commit": "1ada119a0ff9284359fff2740f887140f6324545",
-        "source_tree": "375f0c782af592fd407994fac19f7d61cc3c10a7",
-        "assets": [
-          "WuwaTerm-0.7.1-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.7.1-windows-x64.zip": "7ea9d97f11f22ebf5be1ba75986574ec2d961afc34b65f65994866fb5a7e86f4",
-          "manifest.json": "4b0a8fd21ed1755aaef8120762eb0b9c48de2e7dff27bd6c1a2b9c5f69838be9",
-          "SHA256SUMS": "d9ab36517aef8022ed15898a7a4f6bb9729b85c34a4a16babdcb2b856766ae4f"
-        },
-        "zip_sha256": "7ea9d97f11f22ebf5be1ba75986574ec2d961afc34b65f65994866fb5a7e86f4",
-        "signed": false,
-        "note": "v0.7.1 is a patch release on top of v0.7.0 (#57, #58, #59). #58 keeps progress.current when a no-op save follows open; #57 aligns the README's v5 trigger with release.yml and manuscript.py (MY-515); #59 bumps the package version to 0.7.1 in pyproject.toml, wuwaterm_client.__version__ and uv.lock, moves the version-info test's pinned expectations with it and leaves build/version_info.txt generated at build time from the package version. contracts/sources.json keeps the Core v0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) pins, so this release names no new contract source. Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 57,480,645 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 1ada119a; release run 45833727454 succeeded. Kept as history after v0.8.0; v0.7.1 and earlier remain published."
-      },
-      "adoption_note": "0.8.0 is published. WuwaTerm-0.8.0-windows-x64.zip was downloaded anonymously and verified via sha256sum -c SHA256SUMS and unzip -tq (with all three asset SHA-256 digests verified against GitHub Release metadata) after CI and windows-latest offscreen Qt workbench verification; no physical Windows run receipt and no installed copy in the owner's own profile are recorded for 0.8.0 yet, so adoption is unknown."
+      "adoption_note": "0.9.0 is published. WuwaTerm-0.9.0-windows-x64.zip (58,563,224 bytes), manifest.json (283 bytes) and SHA256SUMS (97 bytes) match GitHub Release metadata and downloaded manifest/checksum files after CI run 46030012407; no physical Windows run receipt and no installed copy in the owner's own profile are recorded for 0.9.0 yet, so adoption is unknown."
     },
     {
       "id": "web",
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
-        "tree": "7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277",
+        "commit": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "tree": "e572f8c527c44d4b1a80fe441ecb3ecb369e2bd8",
         "status": "success",
-        "status_note": "The v0.6.0 release source (#79, chore(release): prepare Web 0.6.0), which is also this repository's main when this snapshot was recorded. Web CI run 45961100673, Dependency audit run 45961100634 and CodeQL run 45961100609 passed on this commit, and self-host candidate runs 45961960285 (root) and 45961963454 (prefix /private) plus self-host release publication runs 45962189728 (validate) and 45962269883 (publish) passed."
+        "status_note": "The v0.7.0 release source (#82, chore(release): prepare Web 0.7.0), which is also this repository's main when this snapshot was recorded. Web CI run 46017153327, Dependency audit run 46017153426 and CodeQL run 46017153341 passed on this commit, and self-host candidate runs 46028908878 (root) and 46028913712 (prefix /private) plus self-host release publication runs 46029218800 and 46029310681 passed."
       },
-      "source_version": "0.6.0",
+      "source_version": "0.7.0",
       "release": {
+        "version": "0.7.0",
+        "tag": "v0.7.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.7.0",
+        "published_at": "2026-11-27T15:57:18Z",
+        "source_commit": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "source_tree": "e572f8c527c44d4b1a80fe441ecb3ecb369e2bd8",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.7.0-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.7.0-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.7.0-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.7.0-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.7.0-linux-x64-root.tar.gz": "47c8325ea5e0a54a4823203abc329c50235f97dfe8aead221d4ef0ae0eb160db",
+          "manifest-root.json": "dda947a5e56e1096f95ad9a4c1faa0b038dee54a2ca520b5b538d6390ba8b51f",
+          "SHA256SUMS-root": "59dd9b4ea9f9a64e3bce6c0bfc82427bae3791804a0fc4076c3636c542926f24",
+          "wuwaterm-web-v0.7.0-linux-x64-prefix-71708eb255bc.tar.gz": "f68d7b174bf24778efd83c93c0e662512229891c6f415f695c579926bd209de9",
+          "manifest-prefix.json": "7b2b4103d8c95f37f9806205c9dc5899c0a82053e155d518cb4ade1489497d31",
+          "SHA256SUMS-prefix": "6ae70cb62c4825150289f62054b10e5040c6394e35a33e1b8bb8961664c37ed2"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 46028908878 (artifact 15213351975) and 46028913712 (artifact 15213506802, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 46017153327 and carry tag_status proposed, so the release separately verifies that the v0.7.0 tag resolves to source_sha df0a4d0c. The root archive is 33,580,814 bytes and the prefix archive 33,579,039 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
+        "note": "v0.7.0 adds per-segment TM matching/apply, meta TTL retry, direct dictionary identity, 4-tier provenance, self-hosted SQLite TM (state-web/data/tm.sqlite3), and incremental reuse on top of v0.6.0 (#80, #81, #82). The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication runs 46029218800 and 46029310681 succeeded."
+      },
+      "previous_release": {
         "version": "0.6.0",
         "tag": "v0.6.0",
         "status": "released",
@@ -357,49 +398,8 @@
           "manifest-prefix.json": "bd76ec8bb826f1e1abafdf22bb8a0a9790c66d1fb9b21b13327cf734e8f5c295",
           "SHA256SUMS-prefix": "ef80c56568013a415f5b6a08dc7db2648f48f74a3fccf2065b4be1c9b0f0346b"
         },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45961960285 (artifact 15181365966) and 45961963454 (artifact 15181168108, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45961100673 and carry tag_status proposed, so the release separately verifies that the v0.6.0 tag resolves to source_sha eed5d30e. The root archive is 33,533,799 bytes and the prefix archive 33,534,569 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
-        "note": "v0.6.0 adds workbench controls and in-memory translation memory on top of v0.5.1 (#75, #76, #77, #78, #79). #75 aligns mobile focus order, adds sync scroll, hides resolved checks, adds promote-to-termbase and safe Markdown preview (MY-16); #76 adds explicit in-memory wuwaterm-tm-v1 import/export and context suggestions (MY-491); #77 distinguishes three freshness states and enforces strict context and an 8 MiB merge guard (MY-491); #78 wires the live service game version and dictionary into memory freshness (MY-491); #79 bumps the package version to 0.6.0 in package.json and package-lock.json and points the self-host release commands and tag examples in docs/self-hosting.md at v0.6.0. The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45962189728 and publication run 45962269883 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS."
-      },
-      "previous_release": {
-        "version": "0.5.1",
-        "tag": "v0.5.1",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.5.1",
-        "published_at": "2026-11-26T14:02:40Z",
-        "source_commit": "13faa392cd6f4826d2115ae8ad04117a95577ffe",
-        "source_tree": "e32b94c65f5692dc3534c6cdec8854dac460b025",
-        "builds": {
-          "root": {
-            "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.5.1-linux-x64-root.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": ""
-          },
-          "prefix": {
-            "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.5.1-linux-x64-prefix-71708eb255bc.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": "/private"
-          }
-        },
-        "assets": [
-          "wuwaterm-web-v0.5.1-linux-x64-root.tar.gz",
-          "manifest-root.json",
-          "SHA256SUMS-root",
-          "wuwaterm-web-v0.5.1-linux-x64-prefix-71708eb255bc.tar.gz",
-          "manifest-prefix.json",
-          "SHA256SUMS-prefix"
-        ],
-        "asset_sha256": {
-          "wuwaterm-web-v0.5.1-linux-x64-root.tar.gz": "9b730012fff07afae5a1eb828f6358bd279b2820e92b105bb4a41ac71cb8bedc",
-          "manifest-root.json": "0b60d745e3fa8e97844a816a141a5dcd4ce28a4bff0400ad77f5d46adf4c19c9",
-          "SHA256SUMS-root": "85fb1239b1282badf836940e07975b1afbb173b66995a6ba51b433890b548804",
-          "wuwaterm-web-v0.5.1-linux-x64-prefix-71708eb255bc.tar.gz": "403942b54bb60cda633da739e2f92123728395e6db0a66dd727ccb5747255867",
-          "manifest-prefix.json": "ab2e6d4fe1f50c19beaf28b5d7938e5657be4a7921485a4178e9b86061d04b10",
-          "SHA256SUMS-prefix": "754398fe1498fa05f41721e9ef22ee010acb26cae04be7c3832a615ac39c373b"
-        },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45833727355 (artifact 15124356174) and 45833734606 (artifact 15123171738, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45832552132 and carry tag_status proposed, so the release separately verifies that the v0.5.1 tag resolves to source_sha 13faa392. The root archive is 33,508,155 bytes and the prefix archive 33,507,992 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
-        "note": "v0.5.1 is a patch release on top of v0.5.0 (#72, #73, #74). #72 resets the radio height, drops the favicon console filter and names the v4 and v5 sizes (MY-515); #73 scrolls located words into view, keeps a paused run resumable and tightens the phone layout; #74 bumps the package version to 0.5.1 in package.json and package-lock.json and points the self-host release commands and tag examples in docs/self-hosting.md at v0.5.1. The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45834408521 and publication run 45834893660 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS. Kept as history after v0.6.0; v0.5.1 and earlier remain published on the release page."
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45961960285 (artifact 15181365966) and 45961963454 (artifact 15181168108, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45961100673 and carry tag_status proposed, so the release separately verifies that the v0.6.0 tag resolves to source_sha eed5d30e.",
+        "note": "v0.6.0 adds workbench controls and in-memory translation memory on top of v0.5.1 (#75, #76, #77, #78, #79). Kept as history after v0.7.0; v0.6.0 and earlier remain published on the release page."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -435,16 +435,16 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility. The client writes wuwaterm-manuscript-v5 only for a recorded review feature or gap-tolerant segment records and keeps the lowest earlier format otherwise; Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject v5 files. The structure check and ambiguous single characters appear only when the Core API lists structure-check-v1 and ambiguous-mention-v1."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0/docs/self-hosting.md"
       ],
-      "adoption_note": "Web v0.6.0 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.6.0, from source commit eed5d30e26c6446dbff49aa63905ec3ba2db9677 and tree 7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277. Its six public assets were downloaded anonymously: both archives and both manifests matched their SHA256SUMS (root archive 90787bcc..., /private archive f7e7c8ac...), and the release record's own digests matched every asset. v0.6.0 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.6.0 (this release publishes only the GitHub self-hosted bundles). Public Sites previously published version 34 on 2026-11-22 and versions 35 and 36 on 2026-11-26, with version 36 published at 2026-11-26 13:06 UTC as the latest known public Sites deployment (its exact corresponding public Web tag is unknown because that source commit is not in the public WuwaTerm-Web repository; the earlier version 33 / v0.4.2 record is historical)."
+      "adoption_note": "Web v0.7.0 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.7.0, from source commit df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0 and tree e572f8c527c44d4b1a80fe441ecb3ecb369e2bd8. Both manifest-root.json and manifest-prefix.json and their SHA256SUMS match GitHub Release metadata (root archive 47c8325e..., /private archive f68d7b17...). v0.7.0 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.7.0 (this release publishes only the GitHub self-hosted bundles). Public Sites previously published version 34 on 2026-11-22 and versions 35 and 36 on 2026-11-26, with version 36 published at 2026-11-26 13:06 UTC as the latest known public Sites deployment (its exact corresponding public Web tag is unknown because that source commit is not in the public WuwaTerm-Web repository; the earlier version 33 / v0.4.2 record is historical)."
     }
   ],
   "ci_pins": {
-    "core_tests_web": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
-    "core_tests_windows": "97c659e22b97f05b9a817c0740ca19d4add63441",
+    "core_tests_web": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+    "core_tests_windows": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
     "web_tests_core": "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.6.0 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.8.0 tag commit, which carries manuscript v5 and names Web commit 6cd0a7c5 and Core v0.14.0 (27375301) as its contract sources; the Core pin is the contracts/backend-ref.txt of the pinned Web commit, still the Core v0.14.0 release source 2737530, because Web v0.6.0 did not move it. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). Note that the Core v0.15.0 tag itself pins Web v0.5.1 (13faa392cd6f4826d2115ae8ad04117a95577ffe) and Windows v0.7.1 (1ada119a0ff9284359fff2740f887140f6324545); this commit on main moves contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json to Web v0.6.0 (eed5d30e) and Windows v0.8.0 (97c659e2)."
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.7.0 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.9.0 tag commit, which carries manuscript v5 and names Core commit b7abb953b8e997328344064e85c9db28f55f40aa and Web commit 6cd0a7c5 in contracts/sources.json; the Web-to-Core pin stays on Core v0.14.0 (27375301) because Web v0.7.0 did not move contracts/backend-ref.txt. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). Note that the Core v0.16.0 tag itself (8565b48b) pinned Web v0.6.0 (eed5d30e) and Windows v0.8.0 (97c659e2); this commit moves contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json to Web v0.7.0 (df0a4d0c) and Windows v0.9.0 (e6835f38)."
   }
 }
