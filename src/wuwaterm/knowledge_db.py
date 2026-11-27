@@ -22,9 +22,12 @@ from .domain_knowledge import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_SCALARS,
     DomainKnowledgeCandidate,
+    NormalizedTextIndex,
     RetrievalChannel,
     TRUST_TIERS,
     TrustTier,
+    build_normalized_index,
+    find_normalized_spans,
     is_single_cjk_char,
     select_domain_knowledge_candidates,
 )
@@ -377,18 +380,22 @@ def _as_trust_tier(value: str) -> TrustTier:
     raise KnowledgeBaseError(f"invalid trust_tier in knowledge.db: {value!r}")
 
 
-def _field_matches_query(
+def _matched_probe_spans_for_field(
+    norm_index: NormalizedTextIndex,
+    field_text: str,
     field_norm: str,
-    query_norm: str,
-    phrase_norms: tuple[str, ...],
-) -> bool:
+    phrases: list[tuple[str, str]],
+) -> list[tuple[int, int]]:
+    """Return source spans in ``norm_index`` that actually matched ``field_norm``."""
     if not field_norm:
-        return False
-    if field_norm in query_norm:
-        return True
-    if len(query_norm) >= 3 and query_norm in field_norm:
-        return True
-    return any(len(phrase) >= 3 and phrase in field_norm for phrase in phrase_norms)
+        return []
+    spans: list[tuple[int, int]] = []
+    if field_norm in norm_index.norm_text:
+        spans.extend(find_normalized_spans(norm_index, field_text))
+    for phrase, phrase_norm in phrases:
+        if len(phrase_norm) >= 3 and phrase_norm in field_norm:
+            spans.extend(find_normalized_spans(norm_index, phrase))
+    return spans
 
 
 class KnowledgeBaseReader:
@@ -475,11 +482,13 @@ class KnowledgeBaseReader:
             for row in rows
         )
 
-    def _query_exact_aliases(self, text: str) -> list[tuple[str, str, TrustTier]]:
+    def _query_exact_aliases(
+        self, text: str, norm_index: NormalizedTextIndex
+    ) -> list[tuple[str, str, TrustTier, tuple[tuple[int, int], ...]]]:
         probes = _extract_alias_probes(text)
         if not probes:
             return []
-        hits: list[tuple[str, str, TrustTier]] = []
+        hits: list[tuple[str, str, TrustTier, tuple[tuple[int, int], ...]]] = []
         seen: set[tuple[str, str]] = set()
         for start in range(0, len(probes), _SQL_IN_CHUNK):
             chunk = probes[start : start + _SQL_IN_CHUNK]
@@ -495,10 +504,18 @@ class KnowledgeBaseReader:
                 chunk,
             ).fetchall()
             for row in alias_rows:
-                key = (str(row["entity_id"]), str(row["alias_surface"]))
+                surface = str(row["alias_surface"])
+                key = (str(row["entity_id"]), surface)
                 if key not in seen:
                     seen.add(key)
-                    hits.append((key[0], key[1], _as_trust_tier(str(row["trust_tier"]))))
+                    hits.append(
+                        (
+                            key[0],
+                            surface,
+                            _as_trust_tier(str(row["trust_tier"])),
+                            find_normalized_spans(norm_index, surface),
+                        )
+                    )
 
             entity_rows = self._conn.execute(
                 f"""
@@ -519,12 +536,21 @@ class KnowledgeBaseReader:
                 key = (str(row["entity_id"]), surface)
                 if key not in seen:
                     seen.add(key)
-                    hits.append((key[0], key[1], _as_trust_tier(str(row["trust_tier"]))))
+                    hits.append(
+                        (
+                            key[0],
+                            surface,
+                            _as_trust_tier(str(row["trust_tier"])),
+                            find_normalized_spans(norm_index, surface),
+                        )
+                    )
         return hits
 
-    def _query_short_ngrams(self, text: str) -> list[tuple[str, str]]:
+    def _query_short_ngrams(
+        self, text: str, norm_index: NormalizedTextIndex
+    ) -> list[tuple[str, str, tuple[tuple[int, int], ...]]]:
         bigrams, unigrams = _extract_short_ngram_probes(text)
-        hits: list[tuple[str, str]] = []
+        hits: list[tuple[str, str, tuple[tuple[int, int], ...]]] = []
         seen: set[tuple[str, str]] = set()
         for ngram_len, bucket in ((2, bigrams), (1, unigrams)):
             for start in range(0, len(bucket), _SQL_IN_CHUNK):
@@ -540,23 +566,30 @@ class KnowledgeBaseReader:
                     [ngram_len, *chunk],
                 ).fetchall()
                 for row in rows:
-                    key = (str(row["entity_id"]), str(row["surface"]))
+                    surface = str(row["surface"])
+                    key = (str(row["entity_id"]), surface)
                     if key not in seen:
                         seen.add(key)
-                        hits.append(key)
+                        hits.append(
+                            (key[0], surface, find_normalized_spans(norm_index, surface))
+                        )
         return hits
 
-    def _query_fts_trigram(self, text: str, *, limit: int) -> list[tuple[str, str]]:
+    def _query_fts_trigram(
+        self, text: str, norm_index: NormalizedTextIndex, *, limit: int
+    ) -> list[tuple[str, str, tuple[tuple[int, int], ...]]]:
         phrases = _extract_fts_phrases(text)
         if not phrases:
             return []
-        query_norm = normalize_text(text)
-        phrase_norms = tuple(
-            norm for phrase in phrases if (norm := normalize_text(phrase))
-        )
+        phrase_pairs = [
+            (phrase, norm)
+            for phrase in phrases
+            if (norm := normalize_text(phrase))
+        ]
         cjk_query = has_cjk(text)
 
         scored: dict[tuple[str, str], tuple[int, float]] = {}
+        hit_spans: dict[tuple[str, str], set[tuple[int, int]]] = {}
         batch_limit = max(limit * 4, 32)
         for start in range(0, len(phrases), _FTS_BATCH_SIZE):
             batch = phrases[start : start + _FTS_BATCH_SIZE]
@@ -564,7 +597,8 @@ class KnowledgeBaseReader:
             try:
                 rows = self._conn.execute(
                     """
-                    SELECT entity_id, surface, zh, en, bm25(kb_fts_trigram) AS rank_score
+                    SELECT entity_id, surface, zh, en, context_gloss,
+                           bm25(kb_fts_trigram) AS rank_score
                     FROM kb_fts_trigram
                     WHERE kb_fts_trigram MATCH ?
                     ORDER BY rank_score ASC, entity_id ASC
@@ -580,24 +614,26 @@ class KnowledgeBaseReader:
                 surface = str(row["surface"])
                 zh = str(row["zh"])
                 en = str(row["en"])
+                gloss = str(row["context_gloss"])
                 surf_norm = normalize_text(surface)
                 zh_norm = normalize_text(zh)
                 en_norm = normalize_text(en)
 
-                surface_matched = _field_matches_query(
-                    surf_norm, query_norm, phrase_norms
+                surface_spans = _matched_probe_spans_for_field(
+                    norm_index, surface, surf_norm, phrase_pairs
                 )
-                zh_matched = _field_matches_query(zh_norm, query_norm, phrase_norms)
-                en_matched = _field_matches_query(en_norm, query_norm, phrase_norms)
+                zh_spans = _matched_probe_spans_for_field(
+                    norm_index, zh, zh_norm, phrase_pairs
+                )
+                en_spans = _matched_probe_spans_for_field(
+                    norm_index, en, en_norm, phrase_pairs
+                )
 
-                if surface_matched:
-                    matched_surface = surface
-                    tier_rank = 0
-                elif zh_matched:
-                    matched_surface = zh
-                    tier_rank = 0
-                elif en_matched:
-                    matched_surface = en
+                if surface_spans or zh_spans or en_spans:
+                    matched_surface = (
+                        surface if surface_spans else (zh if zh_spans else en)
+                    )
+                    matched_spans = [*surface_spans, *zh_spans, *en_spans]
                     tier_rank = 0
                 else:
                     # Gloss-only match: never report the entity's English name as
@@ -607,6 +643,9 @@ class KnowledgeBaseReader:
                         matched_surface = zh
                     else:
                         matched_surface = zh if (cjk_query and zh) else (en or surface)
+                    matched_spans = _matched_probe_spans_for_field(
+                        norm_index, gloss, normalize_text(gloss), phrase_pairs
+                    )
                     tier_rank = 1
 
                 key = (entity_id, matched_surface)
@@ -614,12 +653,16 @@ class KnowledgeBaseReader:
                 prev = scored.get(key)
                 if prev is None or cand_rank < prev:
                     scored[key] = cand_rank
+                hit_spans.setdefault(key, set()).update(matched_spans)
 
         ordered = sorted(
             scored.items(),
             key=lambda item: (item[1][0], item[1][1], item[0][0], item[0][1]),
         )
-        return [key for key, _ in ordered[: max(limit * 2, 16)]]
+        return [
+            (key[0], key[1], tuple(sorted(hit_spans.get(key, ()))))
+            for key, _ in ordered[: max(limit * 2, 16)]
+        ]
 
     def _load_entities(self, entity_ids: Collection[str]) -> dict[str, sqlite3.Row]:
         if not entity_ids:
@@ -659,29 +702,36 @@ class KnowledgeBaseReader:
         if not text or not text.strip():
             return ()
 
-        alias_hits = self._query_exact_aliases(text)
-        short_hits = self._query_short_ngrams(text)
-        fts_hits = self._query_fts_trigram(text, limit=max(max_candidates, 8))
+        norm_index = build_normalized_index(text)
+        alias_hits = self._query_exact_aliases(text, norm_index)
+        short_hits = self._query_short_ngrams(text, norm_index)
+        fts_hits = self._query_fts_trigram(
+            text, norm_index, limit=max(max_candidates, 8)
+        )
 
         fused_scores: dict[tuple[str, str], float] = {}
         best_channel: dict[tuple[str, str], tuple[float, RetrievalChannel]] = {}
         tier_overrides: dict[tuple[str, str], TrustTier] = {}
+        matched_spans_by_key: dict[tuple[str, str], set[tuple[int, int]]] = {}
 
         def record_channel(
             channel: RetrievalChannel,
-            items: list[tuple[str, str]],
+            items: list[tuple[str, str, tuple[tuple[int, int], ...]]],
         ) -> None:
             weight = _CHANNEL_WEIGHTS[channel]
-            for rank, key in enumerate(items, start=1):
+            for rank, (entity_id, surface, spans) in enumerate(items, start=1):
+                key = (entity_id, surface)
                 contribution = weight / (RRF_K + rank)
                 fused_scores[key] = fused_scores.get(key, 0.0) + contribution
                 prev = best_channel.get(key)
                 if prev is None or contribution > prev[0]:
                     best_channel[key] = (contribution, channel)
+                if spans:
+                    matched_spans_by_key.setdefault(key, set()).update(spans)
 
-        for entity_id, surface, tier in alias_hits:
+        for entity_id, surface, tier, _spans in alias_hits:
             tier_overrides[(entity_id, surface)] = tier
-        record_channel("lexical_alias", [(e, s) for e, s, _ in alias_hits])
+        record_channel("lexical_alias", [(e, s, sp) for e, s, _, sp in alias_hits])
         record_channel("short_ngram", short_hits)
         record_channel("fts5_trigram", fts_hits)
 
@@ -709,6 +759,9 @@ class KnowledgeBaseReader:
                     score=score,
                     context_gloss=str(row["context_gloss"]),
                     lock_eligible=False,
+                    matched_source_spans=tuple(
+                        sorted(matched_spans_by_key.get((entity_id, surface), ()))
+                    ),
                 )
             )
 

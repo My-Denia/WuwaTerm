@@ -75,6 +75,7 @@ class DomainKnowledgeCandidate:
     score: float
     context_gloss: str = ""
     lock_eligible: Literal[False] = False
+    matched_source_spans: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.lock_eligible is not False:
@@ -89,6 +90,9 @@ class DomainKnowledgeCandidate:
             raise ValueError(
                 f"unsupported retrieval_channel: {self.retrieval_channel!r}"
             )
+        for start, end in self.matched_source_spans:
+            if start < 0 or end <= start:
+                raise ValueError(f"invalid matched_source_span: {(start, end)!r}")
 
 
 def is_single_cjk_char(surface: str) -> bool:
@@ -107,7 +111,7 @@ def candidate_scalar_length(candidate: DomainKnowledgeCandidate) -> int:
 
 
 @dataclass(frozen=True)
-class _NormalizedTextIndex:
+class NormalizedTextIndex:
     """Normalized text aligned back to original ``(start, end)`` spans."""
 
     norm_text: str
@@ -118,7 +122,7 @@ _LATIN_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")
 _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
 
 
-def _build_normalized_index(text: str) -> _NormalizedTextIndex:
+def build_normalized_index(text: str) -> NormalizedTextIndex:
     """Normalize ``text`` by combining-character clusters using NFKC + casefold.
 
     Grouping base characters with trailing combining marks ensures NFD inputs
@@ -139,18 +143,19 @@ def _build_normalized_index(text: str) -> _NormalizedTextIndex:
             norm_chars.append(norm_ch)
             orig_spans.append((idx, end))
         idx = end
-    return _NormalizedTextIndex(
+    return NormalizedTextIndex(
         norm_text="".join(norm_chars),
         orig_spans=tuple(orig_spans),
     )
 
 
-def _find_normalized_occurrences(
-    index: _NormalizedTextIndex, needle: str
-) -> list[tuple[int, int]]:
+def find_normalized_spans(
+    index: NormalizedTextIndex, needle: str
+) -> tuple[tuple[int, int], ...]:
+    """Return all original ``(start, end)`` spans in ``index`` matching ``needle``."""
     norm_needle = normalize_text(needle)
     if not norm_needle or not index.norm_text:
-        return []
+        return ()
     spans: list[tuple[int, int]] = []
     start = 0
     needle_len = len(norm_needle)
@@ -162,15 +167,15 @@ def _find_normalized_occurrences(
         orig_end = index.orig_spans[pos + needle_len - 1][1]
         spans.append((orig_start, orig_end))
         start = pos + 1
-    return spans
+    return tuple(spans)
 
 
 def _occupied_spans(
-    index: _NormalizedTextIndex, surfaces: Collection[str]
+    index: NormalizedTextIndex, surfaces: Collection[str]
 ) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for surface in surfaces:
-        spans.extend(_find_normalized_occurrences(index, surface))
+        spans.extend(find_normalized_spans(index, surface))
     return spans
 
 
@@ -180,7 +185,7 @@ def _is_span_covered(span: tuple[int, int], occupied: list[tuple[int, int]]) -> 
 
 
 def _is_entire_index_covered(
-    index: _NormalizedTextIndex, occupied: list[tuple[int, int]]
+    index: NormalizedTextIndex, occupied: list[tuple[int, int]]
 ) -> bool:
     if not index.orig_spans or not occupied:
         return False
@@ -188,14 +193,14 @@ def _is_entire_index_covered(
 
 
 def _candidate_partial_match_spans(
-    index: _NormalizedTextIndex,
+    index: NormalizedTextIndex,
     candidate: DomainKnowledgeCandidate,
 ) -> list[tuple[int, int]]:
     """Return spans in ``index`` where substrings/tokens of ``candidate`` hit.
 
-    Used when a candidate's full ``source_surface`` is longer than the matched
-    fragment in ``text`` (e.g. FTS trigram substring query ``Ice`` matching
-    ``Ice Blade``, or ``风声羽`` matching ``风声羽息``).
+    Fallback used when ``candidate.matched_source_spans`` was not populated by
+    a retriever and the candidate's full ``source_surface`` is longer than the
+    matched fragment in ``text``.
     """
     spans: list[tuple[int, int]] = []
     seen_needles: set[str] = set()
@@ -213,27 +218,27 @@ def _candidate_partial_match_spans(
             tok_norm = normalize_text(token)
             if len(tok_norm) >= 2 and tok_norm not in seen_needles:
                 seen_needles.add(tok_norm)
-                spans.extend(_find_normalized_occurrences(index, token))
+                spans.extend(find_normalized_spans(index, token))
         for run in _CJK_RUN_RE.findall(field):
             if len(run) >= 3:
                 for pos in range(0, len(run) - 2):
                     tri = run[pos : pos + 3]
                     if tri not in seen_needles:
                         seen_needles.add(tri)
-                        spans.extend(_find_normalized_occurrences(index, tri))
+                        spans.extend(find_normalized_spans(index, tri))
             elif len(run) == 2 and run not in seen_needles:
                 seen_needles.add(run)
-                spans.extend(_find_normalized_occurrences(index, run))
+                spans.extend(find_normalized_spans(index, run))
     return spans
 
 
 def _has_uncovered_non_ordinary_single_cjk(
     text: str,
-    index: _NormalizedTextIndex,
+    index: NormalizedTextIndex,
     char: str,
     occupied: list[tuple[int, int]],
 ) -> bool:
-    occurrences = _find_normalized_occurrences(index, char)
+    occurrences = find_normalized_spans(index, char)
     for start, end in occurrences:
         if _is_span_covered((start, end), occupied):
             continue
@@ -277,7 +282,7 @@ def select_domain_knowledge_candidates(
     if not text or max_candidates <= 0 or max_scalars <= 0:
         return ()
 
-    norm_index = _build_normalized_index(text)
+    norm_index = build_normalized_index(text)
     blocked_surfaces = tuple(s for s in (*locked_surfaces, *reference_surfaces) if s)
     blocked_norm = {
         norm for surface in blocked_surfaces if (norm := normalize_text(surface))
@@ -315,41 +320,64 @@ def select_domain_knowledge_candidates(
         ):
             continue
 
-        surface_occs = _find_normalized_occurrences(norm_index, candidate.source_surface)
-        uncovered_surface_occs = [
-            span for span in surface_occs if not _is_span_covered(span, occupied)
-        ]
-        if surface_occs and not uncovered_surface_occs:
-            continue
-        if not surface_occs and occupied:
-            if _is_entire_index_covered(norm_index, occupied):
+        if candidate.matched_source_spans:
+            uncovered_spans = [
+                span
+                for span in candidate.matched_source_spans
+                if not _is_span_covered(span, occupied)
+            ]
+            if not uncovered_spans:
                 continue
-            partial_spans = _candidate_partial_match_spans(norm_index, candidate)
-            if partial_spans and all(
-                _is_span_covered(span, occupied) for span in partial_spans
-            ):
+            if is_single_cjk_char(candidate.source_surface):
+                if not any(
+                    end - start == 1
+                    and text[start:end] == candidate.source_surface
+                    and classify_single_character_mention(text, start, end)
+                    != SINGLE_CHAR_ORDINARY_WORD
+                    for start, end in uncovered_spans
+                ):
+                    continue
+            elif is_single_cjk_char(candidate.zh):
+                surface_matched_in_spans = bool(surface_norm) and any(
+                    (span_norm := normalize_text(text[start:end]))
+                    and (span_norm in surface_norm or surface_norm in span_norm)
+                    for start, end in uncovered_spans
+                )
+                if not surface_matched_in_spans and not _has_uncovered_non_ordinary_single_cjk(
+                    text, norm_index, candidate.zh, occupied
+                ):
+                    continue
+        else:
+            surface_occs = find_normalized_spans(norm_index, candidate.source_surface)
+            uncovered_surface_occs = [
+                span for span in surface_occs if not _is_span_covered(span, occupied)
+            ]
+            if surface_occs and not uncovered_surface_occs:
                 continue
+            if not surface_occs and occupied:
+                if _is_entire_index_covered(norm_index, occupied):
+                    continue
+                partial_spans = _candidate_partial_match_spans(norm_index, candidate)
+                if partial_spans and all(
+                    _is_span_covered(span, occupied) for span in partial_spans
+                ):
+                    continue
 
-        if is_single_cjk_char(candidate.source_surface):
-            if not _has_uncovered_non_ordinary_single_cjk(
-                text, norm_index, candidate.source_surface, occupied
-            ):
-                continue
-        elif is_single_cjk_char(candidate.zh):
-            # A 1-char CJK entity matched via a non-Chinese surface (e.g. its
-            # English name) is allowed only when that surface itself directly
-            # matches an uncovered span or substring of the input text.
-            # Otherwise (e.g. gloss-only FTS hits), require an uncovered
-            # non-ordinary occurrence of the 1-char CJK surface in ``text``.
-            surface_directly_matched = bool(uncovered_surface_occs) or (
-                len(norm_index.norm_text) >= 3
-                and bool(surface_norm)
-                and norm_index.norm_text in surface_norm
-            )
-            if not surface_directly_matched and not _has_uncovered_non_ordinary_single_cjk(
-                text, norm_index, candidate.zh, occupied
-            ):
-                continue
+            if is_single_cjk_char(candidate.source_surface):
+                if not _has_uncovered_non_ordinary_single_cjk(
+                    text, norm_index, candidate.source_surface, occupied
+                ):
+                    continue
+            elif is_single_cjk_char(candidate.zh):
+                surface_directly_matched = bool(uncovered_surface_occs) or (
+                    len(norm_index.norm_text) >= 3
+                    and bool(surface_norm)
+                    and norm_index.norm_text in surface_norm
+                )
+                if not surface_directly_matched and not _has_uncovered_non_ordinary_single_cjk(
+                    text, norm_index, candidate.zh, occupied
+                ):
+                    continue
 
         pair_key = (zh_norm, en_norm)
         if pair_key in seen_pairs:

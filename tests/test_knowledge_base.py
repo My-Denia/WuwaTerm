@@ -1397,4 +1397,84 @@ def test_te_anchor_parses_href_strictly_at_html_attribute_boundaries():
     ) == [("34", "术语")]
 
 
+def test_matched_source_spans_gate_icebound_and_winter_blade_regressions(
+    tmp_path: Path,
+):
+    # Invalid matched_source_spans fail closed on construction
+    with pytest.raises(ValueError, match="invalid matched_source_span"):
+        DomainKnowledgeCandidate(
+            entity_id="weapon:1",
+            source_surface="Icebound",
+            zh="冰封",
+            en="Icebound",
+            entity_type="weapon",
+            trust_tier="official_authoritative",
+            retrieval_channel="fts5_trigram",
+            score=0.8,
+            matched_source_spans=((4, 4),),
+        )
+
+    kb_path = tmp_path / "span_gate_kb.db"
+    rev = "c" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="weapon:910",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="910",
+                zh="冰封",
+                en="Icebound",
+                context_gloss="Use Icebound in combat",
+            ),
+            EntitySpec(
+                entity_id="weapon:911",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="911",
+                zh="寒冬之刃",
+                en="Winter Blade",
+            ),
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # Case 1: "Use Ice now" with locked "Ice" must NOT emit "Icebound"
+        # because its only real matched source span is the locked "Ice" (4, 7).
+        unfiltered_ice = reader.query("Use Ice now")
+        assert any(
+            c.en == "Icebound" and c.matched_source_spans == ((4, 7),)
+            for c in unfiltered_ice
+        ), unfiltered_ice
+        assert not any(
+            c.en == "Icebound"
+            for c in reader.query("Use Ice now", locked_surfaces=("Ice",))
+        )
+
+        # Case 2: "Use Winter or Blad" with locked "Winter" MUST still retain
+        # "Winter Blade" via the uncovered matched source span "Blad" (14, 18).
+        kept = reader.query("Use Winter or Blad", locked_surfaces=("Winter",))
+        assert any(
+            c.en == "Winter Blade"
+            and (14, 18) in c.matched_source_spans
+            and c.lock_eligible is False
+            for c in kept
+        ), kept
+
+        # Locking both matched spans filters "Winter Blade" out cleanly.
+        assert not any(
+            c.en == "Winter Blade"
+            for c in reader.query(
+                "Use Winter or Blad", locked_surfaces=("Winter", "Blad")
+            )
+        )
+
+
+
 
