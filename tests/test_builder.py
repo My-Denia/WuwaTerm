@@ -993,27 +993,37 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
 
 def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path):
     texts = {
+        # Official non-CJK acronyms/titles and dotted initialisms must stay.
         "Term151106_Title": ("SQL", "SQL"),
-        "ItemInfo_44010027_Name": ("存在异常，如有疑问请联系官方客服", "test/Universal Echo"),
+        "ItemInfo_54006_Name": ("VIOLET", "VIOLET"),
+        "Speaker_100086_Name": ("N.A.N.A.", "N.A.N.A."),
+        # Isolated test/ markers (zh has CJK, en has alpha).
+        "Skill_1001908_SkillName": ("test/巧手烹调", "Skillful Cooking"),
+        "Skill_1002008_SkillName": ("测试技能", "test/Skill"),
+        "Area_1500001_Title": ("TD测试用例空气墙", "Invisible Walls for TD test cases"),
+        # Isolated error placeholders (zh-only vs en-only) plus real Sundial.
         "ItemInfo_31000013_Name": ("存在异常，如有疑问请联系官方客服", "Sundial"),
+        "ItemInfo_31000099_Name": (
+            "占位文本",
+            "An error happened. Please contact Customer Service",
+        ),
+        "Speaker_250058_Name": ("版本空置项", "2.7 Placeholder"),
         "ItemInfo_70139310_Name": ("日晷", "Sundial"),
+        # Isolated [?？\dP]+ (en has alpha 'P' while zh has CJK) and non-alpha en.
+        "Speaker_850743_Name": ("测试角色甲", "P"),
+        "Speaker_850744_Name": ("空白代号", "---"),
+        # Isolated non-CJK zh noise (en has valid alpha, not [?？\dP]+).
         "ItemInfo_80110401_Name": ("Saving Light", "Saving Light"),
         "ItemInfo_80110409_Name": ("승소산의 메아리", "Thawing Fates"),
-        "Skill_1001908_SkillName": ("test/巧手烹调", "Skillful Cooking"),
-        "Skill_1002008_SkillName": ("1", "test/"),
-        "Area_1500001_Title": ("TD测试用例空气墙", "Invisible Walls for TD test cases"),
-        "Speaker_153_Name": ("？", "?"),
-        "Speaker_178_Name": ("？？？", "???"),
-        "Speaker_400058_Name": ("2", "2"),
-        "Speaker_850743_Name": ("P", "P"),
+        "Speaker_40_Name": ("os", "os"),
         "Speaker_750088_Name": ("{PlayerName}", "{PlayerName}"),
-        "Speaker_250058_Name": ("2.7暂时空置", "2.7 Placeholder"),
         "Speaker_1304_Name": ("今汐", "Jinhsi"),
     }
     table_rows = {
         "item/iteminfo.json": [
-            {"Id": 44010027, "Name": "ItemInfo_44010027_Name"},
+            {"Id": 54006, "Name": "ItemInfo_54006_Name"},
             {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
+            {"Id": 31000099, "Name": "ItemInfo_31000099_Name"},
             {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
             {"Id": 80110401, "Name": "ItemInfo_80110401_Name"},
             {"Id": 80110409, "Name": "ItemInfo_80110409_Name"},
@@ -1031,12 +1041,12 @@ def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path)
     (root / "BinData" / "speaker" / "speaker.json").write_text(
         json.dumps(
             [
-                {"Id": 153},
-                {"Id": 178},
-                {"Id": 400058},
-                {"Id": 850743},
-                {"Id": 750088},
+                {"Id": 100086},
                 {"Id": 250058},
+                {"Id": 850743},
+                {"Id": 850744},
+                {"Id": 40},
+                {"Id": 750088},
                 {"Id": 1304},
             ]
         ),
@@ -1050,18 +1060,31 @@ def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path)
     ]
 
     assert [(r.category, r.source_id, r.zh, r.en) for r in records] == [
+        ("core_term", "Term151106_Title", "SQL", "SQL"),
+        ("item", "54006", "VIOLET", "VIOLET"),
         ("item", "70139310", "日晷", "Sundial"),
+        ("speaker", "100086", "N.A.N.A.", "N.A.N.A."),
         ("speaker", "1304", "今汐", "Jinhsi"),
     ]
 
 
-def test_iter_records_cleans_speaker_comm_suffix_and_pronoun_misalignment(
+def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
     tmp_path: Path,
 ):
+    from wuwaterm.constants import SOURCE_PROFILES
+    from wuwaterm.lookup import TermService
+
     texts = {
         "Speaker_288_Name": ("我", "Rover"),
         "Speaker_900220_Name": ("通讯", "Contacting"),
-        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+        # Conflicting comm-suffix entries must not shadow existing exact hits,
+        # even when their speaker row appears before the suffix-free row.
+        "Speaker_850656_Name": ("知远（通讯中）", "Zhiyuan"),
+        "Speaker_858_Name": ("致远", "Zhiyuan"),
+        "Speaker_850632_Name": ("残星会会长（通讯中）", "Fractsidus Grand Architect"),
+        "Speaker_250069_Name": ("残星会会长", "Grand Architect"),
+        # Non-conflicting comm-suffix entries are stripped and kept.
+        "Speaker_200014_Name": ("阿尔伯特先生（通讯中）", "Mr. Alberto"),
         "Speaker_750563_Name": ("认真的天工匠(通讯中）", "Focused Artisan"),
         "Speaker_100058_Name": ("布兰特（通讯）", "Brant (Contacting)"),
         "Speaker_50092_Name": ("？？？（通讯中）", "???"),
@@ -1075,7 +1098,11 @@ def test_iter_records_cleans_speaker_comm_suffix_and_pronoun_misalignment(
             [
                 {"Id": 288},
                 {"Id": 900220},
-                {"Id": 800498},
+                {"Id": 850656},
+                {"Id": 858},
+                {"Id": 850632},
+                {"Id": 250069},
+                {"Id": 200014},
                 {"Id": 750563},
                 {"Id": 100058},
                 {"Id": 50092},
@@ -1093,11 +1120,37 @@ def test_iter_records_cleans_speaker_comm_suffix_and_pronoun_misalignment(
     ]
 
     assert [(r.source_id, r.zh, r.en) for r in records] == [
-        ("800498", "穗穗", "Suisui"),
+        ("858", "致远", "Zhiyuan"),
+        ("250069", "残星会会长", "Grand Architect"),
+        ("1001", "景燃", "Jingran"),
+        ("200014", "阿尔伯特先生", "Mr. Alberto"),
         ("750563", "认真的天工匠", "Focused Artisan"),
         ("100058", "布兰特", "Brant"),
-        ("1001", "景燃", "Jingran"),
     ]
+
+    profile = SOURCE_PROFILES["arikatsu"]
+    db_path = tmp_path / "speaker_lookup.db"
+    create_database(
+        db_path,
+        iter_records(root, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    service = TermService(db_path)
+    assert [(c.entry.zh, c.entry.en) for c in service.lookup_exact("Zhiyuan").candidates] == [
+        ("致远", "Zhiyuan")
+    ]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("残星会会长").candidates
+    ] == [("残星会会长", "Grand Architect")]
 
 
 def test_iter_records_filters_generic_cooking_staple_items(tmp_path: Path):

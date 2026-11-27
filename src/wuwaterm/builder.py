@@ -36,7 +36,7 @@ from .data_source import inspect_data_source
 from .db import connect, create_database
 from .english_plural import number_variants
 from .models import TermRecord
-from .normalize import clean_source_text
+from .normalize import clean_source_text, normalize_text
 
 
 @dataclass(frozen=True)
@@ -182,6 +182,8 @@ def load_arikatsu_string_texts(data_dir: Path, lang: str) -> dict[str, str]:
 
 
 _PUNCT_DIGIT_NOISE_RE = re.compile(r"^[?？\dP]+$")
+_UPPER_ACRONYM_RE = re.compile(r"[A-Z]{2,}")
+_DOTTED_INITIALISM_RE = re.compile(r"(?:[A-Z0-9]+\.)+[A-Z0-9]*")
 _SPEAKER_COMM_ZH_RE = re.compile(r"[（(]通讯中?[）)]$")
 _SPEAKER_COMM_EN_RE = re.compile(r"\s*[（(]Contacting[）)]$")
 _PRONOUN_SPEAKERS = frozenset({"我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "它们"})
@@ -197,6 +199,19 @@ _ERROR_PLACEHOLDER_EN_SUBSTRINGS = (
 )
 
 
+def _is_allowed_non_cjk_zh(zh: str) -> bool:
+    """Allow official uppercase acronyms/titles and dotted initialisms without CJK."""
+    if _UPPER_ACRONYM_RE.fullmatch(zh):
+        return True
+    return bool(
+        _DOTTED_INITIALISM_RE.fullmatch(zh) and any("A" <= ch <= "Z" for ch in zh)
+    )
+
+
+def _has_speaker_comm_suffix(zh: str, en: str) -> bool:
+    return bool(_SPEAKER_COMM_ZH_RE.search(zh) or _SPEAKER_COMM_EN_RE.search(en))
+
+
 def _clean_speaker_text(zh: str, en: str) -> tuple[str, str]:
     """Strip speaker communication-status suffixes from both sides."""
     zh = _SPEAKER_COMM_ZH_RE.sub("", zh).strip()
@@ -205,7 +220,7 @@ def _clean_speaker_text(zh: str, en: str) -> tuple[str, str]:
 
 
 def _keep_record(*, category: str, zh: str, en: str) -> bool:
-    """Reject test markers, error placeholders, non-CJK zh, and noisy speakers."""
+    """Reject test markers, error placeholders, non-CJK noise, and bad speakers."""
     if not zh or not en:
         return False
     zh_cf = zh.casefold()
@@ -220,7 +235,9 @@ def _keep_record(*, category: str, zh: str, en: str) -> bool:
         return False
     if _PUNCT_DIGIT_NOISE_RE.fullmatch(zh) or _PUNCT_DIGIT_NOISE_RE.fullmatch(en):
         return False
-    if not _is_cjk_text(zh) or not any(char.isalpha() for char in en):
+    if not _is_cjk_text(zh) and not _is_allowed_non_cjk_zh(zh):
+        return False
+    if not any(char.isalpha() for char in en):
         return False
     if category == "speaker" and (
         zh in _PRONOUN_SPEAKERS or (zh == "通讯" and en == "Contacting")
@@ -237,6 +254,7 @@ def _record_for_key(
     text_key: str,
     zh_map: dict[str, str],
     en_map: dict[str, str],
+    strip_speaker_comm: bool = False,
 ) -> TermRecord | None:
     zh_raw = zh_map.get(text_key)
     en_raw = en_map.get(text_key)
@@ -244,7 +262,7 @@ def _record_for_key(
         return None
     zh = clean_source_text(zh_raw)
     en = clean_source_text(en_raw)
-    if category == "speaker":
+    if strip_speaker_comm:
         zh, en = _clean_speaker_text(zh, en)
     if not _keep_record(category=category, zh=zh, en=en):
         return None
@@ -475,11 +493,19 @@ def iter_arikatsu_records(
         rows = load_json(speaker_path)
         if not isinstance(rows, list):
             raise BuildError(f"expected list in {speaker_path}")
+        comm_speakers: list[tuple[str, str]] = []
         for row in rows:
             if not isinstance(row, dict) or not row.get("Id"):
                 continue
             source_id = str(row["Id"])
             text_key = f"Speaker_{source_id}_Name"
+            zh_raw = zh_map.get(text_key)
+            en_raw = en_map.get(text_key)
+            if zh_raw is not None and en_raw is not None and _has_speaker_comm_suffix(
+                clean_source_text(zh_raw), clean_source_text(en_raw)
+            ):
+                comm_speakers.append((source_id, text_key))
+                continue
             record = _record_for_key(
                 category="speaker",
                 source_file="BinData/speaker/speaker.json",
@@ -489,6 +515,33 @@ def iter_arikatsu_records(
                 en_map=en_map,
             )
             if record:
+                records.append(record)
+
+        if comm_speakers:
+            # Defer suffix-stripped speakers until every non-comm record across
+            # all tables is collected so a stripped row never shadows or alters
+            # an existing exact-lookup primary such as Zhiyuan -> 致远 or
+            # 残星会会长 -> Grand Architect.
+            covered_zh = {normalize_text(r.zh) for r in records}
+            covered_en = {normalize_text(r.en) for r in records}
+            for source_id, text_key in comm_speakers:
+                record = _record_for_key(
+                    category="speaker",
+                    source_file="BinData/speaker/speaker.json",
+                    source_id=source_id,
+                    text_key=text_key,
+                    zh_map=zh_map,
+                    en_map=en_map,
+                    strip_speaker_comm=True,
+                )
+                if record is None:
+                    continue
+                zh_norm = normalize_text(record.zh)
+                en_norm = normalize_text(record.en)
+                if zh_norm in covered_zh or en_norm in covered_en:
+                    continue
+                covered_zh.add(zh_norm)
+                covered_en.add(en_norm)
                 records.append(record)
 
     # Derived last, so an exact pair already present in another source is not
