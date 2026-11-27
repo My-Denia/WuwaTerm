@@ -24,6 +24,7 @@ from wuwaterm.domain_knowledge import (
     select_domain_knowledge_candidates,
 )
 from wuwaterm.knowledge_builder import (
+    AliasSpec,
     EntitySpec,
     KnowledgeBuildError,
     build_knowledge_database,
@@ -1474,6 +1475,111 @@ def test_matched_source_spans_gate_icebound_and_winter_blade_regressions(
                 "Use Winter or Blad", locked_surfaces=("Winter", "Blad")
             )
         )
+
+
+def test_exact_probe_spans_entity_priority_and_out_of_bounds_span_regressions(
+    tmp_path: Path,
+):
+    kb_path = tmp_path / "exact_spans_kb.db"
+    rev = "d" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="weapon:920",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="920",
+                zh="冰封之刃",
+                en="Icebound",
+            ),
+            EntitySpec(
+                entity_id="weapon:921",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="921",
+                zh="甲乙融合",
+                en="A B Fusion",
+            ),
+            EntitySpec(
+                entity_id="weapon:922",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="922",
+                zh="北境之锋",
+                en="Northern Edge",
+                context_gloss="Use this blade in northern winds.",
+            ),
+        ],
+        aliases=[
+            AliasSpec(
+                entity_id="weapon:922",
+                alias_surface="Icebound",
+                lang="en",
+                alias_kind="nickname",
+            )
+        ],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # Repro 1a: "Use Ice boost at this price" locked "Ice boost" must NOT return
+        # "Icebound" (FTS matched token "Ice" at (4, 7), never "ice" inside "price").
+        assert not any(
+            c.entity_id == "weapon:920"
+            for c in reader.query(
+                "Use Ice boost at this price", locked_surfaces=("Ice boost",)
+            )
+        )
+
+        # Repro 1b: "Use A B now" locked "A B" must NOT return "A B Fusion"
+        # (raw 3-char FTS probe "A B" at (4, 7) keeps its exact span despite 2-char norm "ab").
+        assert any(c.entity_id == "weapon:921" for c in reader.query("Use A B now"))
+        assert not any(
+            c.entity_id == "weapon:921"
+            for c in reader.query("Use A B now", locked_surfaces=("A B",))
+        )
+
+        # Repro 2: "Northern Edge" has alias "Icebound" and gloss containing "Use".
+        # Querying "Use Icebound now" with locked "Icebound" must NOT let Northern Edge
+        # re-enter via the lower-priority gloss hit "Use".
+        assert not any(
+            c.entity_id == "weapon:922"
+            for c in reader.query("Use Icebound now", locked_surfaces=("Icebound",))
+        )
+
+    # Repro 3: Out-of-bounds matched_source_spans ((40, 50),) must be rejected,
+    # never treated as an uncovered match on "Ancient Iron Forge".
+    oob_candidate = DomainKnowledgeCandidate(
+        entity_id="area:923",
+        source_surface="Iron Forge",
+        zh="铁砧炉",
+        en="Iron Forge",
+        entity_type="area",
+        trust_tier="official_authoritative",
+        retrieval_channel="fts5_trigram",
+        score=0.9,
+        matched_source_spans=((40, 50),),
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Ancient Iron Forge",
+            [oob_candidate],
+            locked_surfaces=("Ancient Iron Forge",),
+        )
+        == ()
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Ancient Iron Forge",
+            [oob_candidate],
+        )
+        == ()
+    )
+
 
 
 

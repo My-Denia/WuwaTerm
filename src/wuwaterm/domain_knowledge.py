@@ -321,9 +321,17 @@ def select_domain_knowledge_candidates(
             continue
 
         if candidate.matched_source_spans:
+            text_len = len(text)
+            valid_spans = [
+                (start, end)
+                for start, end in candidate.matched_source_spans
+                if 0 <= start < end <= text_len
+            ]
+            if not valid_spans:
+                continue
             uncovered_spans = [
                 span
-                for span in candidate.matched_source_spans
+                for span in valid_spans
                 if not _is_span_covered(span, occupied)
             ]
             if not uncovered_spans:

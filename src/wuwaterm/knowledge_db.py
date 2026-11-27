@@ -22,12 +22,9 @@ from .domain_knowledge import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_SCALARS,
     DomainKnowledgeCandidate,
-    NormalizedTextIndex,
     RetrievalChannel,
     TRUST_TIERS,
     TrustTier,
-    build_normalized_index,
-    find_normalized_spans,
     is_single_cjk_char,
     select_domain_knowledge_candidates,
 )
@@ -251,82 +248,118 @@ def compute_terms_db_revision(terms_db_path: str | Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _extract_short_ngram_probes(text: str) -> tuple[list[str], list[str]]:
-    """Extract deduplicated (bigrams, unigrams) in separate buckets.
+def _trimmed_span(text: str) -> tuple[str, tuple[int, int]] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    start = len(text) - len(text.lstrip())
+    return stripped, (start, start + len(stripped))
+
+
+def _extract_short_ngram_probes(
+    text: str,
+) -> tuple[dict[str, set[tuple[int, int]]], dict[str, set[tuple[int, int]]]]:
+    """Extract deduplicated ``{ngram: exact_source_spans}`` for bigrams and unigrams.
 
     Keeping 2-char and 1-char probes in separate high-ceiling buckets prevents
-    long inputs from exhausting unigram or tail-position recall.
+    long inputs from exhausting unigram or tail-position recall, and retaining
+    extraction spans avoids false interior-substring matches on unrelated words.
     """
-    bigrams: list[str] = []
-    unigrams: list[str] = []
-    seen_bi: set[str] = set()
-    seen_uni: set[str] = set()
+    bigrams: dict[str, set[tuple[int, int]]] = {}
+    unigrams: dict[str, set[tuple[int, int]]] = {}
 
-    def add_bi(value: str) -> None:
-        if len(value) == 2 and value not in seen_bi and len(bigrams) < _MAX_SHORT_BIGRAM_PROBES:
-            seen_bi.add(value)
-            bigrams.append(value)
+    def add_bi(value: str, span: tuple[int, int]) -> None:
+        if len(value) != 2:
+            return
+        if value in bigrams:
+            bigrams[value].add(span)
+        elif len(bigrams) < _MAX_SHORT_BIGRAM_PROBES:
+            bigrams[value] = {span}
 
-    def add_uni(value: str) -> None:
-        if len(value) == 1 and value not in seen_uni and len(unigrams) < _MAX_SHORT_UNIGRAM_PROBES:
-            seen_uni.add(value)
-            unigrams.append(value)
+    def add_uni(value: str, span: tuple[int, int]) -> None:
+        if len(value) != 1:
+            return
+        if value in unigrams:
+            unigrams[value].add(span)
+        elif len(unigrams) < _MAX_SHORT_UNIGRAM_PROBES:
+            unigrams[value] = {span}
 
-    norm_full = normalize_text(text)
-    if len(norm_full) == 2:
-        add_bi(norm_full)
-    elif len(norm_full) == 1:
-        add_uni(norm_full)
+    trimmed = _trimmed_span(text)
+    if trimmed is not None:
+        stripped, full_span = trimmed
+        norm_full = normalize_text(stripped)
+        if len(norm_full) == 2:
+            add_bi(norm_full, full_span)
+        elif len(norm_full) == 1:
+            add_uni(norm_full, full_span)
 
-    for run in _CJK_RUN_RE.findall(text):
-        run_norm = normalize_text(run)
-        for idx in range(len(run_norm) - 1):
-            add_bi(run_norm[idx : idx + 2])
-        for ch in run_norm:
-            add_uni(ch)
+    for match in _CJK_RUN_RE.finditer(text):
+        run = match.group(0)
+        base = match.start()
+        for idx in range(len(run) - 1):
+            piece = normalize_text(run[idx : idx + 2])
+            add_bi(piece, (base + idx, base + idx + 2))
+        for idx, ch in enumerate(run):
+            add_uni(normalize_text(ch), (base + idx, base + idx + 1))
 
-    for token in _LATIN_TOKEN_RE.findall(text):
-        tok_norm = normalize_text(token)
+    for match in _LATIN_TOKEN_RE.finditer(text):
+        tok_norm = normalize_text(match.group(0))
+        span = (match.start(), match.end())
         if len(tok_norm) == 2:
-            add_bi(tok_norm)
+            add_bi(tok_norm, span)
         elif len(tok_norm) == 1:
-            add_uni(tok_norm)
+            add_uni(tok_norm, span)
 
     return bigrams, unigrams
 
 
-def _extract_alias_probes(text: str) -> list[str]:
-    probes: list[str] = []
-    seen: set[str] = set()
+def _extract_alias_probes(text: str) -> dict[str, set[tuple[int, int]]]:
+    """Extract deduplicated ``{alias_norm: exact_source_spans}`` from ``text``."""
+    probes: dict[str, set[tuple[int, int]]] = {}
 
-    def add(value: str) -> None:
-        if value and value not in seen and len(probes) < _MAX_ALIAS_PROBES:
-            seen.add(value)
-            probes.append(value)
+    def add(value: str, span: tuple[int, int]) -> None:
+        if not value:
+            return
+        if value in probes:
+            probes[value].add(span)
+        elif len(probes) < _MAX_ALIAS_PROBES:
+            probes[value] = {span}
 
-    norm_full = normalize_text(text)
-    if norm_full:
-        add(norm_full)
+    trimmed = _trimmed_span(text)
+    if trimmed is not None:
+        stripped, full_span = trimmed
+        add(normalize_text(stripped), full_span)
 
-    for run in _CJK_RUN_RE.findall(text):
-        run_norm = normalize_text(run)
-        if run_norm:
-            add(run_norm)
-        max_n = min(len(run_norm), 8)
+    for match in _CJK_RUN_RE.finditer(text):
+        run = match.group(0)
+        base = match.start()
+        add(normalize_text(run), (base, match.end()))
+        max_n = min(len(run), 8)
         for length in range(max_n, 1, -1):
-            for idx in range(len(run_norm) - length + 1):
-                add(run_norm[idx : idx + length])
+            for idx in range(len(run) - length + 1):
+                add(
+                    normalize_text(run[idx : idx + length]),
+                    (base + idx, base + idx + length),
+                )
 
-    latin_tokens = _LATIN_TOKEN_RE.findall(text)
-    for token in latin_tokens:
-        add(normalize_text(token))
-    for idx in range(len(latin_tokens) - 1):
-        add(normalize_text(f"{latin_tokens[idx]} {latin_tokens[idx + 1]}"))
-    for idx in range(len(latin_tokens) - 2):
+    latin_matches = list(_LATIN_TOKEN_RE.finditer(text))
+    for match in latin_matches:
+        add(normalize_text(match.group(0)), (match.start(), match.end()))
+    for idx in range(len(latin_matches) - 1):
+        m1, m2 = latin_matches[idx], latin_matches[idx + 1]
         add(
-            normalize_text(
-                f"{latin_tokens[idx]} {latin_tokens[idx + 1]} {latin_tokens[idx + 2]}"
-            )
+            normalize_text(f"{m1.group(0)} {m2.group(0)}"),
+            (m1.start(), m2.end()),
+        )
+    for idx in range(len(latin_matches) - 2):
+        m1, m2, m3 = (
+            latin_matches[idx],
+            latin_matches[idx + 1],
+            latin_matches[idx + 2],
+        )
+        add(
+            normalize_text(f"{m1.group(0)} {m2.group(0)} {m3.group(0)}"),
+            (m1.start(), m3.end()),
         )
 
     return probes
@@ -337,37 +370,48 @@ def _quote_fts5_phrase(term: str) -> str:
     return f'"{escaped}"'
 
 
-def _extract_fts_phrases(text: str) -> list[str]:
-    phrases: list[str] = []
-    seen: set[str] = set()
+def _extract_fts_probes(
+    text: str,
+) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
+    """Extract FTS5 trigram probes paired with their exact original ``(start, end)`` spans."""
+    probes: dict[str, set[tuple[int, int]]] = {}
 
-    def add(value: str) -> None:
+    def add(value: str, span: tuple[int, int]) -> None:
         cleaned = value.strip()
-        if len(cleaned) >= 3 and cleaned not in seen and len(phrases) < _MAX_FTS_PHRASES:
-            seen.add(cleaned)
-            phrases.append(cleaned)
+        if len(cleaned) < 3:
+            return
+        if cleaned in probes:
+            probes[cleaned].add(span)
+        elif len(probes) < _MAX_FTS_PHRASES:
+            probes[cleaned] = {span}
 
-    stripped = text.strip()
-    if 3 <= len(stripped) <= 24:
-        add(stripped)
+    trimmed = _trimmed_span(text)
+    if trimmed is not None:
+        stripped, full_span = trimmed
+        if 3 <= len(stripped) <= 24:
+            add(stripped, full_span)
 
-    for run in _CJK_RUN_RE.findall(stripped):
+    for match in _CJK_RUN_RE.finditer(text):
+        run = match.group(0)
+        base = match.start()
         if len(run) >= 3:
             if len(run) <= 16:
-                add(run)
+                add(run, (base, match.end()))
             for idx in range(0, len(run) - 2):
-                add(run[idx : idx + 3])
+                add(run[idx : idx + 3], (base + idx, base + idx + 3))
 
-    latin_tokens = _LATIN_TOKEN_RE.findall(stripped)
-    for idx in range(len(latin_tokens) - 1):
-        bigram = f"{latin_tokens[idx]} {latin_tokens[idx + 1]}"
-        if len(bigram) >= 3:
-            add(bigram)
-    for token in latin_tokens:
+    latin_matches = list(_LATIN_TOKEN_RE.finditer(text))
+    for idx in range(len(latin_matches) - 1):
+        m1, m2 = latin_matches[idx], latin_matches[idx + 1]
+        bigram = text[m1.start() : m2.end()]
+        if len(bigram.strip()) >= 3:
+            add(bigram, (m1.start(), m2.end()))
+    for match in latin_matches:
+        token = match.group(0)
         if len(token) >= 3:
-            add(token)
+            add(token, (match.start(), match.end()))
 
-    return phrases
+    return [(probe, tuple(sorted(spans))) for probe, spans in probes.items()]
 
 
 def _as_trust_tier(value: str) -> TrustTier:
@@ -381,20 +425,26 @@ def _as_trust_tier(value: str) -> TrustTier:
 
 
 def _matched_probe_spans_for_field(
-    norm_index: NormalizedTextIndex,
     field_text: str,
-    field_norm: str,
-    phrases: list[tuple[str, str]],
+    probes: list[tuple[str, str, str, tuple[tuple[int, int], ...]]],
 ) -> list[tuple[int, int]]:
-    """Return source spans in ``norm_index`` that actually matched ``field_norm``."""
-    if not field_norm:
+    """Return exact source spans of probes that actually matched ``field_text``.
+
+    Uses raw FTS5 trigram length (``len(probe) >= 3``) and casefolded substring
+    matching (plus normalized fallback) without ever re-searching the full
+    source text, so probes like ``A B`` (3 chars raw, 2 chars normalized) keep
+    their exact span and ``Ice`` never bleeds into unrelated words like ``price``.
+    """
+    if not field_text:
         return []
+    field_cf = field_text.casefold()
+    field_norm = normalize_text(field_text)
     spans: list[tuple[int, int]] = []
-    if field_norm in norm_index.norm_text:
-        spans.extend(find_normalized_spans(norm_index, field_text))
-    for phrase, phrase_norm in phrases:
-        if len(phrase_norm) >= 3 and phrase_norm in field_norm:
-            spans.extend(find_normalized_spans(norm_index, phrase))
+    for probe_raw, probe_cf, probe_norm, probe_spans in probes:
+        if len(probe_raw) < 3:
+            continue
+        if probe_cf in field_cf or (probe_norm and field_norm and probe_norm in field_norm):
+            spans.extend(probe_spans)
     return spans
 
 
@@ -483,9 +533,10 @@ class KnowledgeBaseReader:
         )
 
     def _query_exact_aliases(
-        self, text: str, norm_index: NormalizedTextIndex
+        self, text: str
     ) -> list[tuple[str, str, TrustTier, tuple[tuple[int, int], ...]]]:
-        probes = _extract_alias_probes(text)
+        probe_spans = _extract_alias_probes(text)
+        probes = list(probe_spans)
         if not probes:
             return []
         hits: list[tuple[str, str, TrustTier, tuple[tuple[int, int], ...]]] = []
@@ -495,7 +546,7 @@ class KnowledgeBaseReader:
             placeholders = ",".join("?" for _ in chunk)
             alias_rows = self._conn.execute(
                 f"""
-                SELECT entity_id, alias_surface, trust_tier
+                SELECT entity_id, alias_surface, alias_norm, trust_tier
                 FROM kb_aliases
                 WHERE alias_norm IN ({placeholders})
                   AND lock_eligible = 0
@@ -513,7 +564,7 @@ class KnowledgeBaseReader:
                             key[0],
                             surface,
                             _as_trust_tier(str(row["trust_tier"])),
-                            find_normalized_spans(norm_index, surface),
+                            tuple(sorted(probe_spans.get(str(row["alias_norm"]), ()))),
                         )
                     )
 
@@ -528,11 +579,13 @@ class KnowledgeBaseReader:
             ).fetchall()
             chunk_set = set(chunk)
             for row in entity_rows:
-                surface = (
-                    str(row["zh"])
-                    if str(row["zh_norm"]) in chunk_set
-                    else str(row["en"])
-                )
+                zh_norm = str(row["zh_norm"])
+                if zh_norm in chunk_set:
+                    surface = str(row["zh"])
+                    matched_norm = zh_norm
+                else:
+                    surface = str(row["en"])
+                    matched_norm = str(row["en_norm"])
                 key = (str(row["entity_id"]), surface)
                 if key not in seen:
                     seen.add(key)
@@ -541,24 +594,25 @@ class KnowledgeBaseReader:
                             key[0],
                             surface,
                             _as_trust_tier(str(row["trust_tier"])),
-                            find_normalized_spans(norm_index, surface),
+                            tuple(sorted(probe_spans.get(matched_norm, ()))),
                         )
                     )
         return hits
 
     def _query_short_ngrams(
-        self, text: str, norm_index: NormalizedTextIndex
+        self, text: str
     ) -> list[tuple[str, str, tuple[tuple[int, int], ...]]]:
         bigrams, unigrams = _extract_short_ngram_probes(text)
         hits: list[tuple[str, str, tuple[tuple[int, int], ...]]] = []
         seen: set[tuple[str, str]] = set()
         for ngram_len, bucket in ((2, bigrams), (1, unigrams)):
-            for start in range(0, len(bucket), _SQL_IN_CHUNK):
-                chunk = bucket[start : start + _SQL_IN_CHUNK]
+            keys = list(bucket)
+            for start in range(0, len(keys), _SQL_IN_CHUNK):
+                chunk = keys[start : start + _SQL_IN_CHUNK]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = self._conn.execute(
                     f"""
-                    SELECT entity_id, surface
+                    SELECT ngram, entity_id, surface
                     FROM kb_short_ngrams
                     WHERE ngram_len = ? AND ngram IN ({placeholders})
                     ORDER BY entity_id, surface
@@ -571,29 +625,34 @@ class KnowledgeBaseReader:
                     if key not in seen:
                         seen.add(key)
                         hits.append(
-                            (key[0], surface, find_normalized_spans(norm_index, surface))
+                            (
+                                key[0],
+                                surface,
+                                tuple(sorted(bucket.get(str(row["ngram"]), ()))),
+                            )
                         )
         return hits
 
     def _query_fts_trigram(
-        self, text: str, norm_index: NormalizedTextIndex, *, limit: int
-    ) -> list[tuple[str, str, tuple[tuple[int, int], ...]]]:
-        phrases = _extract_fts_phrases(text)
-        if not phrases:
+        self, text: str, *, limit: int
+    ) -> list[tuple[str, str, int, tuple[tuple[int, int], ...]]]:
+        extracted = _extract_fts_probes(text)
+        if not extracted:
             return []
-        phrase_pairs = [
-            (phrase, norm)
-            for phrase in phrases
-            if (norm := normalize_text(phrase))
+        probe_records = [
+            (probe, probe.casefold(), normalize_text(probe), spans)
+            for probe, spans in extracted
         ]
         cjk_query = has_cjk(text)
 
         scored: dict[tuple[str, str], tuple[int, float]] = {}
         hit_spans: dict[tuple[str, str], set[tuple[int, int]]] = {}
         batch_limit = max(limit * 4, 32)
-        for start in range(0, len(phrases), _FTS_BATCH_SIZE):
-            batch = phrases[start : start + _FTS_BATCH_SIZE]
-            fts_query = " OR ".join(_quote_fts5_phrase(phrase) for phrase in batch)
+        for start in range(0, len(probe_records), _FTS_BATCH_SIZE):
+            batch = probe_records[start : start + _FTS_BATCH_SIZE]
+            fts_query = " OR ".join(
+                _quote_fts5_phrase(probe_raw) for probe_raw, _, _, _ in batch
+            )
             try:
                 rows = self._conn.execute(
                     """
@@ -615,19 +674,10 @@ class KnowledgeBaseReader:
                 zh = str(row["zh"])
                 en = str(row["en"])
                 gloss = str(row["context_gloss"])
-                surf_norm = normalize_text(surface)
-                zh_norm = normalize_text(zh)
-                en_norm = normalize_text(en)
 
-                surface_spans = _matched_probe_spans_for_field(
-                    norm_index, surface, surf_norm, phrase_pairs
-                )
-                zh_spans = _matched_probe_spans_for_field(
-                    norm_index, zh, zh_norm, phrase_pairs
-                )
-                en_spans = _matched_probe_spans_for_field(
-                    norm_index, en, en_norm, phrase_pairs
-                )
+                surface_spans = _matched_probe_spans_for_field(surface, batch)
+                zh_spans = _matched_probe_spans_for_field(zh, batch)
+                en_spans = _matched_probe_spans_for_field(en, batch)
 
                 if surface_spans or zh_spans or en_spans:
                     matched_surface = (
@@ -643,9 +693,7 @@ class KnowledgeBaseReader:
                         matched_surface = zh
                     else:
                         matched_surface = zh if (cjk_query and zh) else (en or surface)
-                    matched_spans = _matched_probe_spans_for_field(
-                        norm_index, gloss, normalize_text(gloss), phrase_pairs
-                    )
+                    matched_spans = _matched_probe_spans_for_field(gloss, batch)
                     tier_rank = 1
 
                 key = (entity_id, matched_surface)
@@ -655,13 +703,25 @@ class KnowledgeBaseReader:
                     scored[key] = cand_rank
                 hit_spans.setdefault(key, set()).update(matched_spans)
 
+        # Entity-level evidence priority: if an entity has any direct
+        # surface/name/alias match (tier_rank == 0), discard gloss-only hits
+        # (tier_rank == 1) for that same entity before downstream lock gating.
+        direct_entities = {
+            entity_id
+            for (entity_id, _surface), (tier_rank, _score) in scored.items()
+            if tier_rank == 0
+        }
         ordered = sorted(
-            scored.items(),
+            (
+                item
+                for item in scored.items()
+                if item[1][0] == 0 or item[0][0] not in direct_entities
+            ),
             key=lambda item: (item[1][0], item[1][1], item[0][0], item[0][1]),
         )
         return [
-            (key[0], key[1], tuple(sorted(hit_spans.get(key, ()))))
-            for key, _ in ordered[: max(limit * 2, 16)]
+            (key[0], key[1], tier_rank, tuple(sorted(hit_spans.get(key, ()))))
+            for key, (tier_rank, _score) in ordered[: max(limit * 2, 16)]
         ]
 
     def _load_entities(self, entity_ids: Collection[str]) -> dict[str, sqlite3.Row]:
@@ -702,45 +762,62 @@ class KnowledgeBaseReader:
         if not text or not text.strip():
             return ()
 
-        norm_index = build_normalized_index(text)
-        alias_hits = self._query_exact_aliases(text, norm_index)
-        short_hits = self._query_short_ngrams(text, norm_index)
-        fts_hits = self._query_fts_trigram(
-            text, norm_index, limit=max(max_candidates, 8)
-        )
+        alias_hits = self._query_exact_aliases(text)
+        short_hits = self._query_short_ngrams(text)
+        fts_hits = self._query_fts_trigram(text, limit=max(max_candidates, 8))
 
         fused_scores: dict[tuple[str, str], float] = {}
         best_channel: dict[tuple[str, str], tuple[float, RetrievalChannel]] = {}
         tier_overrides: dict[tuple[str, str], TrustTier] = {}
         matched_spans_by_key: dict[tuple[str, str], set[tuple[int, int]]] = {}
+        evidence_tier_by_key: dict[tuple[str, str], int] = {}
 
         def record_channel(
             channel: RetrievalChannel,
-            items: list[tuple[str, str, tuple[tuple[int, int], ...]]],
+            items: list[tuple[str, str, int, tuple[tuple[int, int], ...]]],
         ) -> None:
             weight = _CHANNEL_WEIGHTS[channel]
-            for rank, (entity_id, surface, spans) in enumerate(items, start=1):
+            for rank, (entity_id, surface, evidence_tier, spans) in enumerate(
+                items, start=1
+            ):
                 key = (entity_id, surface)
                 contribution = weight / (RRF_K + rank)
                 fused_scores[key] = fused_scores.get(key, 0.0) + contribution
                 prev = best_channel.get(key)
                 if prev is None or contribution > prev[0]:
                     best_channel[key] = (contribution, channel)
+                prev_tier = evidence_tier_by_key.get(key)
+                if prev_tier is None or evidence_tier < prev_tier:
+                    evidence_tier_by_key[key] = evidence_tier
                 if spans:
                     matched_spans_by_key.setdefault(key, set()).update(spans)
 
         for entity_id, surface, tier, _spans in alias_hits:
             tier_overrides[(entity_id, surface)] = tier
-        record_channel("lexical_alias", [(e, s, sp) for e, s, _, sp in alias_hits])
-        record_channel("short_ngram", short_hits)
+        record_channel("lexical_alias", [(e, s, 0, sp) for e, s, _, sp in alias_hits])
+        record_channel("short_ngram", [(e, s, 0, sp) for e, s, sp in short_hits])
         record_channel("fts5_trigram", fts_hits)
 
         if not fused_scores:
             return ()
 
+        # Entity-level evidence priority across all channels: once an entity has
+        # direct name/alias/short-ngram evidence (tier 0), drop gloss-only hits
+        # (tier 1) for that entity before applying lock-coverage filtering.
+        entities_with_direct_evidence = {
+            entity_id
+            for (entity_id, _surface), ev_tier in evidence_tier_by_key.items()
+            if ev_tier == 0
+        }
+
         entities = self._load_entities({entity_id for entity_id, _ in fused_scores})
         candidates: list[DomainKnowledgeCandidate] = []
         for (entity_id, surface), score in fused_scores.items():
+            if (
+                evidence_tier_by_key.get((entity_id, surface), 1) > 0
+                and entity_id in entities_with_direct_evidence
+            ):
+                continue
             row = entities.get(entity_id)
             if row is None:
                 continue
