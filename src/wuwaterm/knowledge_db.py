@@ -634,103 +634,143 @@ class KnowledgeBaseReader:
                         )
         return hits
 
-    def _query_fts_trigram(
-        self, text: str, *, limit: int
+    def _discover_fts_candidate_ids(
+        self,
+        extracted: list[tuple[str, tuple[tuple[int, int], ...]]],
+        *,
+        per_probe_limit: int,
+    ) -> set[str]:
+        """Phase 1 (bounded): discover candidate entity IDs from FTS5."""
+        discovered: set[str] = set()
+        for probe_raw, _probe_spans in extracted:
+            phrase = _quote_fts5_phrase(probe_raw)
+            for fts_query in (f"{{surface zh en}} : {phrase}", f"context_gloss : {phrase}"):
+                try:
+                    rows = self._conn.execute(
+                        """
+                        SELECT entity_id
+                        FROM kb_fts_trigram
+                        WHERE kb_fts_trigram MATCH ?
+                        ORDER BY bm25(kb_fts_trigram) ASC, entity_id ASC
+                        LIMIT ?
+                        """,
+                        (fts_query, per_probe_limit),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    continue
+                for row in rows:
+                    discovered.add(str(row["entity_id"]))
+        return discovered
+
+    def _complete_fts_evidence(
+        self,
+        text: str,
+        extracted: list[tuple[str, tuple[tuple[int, int], ...]]],
+        *,
+        candidate_entity_ids: set[str],
+        existing_tier0_entities: set[str],
     ) -> list[tuple[str, str, int, tuple[tuple[int, int], ...]]]:
-        extracted = _extract_fts_probes(text)
-        if not extracted:
+        """Phase 2 (unbounded per entity): collect complete SQLite FTS5 evidence.
+
+        Scoped strictly to ``candidate_entity_ids`` without ``LIMIT 32`` so
+        distractor rows from other entities can never truncate a discovered
+        entity's Tier 0 (``{surface zh en}``) or Tier 1 (``context_gloss``)
+        matches.
+        """
+        if not extracted or not candidate_entity_ids:
             return []
         cjk_query = has_cjk(text)
+        ordered_candidates = sorted(candidate_entity_ids)
 
-        # Query SQLite FTS5 per probe with explicit column filters so SQLite
-        # itself decides every probe match and column tier (zero Python-side
-        # casefold/substring guessing, immune to Unicode folding differences
-        # such as German ß vs ss).
         scored: dict[tuple[str, str, int], float] = {}
         hit_spans: dict[tuple[str, str, int], set[tuple[int, int]]] = {}
-        per_probe_limit = max(limit * 4, 32)
 
-        # Tier 0: direct matches on name/alias columns {surface zh en}.
+        # Tier 0: complete direct matches on {surface zh en} for all discovered entities.
         for probe_raw, probe_spans in extracted:
             fts_direct_query = f"{{surface zh en}} : {_quote_fts5_phrase(probe_raw)}"
-            try:
-                rows = self._conn.execute(
-                    """
-                    SELECT entity_id, surface, zh, en,
-                           highlight(kb_fts_trigram, 1, '[', ']') AS h_surface,
-                           highlight(kb_fts_trigram, 2, '[', ']') AS h_zh,
-                           highlight(kb_fts_trigram, 3, '[', ']') AS h_en,
-                           bm25(kb_fts_trigram) AS rank_score
-                    FROM kb_fts_trigram
-                    WHERE kb_fts_trigram MATCH ?
-                    ORDER BY rank_score ASC, entity_id ASC
-                    LIMIT ?
-                    """,
-                    (fts_direct_query, per_probe_limit),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                continue
-
-            for row in rows:
-                entity_id = str(row["entity_id"])
-                surface = str(row["surface"])
-                zh = str(row["zh"])
-                en = str(row["en"])
-                if len(str(row["h_surface"])) > len(surface):
-                    matched_surface = surface
-                elif len(str(row["h_zh"])) > len(zh):
-                    matched_surface = zh
-                elif len(str(row["h_en"])) > len(en):
-                    matched_surface = en
-                else:
-                    matched_surface = surface
-
-                key = (entity_id, matched_surface, 0)
-                rank_score = float(row["rank_score"])
-                prev = scored.get(key)
-                if prev is None or rank_score < prev:
-                    scored[key] = rank_score
-                hit_spans.setdefault(key, set()).update(probe_spans)
-
-        direct_entities = {entity_id for entity_id, _surface, _tier in scored}
-
-        # Tier 1: gloss-only matches on context_gloss, skipping entities that
-        # already have direct tier-0 evidence.
-        for probe_raw, probe_spans in extracted:
-            fts_gloss_query = f"context_gloss : {_quote_fts5_phrase(probe_raw)}"
-            try:
-                rows = self._conn.execute(
-                    """
-                    SELECT entity_id, surface, zh, en,
-                           bm25(kb_fts_trigram) AS rank_score
-                    FROM kb_fts_trigram
-                    WHERE kb_fts_trigram MATCH ?
-                    ORDER BY rank_score ASC, entity_id ASC
-                    LIMIT ?
-                    """,
-                    (fts_gloss_query, per_probe_limit),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                continue
-
-            for row in rows:
-                entity_id = str(row["entity_id"])
-                if entity_id in direct_entities:
+            for start in range(0, len(ordered_candidates), _SQL_IN_CHUNK):
+                chunk = ordered_candidates[start : start + _SQL_IN_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                try:
+                    rows = self._conn.execute(
+                        f"""
+                        SELECT entity_id, surface, zh, en,
+                               highlight(kb_fts_trigram, 1, '[', ']') AS h_surface,
+                               highlight(kb_fts_trigram, 2, '[', ']') AS h_zh,
+                               highlight(kb_fts_trigram, 3, '[', ']') AS h_en,
+                               bm25(kb_fts_trigram) AS rank_score
+                        FROM kb_fts_trigram
+                        WHERE kb_fts_trigram MATCH ?
+                          AND entity_id IN ({placeholders})
+                        """,
+                        [fts_direct_query, *chunk],
+                    ).fetchall()
+                except sqlite3.OperationalError:
                     continue
-                surface = str(row["surface"])
-                zh = str(row["zh"])
-                en = str(row["en"])
-                if is_single_cjk_char(zh):
-                    matched_surface = zh
-                else:
-                    matched_surface = zh if (cjk_query and zh) else (en or surface)
 
-                key = (entity_id, matched_surface, 1)
-                rank_score = float(row["rank_score"])
-                prev = scored.get(key)
-                if prev is None or rank_score < prev:
-                    scored[key] = rank_score
-                hit_spans.setdefault(key, set()).update(probe_spans)
+                for row in rows:
+                    entity_id = str(row["entity_id"])
+                    surface = str(row["surface"])
+                    zh = str(row["zh"])
+                    en = str(row["en"])
+                    if len(str(row["h_surface"])) > len(surface):
+                        matched_surface = surface
+                    elif len(str(row["h_zh"])) > len(zh):
+                        matched_surface = zh
+                    elif len(str(row["h_en"])) > len(en):
+                        matched_surface = en
+                    else:
+                        matched_surface = surface
+
+                    key = (entity_id, matched_surface, 0)
+                    rank_score = float(row["rank_score"])
+                    prev = scored.get(key)
+                    if prev is None or rank_score < prev:
+                        scored[key] = rank_score
+                    hit_spans.setdefault(key, set()).update(probe_spans)
+
+        tier0_entities = existing_tier0_entities | {
+            entity_id for entity_id, _surface, _tier in scored
+        }
+        gloss_only_candidates = sorted(candidate_entity_ids - tier0_entities)
+
+        # Tier 1: complete context_gloss matches ONLY for entities with zero Tier 0 evidence.
+        if gloss_only_candidates:
+            for probe_raw, probe_spans in extracted:
+                fts_gloss_query = f"context_gloss : {_quote_fts5_phrase(probe_raw)}"
+                for start in range(0, len(gloss_only_candidates), _SQL_IN_CHUNK):
+                    chunk = gloss_only_candidates[start : start + _SQL_IN_CHUNK]
+                    placeholders = ",".join("?" for _ in chunk)
+                    try:
+                        rows = self._conn.execute(
+                            f"""
+                            SELECT entity_id, surface, zh, en,
+                                   bm25(kb_fts_trigram) AS rank_score
+                            FROM kb_fts_trigram
+                            WHERE kb_fts_trigram MATCH ?
+                              AND entity_id IN ({placeholders})
+                            """,
+                            [fts_gloss_query, *chunk],
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        continue
+
+                    for row in rows:
+                        entity_id = str(row["entity_id"])
+                        surface = str(row["surface"])
+                        zh = str(row["zh"])
+                        en = str(row["en"])
+                        if is_single_cjk_char(zh):
+                            matched_surface = zh
+                        else:
+                            matched_surface = zh if (cjk_query and zh) else (en or surface)
+
+                        key = (entity_id, matched_surface, 1)
+                        rank_score = float(row["rank_score"])
+                        prev = scored.get(key)
+                        if prev is None or rank_score < prev:
+                            scored[key] = rank_score
+                        hit_spans.setdefault(key, set()).update(probe_spans)
 
         ordered = sorted(
             scored.items(),
@@ -743,7 +783,7 @@ class KnowledgeBaseReader:
                 tier_rank,
                 tuple(sorted(hit_spans.get((entity_id, surface, tier_rank), ()))),
             )
-            for (entity_id, surface, tier_rank), _score in ordered[: max(limit * 2, 16)]
+            for (entity_id, surface, tier_rank), _score in ordered
         ]
 
     def _load_entities(self, entity_ids: Collection[str]) -> dict[str, sqlite3.Row]:
@@ -784,10 +824,37 @@ class KnowledgeBaseReader:
         if not text or not text.strip():
             return ()
 
-        # Stage 1: Collect raw hits across all channels without cross-tier merging.
+        # Phase 1: Bounded candidate discovery across alias, short-ngram, and FTS5.
+        alias_hits = self._query_exact_aliases(text)
+        short_hits = self._query_short_ngrams(text)
+        fts_probes = _extract_fts_probes(text)
+        per_probe_limit = max(max(max_candidates, 8) * 4, 32)
+        fts_discovered_ids = (
+            self._discover_fts_candidate_ids(
+                fts_probes, per_probe_limit=per_probe_limit
+            )
+            if fts_probes
+            else set()
+        )
+
+        existing_tier0_entities = {entity_id for entity_id, *_ in alias_hits} | {
+            entity_id for entity_id, *_ in short_hits
+        }
+        candidate_entity_ids = existing_tier0_entities | fts_discovered_ids
+        if not candidate_entity_ids:
+            return ()
+
+        # Phase 2: Complete unbounded SQLite FTS5 evidence for discovered entities.
+        fts_hits = self._complete_fts_evidence(
+            text,
+            fts_probes,
+            candidate_entity_ids=candidate_entity_ids,
+            existing_tier0_entities=existing_tier0_entities,
+        )
+
         raw_hits: list[_RawChannelHit] = []
         for rank, (entity_id, surface, trust_tier, spans) in enumerate(
-            self._query_exact_aliases(text), start=1
+            alias_hits, start=1
         ):
             raw_hits.append(
                 _RawChannelHit(
@@ -800,9 +867,7 @@ class KnowledgeBaseReader:
                     trust_tier=trust_tier,
                 )
             )
-        for rank, (entity_id, surface, spans) in enumerate(
-            self._query_short_ngrams(text), start=1
-        ):
+        for rank, (entity_id, surface, spans) in enumerate(short_hits, start=1):
             raw_hits.append(
                 _RawChannelHit(
                     entity_id=entity_id,
@@ -814,7 +879,7 @@ class KnowledgeBaseReader:
                 )
             )
         for rank, (entity_id, surface, evidence_tier, spans) in enumerate(
-            self._query_fts_trigram(text, limit=max(max_candidates, 8)), start=1
+            fts_hits, start=1
         ):
             raw_hits.append(
                 _RawChannelHit(
