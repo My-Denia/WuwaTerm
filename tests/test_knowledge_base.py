@@ -1693,30 +1693,22 @@ def test_fts5_authoritative_per_probe_unicode_folding_regression(tmp_path: Path)
 
 
 def test_two_phase_fts_evidence_completion_avoids_limit_32_truncation(tmp_path: Path):
-    # Populate 85 distractor aliases matching "Blade" so target entities' "Blade"
-    # matches rank past row 42 and row 80 globally (beyond per-probe LIMIT 32).
+    # Give a single distractor entity (en="Blade") 80 distinct non-Blade aliases.
+    # Each alias inserts a kb_fts_trigram row carrying en="Blade", so SQLite FTS5
+    # sees 81 matching rows for "Blade" (pushing target entities past LIMIT 32
+    # while collapsing all distractor hits onto one (entity_id, "Blade") key
+    # under default max_candidates=8).
     entities: list[EntitySpec] = [
         EntitySpec(
-            entity_id=f"weapon:10{idx:02d}",
+            entity_id="weapon:1000",
             entity_type="weapon",
             source_file="BinData/weapon/weaponconf.json",
-            source_id=f"10{idx:02d}",
-            zh=f"剑{idx:02d}",
-            en=f"Blade {idx:02d}",
-        )
-        for idx in range(45)
-    ]
-    aliases: list[AliasSpec] = [
-        AliasSpec(
-            entity_id=f"weapon:10{idx:02d}",
-            alias_surface=f"Blade{idx:02d}",
-            lang="en",
-            alias_kind="nickname",
-        )
-        for idx in range(45)
-    ]
-    # Target 1: Bladebound (rank > 42 on "Blade", plus "Use" in context_gloss)
-    entities.append(
+            source_id="1000",
+            zh="Blade",
+            en="Blade",
+        ),
+        # Target 1: Bladebound (en="Bladebound" ranks past row 80 on "Blade",
+        # while context_gloss="Use ..." ranks #1 on "Use").
         EntitySpec(
             entity_id="weapon:9991",
             entity_type="weapon",
@@ -1724,11 +1716,10 @@ def test_two_phase_fts_evidence_completion_avoids_limit_32_truncation(tmp_path: 
             source_id="9991",
             zh="剑缚长锋",
             en="Bladebound",
-            context_gloss="Use this ancient blade to cleave shadows.",
-        )
-    )
-    # Target 2: Winterbound Longblade (rank > 80 on "Blade", unique hit on "Winter")
-    entities.append(
+            context_gloss="Use this ancient relic to cleave shadows.",
+        ),
+        # Target 2: Winterbound Longblade (unique hit on "Winter" ranks #1,
+        # while "Blade" hit ranks past row 80 beyond LIMIT 32).
         EntitySpec(
             entity_id="weapon:9992",
             entity_type="weapon",
@@ -1736,8 +1727,17 @@ def test_two_phase_fts_evidence_completion_avoids_limit_32_truncation(tmp_path: 
             source_id="9992",
             zh="冬缚长剑",
             en="Winterbound Longblade",
+        ),
+    ]
+    aliases: list[AliasSpec] = [
+        AliasSpec(
+            entity_id="weapon:1000",
+            alias_surface=f"DistractorAlias{idx:02d}",
+            lang="en",
+            alias_kind="nickname",
         )
-    )
+        for idx in range(80)
+    ]
 
     kb_path = tmp_path / "limit_truncation_kb.db"
     rev = "9" * 64
@@ -1752,22 +1752,23 @@ def test_two_phase_fts_evidence_completion_avoids_limit_32_truncation(tmp_path: 
     )
 
     with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
-        # Case 1: "Use Blade boost now" locked "Blade boost" — Phase 2 must still
-        # retrieve Bladebound's Tier-0 "Blade" match past LIMIT 32 so its Tier-1
-        # gloss "Use" hit is dropped and Bladebound is filtered out by the lock.
+        # Case 1 (default max_candidates=8): without lock, Bladebound is recalled;
+        # when "Blade boost" is locked, Phase 2 must still recover Bladebound's
+        # Tier-0 "Blade" match past row 80 so its Tier-1 gloss "Use" hit is
+        # discarded and Bladebound is filtered out (returning empty).
+        assert any(
+            c.entity_id == "weapon:9991" for c in reader.query("Use Blade boost now")
+        )
         hits_case1 = reader.query(
             "Use Blade boost now", locked_surfaces=("Blade boost",)
         )
         assert not any(c.entity_id == "weapon:9991" for c in hits_case1), hits_case1
 
-        # Case 2: "Use Winter gear or Blade" locked "Winter gear" — Phase 2 must
-        # retrieve Winterbound Longblade's uncovered Tier-0 "Blade" match past
-        # row 80 so Winterbound Longblade is retained (not falsely dropped).
+        # Case 2 (default max_candidates=8): "Use Winter gear or Blade" locked
+        # "Winter gear" — Phase 2 must recover Winterbound Longblade's uncovered
+        # Tier-0 "Blade" match past row 80 so Winterbound Longblade is retained.
         hits_case2 = reader.query(
-            "Use Winter gear or Blade",
-            locked_surfaces=("Winter gear",),
-            max_candidates=64,
-            max_scalars=4000,
+            "Use Winter gear or Blade", locked_surfaces=("Winter gear",)
         )
         assert any(
             c.entity_id == "weapon:9992"
