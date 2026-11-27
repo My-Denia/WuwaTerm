@@ -848,10 +848,7 @@ class TermService:
             if entry.pinyin == q_ascii:
                 return 100.0, "pinyin"
             if entry.pinyin.startswith(q_ascii):
-                return (
-                    max(80.0, 96.0 - (len(entry.pinyin) - len(q_ascii)) * 0.5),
-                    "pinyin-prefix",
-                )
+                return max(80.0, 96.0 - (len(entry.pinyin) - len(q_ascii)) * 0.5), "pinyin-prefix"
             if entry.pinyin_abbrev == q_ascii:
                 return 92.0, "pinyin-abbrev"
             if q_ascii in entry.pinyin:
