@@ -161,9 +161,14 @@ Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_t
   (`(direction, source_masked)`).
 - Self-hosted Web (merged on `WuwaTerm-Web` `main` in PR #81 / `129f6a3`; awaiting
   next self-hosted release): served by the self-hosted Web same-origin backend
-  at `state-web/data/tm.sqlite3` (in the self-hosted Web data directory) with
-  the same schema and `.env` / `data/` deploy rules; user memory stays separate
-  from Core `terms.db` and shared dictionary data.
+  at `state-web/data/tm.sqlite3` (in the self-hosted Web data directory) under
+  the same `.env` / `data/` deploy rules. Windows and self-hosted Web exchange
+  data via `wuwaterm-tm-v1` JSON and each maintain an independent local SQLite
+  schema (their column order differs — for example, `source_hash` sits at a
+  different column position and Web validates column order strictly, so a
+  Windows `.sqlite3` file cannot be copied directly to Web — while both enforce
+  `0600` permissions, WAL journal mode, `PRAGMA synchronous = FULL`, and
+  separation from Core `terms.db` and shared dictionary data).
 - The memory is not part of `terms.db` and is never written into it: official
   data stays reproducible from pinned TextMaps
   ([ADR 0004](0004-sqlite-terminology-data.md),
@@ -350,8 +355,12 @@ Frozen before any measurement, on fixed documents rather than ad-hoc samples:
    outside `"human_confirmed" | "imported_confirmed"`.
 4. **Structure checks still run.** Every reused pair passes through
    `check_segment_structure`, and a finding demotes it.
-5. **Privacy.** No entry text in logs, receipts, or error messages; the Web
-   path stores nothing after the tab closes.
+5. **Privacy.** No entry text in logs, receipts, or error messages. Public Web
+   writes zero browser storage and clears page memory when the tab closes or
+   refreshes; self-hosted Web likewise writes nothing to browser storage, while
+   confirmed entries persist only in the instance's own `tm.sqlite3` (alongside
+   `admission.sqlite3` in the instance local data directory, protected with
+   `0600` permissions).
 6. **Measured saving.** Model calls and latency per 1,000 characters on an
    unchanged document and on an edited one, reported as the ratio the memory
    claims, before the feature is called done.
