@@ -132,14 +132,27 @@ export class WuwaTermTextKernel {
     if (ptr === 0) {
       throw new WuwaTermKernelError("WASM allocation failed");
     }
+    let handle = 0;
     try {
       new Uint8Array(this._memory.buffer, ptr, encoded.length).set(encoded);
-      const handle = this._exports.wasm_ac_create(ptr, encoded.length);
+      handle = this._exports.wasm_ac_create(ptr, encoded.length);
       const text = this._readResultString();
       if (handle === 0) {
         throw new WuwaTermKernelError(text || "wasm_ac_create failed");
       }
-      return new TermAutomatonHandle(this, handle, JSON.parse(text));
+      const stats = JSON.parse(text);
+      const result = new TermAutomatonHandle(this, handle, stats);
+      handle = 0;
+      return result;
+    } catch (err) {
+      if (handle !== 0) {
+        try {
+          this._exports.wasm_ac_free(handle);
+        } catch {
+          // Best-effort cleanup of newly created handle on parse/init failure.
+        }
+      }
+      throw err;
     } finally {
       this._exports.wasm_dealloc(ptr, encoded.length);
     }

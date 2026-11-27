@@ -19,6 +19,7 @@ import importlib
 import os
 from types import ModuleType
 from typing import Literal
+import unicodedata
 
 from . import segmentation as _py_segmentation
 from . import text_spans as _py_text_spans
@@ -28,9 +29,17 @@ BackendName = Literal["native", "python"]
 
 _NATIVE_MODULE_NAME = "_wuwaterm_text_kernel"
 _DISABLE_ENV = "WUWATERM_DISABLE_NATIVE_KERNEL"
+# The Rust kernel freezes Python 3.12's Unicode 15.0.0 `str.isdigit()` table.
+# On Python runtimes with a different Unicode database (e.g. Python 3.11 uses
+# Unicode 14.0.0, where Kawi U+11F50..U+11F59 and Nag Mundari U+1E4F0..U+1E4F9
+# are not digits), operations that consult `isdigit()` automatically fall back
+# to pure Python so behavior matches `wuwaterm.text_spans` / `segmentation` 100%.
+_RUST_DIGIT_UNICODE_VERSION = "15.0.0"
+_DIGIT_PARITY_PROBES = ("\u11f50", "\u1e4f0", "\u00b2", "\u00bd")
 
 _UNSET = object()
 _native_module_cache: ModuleType | None | object = _UNSET
+_digit_parity_cache: bool | None = None
 
 
 def _is_native_disabled() -> bool:
@@ -51,10 +60,38 @@ def _load_native_module() -> ModuleType | None:
     return _native_module_cache  # type: ignore[return-value]
 
 
+def _native_digit_parity_ok(mod: ModuleType) -> bool:
+    """Return True only when the active Python runtime matches Rust's frozen isdigit() table."""
+    global _digit_parity_cache
+    if _digit_parity_cache is not None:
+        return _digit_parity_cache
+    if unicodedata.unidata_version != _RUST_DIGIT_UNICODE_VERSION:
+        _digit_parity_cache = False
+        return False
+    is_py_isdigit = getattr(mod, "is_py_isdigit", None)
+    if callable(is_py_isdigit):
+        matches = all(ch.isdigit() == bool(is_py_isdigit(ch)) for ch in _DIGIT_PARITY_PROBES)
+    else:
+        matches = True
+    _digit_parity_cache = matches
+    return matches
+
+
+def _load_digit_safe_native_module(*, prefer_native: bool) -> ModuleType | None:
+    """Return native module only when `isdigit()`-dependent calls are 100% parity-safe."""
+    if not prefer_native:
+        return None
+    mod = _load_native_module()
+    if mod is None or not _native_digit_parity_ok(mod):
+        return None
+    return mod
+
+
 def reset_native_kernel_cache() -> None:
-    """Clear the cached native-module probe result (primarily for tests)."""
-    global _native_module_cache
+    """Clear the cached native-module and Unicode-parity probes (primarily for tests)."""
+    global _native_module_cache, _digit_parity_cache
     _native_module_cache = _UNSET
+    _digit_parity_cache = None
 
 
 def native_kernel_available() -> bool:
@@ -145,7 +182,7 @@ def sentence_ranges_v2(
     text: str, *, prefer_native: bool = True
 ) -> list[tuple[int, int]]:
     """V2 sentence ranges (segmentation-v1 contract: preserves decimal dots)."""
-    mod = _load_native_module() if prefer_native else None
+    mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         return [(int(a), int(b)) for a, b in mod.sentence_ranges_v2(text)]
     return _py_text_spans.sentence_ranges_v2(text)
@@ -155,7 +192,7 @@ def review_sentence_ranges_v2(
     text: str, *, prefer_native: bool = True
 ) -> list[tuple[int, int]]:
     """Review-v2 sentence ranges (also keeps list markers attached)."""
-    mod = _load_native_module() if prefer_native else None
+    mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         return [(int(a), int(b)) for a, b in mod.review_sentence_ranges_v2(text)]
     return _py_text_spans.review_sentence_ranges_v2(text)
@@ -165,7 +202,7 @@ def segment_text(
     text: str, limit: int = SEGMENT_LIMIT, *, prefer_native: bool = True
 ) -> list[Segment]:
     """Cut ``text`` into ``segmentation-v1`` segments of at most ``limit`` core scalars."""
-    mod = _load_native_module() if prefer_native else None
+    mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         return [
             Segment(int(s), int(e), int(cs), int(ce), bool(hc))
@@ -183,7 +220,7 @@ def pair_segments(
     prefer_native: bool = True,
 ) -> list[SegmentPair]:
     """Pair ``source`` and ``target`` text per ``segmentation-v1``."""
-    mod = _load_native_module() if prefer_native else None
+    mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         rows = mod.pair_segments(source, target, limit, alignments)
         return [

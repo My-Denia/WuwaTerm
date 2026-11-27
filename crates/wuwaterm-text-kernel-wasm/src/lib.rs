@@ -8,6 +8,7 @@
 
 use std::alloc::{Layout, alloc, dealloc};
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +26,9 @@ use wuwaterm_text_kernel::text_spans::{
 thread_local! {
     static RESULT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static AUTOMATONS: RefCell<Vec<Option<AhoCorasick>>> = const { RefCell::new(Vec::new()) };
+    // Tracks every live guest allocation: base ptr address -> requested byte length.
+    // The actual allocator layout size is always `requested_len.max(1)` with alignment 1.
+    static LIVE_ALLOCS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
 
 fn set_result_bytes(bytes: Vec<u8>) {
@@ -48,12 +52,33 @@ fn set_ok_json<T: Serialize>(value: &T) -> u32 {
     }
 }
 
+fn is_within_live_allocation(addr: usize, len: usize) -> bool {
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    LIVE_ALLOCS.with(|slot| {
+        let map = slot.borrow();
+        if let Some(&alloc_len) = map.get(&addr) {
+            return len <= alloc_len;
+        }
+        map.iter().any(|(&base, &alloc_len)| {
+            base <= addr
+                && base
+                    .checked_add(alloc_len)
+                    .is_some_and(|alloc_end| end <= alloc_end)
+        })
+    })
+}
+
 unsafe fn read_utf8_slice<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
-    if len == 0 {
-        return Ok("");
-    }
     if ptr.is_null() {
         return Err("null input pointer".to_string());
+    }
+    if !is_within_live_allocation(ptr as usize, len) {
+        return Err("input pointer/length outside live WASM allocation".to_string());
+    }
+    if len == 0 {
+        return Ok("");
     }
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
     std::str::from_utf8(slice).map_err(|err| format!("invalid UTF-8 input: {err}"))
@@ -69,15 +94,26 @@ pub extern "C" fn wasm_alloc(len: usize) -> *mut u8 {
     let Ok(layout) = Layout::from_size_align(size, 1) else {
         return std::ptr::null_mut();
     };
-    unsafe { alloc(layout) }
+    let ptr = unsafe { alloc(layout) };
+    if !ptr.is_null() {
+        LIVE_ALLOCS.with(|slot| {
+            slot.borrow_mut().insert(ptr as usize, len);
+        });
+    }
+    ptr
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn wasm_dealloc(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn wasm_dealloc(ptr: *mut u8, _len: usize) {
     if ptr.is_null() {
         return;
     }
-    let size = len.max(1);
+    let recorded_len = LIVE_ALLOCS.with(|slot| slot.borrow_mut().remove(&(ptr as usize)));
+    let Some(alloc_len) = recorded_len else {
+        // Ignore unknown or already-freed pointers instead of corrupting the allocator.
+        return;
+    };
+    let size = alloc_len.max(1);
     if let Ok(layout) = Layout::from_size_align(size, 1) {
         unsafe { dealloc(ptr, layout) };
     }
@@ -217,6 +253,10 @@ fn parse_json_exact_int(val: &Value, name: &str) -> Result<i64, String> {
     Err(format!("{name} offsets must be integers"))
 }
 
+fn checked_i64_to_usize(val: i64, out_of_bounds_msg: &str) -> Result<usize, String> {
+    usize::try_from(val).map_err(|_| out_of_bounds_msg.to_string())
+}
+
 fn parse_json_span(name: &str, val: &Value) -> Result<AlignmentSpan, String> {
     let Some(obj) = val.as_object() else {
         return Err(format!("{name} span is not valid"));
@@ -230,15 +270,15 @@ fn parse_json_span(name: &str, val: &Value) -> Result<AlignmentSpan, String> {
     }
     let start_i = parse_json_exact_int(&obj["start"], name)?;
     let end_i = parse_json_exact_int(&obj["end"], name)?;
-    if start_i < 0 || end_i < 0 {
-        return Err(format!("{name} span is out of bounds"));
-    }
+    let bounds_err = format!("{name} span is out of bounds");
+    let start = checked_i64_to_usize(start_i, &bounds_err)?;
+    let end = checked_i64_to_usize(end_i, &bounds_err)?;
     let Some(text) = obj["text"].as_str() else {
         return Err(format!("{name} span text does not match the text"));
     };
     Ok(AlignmentSpan {
-        start: start_i as usize,
-        end: end_i as usize,
+        start,
+        end,
         text: text.to_string(),
     })
 }
@@ -314,7 +354,7 @@ pub fn handle_pair_segments_json(input: &str) -> Result<String, String> {
             if i <= 0 {
                 return Err("limit must be positive".to_string());
             }
-            i as usize
+            checked_i64_to_usize(i, "limit is out of bounds")?
         }
     };
     let include_utf16 = obj
@@ -644,6 +684,16 @@ pub extern "C" fn wasm_ac_free(handle: u32) -> u32 {
 mod tests {
     use super::*;
 
+    fn read_result_string() -> String {
+        let ptr = wasm_result_ptr();
+        let len = wasm_result_len();
+        if len == 0 {
+            return String::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(slice.to_vec()).expect("valid utf8 result")
+    }
+
     #[test]
     fn json_segment_and_utf16_coordinates_work() {
         let out = handle_segment_text_json(
@@ -660,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn json_pair_rejects_boolean_and_non_array_alignments() {
+    fn json_pair_rejects_boolean_non_array_and_out_of_range_ints() {
         let err = handle_pair_segments_json(r#"{"source":"a","target":"b","alignments":"bad"}"#)
             .unwrap_err();
         assert!(err.contains("array"));
@@ -670,6 +720,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err2.contains("integers"));
+
+        // Negative and > i64::MAX (u64::MAX) values must be rejected without truncation.
+        let err3 = handle_pair_segments_json(
+            r#"{"source":"a","target":"b","alignments":[{"source":{"start":-1,"end":1,"text":"a"},"target":null}]}"#,
+        )
+        .unwrap_err();
+        assert!(err3.contains("out of bounds"));
+
+        let err4 = handle_pair_segments_json(
+            r#"{"source":"a","target":"b","alignments":[{"source":{"start":0,"end":18446744073709551615,"text":"a"},"target":null}]}"#,
+        )
+        .unwrap_err();
+        assert!(err4.contains("out of bounds"));
+
+        let err5 = handle_pair_segments_json(
+            r#"{"source":"a","target":"b","limit":18446744073709551615}"#,
+        )
+        .unwrap_err();
+        assert!(err5.contains("out of bounds"));
+
+        assert!(checked_i64_to_usize(-1, "oob").is_err());
+        assert_eq!(checked_i64_to_usize(42, "oob"), Ok(42));
     }
 
     #[test]
@@ -686,5 +758,45 @@ mod tests {
         assert_eq!(arr[0]["order"], 1);
         assert_eq!(arr[0]["utf16_start"], 2);
         assert_eq!(arr[0]["utf16_end"], 6);
+    }
+
+    #[test]
+    fn wasm_abi_validates_live_allocations_and_safe_dealloc() {
+        // 1. Null and forged pointers must be rejected before dereferencing.
+        assert_eq!(unsafe { wasm_segment_text(std::ptr::null(), 4) }, 1);
+        assert!(read_result_string().contains("null"));
+
+        let stack_buf = *b"{\"text\":\"abc\"}";
+        assert_eq!(
+            unsafe { wasm_segment_text(stack_buf.as_ptr(), stack_buf.len()) },
+            1
+        );
+        assert!(read_result_string().contains("live WASM allocation"));
+
+        // 2. Valid allocation works, over-length read is rejected.
+        let payload = br#"{"text":"abc","limit":1800}"#;
+        let ptr = wasm_alloc(payload.len());
+        assert!(!ptr.is_null());
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), ptr, payload.len());
+        }
+        assert_eq!(unsafe { wasm_segment_text(ptr, payload.len() + 1) }, 1);
+        assert!(read_result_string().contains("live WASM allocation"));
+
+        assert_eq!(unsafe { wasm_segment_text(ptr, payload.len()) }, 0);
+        assert!(read_result_string().contains("\"end\":3"));
+
+        // 3. Dealloc with mismatched length uses recorded layout; double-free & invalid ptr are safe no-ops.
+        unsafe {
+            wasm_dealloc(ptr, payload.len() + 999);
+            wasm_dealloc(ptr, payload.len());
+            wasm_dealloc(stack_buf.as_ptr() as *mut u8, stack_buf.len());
+        }
+
+        // 4. Freed pointer is rejected on subsequent calls.
+        assert_eq!(unsafe { wasm_segment_text(ptr, payload.len()) }, 1);
+        assert!(read_result_string().contains("live WASM allocation"));
+        assert_eq!(unsafe { wasm_ac_create(ptr, payload.len()) }, 0);
+        assert!(read_result_string().contains("live WASM allocation"));
     }
 }

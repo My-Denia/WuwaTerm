@@ -162,6 +162,8 @@ def test_native_delegation_path_with_stub_module(monkeypatch: pytest.MonkeyPatch
         TermAutomaton=FakeAutomaton,
     )
     monkeypatch.setattr(native_kernel, "_native_module_cache", fake_mod)
+    monkeypatch.setattr(native_kernel.unicodedata, "unidata_version", "15.0.0")
+    monkeypatch.setattr(native_kernel, "_digit_parity_cache", None)
 
     assert native_kernel.native_kernel_available() is True
     assert native_kernel.kernel_backend() == "native"
@@ -185,6 +187,53 @@ def test_native_delegation_path_with_stub_module(monkeypatch: pytest.MonkeyPatch
     assert scanner.state_count > 1
     assert scanner.scan_and_select("声骸技能") == [(0, 4, 1)]
     assert sorted(scanner.find_all("声骸技能")) == [(0, 2, 0), (0, 4, 1)]
+
+    native_kernel.reset_native_kernel_cache()
+
+
+def test_unicode_14_vs_15_isdigit_mismatch_falls_back_to_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Python's Unicode version disagrees with Rust's frozen 15.0.0 isdigit() table,
+    digit-dependent segmentation/spans must fall back to pure Python (e.g. U+11F50 + '.1')."""
+    monkeypatch.delenv("WUWATERM_DISABLE_NATIVE_KERNEL", raising=False)
+    native_kernel.reset_native_kernel_cache()
+
+    called_native: list[str] = []
+
+    def _boom(name: str):
+        def _fn(*_args, **_kwargs):
+            called_native.append(name)
+            raise AssertionError(f"native {name} should not run on mismatched Unicode runtime")
+
+        return _fn
+
+    fake_mod = SimpleNamespace(
+        is_py_isdigit=lambda ch: ch in {"\u11f50", "\u1e4f0", "\u00b2"} or ch.isdigit(),
+        sentence_ranges_v2=_boom("sentence_ranges_v2"),
+        review_sentence_ranges_v2=_boom("review_sentence_ranges_v2"),
+        segment_text=_boom("segment_text"),
+        pair_segments=_boom("pair_segments"),
+        scalar_to_utf16=lambda t, s: native_kernel.scalar_to_utf16(t, s, prefer_native=False),
+    )
+    monkeypatch.setattr(native_kernel, "_native_module_cache", fake_mod)
+    monkeypatch.setattr(native_kernel.unicodedata, "unidata_version", "14.0.0")
+    monkeypatch.setattr(native_kernel, "_digit_parity_cache", None)
+
+    for sample in ("\u11f50.1", "\u1e4f0.1"):
+        assert native_kernel.sentence_ranges_v2(sample) == text_spans.sentence_ranges_v2(sample)
+        assert native_kernel.review_sentence_ranges_v2(
+            sample
+        ) == text_spans.review_sentence_ranges_v2(sample)
+        assert native_kernel.segment_text(sample, limit=2) == segmentation.segment_text(
+            sample, limit=2
+        )
+        assert native_kernel.pair_segments(sample, sample, limit=2) == segmentation.pair_segments(
+            sample, sample, limit=2
+        )
+    assert called_native == []
+    # Non-isdigit operations still use native module normally.
+    assert native_kernel.scalar_to_utf16("🌊A", 1) == 2
 
     native_kernel.reset_native_kernel_cache()
 
@@ -223,6 +272,19 @@ def test_real_native_extension_parity_if_installed(monkeypatch: pytest.MonkeyPat
                 )
             ]
             assert native_out == case["pairs"], case["name"]
+
+    # Unicode 14.0 vs 15.0 regression: U+11F50 (Kawi) and U+1E4F0 (Nag Mundari) + ".1" at limit=2.
+    for sample in ("\u11f50.1", "\u1e4f0.1"):
+        assert native_kernel.sentence_ranges_v2(sample) == text_spans.sentence_ranges_v2(sample)
+        assert native_kernel.review_sentence_ranges_v2(
+            sample
+        ) == text_spans.review_sentence_ranges_v2(sample)
+        assert native_kernel.segment_text(sample, limit=2) == segmentation.segment_text(
+            sample, limit=2
+        )
+        assert native_kernel.pair_segments(sample, sample, limit=2) == segmentation.pair_segments(
+            sample, sample, limit=2
+        )
 
     surfaces = ["声骸", "声骸技能", "技能", "ab", "bab"]
     native_scanner = native_kernel.TermScanner(surfaces, prefer_native=True)

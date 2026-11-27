@@ -10,7 +10,7 @@ WuwaTerm ships a multi-target Rust Cargo workspace under [`crates/`](../crates/R
 
 - [`crates/wuwaterm-text-kernel/`](../crates/wuwaterm-text-kernel/): Pure `std`-only core library (`text_spans`, `segmentation`, `aho_corasick`) and `wuwaterm-kernel-cli` binary. Zero network, SQLite, or UI dependencies.
 - [`crates/wuwaterm-text-kernel-py/`](../crates/wuwaterm-text-kernel-py/): Optional PyO3 / maturin extension building the `_wuwaterm_text_kernel` Python module.
-- [`crates/wuwaterm-text-kernel-wasm/`](../crates/wuwaterm-text-kernel-wasm/): `wasm32-unknown-unknown` `cdylib` plus a zero-bundler ESM wrapper ([`js/index.mjs`](../crates/wuwaterm-text-kernel-wasm/js/index.mjs)) and TypeScript definitions ([`js/index.d.ts`](../crates/wuwaterm-text-kernel-wasm/js/index.d.ts)) for Browser, Web Worker, and Node.js runtimes.
+- [`crates/wuwaterm-text-kernel-wasm/`](../crates/wuwaterm-text-kernel-wasm/): `wasm32-unknown-unknown` `cdylib` plus a zero-bundler ESM wrapper ([`js/index.mjs`](../crates/wuwaterm-text-kernel-wasm/js/index.mjs)) and TypeScript definitions ([`js/index.d.mts`](../crates/wuwaterm-text-kernel-wasm/js/index.d.mts)) for Browser, Web Worker, and Node.js runtimes.
 - [`crates/scripts/run_differential_and_bench.py`](../crates/scripts/run_differential_and_bench.py): Differential parity harness against `contracts/segmentation-v1.json` (40/40 fixtures), all 1,112,064 non-surrogate Unicode scalars, seeded fuzz corpora, and optional real dictionary benchmarks.
 
 ## Non-Breaking Python Adoption (`wuwaterm.native_kernel`)

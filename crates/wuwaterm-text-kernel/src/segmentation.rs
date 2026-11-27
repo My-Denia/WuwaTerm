@@ -414,12 +414,17 @@ fn drop_empty_pairs(
     out
 }
 
+#[inline]
+fn proportional_cut_target(a: usize, n: usize, i: usize, k: usize) -> usize {
+    a + (((i as u128) * (n as u128)) / (k as u128)) as usize
+}
+
 fn fallback_cuts(chars: &[char], a: usize, b: usize, k: usize) -> Option<Vec<usize>> {
     let mut cuts = Vec::with_capacity(k.saturating_sub(1));
     let mut prev = a;
     let n = b - a;
     for i in 1..k {
-        let t_i = a + (i * n) / k;
+        let t_i = proportional_cut_target(a, n, i, k);
         let mut found = None;
         for d in 0..=HARD_CUT_WINDOW {
             for cand in [t_i.checked_sub(d), t_i.checked_add(d)]
@@ -724,4 +729,20 @@ pub fn pair_chars(
 
     validate_pairs(src_chars.len(), tgt_chars.len(), &result, limit);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proportional_cut_target;
+
+    #[test]
+    fn proportional_cut_target_avoids_32bit_mul_overflow() {
+        // i * n = 10_000_000_000 > u32::MAX, must not wrap on wasm32.
+        assert_eq!(proportional_cut_target(10, 100_000, 100_000, 200_000), 50_010);
+        // Near-u32::MAX range with large k.
+        assert_eq!(
+            proportional_cut_target(0, 2_000_000_000, 1_500_000_000, 2_000_000_000),
+            1_500_000_000
+        );
+    }
 }

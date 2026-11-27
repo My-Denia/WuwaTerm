@@ -66,14 +66,18 @@ jobs:
         run: node crates/wuwaterm-text-kernel-wasm/js/test_contracts.mjs
 
   pyo3-extension:
-    name: PyO3 native extension build & Python parity
+    name: PyO3 native extension build & Python ${{ matrix.python-version }} parity
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install build and test tools
         run: python -m pip install --upgrade pip "maturin>=1.7,<2.0" pytest httpx
       - name: Build and install PyO3 wheel

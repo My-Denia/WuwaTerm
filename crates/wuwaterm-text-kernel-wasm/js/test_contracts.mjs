@@ -150,6 +150,21 @@ assert.deepEqual(spans.review_sentences_v2, [
   [26, 30],
 ]);
 
+// 6. wasm32 32-bit overflow & raw ABI allocation boundary regression checks
+assert.throws(
+  () =>
+    kernel.pairSegments("a", "b", limit, [
+      { source: { start: 4294967296, end: 4294967297, text: "a" }, target: null },
+    ]),
+  WuwaTermKernelError,
+);
+assert.throws(
+  () => kernel.pairSegments("a", "b", 4294967296, null),
+  WuwaTermKernelError,
+);
+assert.equal(kernel._exports.wasm_segment_text(0, 4), 1);
+assert.equal(kernel._exports.wasm_segment_text(16, 4), 1);
+
 console.log(
   `WASM_CONTRACTS PASS: segment=${segPassed}/${fixture.segment_cases.length} ` +
     `pair=${pairPassed}/${fixture.pair_cases.length} ` +
