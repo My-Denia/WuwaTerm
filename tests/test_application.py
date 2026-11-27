@@ -14,13 +14,15 @@ import inspect
 import json
 import logging
 import re
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
 from wuwaterm.db import connect, insert_records
-from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.application import (
     ERROR_INPUT_TOO_LONG,
@@ -910,26 +912,64 @@ def test_dictionary_identity_recomputes_when_term_content_changes_with_same_meta
     assert after.revision == report.dictionary.revision
 
 
-def test_dictionary_identity_caches_on_unchanged_db_and_is_thread_safe(
-    sample_db, monkeypatch
+def test_dictionary_identity_supports_concurrent_reads_and_preserves_in_process_read_locks(
+    tmp_path: Path, sample_db
 ):
-    service = build_term_service(sample_db)
+    locked_db = tmp_path / "locked.db"
+    locked_db.write_bytes(sample_db.read_bytes())
+    service = build_term_service(locked_db)
     expected = dictionary_identity(service)
-
-    snapshot_calls = 0
-
-    def fail_if_rescanned(self):
-        nonlocal snapshot_calls
-        snapshot_calls += 1
-        raise AssertionError("cached dictionary_identity must not re-scan terms")
-
-    monkeypatch.setattr(TermService, "review_snapshot", fail_if_rescanned)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: dictionary_identity(service), range(16)))
 
-    assert snapshot_calls == 0
     assert results == [expected] * 16
+
+    reader = connect(locked_db)
+    writer = sqlite3.connect(locked_db, timeout=0.0)
+    probe_script = (
+        "import sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], timeout=0.0); "
+        "c.execute('BEGIN EXCLUSIVE')"
+    )
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT COUNT(*) FROM terms").fetchone()[0] > 0
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.execute("BEGIN EXCLUSIVE")
+        before_probe = subprocess.run(
+            [sys.executable, "-c", probe_script, str(locked_db)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert before_probe.returncode != 0
+        assert "locked" in before_probe.stderr
+
+        # Must not open/close the raw DB file descriptor and drop reader's POSIX fcntl lock.
+        assert service.dictionary_identity() == expected
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.execute("BEGIN EXCLUSIVE")
+        after_probe = subprocess.run(
+            [sys.executable, "-c", probe_script, str(locked_db)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert after_probe.returncode != 0
+        assert "locked" in after_probe.stderr
+    finally:
+        reader.close()
+        writer.close()
+
+    after_release = sqlite3.connect(locked_db, timeout=0.0)
+    try:
+        after_release.execute("BEGIN EXCLUSIVE")
+        after_release.rollback()
+    finally:
+        after_release.close()
 
 
 def test_probe_database_reports_unreadable_database(tmp_path: Path, sample_db):

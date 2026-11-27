@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-import threading
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -131,9 +130,6 @@ class TermService:
         self.db_path = Path(db_path)
         self._scoring_rows_key: tuple[object, ...] | None = None
         self._scoring_rows_cache: tuple[_ScoringRow, ...] = ()
-        self._dictionary_identity_lock = threading.Lock()
-        self._dictionary_identity_key: tuple[object, ...] | None = None
-        self._dictionary_identity_cache: DictionaryIdentity | None = None
 
     def lookup(self, query: str, limit: int = 5) -> LookupResult:
         query = query.strip()
@@ -211,68 +207,16 @@ class TermService:
             entries=tuple(row_to_entry(row) for row in term_rows),
         )
 
-    def _dictionary_file_stamp(self) -> tuple[object, ...] | None:
-        """O(1) filesystem + SQLite header stamp for caching dictionary identity."""
-        path = self.db_path.resolve(strict=False)
-        try:
-            stat = path.stat()
-            with path.open("rb") as handle:
-                header = handle.read(28)
-        except OSError:
-            return None
-        # Bytes 24..27 hold SQLite's file change counter, incremented on every
-        # write commit to the main DB file even if mtime/size stayed equal.
-        change_counter = header[24:28] if len(header) >= 28 else b""
-        wal_path = path.with_name(f"{path.name}-wal")
-        try:
-            wal_stat = wal_path.stat()
-            wal_stamp: tuple[int, int, int] | None = (
-                wal_stat.st_size,
-                wal_stat.st_mtime_ns,
-                wal_stat.st_ctime_ns,
-            )
-        except OSError:
-            wal_stamp = None
-        return (
-            str(path),
-            stat.st_dev,
-            stat.st_ino,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
-            change_counter,
-            wal_stamp,
-        )
-
     def dictionary_identity(self) -> DictionaryIdentity:
-        """Return the cached cryptographic dictionary identity for the active DB."""
-        custom_snapshot = (
-            "review_snapshot" in self.__dict__
-            or type(self).review_snapshot is not TermService.review_snapshot
+        """Return the cryptographic dictionary identity from one SQLite snapshot."""
+        snapshot = self.review_snapshot()
+        return DictionaryIdentity(
+            revision=dictionary_revision(snapshot.entries),
+            schema_version=snapshot.metadata.get("schema_version"),
+            source_commit=snapshot.metadata.get("source_commit"),
+            source_game_version=snapshot.metadata.get("source_game_version"),
+            term_count=snapshot.term_count,
         )
-        with self._dictionary_identity_lock:
-            stamp_before = None if custom_snapshot else self._dictionary_file_stamp()
-            if (
-                stamp_before is not None
-                and stamp_before == self._dictionary_identity_key
-                and self._dictionary_identity_cache is not None
-            ):
-                return self._dictionary_identity_cache
-
-            snapshot = self.review_snapshot()
-            identity = DictionaryIdentity(
-                revision=dictionary_revision(snapshot.entries),
-                schema_version=snapshot.metadata.get("schema_version"),
-                source_commit=snapshot.metadata.get("source_commit"),
-                source_game_version=snapshot.metadata.get("source_game_version"),
-                term_count=snapshot.term_count,
-            )
-            if not custom_snapshot and stamp_before is not None:
-                stamp_after = self._dictionary_file_stamp()
-                if stamp_after == stamp_before:
-                    self._dictionary_identity_key = stamp_after
-                    self._dictionary_identity_cache = identity
-            return identity
 
     def _exact(self, query: str) -> list[LookupCandidate]:
         # One normalization serves both sides: the query is matched against

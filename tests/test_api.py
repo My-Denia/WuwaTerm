@@ -1361,6 +1361,64 @@ def test_dictionary_handles_null_game_version_and_concurrent_requests(
     assert len(revisions) == 1
 
 
+def test_dictionary_reflects_wal_commits_immediately_without_stale_cache(
+    monkeypatch, tmp_path, sample_db
+):
+    wal_db = tmp_path / "wal-dict.db"
+    wal_db.write_bytes(sample_db.read_bytes())
+    with connect(wal_db) as conn:
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode is not None and mode[0].lower() == "wal"
+        conn.commit()
+
+    app, store = build_client_app(tmp_path, wal_db)
+    _, token = issue_device(store, "owner", [SCOPE_META, SCOPE_TRANSLATE])
+    disable_llm(monkeypatch)
+
+    meta_before = run(call(app, "GET", "/v1/meta", headers=bearer(token))).json()
+    dict_before = run(call(app, "GET", "/v1/dictionary", headers=bearer(token))).json()
+
+    writer = connect(wal_db)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        row = writer.execute("SELECT id, en FROM terms ORDER BY id LIMIT 1").fetchone()
+        assert row is not None
+        updated_en = ("W" if row["en"][0] != "W" else "V") + row["en"][1:]
+        writer.execute("UPDATE terms SET en = ? WHERE id = ?", (updated_en, row["id"]))
+        writer.commit()
+    finally:
+        writer.close()
+
+    meta_after = run(call(app, "GET", "/v1/meta", headers=bearer(token))).json()
+    dict_after = run(call(app, "GET", "/v1/dictionary", headers=bearer(token))).json()
+    review_after = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐拿到了声骸。",
+                "target": "Jinhsi got an Echo.",
+                "direction": "en",
+            },
+            headers=bearer(token),
+        )
+    ).json()
+
+    assert (
+        meta_after["schema_version"],
+        meta_after["source_commit"],
+        meta_after["term_count"],
+    ) == (
+        meta_before["schema_version"],
+        meta_before["source_commit"],
+        meta_before["term_count"],
+    )
+    assert dict_after["revision"] != dict_before["revision"]
+    assert dict_after["revision"] == review_after["dictionary"]["revision"]
+
+
 # --------------------------------------------------------------------------
 # Budgets (AC7): per-process concurrency cap and per-minute call cap
 # --------------------------------------------------------------------------
