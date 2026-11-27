@@ -188,15 +188,23 @@ What it does, in this order:
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
 5. `--with-telegram` orchestrates standalone `WuwaTerm-Telegram` in HTTP mode
-   against the shared Core API: issues a dedicated `telegram` device token
+   against the shared Core API (**requires `>= v0.7.0`** or an explicit
+   compatible `--telegram-package`; `v0.6.1`, the current default in
+   `contracts/products.json`, does not include the HTTP Core backend and fails
+   closed unless you deploy `v0.6.1` via `--telegram-dir <checkout>` and
+   `WuwaTerm-Telegram`'s own `deploy/docker-compose.yml`). For `>= v0.7.0` (or
+   `--telegram-package`), it issues a dedicated `telegram` device token
    (`state-telegram/device.token`, mode `0600`), writes
-   `state-telegram/telegram.env` (mode `0600`) with `WUWATERM_CORE_MODE=http`,
-   `WUWATERM_API_BASE_URL=http://127.0.0.1:<api_port>`,
-   `WUWATERM_API_DEVICE_TOKEN` and `TELEGRAM_BOT_TOKEN`, verifies the release
+   `state-telegram/telegram.env` (mode `0600`) with
+   `WUWATERM_CORE_API_URL=http://127.0.0.1:<api_port>`,
+   `WUWATERM_CORE_API_TOKEN` and `TELEGRAM_BOT_TOKEN`, verifies the release
    `image.oci.tar` against `SHA256SUMS` (and `contracts/products.json`, or a
-   local archive via `--telegram-package`), starts `wuwaterm-telegram` with
-   `--network host`, `state-telegram/state:/app/state:rw` and a private tmpfs,
-   and runs `python -B -m wuwaterm_telegram.operations health`. Pass
+   local archive via `--telegram-package`), refuses to overwrite any existing
+   unmanaged `wuwaterm-telegram` or Compose-managed Telegram container, starts
+   `wuwaterm-telegram` labeled `org.wuwaterm.managed-by=setup.sh` with
+   `--network host`, `data:/app/data:ro`, `state-telegram/state:/app/state:rw`
+   and a private tmpfs, and runs
+   `python -B -m wuwaterm_telegram.operations health`. Pass
    `--telegram-dir <checkout>` if you instead want the legacy checkout-prep
    path that copies `data/terms.db` and prints manual wheel-build steps.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the

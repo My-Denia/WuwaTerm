@@ -645,7 +645,7 @@ aids for a single writer, not a cluster protocol.
 | Credential store | Missing, deleted, locked, corrupt | `503` (store unusable), never `401` — a valid device is never told to re-pair because of a database hiccup |
 | Filesystem state | Disk full, lock errors, durability errors | Settings/reply-index raise typed errors; startup migration refuses overwrite of existing targets |
 | Ingress route | Proxy down, route removed | The client renders an offline or timeout state; the service keeps running on loopback and the bot is unaffected |
-| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for both serving containers |
+| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop (and refuses preflight if legacy `wuwaterm-bot` is still running; a stopped `wuwaterm-bot` is left untouched with a manual `docker rm` hint), or rolls back image + DB + pointer for `wuwaterm-api` after failed post-promote steps |
 
 No automatic cross-region failover. Recovery is restart, restore from
 timestamped backups under `data/deployment-backups` (the newest five snapshots;
@@ -664,13 +664,12 @@ From repo scripts and docs only (no live VPS mutation required to understand):
 3. **Verify** — `verify-db`, seed/exact/idempotent scripts as wired in
    `deploy/vps-update.sh` and `docs/validation.md`.
 4. **Build immutable runtime image** labeled with source commit revision.
-5. **Promote** — stop both serving containers, swap DB, start the exact image,
-   smoke (`scripts/deploy_smoke.py` with diagnostic send disabled in updater
-   path, plus an in-container readiness probe for the API), write immutable
+5. **Promote** — stop `wuwaterm-api`, swap DB, start `wuwaterm-api` on the exact
+   image, verify in-container `/readyz` readiness, write immutable
    `.deployments/<commit>.json`, atomic `.deploy_commit`.
 6. **Rollback** — on post-promote failure restore previous DB, rollback image
    tag, and pointer (`deploy/vps-update.sh` `rollback_on_failure`), restarting
-   only the surfaces that were running before.
+   `wuwaterm-api`.
 
 Runtime vs builder separation: [ADR 0007](adr/0007-runtime-builder-separation.md).
 Dictionary-before-LLM: [ADR 0006](adr/0006-dictionary-first-before-llm.md).

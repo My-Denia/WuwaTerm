@@ -37,7 +37,7 @@ case "$*" in
       printf 'Error: simulated load failure\\n' >&2
       exit 1
     fi
-    printf '%s\\n' "${STUB_TELEGRAM_LOAD_OUTPUT:-Loaded image: wuwaterm-telegram:v0.6.1}" ;;
+    printf '%s\\n' "${STUB_TELEGRAM_LOAD_OUTPUT:-Loaded image: wuwaterm-telegram:v0.7.0}" ;;
   "image inspect "*)
     if [ "${STUB_TELEGRAM_IMAGE_PRESENT:-1}" = 1 ]; then
       printf 'sha256:0000000000000000000000000000000000000000000000000000000000000000\\n'
@@ -51,6 +51,8 @@ case "$*" in
     exit 0 ;;
   "inspect -f {{.State.Status}} wuwaterm-bot") printf '%s\\n' "${STUB_BOT_STATE:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_STATE:-}" ;;
+  *'org.wuwaterm.managed-by'*'wuwaterm-telegram')
+    printf '%s\\n' "${STUB_PRODUCT_MANAGED_BY:-}" ;;
   "inspect -f {{.State.Status}} deploy-wuwaterm-telegram-1") printf '%s\\n' "${STUB_AUTO_PRODUCT_STATE:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-telegram-wuwaterm-telegram-1") printf '%s\\n' "${STUB_PROJECT_PRODUCT_STATE:-}" ;;
   "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_LABEL_IDS:-}" ;;
@@ -361,9 +363,11 @@ def test_with_telegram_orchestrates_core_and_http_mode_container(install_root):
     tg_env = tg_root / "telegram.env"
     assert mode_of(tg_env) == 0o600
     values = env_values(tg_env)
-    assert values["WUWATERM_CORE_MODE"] == "http"
-    assert values["WUWATERM_API_BASE_URL"] == "http://127.0.0.1:8788"
-    assert values["WUWATERM_API_DEVICE_TOKEN"] == tg_token
+    assert values["WUWATERM_CORE_API_URL"] == "http://127.0.0.1:8788"
+    assert values["WUWATERM_CORE_API_TOKEN"] == tg_token
+    assert "WUWATERM_CORE_MODE" not in values
+    assert "WUWATERM_API_BASE_URL" not in values
+    assert "WUWATERM_API_DEVICE_TOKEN" not in values
     assert values["TELEGRAM_BOT_TOKEN"] == "123456:stub-tg-secret"
     assert values["OWNER_USER_ID"] == "42"
     assert values["WUWATERM_STATE_DIR"] == "/app/state"
@@ -371,26 +375,232 @@ def test_with_telegram_orchestrates_core_and_http_mode_container(install_root):
     assert "WUWATERM_API_WEB_EDGE_SECRET" not in values
     assert "WUWATERM_SITE_DEVICE_TOKEN" not in values
     assert "do-not-copy" not in tg_env.read_text(encoding="utf-8")
+    assert (tg_root / "image.version").read_text(encoding="utf-8").strip() == "local-package"
     log = docker_log(install_root)
     assert "up -d --no-build wuwaterm-api" in log
     assert "device issue --name telegram --scopes translate,meta" in log
     assert f"load -i {tg_pkg / 'image.oci.tar'}" in log
-    assert "run -d --name wuwaterm-telegram --restart unless-stopped --network host" in log
+    assert "rm -f wuwaterm-telegram" not in log
+    assert (
+        "run -d --name wuwaterm-telegram --restart unless-stopped --network host "
+        "--label org.wuwaterm.managed-by=setup.sh"
+    ) in log
+    assert "--label com.docker.compose.service=wuwaterm-telegram" not in log
     assert f"--env-file {tg_env}" in log
+    assert f"-v {install_root / 'data'}:/app/data:ro" in log
     assert f"-v {tg_root / 'state'}:/app/state:rw" in log
     assert "--tmpfs /run/wuwaterm-telegram:" in log
     assert "exec wuwaterm-telegram python -B -m wuwaterm_telegram.operations health" in log
     assert not re.search(r"(build|pull|up -d --no-build) wuwaterm$", log, re.MULTILINE), log
 
-    # Re-running without --telegram-package reuses the loaded image, token and env without network.
+    # Re-running against a setup.sh-managed container replaces only that container
+    # and reuses the loaded image, token and env without network.
     (install_root / "docker.log").unlink()
     (install_root / "curl.log").unlink()
-    again = run_setup(install_root, "--with-telegram", "--no-adopt")
+    again = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={"STUB_PRODUCT_STATE": "running", "STUB_PRODUCT_MANAGED_BY": "setup.sh"},
+    )
     assert again.returncode == 0, again.stderr
     assert "reusing the installed Telegram image" in again.stdout
-    assert "device issue" not in docker_log(install_root)
-    assert "load -i" not in docker_log(install_root)
+    again_log = docker_log(install_root)
+    assert "rm -f wuwaterm-telegram" in again_log
+    assert "device issue" not in again_log
+    assert "load -i" not in again_log
     assert "SHA256SUMS" not in (install_root / "curl.log").read_text(encoding="utf-8")
+
+    # If state-telegram/device.token is reissued, WUWATERM_CORE_API_TOKEN in
+    # state-telegram/telegram.env is synchronized to match it.
+    token_file.unlink()
+    reissued = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={"STUB_PRODUCT_STATE": "running", "STUB_PRODUCT_MANAGED_BY": "setup.sh"},
+    )
+    assert reissued.returncode == 0, reissued.stderr
+    new_token = token_file.read_text(encoding="utf-8").strip()
+    assert new_token != tg_token
+    assert env_values(tg_env)["WUWATERM_CORE_API_TOKEN"] == new_token
+    assert mode_of(tg_env) == 0o600
+
+
+def test_with_telegram_and_with_all_fail_closed_on_default_v061(install_root):
+    (install_root / "contracts").mkdir()
+    shutil.copy2(ROOT / "contracts" / "products.json", install_root / "contracts" / "products.json")
+    write_env(install_root, telegram_token="123456:stub-tg-secret")
+    web_pkg = write_web_package(
+        install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST
+    )
+
+    tg_only = run_setup(install_root, "--with-telegram", "--no-adopt")
+    assert tg_only.returncode == 1
+    assert "v0.6.1 does not include the HTTP Core backend" in tg_only.stderr
+    assert ">= v0.7.0" in tg_only.stderr
+    assert "--telegram-dir" in tg_only.stderr
+    assert not (install_root / "data" / "terms.db").exists()
+    assert not (install_root / "curl.log").exists()
+    assert "run -d --name wuwaterm-telegram" not in docker_log(install_root)
+
+    with_all = run_setup(
+        install_root,
+        "--with-all",
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--web-package",
+        str(web_pkg),
+        "--no-adopt",
+    )
+    assert with_all.returncode == 1
+    assert "v0.6.1 does not include the HTTP Core backend" in with_all.stderr
+    assert not (install_root / "data" / "terms.db").exists()
+    assert "run -d --name wuwaterm-telegram" not in docker_log(install_root)
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
+def test_with_telegram_v070_release_orchestrates_and_invalidates_cache_on_version_change(
+    install_root,
+):
+    import hashlib
+
+    write_env(install_root, telegram_token="123456:stub-v070-secret")
+    archive_bytes = b"fake-v070-oci-archive\n"
+    archive_sha = hashlib.sha256(archive_bytes).hexdigest()
+    # Replace curl stub so release downloads write matching SHA256SUMS + image.oci.tar.
+    (install_root / "bin" / "curl").write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "curl $*" >> "$STUB_CURL_LOG"\n'
+        'if [ "${STUB_CURL_FAIL:-0}" = 1 ]; then exit 7; fi\n'
+        "out=\n"
+        "prev=\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$prev" = "-o" ]; then out=$arg; prev=; continue; fi\n'
+        '  prev=$arg\n'
+        "done\n"
+        'case "$*" in\n'
+        "  *SHA256SUMS*)\n"
+        f'    [ -n "$out" ] && printf \'%s  image.oci.tar\\n\' "{archive_sha}" >"$out" ;;\n'
+        "  *image.oci.tar*)\n"
+        '    [ -n "$out" ] && printf \'fake-v070-oci-archive\\n\' >"$out" ;;\n'
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (install_root / "bin" / "curl").chmod(0o755)
+
+    result = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={
+            "WUWATERM_TELEGRAM_VERSION": "v0.7.0",
+            "STUB_TELEGRAM_LOAD_OUTPUT": "Loaded image: wuwaterm-telegram:v0.7.0",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    curl_text = (install_root / "curl.log").read_text(encoding="utf-8")
+    assert "/releases/download/v0.7.0/SHA256SUMS" in curl_text
+    assert "/releases/download/v0.7.0/image.oci.tar" in curl_text
+    tg_root = install_root / "state-telegram"
+    assert (tg_root / "image.version").read_text(encoding="utf-8").strip() == "v0.7.0"
+    assert (tg_root / "image.ref").read_text(encoding="utf-8").strip() == "wuwaterm-telegram:v0.7.0"
+    values = env_values(tg_root / "telegram.env")
+    assert values["WUWATERM_CORE_API_URL"] == "http://127.0.0.1:8788"
+    assert values["WUWATERM_CORE_API_TOKEN"] == (tg_root / "device.token").read_text(
+        encoding="utf-8"
+    ).strip()
+    assert "WUWATERM_CORE_MODE" not in values
+    log = docker_log(install_root)
+    assert "--label org.wuwaterm.managed-by=setup.sh" in log
+    assert "--label com.docker.compose.service=wuwaterm-telegram" not in log
+    assert f"-v {install_root / 'data'}:/app/data:ro" in log
+    assert f"-v {tg_root / 'state'}:/app/state:rw" in log
+    assert "exec wuwaterm-telegram python -B -m wuwaterm_telegram.operations health" in log
+
+    # Same version reuses cache without network.
+    (install_root / "curl.log").unlink()
+    (install_root / "docker.log").unlink()
+    same = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={
+            "WUWATERM_TELEGRAM_VERSION": "v0.7.0",
+            "STUB_PRODUCT_STATE": "running",
+            "STUB_PRODUCT_MANAGED_BY": "setup.sh",
+        },
+    )
+    assert same.returncode == 0, same.stderr
+    assert "reusing the installed Telegram image wuwaterm-telegram:v0.7.0 (v0.7.0)" in same.stdout
+    assert "SHA256SUMS" not in (install_root / "curl.log").read_text(encoding="utf-8")
+
+    # Bumping WUWATERM_TELEGRAM_VERSION invalidates the cached image.ref and fetches v0.8.0.
+    (install_root / "curl.log").unlink()
+    (install_root / "docker.log").unlink()
+    upgraded = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={
+            "WUWATERM_TELEGRAM_VERSION": "v0.8.0",
+            "STUB_PRODUCT_STATE": "running",
+            "STUB_PRODUCT_MANAGED_BY": "setup.sh",
+            "STUB_TELEGRAM_LOAD_OUTPUT": "Loaded image: wuwaterm-telegram:v0.8.0",
+        },
+    )
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert "/releases/download/v0.8.0/SHA256SUMS" in (install_root / "curl.log").read_text(
+        encoding="utf-8"
+    )
+    assert (tg_root / "image.version").read_text(encoding="utf-8").strip() == "v0.8.0"
+    assert (tg_root / "image.ref").read_text(encoding="utf-8").strip() == "wuwaterm-telegram:v0.8.0"
+
+
+@pytest.mark.parametrize(
+    ("stub_env", "expected_error"),
+    [
+        ({"STUB_PRODUCT_STATE": "running"}, "not managed by deploy/setup.sh"),
+        ({"STUB_PRODUCT_STATE": "exited"}, "not managed by deploy/setup.sh"),
+        (
+            {
+                "STUB_PRODUCT_LABEL_IDS": "deploy-wuwaterm-telegram-1",
+                "STUB_AUTO_PRODUCT_STATE": "running",
+            },
+            "existing Compose-managed wuwaterm-telegram container",
+        ),
+        (
+            {
+                "STUB_PRODUCT_LABEL_IDS": "deploy-wuwaterm-telegram-1",
+                "STUB_AUTO_PRODUCT_STATE": "exited",
+            },
+            "existing Compose-managed wuwaterm-telegram container",
+        ),
+    ],
+)
+def test_with_telegram_fails_closed_on_unmanaged_or_compose_container_without_rm(
+    install_root, stub_env, expected_error
+):
+    write_env(install_root, telegram_token="123456:stub-tg-secret")
+    tg_pkg = write_telegram_package(install_root / "tg-pkg")
+
+    result = run_setup(
+        install_root,
+        "--with-telegram",
+        "--telegram-package",
+        str(tg_pkg),
+        "--no-adopt",
+        env=stub_env,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
+    log = docker_log(install_root)
+    assert "rm -f" not in log
+    assert "run -d --name wuwaterm-telegram" not in log
+    assert not (install_root / "data" / "terms.db").exists()
 
 
 def test_with_telegram_refuses_bad_checksum_before_data_build(install_root):
@@ -1711,12 +1921,13 @@ def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
     assert "release v0.6.1" in result.stdout
     assert "wuwaterm_telegram-0.6.1-py3-none-any.whl" in result.stdout
 
-    # In default HTTP-mode orchestration, curl asks for that tag's SHA256SUMS.
+    # In default HTTP-mode orchestration, v0.6.1 fails closed before network access
+    # because the HTTP Core backend requires >= v0.7.0.
+    (install_root / "curl.log").unlink()
     http_result = run_setup(install_root, "--with-telegram", "--no-adopt")
     assert http_result.returncode == 1
-    assert "/releases/download/v0.6.1/SHA256SUMS" in (install_root / "curl.log").read_text(
-        encoding="utf-8"
-    )
+    assert "v0.6.1 does not include the HTTP Core backend" in http_result.stderr
+    assert not (install_root / "curl.log").exists()
 
 
 def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
