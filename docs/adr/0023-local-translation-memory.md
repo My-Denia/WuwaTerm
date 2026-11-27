@@ -161,14 +161,18 @@ Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_t
   (`(direction, source_masked)`).
 - Self-hosted Web (merged on `WuwaTerm-Web` `main` in PR #81 / `129f6a3`; awaiting
   next self-hosted release): served by the self-hosted Web same-origin backend
-  at `state-web/data/tm.sqlite3` (in the self-hosted Web data directory) under
-  the same `.env` / `data/` deploy rules. Windows and self-hosted Web exchange
-  data via `wuwaterm-tm-v1` JSON and each maintain an independent local SQLite
-  schema (their column order differs — for example, `source_hash` sits at a
-  different column position and Web validates column order strictly, so a
-  Windows `.sqlite3` file cannot be copied directly to Web — while both enforce
-  `0600` permissions, WAL journal mode, `PRAGMA synchronous = FULL`, and
-  separation from Core `terms.db` and shared dictionary data).
+  from `tm.sqlite3` in the same directory as the quota database configured by
+  `WUWATERM_LOCAL_DB_PATH` (`deploy/setup.sh` defaults to `pool.sqlite3`,
+  under `state-web/data/`) and `.env` / `data/` deploy rules. Windows creates
+  its SQLite store via `sqlite3.connect` (WAL journal mode and
+  `PRAGMA synchronous = FULL`), whereas `0600` file permissions are enforced
+  by self-hosted Web (`lib/runtime/tm-store.js`) alongside WAL and
+  `PRAGMA synchronous = FULL`. Windows and self-hosted Web exchange data via
+  `wuwaterm-tm-v1` JSON and each maintain an independent local SQLite schema
+  (their column order differs — for example, `source_hash` sits at a different
+  column position and Web validates column order strictly, so a Windows
+  `.sqlite3` file cannot be copied directly to Web — while both keep user
+  memory separate from Core `terms.db` and shared dictionary data).
 - The memory is not part of `terms.db` and is never written into it: official
   data stays reproducible from pinned TextMaps
   ([ADR 0004](0004-sqlite-terminology-data.md),
@@ -358,9 +362,9 @@ Frozen before any measurement, on fixed documents rather than ad-hoc samples:
 5. **Privacy.** No entry text in logs, receipts, or error messages. Public Web
    writes zero browser storage and clears page memory when the tab closes or
    refreshes; self-hosted Web likewise writes nothing to browser storage, while
-   confirmed entries persist only in the instance's own `tm.sqlite3` (alongside
-   `admission.sqlite3` in the instance local data directory, protected with
-   `0600` permissions).
+   confirmed entries persist only in the instance's own `tm.sqlite3` in the
+   same directory as the `WUWATERM_LOCAL_DB_PATH` database (installer default
+   `pool.sqlite3`), protected with `0600` permissions.
 6. **Measured saving.** Model calls and latency per 1,000 characters on an
    unchanged document and on an edited one, reported as the ratio the memory
    claims, before the feature is called done.
