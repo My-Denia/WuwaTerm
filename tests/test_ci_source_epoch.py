@@ -125,14 +125,44 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     for source in (successor, synthetic_merge):
         result = epoch.resolve(source, config)
         assert result["source_epoch"] == "split"
-        assert result["web_revision"] == "eed5d30e26c6446dbff49aa63905ec3ba2db9677"
-        assert result["windows_revision"] == "97c659e22b97f05b9a817c0740ca19d4add63441"
+        assert result["web_revision"] == "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0"
+        assert result["windows_revision"] == "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
         assert result["required_jobs"][-1] == "API to Windows contract"
     # Newer split CONTROL does not change the target's legacy source epoch.
     assert epoch.resolve(LAST, config)["source_epoch"] == "legacy"
 
 
 @pytest.mark.parametrize(("source", "expected_web", "expected_windows"), [
+    (
+        "3144f7b0c5e793826ebea0985b68499b37d8c191",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
+        "716dbf85377c7a3661e0acc73a4703ba40781534",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
+        "df895009c9ed4ca723befaa2bdc1e388226214ef",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
+        "8565b48b628addb6a01569cee00503f1547077c8",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
+        "b7abb953b8e997328344064e85c9db28f55f40aa",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
+        "3be7c5027ab94ac9a25a60e19692b21c4fd6de55",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
     (
         "122870b1eb20195f4e790c2899e0fa6d73bbb020",
         "13faa392cd6f4826d2115ae8ad04117a95577ffe",

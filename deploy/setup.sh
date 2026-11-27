@@ -99,8 +99,8 @@ WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
 steps name (default: the tag contracts/products.json of this checkout records,
 v0.6.1 here; the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
-v0.6.0, the current published release, or latest (default: the tag
-contracts/products.json records, v0.6.0 here; the script's own constant when
+v0.7.0, the current published release, or latest (default: the tag
+contracts/products.json records, v0.7.0 here; the script's own constant when
 that file is absent).
 EOF
 }
@@ -390,7 +390,7 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
 DEFAULT_TELEGRAM_VERSION=v0.6.1
-DEFAULT_WEB_VERSION=v0.6.0
+DEFAULT_WEB_VERSION=v0.7.0
 
 recorded_product_tag() {
     [ -f "$code_root/contracts/products.json" ] || return 1
@@ -843,6 +843,267 @@ web_db_dir() {
     printf '%s' "$db_dir"
 }
 
+stop_web_container() {
+    web_inspect=$(docker inspect -f '{{.State.Status}}' wuwaterm-web 2>&1) && {
+        docker rm -f wuwaterm-web >/dev/null 2>&1 \
+            || fail "could not stop existing wuwaterm-web container before migrating the Web admission database"
+        return 0
+    }
+    case "$web_inspect" in
+        *"No such object"*|*"No such container"*) return 0 ;;
+    esac
+    fail "could not inspect wuwaterm-web state before migrating the Web admission database: $web_inspect"
+}
+
+classify_web_db_file() {
+    python3 - "$1" <<'PY'
+import sqlite3
+import sys
+
+path = sys.argv[1]
+expected_columns = [
+    "id",
+    "second_key",
+    "minute_key",
+    "day_key",
+    "upstream_used",
+    "translation_minute_used",
+    "terms_used",
+    "translation_used",
+    "character_used",
+    "meta_used",
+    "review_used",
+]
+
+try:
+    with open(path, "rb") as handle:
+        if handle.read(16) != b"SQLite format 3\x00":
+            print("unknown")
+            raise SystemExit(0)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        quick = conn.execute("PRAGMA quick_check(1)").fetchone()
+        if not quick or quick[0] != "ok":
+            print("unknown")
+            raise SystemExit(0)
+        if app_id == 0x5755544E and version == 1:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tm_schema'"
+            ).fetchone()
+            print("tm" if row else "unknown")
+            raise SystemExit(0)
+        if app_id == 0x5755544D and version == 1:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(shared_pool)").fetchall()]
+            print("pool" if cols == expected_columns else "unknown")
+            raise SystemExit(0)
+        print("unknown")
+    finally:
+        conn.close()
+except (OSError, sqlite3.DatabaseError):
+    print("unknown")
+PY
+}
+
+pool_dbs_identical() {
+    python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+
+left_path, right_path = sys.argv[1], sys.argv[2]
+query = (
+    "SELECT id, second_key, minute_key, day_key, upstream_used, "
+    "translation_minute_used, terms_used, translation_used, "
+    "character_used, meta_used, review_used FROM shared_pool ORDER BY id ASC"
+)
+
+def read_rows(path: str) -> list[tuple[int, ...]]:
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return conn.execute(query).fetchall()
+    finally:
+        conn.close()
+
+try:
+    if read_rows(left_path) == read_rows(right_path):
+        raise SystemExit(0)
+except sqlite3.DatabaseError:
+    pass
+raise SystemExit(1)
+PY
+}
+
+backup_legacy_pool_db() {
+    src_db=$1
+    dst_db=$2
+    tmp_db="$dst_db.tmp.$$"
+    rm -f "$tmp_db"
+    if ! python3 - "$src_db" "$tmp_db" <<'PY'
+import os
+import sqlite3
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+fd = os.open(dst_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.close(fd)
+src = sqlite3.connect(src_path)
+dst = sqlite3.connect(dst_path)
+try:
+    src.backup(dst)
+    dst.commit()
+finally:
+    dst.close()
+    src.close()
+os.chmod(dst_path, 0o600)
+PY
+    then
+        rm -f "$tmp_db"
+        fail "could not create SQLite backup from $src_db to $dst_db"
+    fi
+    [ "$(classify_web_db_file "$tmp_db")" = "pool" ] || {
+        rm -f "$tmp_db"
+        fail "verified SQLite backup $tmp_db did not pass admission pool schema check"
+    }
+    mv -f "$tmp_db" "$dst_db" || {
+        rm -f "$tmp_db"
+        fail "could not finalize $dst_db"
+    }
+    chmod 600 "$dst_db"
+}
+
+rewrite_web_env_pool_path() {
+    web_env_file=$1
+    new_pool_path=$2
+    tmp_env="$web_env_file.tmp.$$"
+    (
+        umask 077
+        WUWATERM_NEW_POOL_PATH="$new_pool_path" awk '
+            BEGIN { replaced = 0; val = ENVIRON["WUWATERM_NEW_POOL_PATH"] }
+            /^[[:space:]]*WUWATERM_LOCAL_DB_PATH[[:space:]]*=/ {
+                if (!replaced) {
+                    print "WUWATERM_LOCAL_DB_PATH=" val
+                    replaced = 1
+                }
+                next
+            }
+            { print }
+            END {
+                if (!replaced) print "WUWATERM_LOCAL_DB_PATH=" val
+            }
+        ' "$web_env_file" >"$tmp_env"
+    ) && chmod 600 "$tmp_env" \
+        || { rm -f "$tmp_env"; fail "could not prepare updated $web_env_file"; }
+
+    effective_tmp=$(file_value "$tmp_env" WUWATERM_LOCAL_DB_PATH || true)
+    if [ "$effective_tmp" != "$new_pool_path" ] || [ "$(basename "$effective_tmp")" = "tm.sqlite3" ]; then
+        rm -f "$tmp_env"
+        fail "rewritten $web_env_file still resolves WUWATERM_LOCAL_DB_PATH to $effective_tmp"
+    fi
+
+    mv -f "$tmp_env" "$web_env_file" \
+        || { rm -f "$tmp_env"; fail "could not update WUWATERM_LOCAL_DB_PATH in $web_env_file"; }
+
+    effective_live=$(file_value "$web_env_file" WUWATERM_LOCAL_DB_PATH || true)
+    if [ "$effective_live" != "$new_pool_path" ] || [ "$(basename "$effective_live")" = "tm.sqlite3" ]; then
+        fail "effective WUWATERM_LOCAL_DB_PATH in $web_env_file resolved to $effective_live after rewrite"
+    fi
+}
+
+# WuwaTerm-Web v0.7.0+ derives its self-hosted translation memory database as
+# tmDatabasePathForPool(WUWATERM_LOCAL_DB_PATH) = dirname(poolDbPath)/tm.sqlite3
+# and ignores any separate env var. An older web.env that pointed
+# WUWATERM_LOCAL_DB_PATH at .../tm.sqlite3 therefore opens the same file for both
+# databases and fails startup on SQLite application_id mismatch. Verify the
+# legacy admission pool schema read-only first, stop any running wuwaterm-web
+# container, back up atomically to .../pool.sqlite3, clean up the old
+# tm.sqlite3* files, and switch web.env last so every crash point is recoverable.
+reconcile_web_pool_db_path() {
+    web_env_file=$1
+    data_dir=$2
+    local_db_path=$(file_value "$web_env_file" WUWATERM_LOCAL_DB_PATH || true)
+    [ -n "$local_db_path" ] || return 0
+    db_dir=$(web_db_dir "$web_env_file")
+    local_base=$(basename "$local_db_path")
+    new_pool_path="$db_dir/pool.sqlite3"
+    host_tm_file="$data_dir/tm.sqlite3"
+    host_pool_file="$data_dir/pool.sqlite3"
+
+    if [ "$local_base" != "tm.sqlite3" ]; then
+        [ -e "$host_tm_file" ] || return 0
+        command -v python3 >/dev/null 2>&1 \
+            || fail "python3 is required to inspect $host_tm_file"
+        tm_role=$(classify_web_db_file "$host_tm_file")
+        case "$tm_role" in
+            tm)
+                return 0
+                ;;
+            pool)
+                if [ "$local_base" != "pool.sqlite3" ]; then
+                    fail "refusing to delete legacy admission pool $host_tm_file while WUWATERM_LOCAL_DB_PATH points to custom $local_db_path; resolve the two databases manually before rerunning"
+                fi
+                if [ -e "$host_pool_file" ]; then
+                    [ "$(classify_web_db_file "$host_pool_file")" = "pool" ] \
+                        || fail "refusing to clean up legacy $host_tm_file while $host_pool_file is not a valid admission pool database"
+                    pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+                        || fail "refusing to remove $host_tm_file: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
+                    stop_web_container
+                    pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+                        || fail "refusing to remove $host_tm_file: $host_tm_file changed before container stopped and differs from $host_pool_file"
+                    rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
+                else
+                    stop_web_container
+                    backup_legacy_pool_db "$host_tm_file" "$host_pool_file"
+                    rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
+                fi
+                printf 'setup: finished migrating leftover legacy %s to %s.\n' "$host_tm_file" "$host_pool_file"
+                return 0
+                ;;
+            *)
+                fail "refusing to touch unrecognized file $host_tm_file while WUWATERM_LOCAL_DB_PATH=$local_db_path"
+                ;;
+        esac
+    fi
+
+    if [ -e "$host_tm_file" ] && [ -e "$host_pool_file" ]; then
+        command -v python3 >/dev/null 2>&1 \
+            || fail "python3 is required to inspect $host_tm_file and $host_pool_file"
+        [ "$(classify_web_db_file "$host_pool_file")" = "pool" ] \
+            || fail "refusing to migrate: $host_pool_file exists alongside $host_tm_file and is not a valid admission pool database"
+        [ "$(classify_web_db_file "$host_tm_file")" = "pool" ] \
+            || fail "refusing to remove $host_tm_file alongside $host_pool_file: not a legacy admission pool database"
+        pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+            || fail "refusing to migrate: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
+        stop_web_container
+        pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+            || fail "refusing to migrate: $host_tm_file changed before container stopped and differs from $host_pool_file"
+        rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
+        rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
+    elif [ -e "$host_tm_file" ]; then
+        command -v python3 >/dev/null 2>&1 \
+            || fail "python3 is required to verify and migrate $host_tm_file before relocating WUWATERM_LOCAL_DB_PATH"
+        tm_role=$(classify_web_db_file "$host_tm_file")
+        [ "$tm_role" = "pool" ] \
+            || fail "refusing to migrate $host_tm_file to $host_pool_file (detected role: $tm_role); ensure it is a valid Web admission pool database or update WUWATERM_LOCAL_DB_PATH=$new_pool_path in $web_env_file manually"
+        stop_web_container
+        backup_legacy_pool_db "$host_tm_file" "$host_pool_file"
+        rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
+        rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
+    elif [ -e "$host_pool_file" ]; then
+        command -v python3 >/dev/null 2>&1 \
+            || fail "python3 is required to verify $host_pool_file before updating WUWATERM_LOCAL_DB_PATH"
+        [ "$(classify_web_db_file "$host_pool_file")" = "pool" ] \
+            || fail "refusing to switch $web_env_file to $new_pool_path: $host_pool_file is not a valid admission pool database"
+        rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
+    else
+        rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
+    fi
+
+    printf 'setup: relocated WUWATERM_LOCAL_DB_PATH in %s from %s to %s to avoid colliding with tm.sqlite3.\n' \
+        "$web_env_file" "$local_db_path" "$new_pool_path"
+}
+
 enable_web() {
     [ "$with_web" = 1 ] || return 0
     web_env="$code_root/state-web/web.env"
@@ -880,6 +1141,7 @@ enable_web() {
     esac
     [ "${#edge_secret}" -ge 32 ] && [ "${#edge_secret}" -le 128 ] \
         || fail "WUWATERM_WEB_EDGE_SECRET in $web_env must be 32-128 characters; change it there and in the reverse proxy."
+    reconcile_web_pool_db_path "$web_env" "$data_dir"
     web_data_dir=$(web_db_dir "$web_env")
     case "$web_data_dir" in
         /app|/app/*)

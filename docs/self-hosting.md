@@ -84,7 +84,7 @@ install describable later.
 A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10, and a
 clone of the v0.9.1 tag those of Telegram v0.3.0, which pins Core v0.9.0,
 because each Core release records its Telegram tag in `contracts/products.json`
-and `deploy/setup.sh` takes the recorded tag. `main` records Telegram
+and `deploy/setup.sh` takes the recorded tag. `main` and the `v0.16.0` tag record Telegram
 `v0.6.1`, and the `v0.15.0`, `v0.14.1` and `v0.14.0` tags record Telegram
 `v0.6.0` (both pin Core `v0.13.0`). The `v0.13.0`
 tag was frozen before `v0.6.0` was
@@ -105,8 +105,8 @@ The variable names a published tag; there is no `latest`.
 
 The Web release also defaults to the one the checkout records: a clone of the
 v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and the
-v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.6.0,
-the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0, the
+v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.7.0,
+the v0.16.0 tag records Web v0.6.0, the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0, the
 v0.14.0 tag records Web v0.4.5, the v0.13.0 tag records Web v0.4.4, the
 v0.10.3, v0.11.0 and v0.12.0 tags record
 Web v0.4.3, and the v0.10.1 and
@@ -114,7 +114,7 @@ v0.10.2 tags record Web v0.4.1, which reads and writes manuscript v4, so a
 checkout of any earlier tag passes the release it lacks explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.6.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.7.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 For the source path, create the environment with the Bot, API, and builder
@@ -185,7 +185,8 @@ What it does, in this order:
    prepares its checkout when `--telegram-dir` is given (below), and prints
    that product's own install steps with this installation's paths filled in.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
-   tag this checkout's `contracts/products.json` records (`v0.6.1` on `main`,
+   tag this checkout's `contracts/products.json` records (`v0.6.1` on `main` and
+   the `v0.16.0` tag,
    `v0.6.0` on the `v0.15.0`, `v0.14.1` and `v0.14.0` tags,
    `v0.5.0` on the `v0.13.0` tag, `v0.4.1` on the `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags,
    `v0.4.0` on the `v0.10.1` tag,

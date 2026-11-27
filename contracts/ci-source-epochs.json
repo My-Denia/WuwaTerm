@@ -8,10 +8,40 @@
   "consumers": {
     "web_repository": "My-Denia/WuwaTerm-Web",
     "legacy_web_revision": "6cbba41bb934d44d1dde1b94f1b50d6d845af599",
-    "split_web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+    "split_web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
     "windows_repository": "My-Denia/WuwaTerm-Windows",
-    "split_windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441",
+    "split_windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
     "historical_split_pins": [
+      {
+        "source_commit": "3144f7b0c5e793826ebea0985b68499b37d8c191",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
+        "source_commit": "716dbf85377c7a3661e0acc73a4703ba40781534",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
+        "source_commit": "df895009c9ed4ca723befaa2bdc1e388226214ef",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
+        "source_commit": "8565b48b628addb6a01569cee00503f1547077c8",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
+        "source_commit": "b7abb953b8e997328344064e85c9db28f55f40aa",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
+        "source_commit": "3be7c5027ab94ac9a25a60e19692b21c4fd6de55",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
       {
         "source_commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
         "web_revision": "13faa392cd6f4826d2115ae8ad04117a95577ffe",
