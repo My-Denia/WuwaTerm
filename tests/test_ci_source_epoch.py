@@ -139,6 +139,16 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
         "1ada119a0ff9284359fff2740f887140f6324545",
     ),
     (
+        "d36af51286199ec4900c4d7c806c5f7cac6f461d",
+        "13faa392cd6f4826d2115ae8ad04117a95577ffe",
+        "1ada119a0ff9284359fff2740f887140f6324545",
+    ),
+    (
+        "6509896c9c3c0606e45cc46bb2afc6bd663d11f2",
+        "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
+        "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
+    ),
+    (
         "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
         "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
         "d87a66c37b1d4809774774c45bc5731f6ebb66d2",

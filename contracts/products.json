@@ -246,7 +246,7 @@
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
         "commit": "97c659e22b97f05b9a817c0740ca19d4add63441",
-        "tree": "625046a828000dd53c9f04b1a801de18a49647eb",
+        "tree": "625046a828000dd53c9f04b9a801de18a49647eb",
         "status": "success",
         "status_note": "The v0.8.0 release source (#65, chore(release): prepare Windows 0.8.0), which is also this repository's main when this snapshot was recorded. CI push run 45956691400, Dependency audit run 45956691402 and release run 45957285553 all passed on this commit."
       },
@@ -257,7 +257,7 @@
         "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.8.0",
         "published_at": "2026-11-27T07:22:18Z",
         "source_commit": "97c659e22b97f05b9a817c0740ca19d4add63441",
-        "source_tree": "625046a828000dd53c9f04b1a801de18a49647eb",
+        "source_tree": "625046a828000dd53c9f04b9a801de18a49647eb",
         "assets": [
           "WuwaTerm-0.8.0-windows-x64.zip",
           "manifest.json",
@@ -438,7 +438,7 @@
         "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/README.md",
         "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/docs/self-hosting.md"
       ],
-      "adoption_note": "Web v0.6.0 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.6.0, from source commit eed5d30e26c6446dbff49aa63905ec3ba2db9677 and tree 7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277. Its six public assets were downloaded anonymously: both archives and both manifests matched their SHA256SUMS (root archive 90787bcc..., /private archive f7e7c8ac...), and the release record's own digests matched every asset. v0.6.0 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.6.0 (this release publishes only the GitHub self-hosted bundles). Public Sites was updated on 2026-11-26 (around 2026-11-26T13:06Z) through versions 34, 35 and 36, so version 36 is the latest known public Sites deployment (its exact corresponding public Web tag is unknown because that source commit is not in the public WuwaTerm-Web repository; the earlier version 33 / v0.4.2 record is historical)."
+      "adoption_note": "Web v0.6.0 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.6.0, from source commit eed5d30e26c6446dbff49aa63905ec3ba2db9677 and tree 7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277. Its six public assets were downloaded anonymously: both archives and both manifests matched their SHA256SUMS (root archive 90787bcc..., /private archive f7e7c8ac...), and the release record's own digests matched every asset. v0.6.0 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.6.0 (this release publishes only the GitHub self-hosted bundles). Public Sites previously published version 34 on 2026-11-22 and versions 35 and 36 on 2026-11-26, with version 36 published at 2026-11-26 13:06 UTC as the latest known public Sites deployment (its exact corresponding public Web tag is unknown because that source commit is not in the public WuwaTerm-Web repository; the earlier version 33 / v0.4.2 record is historical)."
     }
   ],
   "ci_pins": {
