@@ -36,7 +36,7 @@ from .data_source import inspect_data_source
 from .db import connect, create_database
 from .english_plural import number_variants
 from .models import TermRecord
-from .normalize import clean_source_text
+from .normalize import clean_source_text, normalize_text
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,18 @@ def _keep_quest_main_type(row: dict[str, Any]) -> bool:
     return row.get("Id") not in (0, 100)
 
 
+def _keep_item_info(row: dict[str, Any]) -> bool:
+    # Skip generic everyday kitchen ingredients and condiments (ShowTypes 26
+    # "Cooking Ingredient" paired with 25 "Processed Item" or deprecated 31),
+    # such as Sugar, Salt, Rice, Milk, Beans, Tofu, Chili, Flour, Vinegar.
+    # WuWa-specific collectibles carrying only ShowTypes [26] or [26, 44] stay.
+    show_types = row.get("ShowTypes")
+    if not isinstance(show_types, list):
+        return True
+    type_ids = {item for item in show_types if isinstance(item, int)}
+    return not (26 in type_ids and (25 in type_ids or 31 in type_ids))
+
+
 CATEGORY_SPECS = (
     CategorySpec("resonator", "RoleInfo.json", "Id", ("Name",)),
     CategorySpec("weapon", "WeaponConf.json", "ItemId", ("WeaponName",)),
@@ -99,7 +111,7 @@ ARIKATSU_BIN_SPECS = (
     CategorySpec("resonator", "role/roleinfo.json", "Id", ("Name",)),
     CategorySpec("weapon", "weapon/weaponconf.json", "ItemId", ("WeaponName",)),
     CategorySpec("echo", "phantom/phantomitem.json", "ItemId", ("MonsterName",)),
-    CategorySpec("item", "item/iteminfo.json", "Id", ("Name",)),
+    CategorySpec("item", "item/iteminfo.json", "Id", ("Name",), _keep_item_info),
     CategorySpec("skill", "skill/skill.json", "Id", ("SkillName",)),
     CategorySpec("sonata_effect", "phantom/phantomfettergroup.json", "Id", ("FetterGroupName",)),
     CategorySpec("location", "area/area.json", "AreaId", ("Title",)),
@@ -169,6 +181,76 @@ def load_arikatsu_string_texts(data_dir: Path, lang: str) -> dict[str, str]:
     return mapping
 
 
+_PUNCT_DIGIT_NOISE_RE = re.compile(r"^[?？\dP]+$")
+_UPPER_ACRONYM_RE = re.compile(r"[A-Z]{2,}")
+_DOTTED_INITIALISM_RE = re.compile(r"(?:[A-Z0-9]+\.)+[A-Z0-9]*")
+_SPEAKER_COMM_ZH_RE = re.compile(r"[（(]通讯中?[）)]$")
+_SPEAKER_COMM_EN_RE = re.compile(r"\s*[（(]Contacting[）)]$")
+_PRONOUN_SPEAKERS = frozenset({"我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "它们"})
+_TEST_MARKER_ZH_SUBSTRINGS = ("test/", "测试用例")
+_TEST_MARKER_EN_SUBSTRINGS = ("test/", "test case")
+_ERROR_PLACEHOLDER_ZH_SUBSTRINGS = ("存在异常", "联系官方客服", "暂时空置")
+_ERROR_PLACEHOLDER_EN_SUBSTRINGS = (
+    "an error happened",
+    "an error occurred",
+    "contact customer service",
+    "contact our customer service",
+    "placeholder",
+)
+
+
+def _is_allowed_non_cjk_zh(zh: str) -> bool:
+    """Allow official uppercase acronyms, dotted initialisms, and titled items."""
+    if _UPPER_ACRONYM_RE.fullmatch(zh):
+        return True
+    if _DOTTED_INITIALISM_RE.fullmatch(zh) and any("A" <= ch <= "Z" for ch in zh):
+        return True
+    if (zh.startswith("《") and zh.endswith("》")) or (
+        zh.startswith("「") and zh.endswith("」")
+    ):
+        inner = zh[1:-1].strip()
+        return any("A" <= ch <= "Z" or "a" <= ch <= "z" for ch in inner)
+    return False
+
+
+def _has_speaker_comm_suffix(zh: str, en: str) -> bool:
+    return bool(_SPEAKER_COMM_ZH_RE.search(zh) or _SPEAKER_COMM_EN_RE.search(en))
+
+
+def _clean_speaker_text(zh: str, en: str) -> tuple[str, str]:
+    """Strip speaker communication-status suffixes from both sides."""
+    zh = _SPEAKER_COMM_ZH_RE.sub("", zh).strip()
+    en = _SPEAKER_COMM_EN_RE.sub("", en).strip()
+    return zh, en
+
+
+def _keep_record(*, category: str, zh: str, en: str) -> bool:
+    """Reject test markers, error placeholders, non-CJK noise, and bad speakers."""
+    if not zh or not en:
+        return False
+    zh_cf = zh.casefold()
+    en_cf = en.casefold()
+    if any(marker in zh_cf for marker in _TEST_MARKER_ZH_SUBSTRINGS) or any(
+        marker in en_cf for marker in _TEST_MARKER_EN_SUBSTRINGS
+    ):
+        return False
+    if any(marker in zh for marker in _ERROR_PLACEHOLDER_ZH_SUBSTRINGS) or any(
+        marker in en_cf for marker in _ERROR_PLACEHOLDER_EN_SUBSTRINGS
+    ):
+        return False
+    if _PUNCT_DIGIT_NOISE_RE.fullmatch(zh) or _PUNCT_DIGIT_NOISE_RE.fullmatch(en):
+        return False
+    if not _is_cjk_text(zh) and not _is_allowed_non_cjk_zh(zh):
+        return False
+    if not any(char.isalpha() for char in en):
+        return False
+    if category == "speaker" and (
+        zh in _PRONOUN_SPEAKERS or (zh == "通讯" and en == "Contacting")
+    ):
+        return False
+    return True
+
+
 def _record_for_key(
     *,
     category: str,
@@ -177,6 +259,7 @@ def _record_for_key(
     text_key: str,
     zh_map: dict[str, str],
     en_map: dict[str, str],
+    strip_speaker_comm: bool = False,
 ) -> TermRecord | None:
     zh_raw = zh_map.get(text_key)
     en_raw = en_map.get(text_key)
@@ -184,7 +267,9 @@ def _record_for_key(
         return None
     zh = clean_source_text(zh_raw)
     en = clean_source_text(en_raw)
-    if not zh or not en:
+    if strip_speaker_comm:
+        zh, en = _clean_speaker_text(zh, en)
+    if not _keep_record(category=category, zh=zh, en=en):
         return None
     return TermRecord(
         category=category,
@@ -223,7 +308,7 @@ def _item_tier_base_records(
     existing_pairs = {(record.zh, record.en) for record in existing}
     families: dict[tuple[str, str], dict[int, list[str]]] = defaultdict(dict)
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or not _keep_item_info(row):
             continue
         row_id = str(row.get("Id", ""))
         text_key = row.get("Name")
@@ -240,7 +325,11 @@ def _item_tier_base_records(
 
     records: list[TermRecord] = []
     for (zh, en), tiers in sorted(families.items()):
-        if len(tiers) != len(ITEM_TIER_PREFIXES) or (zh, en) in existing_pairs:
+        if (
+            len(tiers) != len(ITEM_TIER_PREFIXES)
+            or (zh, en) in existing_pairs
+            or not _keep_record(category="item", zh=zh, en=en)
+        ):
             continue
         basic_id = min(tiers[0], key=_numeric_id_key)
         source_id = f"{ITEM_TIER_BASE_SOURCE_PREFIX}{basic_id}"
@@ -409,11 +498,19 @@ def iter_arikatsu_records(
         rows = load_json(speaker_path)
         if not isinstance(rows, list):
             raise BuildError(f"expected list in {speaker_path}")
+        comm_speakers: list[tuple[str, str]] = []
         for row in rows:
             if not isinstance(row, dict) or not row.get("Id"):
                 continue
             source_id = str(row["Id"])
             text_key = f"Speaker_{source_id}_Name"
+            zh_raw = zh_map.get(text_key)
+            en_raw = en_map.get(text_key)
+            if zh_raw is not None and en_raw is not None and _has_speaker_comm_suffix(
+                clean_source_text(zh_raw), clean_source_text(en_raw)
+            ):
+                comm_speakers.append((source_id, text_key))
+                continue
             record = _record_for_key(
                 category="speaker",
                 source_file="BinData/speaker/speaker.json",
@@ -424,6 +521,52 @@ def iter_arikatsu_records(
             )
             if record:
                 records.append(record)
+
+        if comm_speakers:
+            # Defer suffix-stripped speakers until every non-comm record across
+            # all tables is collected: drop exact (zh_norm, en_norm) duplicates
+            # and noise, keep original suffixed rows on single-sided conflicts
+            # (preserving Zhiyuan -> 致远, 残星会会长 -> Grand Architect, and the
+            # reverse exact lookup for Fractsidus Grand Architect / 知远（通讯中）),
+            # and strip the suffix only when neither side collides.
+            covered_pairs = {
+                (normalize_text(r.zh), normalize_text(r.en)) for r in records
+            }
+            covered_zh = {zh_norm for zh_norm, _ in covered_pairs}
+            covered_en = {en_norm for _, en_norm in covered_pairs}
+            for source_id, text_key in comm_speakers:
+                cleaned = _record_for_key(
+                    category="speaker",
+                    source_file="BinData/speaker/speaker.json",
+                    source_id=source_id,
+                    text_key=text_key,
+                    zh_map=zh_map,
+                    en_map=en_map,
+                    strip_speaker_comm=True,
+                )
+                if cleaned is None:
+                    continue
+                zh_norm = normalize_text(cleaned.zh)
+                en_norm = normalize_text(cleaned.en)
+                if (zh_norm, en_norm) in covered_pairs:
+                    continue
+                if zh_norm in covered_zh or en_norm in covered_en:
+                    original = _record_for_key(
+                        category="speaker",
+                        source_file="BinData/speaker/speaker.json",
+                        source_id=source_id,
+                        text_key=text_key,
+                        zh_map=zh_map,
+                        en_map=en_map,
+                        strip_speaker_comm=False,
+                    )
+                    if original is not None:
+                        records.append(original)
+                    continue
+                covered_pairs.add((zh_norm, en_norm))
+                covered_zh.add(zh_norm)
+                covered_en.add(en_norm)
+                records.append(cleaned)
 
     # Derived last, so an exact pair already present in another source is not
     # repeated. A shared surface with a different counterpart stays available
