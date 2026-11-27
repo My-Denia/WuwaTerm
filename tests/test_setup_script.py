@@ -807,6 +807,130 @@ def test_web_migration_recovers_idempotently_across_crash_points(install_root, c
         assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (777,)
 
 
+@pytest.mark.parametrize("env_target", ["tm.sqlite3", "pool.sqlite3"])
+def test_web_migration_fails_closed_when_both_pool_dbs_have_different_contents(install_root, env_target):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    _create_legacy_pool_db(data / "tm.sqlite3", second_key=987)
+    _create_legacy_pool_db(data / "pool.sqlite3", second_key=111)
+    original_env = (
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        f"WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/{env_target}\n"
+    )
+    (state / "web.env").write_text(original_env, encoding="utf-8")
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "different contents" in result.stderr
+    assert (state / "web.env").read_text(encoding="utf-8") == original_env
+    with sqlite3.connect(data / "tm.sqlite3") as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (987,)
+    with sqlite3.connect(data / "pool.sqlite3") as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (111,)
+    assert "rm -f wuwaterm-web" not in docker_log(install_root)
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
+def test_web_migration_fails_closed_on_custom_pool_path_with_legacy_tm_sqlite3(install_root):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    _create_legacy_pool_db(data / "quota.sqlite3", second_key=111)
+    _create_legacy_pool_db(data / "tm.sqlite3", second_key=987)
+    original_env = (
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/quota.sqlite3\n"
+    )
+    (state / "web.env").write_text(original_env, encoding="utf-8")
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "refusing to delete legacy admission pool" in result.stderr
+    assert (state / "web.env").read_text(encoding="utf-8") == original_env
+    with sqlite3.connect(data / "tm.sqlite3") as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (987,)
+    with sqlite3.connect(data / "quota.sqlite3") as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (111,)
+    assert "rm -f wuwaterm-web" not in docker_log(install_root)
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
+def test_web_rerun_keeps_real_tm_sqlite3_untouched_with_custom_pool_path(install_root):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    _create_legacy_pool_db(data / "quota.sqlite3", second_key=222)
+    with sqlite3.connect(data / "tm.sqlite3") as tm_conn:
+        tm_conn.execute("CREATE TABLE tm_schema (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+        tm_conn.execute("INSERT INTO tm_schema VALUES ('format', 'wuwaterm-tm-v1')")
+        tm_conn.execute("PRAGMA application_id=0x5755544e")
+        tm_conn.execute("PRAGMA user_version=1")
+        tm_conn.commit()
+    (state / "web.env").write_text(
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_API_BASE_URL=http://127.0.0.1:8788\n"
+        "WUWATERM_SITE_DEVICE_TOKEN=wtd1.dev123.secret\n"
+        "WUWATERM_TRANSLATION_ENABLED=true\n"
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/quota.sqlite3\n",
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (data / "tm.sqlite3").is_file()
+    with sqlite3.connect(data / "tm.sqlite3") as tm_conn:
+        assert tm_conn.execute("SELECT value FROM tm_schema WHERE key='format'").fetchone() == ("wuwaterm-tm-v1",)
+
+
 def test_web_rerun_keeps_real_tm_sqlite3_untouched(install_root):
     import sqlite3
 

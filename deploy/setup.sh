@@ -906,6 +906,34 @@ except (OSError, sqlite3.DatabaseError):
 PY
 }
 
+pool_dbs_identical() {
+    python3 - "$1" "$2" <<'PY'
+import sqlite3
+import sys
+
+left_path, right_path = sys.argv[1], sys.argv[2]
+query = (
+    "SELECT id, second_key, minute_key, day_key, upstream_used, "
+    "translation_minute_used, terms_used, translation_used, "
+    "character_used, meta_used, review_used FROM shared_pool ORDER BY id ASC"
+)
+
+def read_rows(path: str) -> list[tuple[int, ...]]:
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(query).fetchall()
+    finally:
+        conn.close()
+
+try:
+    if read_rows(left_path) == read_rows(right_path):
+        raise SystemExit(0)
+except sqlite3.DatabaseError:
+    pass
+raise SystemExit(1)
+PY
+}
+
 backup_legacy_pool_db() {
     src_db=$1
     dst_db=$2
@@ -1011,9 +1039,14 @@ reconcile_web_pool_db_path() {
                 return 0
                 ;;
             pool)
+                if [ "$local_base" != "pool.sqlite3" ]; then
+                    fail "refusing to delete legacy admission pool $host_tm_file while WUWATERM_LOCAL_DB_PATH points to custom $local_db_path; resolve the two databases manually before rerunning"
+                fi
                 if [ -e "$host_pool_file" ]; then
                     [ "$(classify_web_db_file "$host_pool_file")" = "pool" ] \
                         || fail "refusing to clean up legacy $host_tm_file while $host_pool_file is not a valid admission pool database"
+                    pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+                        || fail "refusing to remove $host_tm_file: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
                     stop_web_container
                     rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
                 else
@@ -1037,6 +1070,8 @@ reconcile_web_pool_db_path() {
             || fail "refusing to migrate: $host_pool_file exists alongside $host_tm_file and is not a valid admission pool database"
         [ "$(classify_web_db_file "$host_tm_file")" = "pool" ] \
             || fail "refusing to remove $host_tm_file alongside $host_pool_file: not a legacy admission pool database"
+        pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+            || fail "refusing to migrate: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
         stop_web_container
         rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
         rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
