@@ -42,7 +42,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Hashable, Literal, ParamSpec, Protocol, TypeVar
 
-from .lookup import ReviewSnapshot, TermService
+from .lookup import (
+    DictionaryIdentity as DictionaryIdentity,
+    ReviewSnapshot,
+    TermService,
+    dictionary_revision as _dictionary_revision,
+)
 from .models import LookupCandidate
 from .normalize import count_cjk as count_cjk
 from .normalize import count_latin as count_latin
@@ -109,6 +114,7 @@ TranslationKind = Literal["noop", "exact", "fuzzy", "llm", "error"]
 TranslationDirection = Literal["en", "zh"]
 ServiceCapability = Literal[
     "ambiguous-mention-v1",
+    "dictionary-identity-v1",
     "semantic-review-v1",
     "structure-check-v1",
     "translation-context-v1",
@@ -911,6 +917,24 @@ def service_metadata(service: TermService) -> ServiceMetadata:
     )
 
 
+def dictionary_identity(service: TermService) -> DictionaryIdentity:
+    """Authoritative cryptographic dictionary identity and provenance.
+
+    Excludes filesystem paths, credentials and chat identifiers.
+    """
+    getter = getattr(service, "dictionary_identity", None)
+    if callable(getter):
+        return getter()
+    snapshot = service.review_snapshot()
+    return DictionaryIdentity(
+        revision=_dictionary_revision(snapshot.entries),
+        schema_version=snapshot.metadata.get("schema_version"),
+        source_commit=snapshot.metadata.get("source_commit"),
+        source_game_version=snapshot.metadata.get("source_game_version"),
+        term_count=snapshot.term_count,
+    )
+
+
 def probe_database(service: TermService) -> bool:
     """Readiness probe: can the dictionary be read right now?
 
@@ -1170,25 +1194,36 @@ def semantic_review_enabled() -> bool:
     return os.getenv(SEMANTIC_REVIEW_ENABLED_ENV, "").strip().casefold() in _TRUTHY
 
 
+CAPABILITY_DICTIONARY_IDENTITY: Literal["dictionary-identity-v1"] = (
+    "dictionary-identity-v1"
+)
+
+
 def service_capabilities() -> tuple[ServiceCapability, ...]:
     """Optional capabilities this process can serve right now, sorted by name.
 
     A capability is listed only when it actually works, so a client can turn a
-    feature on from this list alone. ``ambiguous-mention-v1`` needs only the
-    dictionary and ``structure-check-v1`` calls no model, so both are always
-    listed. ``translation-context-v1`` needs a configured model;
+    feature on from this list alone. ``ambiguous-mention-v1``,
+    ``dictionary-identity-v1`` and ``structure-check-v1`` need no model, so they
+    are always listed. ``translation-context-v1`` needs a configured model;
     ``semantic-review-v1`` also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
     """
     if not llm_configured():
-        return (REVIEW_FEATURE_AMBIGUOUS_MENTION, CAPABILITY_STRUCTURE_CHECK)
+        return (
+            REVIEW_FEATURE_AMBIGUOUS_MENTION,
+            CAPABILITY_DICTIONARY_IDENTITY,
+            CAPABILITY_STRUCTURE_CHECK,
+        )
     if not semantic_review_enabled():
         return (
             REVIEW_FEATURE_AMBIGUOUS_MENTION,
+            CAPABILITY_DICTIONARY_IDENTITY,
             CAPABILITY_STRUCTURE_CHECK,
             _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
         )
     return (
         REVIEW_FEATURE_AMBIGUOUS_MENTION,
+        CAPABILITY_DICTIONARY_IDENTITY,
         _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
         CAPABILITY_STRUCTURE_CHECK,
         _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,

@@ -773,12 +773,20 @@ def test_http_resolution_judges_an_ambiguous_name(tmp_path, sample_db):
 def test_capabilities_always_list_ambiguous_mention(tmp_path, sample_db, monkeypatch):
     for name in ("WUWATERM_OPENAI_BASE_URL", "WUWATERM_OPENAI_API_KEY", "WUWATERM_OPENAI_MODEL"):
         monkeypatch.delenv(name, raising=False)
-    assert service_capabilities() == (REVIEW_FEATURE_AMBIGUOUS_MENTION, "structure-check-v1")
+    assert service_capabilities() == (
+        REVIEW_FEATURE_AMBIGUOUS_MENTION,
+        "dictionary-identity-v1",
+        "structure-check-v1",
+    )
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "owner desktop")
     response = run(call(app, "GET", "/v1/capabilities", headers=bearer(token)))
     assert response.status_code == 200, response.text
-    assert response.json()["capabilities"] == ["ambiguous-mention-v1", "structure-check-v1"]
+    assert response.json()["capabilities"] == [
+        "ambiguous-mention-v1",
+        "dictionary-identity-v1",
+        "structure-check-v1",
+    ]
 
 
 # fmt: off

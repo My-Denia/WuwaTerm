@@ -8,16 +8,19 @@ mode) is covered by tests/test_bot.py.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import inspect
 import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
 import pytest
 
 from wuwaterm.db import connect, insert_records
+from wuwaterm.lookup import TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.application import (
     ERROR_INPUT_TOO_LONG,
@@ -29,6 +32,7 @@ from wuwaterm.application import (
     KIND_LLM,
     KIND_NOOP,
     TRANSLATION_ERROR_CODES,
+    DictionaryIdentity,
     MarkupTranslation,
     ServiceMetadata,
     SlidingWindowRateLimiter,
@@ -36,11 +40,13 @@ from wuwaterm.application import (
     TranslationOutcome,
     build_term_service,
     build_translator,
+    dictionary_identity,
     error_code_for_llm_reason,
     input_too_long_message,
     lookup_exact_terms,
     lookup_terms,
     probe_database,
+    review_pair,
     service_metadata,
     split_plain_text,
     translate_request,
@@ -856,6 +862,74 @@ def test_service_metadata_exposes_no_paths_or_secrets(sample_db):
     rendered = repr(meta)
     assert str(sample_db) not in rendered
     assert "terms.db" not in rendered
+
+
+def test_dictionary_identity_matches_review_revision_and_exposes_no_paths_or_secrets(
+    sample_db,
+):
+    service = build_term_service(sample_db)
+
+    identity = dictionary_identity(service)
+    meta = service_metadata(service)
+    report = review_pair(service, "今汐", "Jinhsi", "en", review_version="review-v2")
+
+    assert isinstance(identity, DictionaryIdentity)
+    assert re.fullmatch(r"[0-9a-f]{64}", identity.revision)
+    assert identity.revision == report.dictionary.revision
+    assert identity.schema_version == meta.schema_version
+    assert identity.source_commit == meta.source_commit
+    assert identity.source_game_version == meta.source_game_version
+    assert identity.term_count == meta.term_count > 0
+    rendered = repr(identity)
+    assert str(sample_db) not in rendered
+    assert "terms.db" not in rendered
+
+
+def test_dictionary_identity_recomputes_when_term_content_changes_with_same_metadata_and_count(
+    tmp_path: Path, sample_db
+):
+    mutated = tmp_path / "mutated.db"
+    mutated.write_bytes(sample_db.read_bytes())
+    service = build_term_service(mutated)
+
+    before = dictionary_identity(service)
+    with connect(mutated) as conn:
+        row = conn.execute("SELECT id, en FROM terms ORDER BY id LIMIT 1").fetchone()
+        assert row is not None
+        updated_en = ("X" if row["en"][0] != "X" else "Y") + row["en"][1:]
+        conn.execute("UPDATE terms SET en = ? WHERE id = ?", (updated_en, row["id"]))
+        conn.commit()
+
+    after = dictionary_identity(service)
+    report = review_pair(service, "今汐", "Jinhsi", "en", review_version="review-v2")
+
+    assert after.schema_version == before.schema_version
+    assert after.source_commit == before.source_commit
+    assert after.term_count == before.term_count
+    assert after.revision != before.revision
+    assert after.revision == report.dictionary.revision
+
+
+def test_dictionary_identity_caches_on_unchanged_db_and_is_thread_safe(
+    sample_db, monkeypatch
+):
+    service = build_term_service(sample_db)
+    expected = dictionary_identity(service)
+
+    snapshot_calls = 0
+
+    def fail_if_rescanned(self):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        raise AssertionError("cached dictionary_identity must not re-scan terms")
+
+    monkeypatch.setattr(TermService, "review_snapshot", fail_if_rescanned)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: dictionary_identity(service), range(16)))
+
+    assert snapshot_calls == 0
+    assert results == [expected] * 16
 
 
 def test_probe_database_reports_unreadable_database(tmp_path: Path, sample_db):

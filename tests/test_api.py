@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1136,7 +1137,7 @@ def test_meta_versions_stay_null_when_the_database_did_not_record_them(
             "UPDATE metadata SET value = 'arikatsu' WHERE key = 'source_profile'"
         )
 
-    app, store = build_client_app(tmp_path, bare)
+    app, store = build_client_app(tmp_path, bare, auth_max_concurrency=8)
     _, token = issue_device(store, "owner desktop")
     disable_llm(monkeypatch)
 
@@ -1190,6 +1191,174 @@ def test_meta_versions_round_trip_the_strings_stored_in_the_open_database(
     assert "3.7.0" not in text
     assert "3.7.8" not in text
     assert "8975829" not in text
+
+
+def test_dictionary_returns_authoritative_identity_matching_reviews_and_preserves_meta(
+    monkeypatch, tmp_path, sample_db
+):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, meta_token = issue_device(store, "owner meta", [SCOPE_META])
+    _, review_token = issue_device(store, "owner review", [SCOPE_TRANSLATE])
+    disable_llm(monkeypatch)
+
+    dict_response = run(call(app, "GET", "/v1/dictionary", headers=bearer(meta_token)))
+    meta_response = run(call(app, "GET", "/v1/meta", headers=bearer(meta_token)))
+    review_response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐拿到了声骸。",
+                "target": "Jinhsi got an Echo.",
+                "direction": "en",
+            },
+            headers=bearer(review_token),
+        )
+    )
+
+    assert dict_response.status_code == 200, dict_response.text
+    assert meta_response.status_code == 200, meta_response.text
+    assert review_response.status_code == 200, review_response.text
+
+    dict_body = dict_response.json()
+    meta_body = meta_response.json()
+    review_body = review_response.json()
+
+    assert set(dict_body) == {
+        "revision",
+        "schema_version",
+        "source_commit",
+        "source_game_version",
+        "term_count",
+        "request_id",
+    }
+    assert set(meta_body) == {
+        "service_version",
+        "api_version",
+        "schema_version",
+        "source_profile",
+        "source_commit",
+        "source_game_version",
+        "source_resource_version",
+        "source_changelist",
+        "term_count",
+        "llm_configured",
+        "request_id",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", dict_body["revision"])
+    assert dict_body["revision"] == review_body["dictionary"]["revision"]
+    assert dict_body["schema_version"] == meta_body["schema_version"]
+    assert dict_body["source_commit"] == meta_body["source_commit"]
+    assert dict_body["source_game_version"] == meta_body["source_game_version"]
+    assert dict_body["term_count"] == meta_body["term_count"] > 0
+    assert dict_response.headers["X-Request-Id"] == dict_body["request_id"]
+    assert str(sample_db) not in dict_response.text
+    assert "terms.db" not in dict_response.text
+    assert "devices.db" not in dict_response.text
+    assert meta_token not in dict_response.text
+
+
+def test_dictionary_requires_meta_scope(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, meta_only = issue_device(store, "reader", [SCOPE_META])
+    _, translate_only = issue_device(store, "translator", [SCOPE_TRANSLATE])
+
+    unauthenticated = run(call(app, "GET", "/v1/dictionary"))
+    forbidden = run(
+        call(app, "GET", "/v1/dictionary", headers=bearer(translate_only))
+    )
+    allowed = run(call(app, "GET", "/v1/dictionary", headers=bearer(meta_only)))
+
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["error"]["code"] == "unauthorized"
+    assert forbidden.status_code == 403
+    assert forbidden.json()["error"]["code"] == "forbidden"
+    assert allowed.status_code == 200
+
+
+def test_dictionary_revision_changes_when_terms_change_with_unchanged_meta_triple(
+    monkeypatch, tmp_path, sample_db
+):
+    mutated = tmp_path / "mutated.db"
+    mutated.write_bytes(sample_db.read_bytes())
+    app, store = build_client_app(tmp_path, mutated)
+    _, token = issue_device(store, "owner", [SCOPE_META, SCOPE_TRANSLATE])
+    disable_llm(monkeypatch)
+
+    meta_before = run(call(app, "GET", "/v1/meta", headers=bearer(token))).json()
+    dict_before = run(call(app, "GET", "/v1/dictionary", headers=bearer(token))).json()
+
+    with connect(mutated) as conn:
+        row = conn.execute("SELECT id, en FROM terms ORDER BY id LIMIT 1").fetchone()
+        assert row is not None
+        updated_en = ("Z" if row["en"][0] != "Z" else "Q") + row["en"][1:]
+        conn.execute("UPDATE terms SET en = ? WHERE id = ?", (updated_en, row["id"]))
+        conn.commit()
+
+    meta_after = run(call(app, "GET", "/v1/meta", headers=bearer(token))).json()
+    dict_after = run(call(app, "GET", "/v1/dictionary", headers=bearer(token))).json()
+    review_after = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐拿到了声骸。",
+                "target": "Jinhsi got an Echo.",
+                "direction": "en",
+            },
+            headers=bearer(token),
+        )
+    ).json()
+
+    assert (
+        meta_after["schema_version"],
+        meta_after["source_commit"],
+        meta_after["term_count"],
+    ) == (
+        meta_before["schema_version"],
+        meta_before["source_commit"],
+        meta_before["term_count"],
+    )
+    assert dict_after["revision"] != dict_before["revision"]
+    assert dict_after["revision"] == review_after["dictionary"]["revision"]
+
+
+def test_dictionary_handles_null_game_version_and_concurrent_requests(
+    monkeypatch, tmp_path, sample_db
+):
+    bare = tmp_path / "bare-dict.db"
+    bare.write_bytes(sample_db.read_bytes())
+    with connect(bare) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'source_game_version'")
+        conn.commit()
+    app, store = build_client_app(tmp_path, bare, auth_max_concurrency=8)
+    _, token = issue_device(store, "reader", [SCOPE_META])
+    disable_llm(monkeypatch)
+
+    async def fetch_many():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://api.test"
+        ) as client:
+            return await asyncio.gather(
+                *[
+                    client.get("/v1/dictionary", headers=bearer(token))
+                    for _ in range(8)
+                ]
+            )
+
+    responses = run(fetch_many())
+    revisions = set()
+    for resp in responses:
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source_game_version"] is None
+        revisions.add(body["revision"])
+    assert len(revisions) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1338,6 +1507,7 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/readyz",
         "/v1/auth/status",
         "/v1/capabilities",
+        "/v1/dictionary",
         "/v1/meta",
         "/v1/reviews",
         "/v1/semantic-reviews",

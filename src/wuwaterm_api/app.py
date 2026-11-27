@@ -96,6 +96,7 @@ from wuwaterm.application import (
     build_term_service,
     build_translator,
     check_structure,
+    dictionary_identity,
     llm_configured,
     lookup_terms,
     probe_database,
@@ -392,6 +393,23 @@ class MetaResponseBody(BaseModel):
     request_id: str
 
 
+class DictionaryIdentityResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "Deterministic 64-character lowercase hex SHA-256 digest of the "
+            "served dictionary entries, matching POST /v1/reviews "
+            "dictionary.revision."
+        ),
+    )
+    schema_version: str | None
+    source_commit: str | None
+    source_game_version: str | None
+    term_count: int = Field(ge=0)
+    request_id: str
+
+
 class HealthResponseBody(BaseModel):
     status: Literal["ok", "ready"]
 
@@ -588,6 +606,7 @@ class ReviewResponseBody(BaseModel):
 
 CapabilityName = Literal[
     "ambiguous-mention-v1",
+    "dictionary-identity-v1",
     "semantic-review-v1",
     "structure-check-v1",
     "translation-context-v1",
@@ -2402,6 +2421,29 @@ def _register_routes(app: FastAPI) -> None:
             source_changelist=meta.source_changelist,
             term_count=meta.term_count,
             llm_configured=llm_configured(),
+            request_id=_request_id(request),
+        )
+
+    @app.get(
+        f"{prefix}/dictionary",
+        response_model=DictionaryIdentityResponseBody,
+        tags=["dictionary"],
+        responses=ERROR_RESPONSES,
+    )
+    async def read_dictionary(
+        request: Request,
+        device: Annotated[Device, Depends(require_scope(SCOPE_META))],
+    ) -> DictionaryIdentityResponseBody:
+        """Authoritative cryptographic dictionary identity and matching provenance."""
+        identity = await asyncio.to_thread(
+            dictionary_identity, request.app.state.term_service
+        )
+        return DictionaryIdentityResponseBody(
+            revision=identity.revision,
+            schema_version=identity.schema_version,
+            source_commit=identity.source_commit,
+            source_game_version=identity.source_game_version,
+            term_count=identity.term_count,
             request_id=_request_id(request),
         )
 
