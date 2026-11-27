@@ -451,6 +451,8 @@ def _write_live_preconditions(
     tools_sha = {
         "scripts/eval_h3_corpus.py": frozen_tools["scripts/eval_h3_corpus.py"],
         "scripts/eval_usability.py": frozen_tools["scripts/eval_usability.py"],
+        "scripts/eval_h3.py": frozen_tools["scripts/eval_h3.py"],
+        "scripts/eval_h3_export.py": frozen_tools["scripts/eval_h3_export.py"],
     }
     if tools_sha256_override:
         tools_sha.update(tools_sha256_override)
@@ -932,7 +934,7 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     assert pf_c4["approval_tokens"]["full"].startswith("unavailable")
     assert "windows_uncleared" in pf_c4["approval_tokens"]["full"]
 
-    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 mismatch).
+    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 or running tool SHA-256 mismatch).
     bad_tool_acc, _ = _write_live_preconditions(
         h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
         terms_db=env["db"], annotations=env["annotations"],
@@ -941,6 +943,25 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     pf_tool = run_preflight(bad_tool_acc, judges)
     assert pf_tool["approval_tokens"]["full"].startswith("unavailable")
     assert "gate_sha256" in pf_tool["approval_tokens"]["full"]
+
+    # 8a. Mismatched scripts/eval_h3.py SHA-256 in acceptance receipt -> unavailable and run --live refused.
+    stale_runner_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        tools_sha256_override={"scripts/eval_h3.py": "e" * 64},
+    )
+    pf_stale_runner = run_preflight(stale_runner_acc, judges)
+    assert pf_stale_runner["approval_tokens"]["full"].startswith("unavailable")
+    assert "scripts/eval_h3.py" in pf_stale_runner["approval_tokens"]["full"]
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *env["freeze"], "--freeze", str(stale_runner_acc), "--freeze", str(judges),
+         "--run-dir", str(env["run_dir"]), "--manifest", str(env["manifest"]),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
+         "--live", "--owner-approval-token", "h3-live-000000000000000000000000", *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "scripts/eval_h3.py" in err
 
     # 8b. freeze_core_commit equal to core_tag_commit -> unavailable.
     same_commit_acc, _ = _write_live_preconditions(
@@ -1305,3 +1326,128 @@ def test_protocol_records_the_sha256_of_the_frozen_h3_tools():
         recorded = re.findall(rf"`{re.escape(rel)}` SHA-256 `([0-9a-f]{{64}})`", text)
         assert recorded, rel
         assert set(recorded) == {_sha256(ROOT / rel)}, rel
+
+
+def test_expected_model_binding_and_anti_drift(h3, env, capsys, monkeypatch, no_network):
+    monkeypatch.setattr(h3, "PINNED_SRC_TREE", _src_tree())
+    monkeypatch.setattr(h3, "PINNED_TERMS_DB_SHA256", _sha256(env["db"]))
+    monkeypatch.setattr(h3, "PINNED_MATCHER_REVISION", sys.modules["wuwaterm.cjk_span"].MATCHER_REVISION)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://live-gateway.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "live-test-key")
+
+    two_docs = env["tmp"] / "model_two_docs.json"
+    two_docs.write_text(
+        json.dumps(
+            {"schema": "h3-manifest-v1", "set": "H3-model-pin", "documents": [DOCS[0], DOCS[2]]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    good_acc, judges = _write_live_preconditions(
+        h3, env["tmp"], manifest=two_docs, src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"], verdict="pass",
+    )
+    pinned_args = ["--bound-tree", str(ROOT), "--terms-db", str(env["db"])]
+    freeze_all = [*env["freeze"], "--freeze", str(good_acc), "--freeze", str(judges)]
+    cost_flags = [
+        "--ledger-budget-usd", "5.0", "--max-cost-usd", "5.0",
+        "--price-input-per-1m", "0.5", "--price-output-per-1m", "2.0",
+    ]
+
+    # Invalid --expected-model values (empty, padded, multiline) are refused.
+    for bad_model in ("", "   ", " gemini-4-neon", "gemini-4-neon\nother"):
+        code, err = _run(
+            h3,
+            ["preflight", *pinned_args, *freeze_all, "--manifest", str(two_docs), "--expected-model", bad_model],
+            capsys,
+        )
+        assert code == 1 and "--expected-model" in err
+
+    # Default preflight pins deepseek-flash; explicit gemini-4-neon produces a different approval token.
+    pf_default_out = env["tmp"] / "pf_default.json"
+    pf_neon_out = env["tmp"] / "pf_neon.json"
+    assert h3.main(
+        ["preflight", *pinned_args, *freeze_all, "--manifest", str(two_docs), "--json-out", str(pf_default_out)]
+    ) == 0
+    assert h3.main(
+        ["preflight", *pinned_args, *freeze_all, "--manifest", str(two_docs),
+         "--expected-model", "gemini-4-neon", "--json-out", str(pf_neon_out)]
+    ) == 0
+    pf_default = json.loads(pf_default_out.read_text(encoding="utf-8"))
+    pf_neon = json.loads(pf_neon_out.read_text(encoding="utf-8"))
+    default_tok = pf_default["approval_tokens"]["full"]
+    neon_tok = pf_neon["approval_tokens"]["full"]
+    assert pf_default["expected_model"] == "deepseek-flash"
+    assert pf_neon["expected_model"] == "gemini-4-neon"
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", default_tok)
+    assert re.fullmatch(r"h3-live-[0-9a-f]{24}", neon_tok)
+    assert neon_tok != default_tok
+
+    # cost-estimate also accepts --expected-model and preserves the same token.
+    ce_neon_out = env["tmp"] / "ce_neon.json"
+    assert h3.main(
+        ["cost-estimate", *pinned_args, *freeze_all, "--manifest", str(two_docs),
+         "--expected-model", "gemini-4-neon", "--price-input-per-1m", "0.5",
+         "--price-output-per-1m", "2.0", "--json-out", str(ce_neon_out)]
+    ) == 0
+    assert json.loads(ce_neon_out.read_text(encoding="utf-8"))["approval_tokens"]["full"] == neon_tok
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncHTTPTransport",
+        lambda *a, **kw: httpx.MockTransport(h3.FakeGateway("raw_baseline", [])),
+    )
+
+    # 1. Default (no --expected-model) stays pinned to deepseek-flash and refuses gemini-4-neon.
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "gemini-4-neon")
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(env["tmp"] / "live_default_reject"),
+         "--manifest", str(two_docs), "--stage", "full", "--arm", "raw_baseline",
+         "--direction", "zh->en", "--max-calls", "5", "--live",
+         "--owner-approval-token", default_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "deepseek-flash" in err
+
+    # 2. --expected-model gemini-4-neon refuses deepseek-flash.
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-flash")
+    neon_run_dir = env["tmp"] / "live_neon"
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(neon_run_dir),
+         "--manifest", str(two_docs), "--expected-model", "gemini-4-neon",
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--live", "--owner-approval-token", neon_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "gemini-4-neon" in err
+    assert not neon_run_dir.exists()
+
+    # 3. --expected-model gemini-4-neon accepts gemini-4-neon and records it in ledger bindings.
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "gemini-4-neon")
+    code, summary = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(neon_run_dir),
+         "--manifest", str(two_docs), "--expected-model", "gemini-4-neon",
+         "--stage", "full", "--arm", "raw_baseline", "--direction", "zh->en", "--max-calls", "5",
+         "--live", "--owner-approval-token", neon_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 0, summary
+    ledger = json.loads((neon_run_dir / "h3-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["bindings"]["pinned_model"] == "gemini-4-neon"
+    assert ledger["records"][-1]["model"] == "gemini-4-neon"
+
+    # 4. A ledger created for gemini-4-neon refuses mixing in another model (e.g. default deepseek-flash).
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-flash")
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *freeze_all, "--run-dir", str(neon_run_dir),
+         "--manifest", str(two_docs), "--stage", "full", "--arm", "wuwaterm_prod",
+         "--direction", "zh->en", "--max-calls", "5", "--live",
+         "--owner-approval-token", default_tok, *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "frozen bindings differ" in err
+    assert no_network == []

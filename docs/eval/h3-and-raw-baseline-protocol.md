@@ -1,9 +1,10 @@
 # H3 Held-Out Usability & Raw-Model Baseline Evaluation Protocol
 
-- Status: **Frozen design spec — `Pending Owner Authorization` (0 live LLM calls executed)**.
+- Status: **Revision (d) — Owner-authorized (2026-11-27) for `H3` three-arm live run using `--expected-model gemini-4-neon` on the owner's OpenAI-compatible gateway** (historical baseline: `0 live LLM calls executed` as of 2026-11-27 protocol freeze before execution). Separate owner authorization is still required for production `deepseek-flash` runs or subsequent `C1`/`C2`/`C3`/`C4` candidate paid experiments.
 - Revision 2026-11-26 (before any `H3` call): pins Core `v0.13.0`, `wuwaterm-cjk-matcher-v10`, the production dictionary and the frozen evaluation tools (§0); adds the `en->zh` `raw_matched` thinking ablation (§3.2), the paired comparison metrics (§4.1) and a pre-registered decision rule (§4.2); re-itemizes the call budget and defers Arm C at `0` POSTs (§6).
 - Revision 2026-11-26 (b), still before any `H3` call (MY-489): adds the frozen runner, arm-scores exporter and judging addendum with their SHA-256 (§0, §0.1); states `raw_matched` → `wuwaterm_prod` as the full-pipeline gain at the matched final thinking mode (§3.2, §4.1); clarifies that §3.2 rule 3 reads a rerun document's final attempt; adds the critical-error non-worsening gate to the decision rule (§4.2); completes the community-term judging rules (§5.3).
 - Revision 2026-11-26 (c), before any `H3` candidate is scanned and before any `H3` call (MY-518): retargets the Core under test to `v0.14.0` and adds the `v0.13.0` / `v0.14.0` offline differential check (`scripts/eval_h3_tree_diff.py`, #336) and the pinned tool worktree (§0.2); makes the 12-scalar clearance mechanical, with the tagged and the freeze-time Core trees as sealed sets and `T = 24` (§2.4.1); adds the announcement collection ladder (`L0`/`L1`/`L2`, §2.5) and the corpus acceptance gate (`scripts/eval_h3_corpus.py`, #337) plus `h3-acceptance-v1` receipt and `h3-judges-v1` judge roster freeze gates (§2.6); adds the post-freeze leakage scan (§2.1); takes the pilot slice from `D` (§6.1); separates the real-dollar pre-send USD budget gate from `--owner-approval-token`, locks immutable `prices_usd_per_1m` in `h3-ledger.json`, and adds explicit `http`/`https` `--proxy` support (§6.8); updates §0 and §0.1 to the final `v0.14.0` bindings and tool SHA-256 values.
+- Revision 2026-11-27 (d), before any `H3` live call: adds explicit `--expected-model MODEL` binding (default `deepseek-flash`) to `scripts/eval_h3.py` and records owner authorization (2026-11-27) to run the current `H3` same-model three-arm blind evaluation (`raw_baseline`, `wuwaterm_prod` `v0.14.0`, `raw_matched`) with `--expected-model gemini-4-neon` on the owner's OpenAI-compatible gateway; hashes `pinned_model` into `bindings`, `--owner-approval-token`, and `h3-ledger.json` while keeping the `v0.14.0` Core tree under test, `terms.db`, and frozen corpus unchanged; requires re-issuing `h3-acceptance-v1` from the revision (d) pinned tool worktree to bind the updated `scripts/eval_h3.py` SHA-256.
 - Target Core under test: `v0.14.0` (tag commit `2737530187f1e1c3a6b8758de357c8d32d21dfc7`, `src` tree `8e6bd426bfc12625f050c03ed14e419d3dba145f`), `wuwaterm-cjk-matcher-v11`, pinned `3.7.0` / `3.7.8` data commit `9218d612ad815e398e064e577e42aaf878899968`. Full bindings in §0.
 - Ledger separation: **Strictly separate** from the completed `q8` / `v0.11.0` ledger (`602/606` closed). A fresh `H3` ledger (`h3-ledger.json` + append-only `h3-ledger-log.jsonl`) is initialized only after owner authorization.
 - Precondition: `MY-229` (`scripts/eval_semantic.py` audit) — **satisfied** by #316 (`5bc809c`, merged to `main` 2026-11-25).
@@ -25,7 +26,7 @@ Every value below is hashed into `h3-ledger.json` before the first live POST. An
 | Semantic evaluation fingerprint | `FINGERPRINT_VERSION = 4` | `scripts/eval_semantic.py` |
 | Scorer | `scripts/eval_usability.py` SHA-256 `8b17d3ae75f7aafebaf537246fcaa1e56c1e52cb1a4bf5c875c599c42622d796` | `main` `486312df532a3757f367d523d6f7a7cdd5735f96` (includes `paired-compare`, #321) |
 | Semantic evaluation runner | `scripts/eval_semantic.py` SHA-256 `e0677dc797b5dfa3a23c336b56f95408a1a3127333462a8032a03b3983a21c91` | `main` `486312d` (includes the `MY-229` hardening, #316); byte-identical at `v0.14.0` |
-| `H3` runner | `scripts/eval_h3.py` SHA-256 `ed59ca4540575d3bb8bc4b778775f7c6424e86a4ad34f193f56fd281dedd67f0` | revision (c); bound to `v0.14.0` (`HEAD:src` `8e6bd426…`), dual USD budget gate, explicit proxy, `eval_h3_corpus` receipt gate |
+| `H3` runner | `scripts/eval_h3.py` SHA-256 `8fa854b225af7125baa44060f9982aed8f8250df90b1e5ecea9e2ffc1dea0c12` | revision (d); bound to `v0.14.0` (`HEAD:src` `8e6bd426…`), explicit `--expected-model` binding (default `deepseek-flash`; `gemini-4-neon` authorized under revision (d)), dual USD budget gate, explicit proxy, `eval_h3_corpus` receipt gate |
 | `H3` corpus acceptance gate | `scripts/eval_h3_corpus.py` SHA-256 `6c8a76fd808fa70eda25250b7031cd5ab6792fff6f0f24ddb0f569116dc5651b` | revision (c) (#337); mechanical checks `C1`–`C10` and `validate_acceptance_receipt` |
 | `v0.13.0` → `v0.14.0` differential harness | `scripts/eval_h3_tree_diff.py` SHA-256 `e483d96eb5d58a3a363fef3535352de1874092fa0c334e1c37beb015b324e743` | revision (c) (#336); offline `--fake-transport` tree comparison and stage probe |
 | Arm-scores exporter and decision rule | `scripts/eval_h3_export.py` SHA-256 `23d7092e6c47efe6cb5c31155648b46a058ce6ae4c2c9715034f040db431454c` | revision (b); unchanged in revision (c) |
@@ -34,7 +35,7 @@ Every value below is hashed into `h3-ledger.json` before the first live POST. An
 
 Notes on the bindings:
 
-- The Core tree under test (`v0.14.0`, `2737530187f1e1c3a6b8758de357c8d32d21dfc7`, `HEAD:src` `8e6bd426bfc12625f050c03ed14e419d3dba145f`) and the evaluation tools come from separate checkouts on purpose: `--bound-tree` is a detached checkout of `v0.14.0`, while the runner runs from a detached pinned tool worktree at the revision (c) closing merge commit (§0.2).
+- The Core tree under test (`v0.14.0`, `2737530187f1e1c3a6b8758de357c8d32d21dfc7`, `HEAD:src` `8e6bd426bfc12625f050c03ed14e419d3dba145f`) and the evaluation tools come from separate checkouts on purpose: `--bound-tree` is a detached checkout of `v0.14.0`, while the runner runs from a detached pinned tool worktree at the current revision (d) closing merge commit (§0.2).
 - The q7 and q8 plans cite `2bc0154b…` for the dictionary. That value is the SHA-256 of the `terms.db` file built locally in q7, not a dictionary revision. `H3` binds the production file and the `review-v2` revision in the table above.
 
 All eight frozen tool and instruction files above (`scripts/eval_h3.py`, `scripts/eval_h3_corpus.py`, `scripts/eval_h3_tree_diff.py`, `scripts/eval_h3_export.py`, `scripts/eval_usability.py`, `scripts/eval_semantic.py`, `docs/eval/usability-judging.md`, `docs/eval/h3-judging-addendum.md`) are hashed into `h3-ledger.json` when the runner creates the ledger, and any missing file or SHA-256 drift is refused:
@@ -68,19 +69,22 @@ python scripts/eval_h3_tree_diff.py \
   --terms-db <terms.db> --json-out <tree-diff report>
 
 # 3) offline, no network: exact POST itemization per stage and arm, and the approval token
+#    (pass the same --expected-model <model>, e.g. gemini-4-neon under revision (d) or default deepseek-flash)
 python scripts/eval_h3.py preflight --bound-tree <v0.14.0 checkout> --terms-db <terms.db> \
+  --expected-model <model> \
   --freeze <sample> --freeze <official names> --freeze <community names> \
   --freeze <adjudication> --freeze <metadata> --freeze <community lexicon> \
   --freeze <upstream clearances> --freeze <official clear names> \
   --acceptance-receipt <acceptance receipt> --judges <judge roster> \
   --manifest <H3 manifest> [--pilot-manifest <pilot manifest>]
-python scripts/eval_h3.py cost-estimate <same arguments> \
+python scripts/eval_h3.py cost-estimate <same arguments, including --expected-model <model>> \
   --price-input-per-1m <peak input USD> --price-output-per-1m <peak output USD>
 
 # 4) one stage of one arm; per stage: wuwaterm_prod, then raw_baseline, then raw_matched
 #    (for --stage full/ablation on a ledger that ran pilot, pass the same --pilot-manifest;
 #     for --stage pilot, --manifest is <pilot manifest> and optional --full-manifest cross-checks <H3 manifest>)
 python scripts/eval_h3.py run --bound-tree <v0.14.0 checkout> --terms-db <terms.db> \
+  --expected-model <model> \
   --freeze <same frozen inputs> \
   --acceptance-receipt <acceptance receipt> --judges <judge roster> \
   --run-dir <private run dir> --manifest <stage manifest> \
@@ -101,7 +105,7 @@ python scripts/eval_h3_export.py decide --ledger <run dir>/h3-ledger.json \
   --zh-en <zh->en primary comparison> --en-zh <en->zh primary comparison>
 ```
 
-- **No POST by default.** `run` sends nothing unless exactly one of `--fake-transport` or `--live --owner-approval-token` is given. `--fake-transport` answers every request from an in-process deterministic gateway (`httpx.MockTransport`), points the gateway variables at `.invalid`, and refuses `--proxy`; a fake scenario file can make chosen requests time out, fail, omit `usage`, or merge paragraphs to exercise the retry, fallback, budget-stop, and rerun paths. `--owner-approval-token` is a configuration anti-drift digest only (never a budget or spend authorization): it binds the Core tree, `terms.db`, matcher revision, frozen tool and instruction SHA-256 values, raw prompts, thinking and timeout settings, stage caps, decision parameters, frozen inputs (including `h3-acceptance-v1` and `h3-judges-v1`), optional `pilot_manifest_sha256`, and stage manifest SHA-256; it deliberately excludes USD budget, prices, and `--proxy`. A live run also requires both `--ledger-budget-usd` and `--max-cost-usd`, plus `--price-input-per-1m`, `--price-output-per-1m`, valid `h3-acceptance-v1` and `h3-judges-v1` preconditions, no expectation overrides, and `deepseek-flash` only, all verified before any HTTP client or transport exists.
+- **No POST by default.** `run` sends nothing unless exactly one of `--fake-transport` or `--live --owner-approval-token` is given. `--fake-transport` answers every request from an in-process deterministic gateway (`httpx.MockTransport`), points the gateway variables at `.invalid`, and refuses `--proxy`; a fake scenario file can make chosen requests time out, fail, omit `usage`, or merge paragraphs to exercise the retry, fallback, budget-stop, and rerun paths. `--owner-approval-token` is a configuration anti-drift digest only (never a budget or spend authorization): it binds the Core tree, `terms.db`, matcher revision, `pinned_model` (`--expected-model`), frozen tool and instruction SHA-256 values, raw prompts, thinking and timeout settings, stage caps, decision parameters, frozen inputs (including `h3-acceptance-v1` and `h3-judges-v1`), optional `pilot_manifest_sha256`, and stage manifest SHA-256; it deliberately excludes USD budget, prices, and `--proxy`. A live run also requires both `--ledger-budget-usd` and `--max-cost-usd`, plus `--price-input-per-1m`, `--price-output-per-1m`, valid `h3-acceptance-v1` and `h3-judges-v1` preconditions, no expectation overrides, and the bound `--expected-model` (default `deepseek-flash`; `gemini-4-neon` authorized under revision (d)) only, all verified before any HTTP client or transport exists.
 - **Bound tree.** The runner imports Core only from `--bound-tree`/`src`, after `git rev-parse HEAD:src` equals `8e6bd426…` and `src` and `pyproject.toml` have no uncommitted change, and refuses if `wuwaterm` is already loaded from another tree. `--terms-db` must have the production SHA-256 above and the matcher revision must equal `MATCHER_REVISION`. A dry run may override the tree and dictionary expectations; the ledger records the overrides and `preflight` then prints `unavailable`.
 - **Counting & pre-send USD budget gate.** Every POST is charged to `h3-ledger.json` by the transport pre-send hook before it is sent; the charge that would pass `--max-calls`, the stage's cumulative cap, `354`, or the pre-send USD budget gate (`spent_usd + reserve <= ledger_budget_usd`, and `record.spent_usd + reserve <= max_cost_usd` when `--max-cost-usd` is set) is refused before reaching the transport and stops the run immediately without a rerun (exit `3`, `transport_posts == posts`). Because translation requests set no `max_tokens`, the conservative per-POST reserve is not a strict upper bound: one POST whose real usage exceeds its reserve can carry `spent_usd` past `ledger_budget_usd` by that excess, after which every further POST is refused (exit `3`). Failed or timed-out POSTs stay charged at their full reserve; a 2xx response missing `usage` stays charged at full reserve and stops the run immediately (exit `3`). A recording transport keeps what each request put on the wire (`thinking` / `reasoning_effort`, payload hashes) and the gateway `usage`; its POST count must equal the ledger's.
 - **Ledger & proxy.** `h3-ledger.json` and the append-only `h3-ledger-log.jsonl` (each line carries the SHA-256 of the line before it) hold bindings, `ledger_budget_usd`, `prices_usd_per_1m`, `spent_usd`, `proxy_enabled` (`true`/`false` only; never proxy URLs or credentials), precondition hashes/counts, counts, modes, telemetry and SHA-256 values, never text. `ledger_budget_usd` and `prices_usd_per_1m` are locked on first ledger creation and immutable thereafter; tampering with them or with `spent_usd` is refused against `h3-ledger-log.jsonl` (exit `1`). `--proxy` accepts explicit `http`/`https` URLs in live mode only (`httpx.AsyncHTTPTransport(proxy=..., trust_env=False)` so unrequested environment proxies are never silently inherited). A run directory that holds another evaluation's `ledger.json` (the closed `q8` ledger) is refused, and a dry-run ledger is never reused by a live run. Arm outputs, which are text, go to `outputs/` in the private run directory, which must lie outside every repository (the runner refuses this repository and the bound tree); their SHA-256 is in the ledger.
@@ -130,7 +134,7 @@ All revision (c) tools (`scripts/eval_h3_tree_diff.py` in #336, `scripts/eval_h3
 - An unintended regression: it is fixed in Core `v0.14.1`, and `H3` is rebound to that tag before any live call. A regression first seen after closing revision (c) stops `H3` before any live call; the rebinding then needs a new protocol revision and a new acceptance receipt.
 - `H3` never falls back to `0.13.0`, which would measure a Core the production API no longer serves.
 
-**Pinned tool worktree.** `frozen_file_hashes()` hashes the frozen files of the checkout the runner runs from, not of `--bound-tree`, and those hashes are part of the bindings and of the approval token. Run from a `main` checkout that has moved past a change to a frozen file, the runner would compute other bindings, and the ledger and the token would refuse it. After this revision (c) closing PR merges, a detached worktree is therefore created at its merge commit. `preflight`, every `run --live`, and the export and decision steps of the `H3` ledger run from that worktree only. `--bound-tree` stays a separate detached checkout of the `v0.14.0` tag (`2737530187f1e1c3a6b8758de357c8d32d21dfc7`). Both worktrees stay until `H3` is reported.
+**Pinned tool worktree.** `frozen_file_hashes()` hashes the frozen files of the checkout the runner runs from, not of `--bound-tree`, and those hashes are part of the bindings and of the approval token. Run from a `main` checkout that has moved past a change to a frozen file, the runner would compute other bindings, and the ledger and the token would refuse it. After the current revision (d) closing PR merges, a detached worktree is therefore created at that revision (d) merge commit (replacing the prior revision (c) tool worktree). `preflight`, every `run --live`, `eval_h3_corpus.py accept`, and the export and decision steps of the `H3` ledger run from that worktree only. `--bound-tree` stays a separate detached checkout of the `v0.14.0` tag (`2737530187f1e1c3a6b8758de357c8d32d21dfc7`). Both worktrees stay until `H3` is reported.
 
 ## 1. Status of Prior Held-Out Corpora (`H1` and `H2`)
 
@@ -257,7 +261,7 @@ All arms run in this revision (`raw_baseline`, `raw_matched`, `wuwaterm_prod`) r
 | --- | --- | --- | --- |
 | Code / Pipeline | Standalone minimal harness calling `llm_transport.post_chat_completion` directly | Same harness and prompt as `raw_baseline` | Core `v0.14.0` (`2737530`, `src` tree `8e6bd426…`, §0.2): `application._translate_long_plain_text` + `TranslationPlan` / `OperationExecutionBudget` |
 | Directions | `zh->en` and `en->zh` | `en->zh` only | `zh->en` and `en->zh` |
-| Model & Gateway | Same production `WUWATERM_OPENAI_MODEL` (`deepseek-flash`) & `WUWATERM_OPENAI_BASE_URL`, `temperature=0` | Same | Same |
+| Model & Gateway | Same `WUWATERM_OPENAI_MODEL` (`deepseek-flash`, or `--expected-model gemini-4-neon` under revision (d)) & `WUWATERM_OPENAI_BASE_URL`, `temperature=0` | Same | Same |
 | Timeouts | `45 s` model timeout / `90 s` request budget | `45 s` model timeout / `90 s` request budget | `45 s` model timeout / `90 s` request budget |
 | Segmentation | `segmentation-v1` (`L = 1800`) identical segment cores | `segmentation-v1` (`L = 1800`) identical segment cores | `segmentation-v1` (`L = 1800`) identical segment cores |
 | Dictionary (`terms.db`) | **None** (no exact lookup, no locks, no references) | **None** | Production `terms.db` (`9ddee819…`, revision `d9f5e4ae…`) + `wuwaterm-cjk-matcher-v11` |
@@ -407,7 +411,7 @@ Community-term rules (§4 item 3):
 
 ## 6. Itemized Live Call Budget Table
 
-> **Status: `Pending Owner Authorization — 0 live LLM calls executed`.**
+> **Status: Owner-authorized (2026-11-27) to launch the `H3` three-arm run using `--expected-model gemini-4-neon` on the owner's OpenAI-compatible gateway** (historical baseline: `0 live LLM calls executed` as of 2026-11-27 protocol freeze before execution). Separate owner authorization is still required for production `deepseek-flash` runs or subsequent `C1`/`C2`/`C3`/`C4` candidate paid experiments.
 > This budget is strictly separate from the completed `602/606` `q8` / `v0.11.0` ledger.
 
 Every attempted POST to the product model gateway counts, retries and failures included, through the transport pre-send hook. Hard caps are per stage: the runner's `--max-calls` stops a stage at its cap, the ledger keeps each stage's cumulative count across runs and refuses the POST that would pass the stage cap (`pilot` `56`, `full` `240`, `ablation` `58`, Arm C `0`), and the whole `H3` translation budget stops at `354` (§0.1).
@@ -476,7 +480,7 @@ Items at the scored-unit floor of §2.3 (more scored units scale every line in p
 
 ### 6.7 Hard Stop and Approval Request
 
-> **Hard stop: 0 live paid calls have been made under `H3`. No paid online POST — the Stage 1 pilot included — is sent until the owner approves.**
+> **Hard stop (historical baseline as of 2026-11-27 protocol freeze: `0` live paid calls prior to execution): no paid online POST is sent without explicit owner approval.** Revision (d) (2026-11-27) authorizes the `H3` run under `--expected-model gemini-4-neon` on the owner's OpenAI-compatible gateway; production `deepseek-flash` runs and subsequent `C1`/`C2`/`C3`/`C4` candidate experiments still require separate owner approval.
 
 The approval request carries:
 
