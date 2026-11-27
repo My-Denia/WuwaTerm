@@ -7,10 +7,8 @@ import json
 import logging
 import os
 import sqlite3
-import struct
 import sys
 import threading
-import weakref
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -332,89 +330,6 @@ def build_lockable_snapshot(
     )
 
 
-def _build_exact_index(
-    entries: tuple[TermEntry, ...],
-    row_norms: tuple[tuple[str, str, int], ...],
-) -> Mapping[str, tuple[LookupCandidate, ...]]:
-    # Each bucket item carries (priority, len(zh), category, source_file,
-    # source_id, match_rank, id, entry) where match_rank=0 for idx_terms_zh_norm
-    # hits and match_rank=1 for idx_terms_en_norm-only hits, mirroring SQLite's
-    # MULTI-INDEX OR scan order before ORDER BY.
-    buckets: dict[
-        str, list[tuple[int, int, str, str, str, int, int, TermEntry]]
-    ] = {}
-    for entry, (zh_norm, en_norm, priority) in zip(entries, row_norms, strict=True):
-        buckets.setdefault(zh_norm, []).append(
-            (
-                priority,
-                len(entry.zh),
-                entry.category,
-                entry.source_file,
-                entry.source_id,
-                0,
-                entry.id,
-                entry,
-            )
-        )
-        if en_norm != zh_norm:
-            buckets.setdefault(en_norm, []).append(
-                (
-                    priority,
-                    len(entry.zh),
-                    entry.category,
-                    entry.source_file,
-                    entry.source_id,
-                    1,
-                    entry.id,
-                    entry,
-                )
-            )
-
-    index: dict[str, tuple[LookupCandidate, ...]] = {}
-    for norm, items in buckets.items():
-        if len(items) > 1:
-            items.sort(
-                key=lambda row: (
-                    row[0],
-                    row[1],
-                    row[2],
-                    row[3],
-                    row[4],
-                    row[5],
-                    row[6],
-                )
-            )
-        candidates: list[LookupCandidate] = []
-        seen: set[tuple[str, str, str]] = set()
-        for (
-            _prio,
-            _zh_len,
-            _cat,
-            _src_file,
-            _src_id,
-            _match_rank,
-            _entry_id,
-            entry,
-        ) in items:
-            key = (entry.zh, entry.en, entry.category)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(LookupCandidate(entry=entry, score=100.0, reason="exact"))
-        if len(candidates) > 1:
-            candidates.sort(
-                key=lambda c: (
-                    CATEGORY_ORDER.get(c.entry.category, 999),
-                    _source_priority(c.entry),
-                    len(c.entry.zh),
-                    c.entry.en,
-                    c.entry.source_id,
-                )
-            )
-        index[norm] = tuple(candidates)
-    return MappingProxyType(index)
-
-
 def _build_scoring_rows(entries: tuple[TermEntry, ...]) -> tuple[_ScoringRow, ...]:
     rows: list[_ScoringRow] = []
     for entry in entries:
@@ -440,8 +355,8 @@ class DictionarySnapshot:
     """Unified immutable snapshot for a single committed dictionary revision.
 
     All derived views — cryptographic :class:`DictionaryIdentity`,
-    :class:`ReviewSnapshot`, exact-lookup index, normalized fuzzy-scoring rows,
-    and :class:`LockableSnapshot` (including the compiled Aho-Corasick
+    :class:`ReviewSnapshot`, normalized fuzzy-scoring rows, and
+    :class:`LockableSnapshot` (including the compiled Aho-Corasick
     :class:`TermSpanMatcher`) — are derived deterministically from this single
     atomic SQLite read and cached on the snapshot instance. In-flight requests
     holding a snapshot reference stay isolated while newer requests advance to
@@ -452,10 +367,8 @@ class DictionarySnapshot:
         "_storage_stamp",
         "_metadata",
         "_entries",
-        "_row_norms",
         "_derived_lock",
         "_dictionary_identity",
-        "_exact_index",
         "_scoring_rows",
         "_lockable_snapshot",
     )
@@ -466,25 +379,12 @@ class DictionarySnapshot:
         storage_stamp: tuple[object, ...],
         metadata: Mapping[str, str],
         entries: tuple[TermEntry, ...],
-        row_norms: tuple[tuple[str, str, int], ...] | None = None,
     ) -> None:
         self._storage_stamp = storage_stamp
         self._metadata: Mapping[str, str] = MappingProxyType(dict(metadata))
         self._entries = entries
-        if row_norms is None:
-            self._row_norms = tuple(
-                (
-                    normalize_text(entry.zh),
-                    normalize_text(entry.en),
-                    CATEGORY_ORDER.get(entry.category, 999),
-                )
-                for entry in entries
-            )
-        else:
-            self._row_norms = row_norms
         self._derived_lock = threading.Lock()
         self._dictionary_identity: DictionaryIdentity | None = None
-        self._exact_index: Mapping[str, tuple[LookupCandidate, ...]] | None = None
         self._scoring_rows: tuple[_ScoringRow, ...] | None = None
         self._lockable_snapshot: LockableSnapshot | None = None
 
@@ -531,16 +431,6 @@ class DictionarySnapshot:
         )
 
     @property
-    def exact_index(self) -> Mapping[str, tuple[LookupCandidate, ...]]:
-        index = self._exact_index
-        if index is not None:
-            return index
-        with self._derived_lock:
-            if self._exact_index is None:
-                self._exact_index = _build_exact_index(self._entries, self._row_norms)
-            return self._exact_index
-
-    @property
     def scoring_rows(self) -> tuple[_ScoringRow, ...]:
         rows = self._scoring_rows
         if rows is not None:
@@ -567,17 +457,9 @@ class DictionarySnapshot:
         """Materialize all derived indices and matchers on this snapshot."""
         _ = self.dictionary_identity
         _ = self.review_snapshot
-        _ = self.exact_index
         _ = self.scoring_rows
         _ = self.lockable_snapshot(logger=logger)
         return self
-
-
-_SQLITE_WAL_INDEX_VERSION = 3007000
-# SQLite WAL-index header (48 bytes, native byte order):
-#   iVersion(u32), unused(u32), iChange(u32), isInit(u8), bigEndCksum(u8),
-#   szPage(u16), mxFrame(u32), nPage(u32), aFrameCksum(8B), aSalt(8B), aCksum(8B)
-_SHM_HEADER_STRUCT = struct.Struct("=IIIBBHII8s8s8s")
 
 
 def _stat_tuple(path: Path) -> tuple[int, int, int, int, int]:
@@ -593,83 +475,19 @@ def _optional_stat_tuple(path: Path) -> tuple[int, int, int, int, int] | None:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _close_fd_holder(holder: list[int | None]) -> None:
-    for idx in range(len(holder)):
-        fd = holder[idx]
-        holder[idx] = None
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+def _is_coarse_timestamp(stat: tuple[int, int, int, int, int]) -> bool:
+    """Return True when file mtime/ctime has whole-second (coarse) granularity."""
+    return (stat[3] % 1_000_000_000 == 0) or (stat[4] % 1_000_000_000 == 0)
 
 
-def _parse_shm_wal_index(
-    raw: bytes,
-) -> tuple[tuple[object, ...] | None, bool]:
-    """Parse the mirrored 48-byte SQLite WAL-index headers from ``-shm``.
-
-    Returns ``(fingerprint, cacheable)``. When the two mirrored headers
-    disagree (a writer is mid-commit updating ``-shm``) or ``isInit != 1``,
-    ``cacheable`` is ``False`` so callers never pin a snapshot to a transient
-    WAL visibility window.
-    """
-    if len(raw) < 96:
-        return None, False
-    hdr1 = raw[:48]
-    hdr2 = raw[48:96]
-    if hdr1 != hdr2:
-        return None, False
-    (
-        i_version,
-        _unused,
-        i_change,
-        is_init,
-        _big_end_cksum,
-        sz_page,
-        mx_frame,
-        n_page,
-        a_frame_cksum,
-        a_salt,
-        a_cksum,
-    ) = _SHM_HEADER_STRUCT.unpack(hdr1)
-    if i_version != _SQLITE_WAL_INDEX_VERSION or is_init != 1:
-        return None, False
-    return (
-        i_version,
-        i_change,
-        is_init,
-        sz_page,
-        mx_frame,
-        n_page,
-        a_frame_cksum,
-        a_salt,
-        a_cksum,
-    ), True
-
-
-def _connect_for_snapshot(path: Path) -> sqlite3.Connection:
-    """Open a short-lived SQLite connection for reading a snapshot.
-
-    Uses a standard read-write connection when the database file and its parent
-    directory are writable so that closing the last connection on a WAL
-    database triggers SQLite's normal automatic checkpoint and ``-wal``/``-shm``
-    cleanup (matching ``main``). Falls back to ``?mode=ro`` for read-only files
-    or mounts.
-    """
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    """Open a short-lived read-only SQLite connection that never writes or checkpoints."""
     resolved = path.resolve(strict=False)
-    conn: sqlite3.Connection | None = None
-    if os.access(resolved, os.W_OK) and os.access(resolved.parent, os.W_OK):
-        try:
-            conn = sqlite3.connect(resolved, isolation_level=None)
-        except sqlite3.OperationalError:
-            conn = None
-    if conn is None:
-        conn = sqlite3.connect(
-            f"{resolved.as_uri()}?mode=ro",
-            uri=True,
-            isolation_level=None,
-        )
+    conn = sqlite3.connect(
+        f"{resolved.as_uri()}?mode=ro",
+        uri=True,
+        isolation_level=None,
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -678,140 +496,64 @@ class TermService:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self._lock = threading.RLock()
-        # Raw O_RDONLY file descriptors for pread() header checks only (index 0:
-        # main DB header bytes 24..44; index 1: optional -shm WAL-index header
-        # bytes 0..96). Keeping them open per inode avoids open()+close() on
-        # every read so in-process POSIX fcntl locks held by SQLite connections
-        # are never disturbed, while holding zero SQLite connections or locks.
-        self._fd_holder: list[int | None] = [None, None]
-        self._fd_inodes: list[tuple[int, int] | None] = [None, None]
-        self._finalizer = weakref.finalize(self, _close_fd_holder, self._fd_holder)
         self._snapshot_stamp: tuple[object, ...] | None = None
         self._snapshot_cache: DictionarySnapshot | None = None
 
     def close(self) -> None:
-        """Release cached snapshot and raw read-only header descriptors."""
+        """Release the cached snapshot reference (no open handles are held)."""
         with self._lock:
-            self._close_fds_locked()
             self._snapshot_stamp = None
             self._snapshot_cache = None
 
-    def _close_fd_slot_locked(self, slot: int) -> None:
-        fd = self._fd_holder[slot]
-        self._fd_holder[slot] = None
-        self._fd_inodes[slot] = None
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    def _storage_stamp(self) -> tuple[tuple[object, ...], bool]:
+        """Return ``(storage_stamp, cacheable)`` using only ``os.stat()``.
 
-    def _close_fds_locked(self) -> None:
-        self._close_fd_slot_locked(0)
-        self._close_fd_slot_locked(1)
+        Opens zero file descriptors and holds zero persistent SQLite
+        connections, so in-process POSIX ``fcntl`` locks (DELETE and WAL) are
+        untouched and atomic DB replacement cannot be polluted by stale WAL
+        checkpoints.
 
-    def _pread_slot_locked(
-        self,
-        slot: int,
-        path: Path,
-        inode: tuple[int, int],
-        size: int,
-        offset: int = 0,
-    ) -> bytes:
-        fd = self._fd_holder[slot]
-        if fd is None or self._fd_inodes[slot] != inode:
-            self._close_fd_slot_locked(slot)
-            fd = os.open(path, os.O_RDONLY)
-            self._fd_holder[slot] = fd
-            self._fd_inodes[slot] = inode
-        return os.pread(fd, size, offset)
-
-    def _storage_stamp_locked(self) -> tuple[tuple[object, ...], bool]:
-        """Return ``(storage_stamp, cacheable)`` without persistent SQLite connections.
-
-        - Main DB: ``os.stat`` + SQLite header bytes ``24..44`` (``file_change_counter``,
-          ``db_size_pages``, freelist header, ``schema_cookie``) read via
-          ``os.pread`` on a cached ``O_RDONLY`` fd, detecting same-second
-          same-size DELETE-mode commits even on coarse-grained filesystems while
-          preserving in-process POSIX ``fcntl`` locks.
-        - WAL visibility: reads the mirrored 48-byte WAL-index headers (bytes
-          ``0..96``) from ``-shm`` via ``os.pread`` on a cached ``O_RDONLY`` fd
-          and requires ``hdr1 == hdr2`` and ``isInit == 1``. Raw uncommitted
-          ``-wal`` frames written before ``-shm`` advances are NOT used as cache
-          keys, and transient states (``hdr1 != hdr2``, ``isInit != 1``, or a
-          non-empty ``-wal`` without a valid ``-shm``) return ``cacheable=False``
-          so stale snapshots are never cached.
+        Caching is allowed only when:
+        - no non-empty ``-wal`` sidecar exists (when ``-wal`` has bytes, every
+          read goes straight through a short ``?mode=ro`` SQLite connection so
+          WAL commits are immediately visible and mid-commit visibility windows
+          can never pin a stale snapshot), and
+        - the main DB file has sub-second timestamps (coarse whole-second
+          timestamps bypass cache so same-second same-size DELETE-mode updates
+          are always observed immediately).
         """
         path = self.db_path.resolve(strict=False)
-        try:
-            main_stat = _stat_tuple(path)
-        except OSError:
-            self._close_fds_locked()
-            raise
-        main_inode = (main_stat[0], main_stat[1])
-        try:
-            main_header = self._pread_slot_locked(0, path, main_inode, 44, 0)
-            main_header_slice = (
-                main_header[24:44] if len(main_header) >= 44 else main_header
-            )
-        except OSError:
-            self._close_fd_slot_locked(0)
-            main_header_slice = b""
-
-        shm_path = Path(f"{path}-shm")
-        wal_path = Path(f"{path}-wal")
-        shm_stat = _optional_stat_tuple(shm_path)
-        wal_stat = _optional_stat_tuple(wal_path)
-        # Also detect symlink-adjacent -shm/-wal if db_path itself is a symlink.
-        if shm_stat is None and Path(f"{self.db_path}-shm") != shm_path:
-            alt_shm = Path(f"{self.db_path}-shm")
-            shm_stat = _optional_stat_tuple(alt_shm)
-            if shm_stat is not None:
-                shm_path = alt_shm
-        if wal_stat is None and Path(f"{self.db_path}-wal") != wal_path:
-            wal_stat = _optional_stat_tuple(Path(f"{self.db_path}-wal"))
-
-        cacheable = True
-        shm_key: tuple[object, ...] | None = None
-        if shm_stat is not None:
-            shm_inode = (shm_stat[0], shm_stat[1])
-            try:
-                shm_raw = self._pread_slot_locked(1, shm_path, shm_inode, 96, 0)
-                parsed_shm, shm_ok = _parse_shm_wal_index(shm_raw)
-                if shm_ok and parsed_shm is not None:
-                    shm_key = (shm_inode, parsed_shm)
-                else:
-                    cacheable = False
-            except OSError:
-                self._close_fd_slot_locked(1)
-                cacheable = False
-        else:
-            self._close_fd_slot_locked(1)
-            # Non-empty -wal without a valid -shm means WAL has not yet been
-            # indexed/recovered; never cache against that transient state.
-            if wal_stat is not None and wal_stat[2] > 0:
-                cacheable = False
-
-        wal_present = wal_stat is not None and wal_stat[2] > 0
-        stamp = (
-            str(path),
-            main_stat,
-            main_header_slice,
-            shm_key,
-            wal_present,
+        main_stat = _stat_tuple(path)
+        wal_resolved = Path(f"{path}-wal")
+        wal_direct = Path(f"{self.db_path}-wal")
+        wal_stat = _optional_stat_tuple(wal_resolved)
+        wal_direct_stat = (
+            _optional_stat_tuple(wal_direct) if wal_direct != wal_resolved else None
         )
+        wal_nonempty = (wal_stat is not None and wal_stat[2] > 0) or (
+            wal_direct_stat is not None and wal_direct_stat[2] > 0
+        )
+        cacheable = (not wal_nonempty) and (not _is_coarse_timestamp(main_stat))
+        if wal_direct != wal_resolved:
+            stamp: tuple[object, ...] = (
+                str(path),
+                main_stat,
+                wal_stat,
+                wal_direct_stat,
+            )
+        else:
+            stamp = (str(path), main_stat, wal_stat)
         return stamp, cacheable
 
     def _identity(self) -> tuple[object, ...]:
-        """Storage identity for cache validation, aware of SQLite WAL and DELETE commits."""
-        with self._lock:
-            stamp, _cacheable = self._storage_stamp_locked()
-            return stamp
+        """Storage identity for cache validation, aware of SQLite WAL and file replacement."""
+        stamp, _cacheable = self._storage_stamp()
+        return stamp
 
     def _read_snapshot(
         self, path: Path, stamp: tuple[object, ...]
     ) -> DictionarySnapshot:
-        conn = _connect_for_snapshot(path)
+        conn = _connect_readonly(path)
         try:
             conn.execute("BEGIN")
             try:
@@ -833,29 +575,24 @@ class TermService:
             conn.close()
         metadata = {row["key"]: row["value"] for row in metadata_rows}
         entries = tuple(row_to_entry(row) for row in term_rows)
-        row_norms = tuple(
-            (row["zh_norm"], row["en_norm"], int(row["priority"]))
-            for row in term_rows
-        )
         return DictionarySnapshot(
             storage_stamp=stamp,
             metadata=metadata,
             entries=entries,
-            row_norms=row_norms,
         )
 
     def snapshot(self) -> DictionarySnapshot:
         """Return the current immutable :class:`DictionarySnapshot`.
 
-        Validates the cached snapshot against main-file header counters and
-        ``-shm`` WAL-index headers without keeping any persistent SQLite
-        connection open. Caches only when ``stamp_before == stamp_after`` and
-        the WAL-index header is consistent (never during a mid-commit window).
+        Uses pure ``os.stat()`` validation and short-lived ``?mode=ro`` SQLite
+        connections. Bypasses caching when a non-empty ``-wal`` file or coarse
+        whole-second timestamps are present, and caches only when
+        ``stamp_before == stamp_after`` with both cacheable.
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
-                stamp_before, cacheable_before = self._storage_stamp_locked()
+                stamp_before, cacheable_before = self._storage_stamp()
                 if (
                     cacheable_before
                     and self._snapshot_cache is not None
@@ -864,17 +601,15 @@ class TermService:
                     return self._snapshot_cache
                 resolved_path = self.db_path.resolve(strict=False)
                 snapshot = self._read_snapshot(resolved_path, stamp_before)
-                stamp_after, cacheable_after = self._storage_stamp_locked()
-                if (
-                    cacheable_before
-                    and cacheable_after
-                    and stamp_before == stamp_after
-                ):
+                if not cacheable_before:
+                    return snapshot
+                stamp_after, cacheable_after = self._storage_stamp()
+                if cacheable_after and stamp_before == stamp_after:
                     self._snapshot_stamp = stamp_after
                     self._snapshot_cache = snapshot
                     return snapshot
-            # Transient/in-flight write state (or DB changed twice while read):
-            # return the freshly loaded snapshot without pinning it in cache.
+            # DB changed twice while read or became uncacheable: return fresh
+            # snapshot without pinning it in cache.
             assert snapshot is not None
             return snapshot
 
@@ -942,9 +677,41 @@ class TermService:
 
     def _exact(self, query: str) -> list[LookupCandidate]:
         # One normalization serves both sides: the query is matched against
-        # zh_norm and en_norm with the same normalized form.
+        # zh_norm and en_norm with the same normalized form via SQLite's
+        # indexed query (short-lived ?mode=ro connection), preserving exact
+        # tie-breaking across both ANALYZE and non-ANALYZE query plans.
         norm = normalize_text(query)
-        return list(self.snapshot().exact_index.get(norm, ()))
+        conn = _connect_readonly(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM terms
+                WHERE zh_norm = ? OR en_norm = ?
+                ORDER BY priority, length(zh), category, source_file, source_id
+                """,
+                (norm, norm),
+            ).fetchall()
+        finally:
+            conn.close()
+        candidates: list[LookupCandidate] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            entry = row_to_entry(row)
+            key = (entry.zh, entry.en, entry.category)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(LookupCandidate(entry=entry, score=100.0, reason="exact"))
+        candidates.sort(
+            key=lambda c: (
+                CATEGORY_ORDER.get(c.entry.category, 999),
+                self._source_priority(c.entry),
+                len(c.entry.zh),
+                c.entry.en,
+                c.entry.source_id,
+            )
+        )
+        return candidates
 
     def _scoring_rows(self) -> tuple[_ScoringRow, ...]:
         """Snapshot-cached rows with normalized forms, paid once per dictionary."""

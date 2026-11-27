@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import hashlib
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 import httpx
@@ -444,7 +445,7 @@ def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_in
         assert current_snapshot is not inflight_snapshot
         assert inflight_snapshot.dictionary_identity == inflight_identity
         assert inflight_snapshot.term_count == inflight_scoring_count
-        assert inflight_snapshot.exact_index.get("星尘魔核") is None
+        assert all(entry.zh != "星尘魔核" for entry in inflight_snapshot.entries)
         assert inflight_snapshot.lockable_snapshot() is inflight_lockable
         assert all(src != "星尘魔核" for src, _ in inflight_lockable.eligible_lockable)
     finally:
@@ -706,9 +707,9 @@ def test_benchmark_core_perf_fail_closed_and_wal_backup(tmp_path: Path, sample_d
 
 
 def test_wal_visibility_window_does_not_cache_stale_snapshot_before_shm_commit(
-    monkeypatch, tmp_path: Path, sample_db: Path
+    tmp_path: Path, sample_db: Path
 ):
-    """WAL cache key tracks -shm WAL-index headers and refuses to cache mid-commit states."""
+    """Non-empty -wal bypasses caching so WAL visibility windows can never pin stale data."""
     wal_db = tmp_path / "wal-window.db"
     shutil.copy2(sample_db, wal_db)
     init_conn = connect(wal_db)
@@ -738,20 +739,22 @@ def test_wal_visibility_window_does_not_cache_stale_snapshot_before_shm_commit(
         writer.commit()
         assert service.lookup_exact("窗口初始词").exact is True
         rev_v1 = service.dictionary_identity().revision
+        # Non-empty -wal must not populate the snapshot cache.
+        assert Path(f"{wal_db}-wal").stat().st_size > 0
+        assert service._snapshot_cache is None
 
-        # Part A: Simulate a writer that has already appended frames to -wal
-        # before updating -shm mxFrame (the exact WAL commit visibility window).
+        # Simulate extra -wal bytes synced before -shm mxFrame advances.
         wal_path = Path(f"{wal_db}-wal")
         wal_before = wal_path.read_bytes()
         with open(wal_path, "ab") as wal_handle:
             wal_handle.write(b"\x00" * 4120)
         try:
-            # Reading during the window must still reflect committed v1 state.
             assert service.dictionary_identity().revision == rev_v1
+            assert service._snapshot_cache is None
         finally:
             wal_path.write_bytes(wal_before)
 
-        # Now writer finishes committing a second row (advancing -shm mxFrame).
+        # Writer commits a second row; service immediately sees v2 with zero stale caching.
         insert_records(
             writer,
             [
@@ -767,42 +770,82 @@ def test_wal_visibility_window_does_not_cache_stale_snapshot_before_shm_commit(
         )
         writer.commit()
 
-        # Service must immediately observe the new -shm mxFrame and return v2.
         assert service.lookup_exact("窗口新词").exact is True
         assert service.dictionary_identity().revision != rev_v1
-
-        # Part B: Torn -shm header (hdr1 != hdr2) must not pin a snapshot into cache.
-        real_pread = service._pread_slot_locked
-        torn_once = {"active": True}
-
-        def torn_shm_pread(slot, path, inode, size, offset=0):
-            data = real_pread(slot, path, inode, size, offset)
-            if slot == 1 and torn_once["active"] and len(data) >= 96:
-                # Flip one byte in hdr2 so hdr1 != hdr2 (mid-commit state).
-                return data[:48] + bytes([data[48] ^ 0xFF]) + data[49:]
-            return data
-
-        service._snapshot_cache = None
-        service._snapshot_stamp = None
-        monkeypatch.setattr(service, "_pread_slot_locked", torn_shm_pread)
-        snap = service.snapshot()
-        assert snap.term_count > 0
-        assert service._snapshot_cache is None
-
-        # Once hdr1 == hdr2 again, normal caching resumes.
-        torn_once["active"] = False
-        cached_snap = service.snapshot()
-        assert service._snapshot_cache is cached_snap
     finally:
         writer.close()
         service.close()
 
 
-def test_last_closing_short_connection_cleans_up_wal_before_atomic_replace(
-    monkeypatch, tmp_path: Path, sample_db: Path
+@pytest.mark.parametrize("journal_mode", ["DELETE", "WAL"])
+def test_cross_process_write_lock_preserved_across_queries_close_and_gc(
+    tmp_path: Path, sample_db: Path, journal_mode: str
 ):
-    """When writer closes first and TermService's short read connection closes last, WAL is cleaned up."""
-    live_db = tmp_path / "last-closer.db"
+    """TermService queries, close(), and GC must never release another in-process write lock."""
+    db_path = tmp_path / f"lock-{journal_mode.lower()}.db"
+    shutil.copy2(sample_db, db_path)
+    init_conn = connect(db_path)
+    try:
+        mode = init_conn.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()
+        assert mode is not None and mode[0].upper() == journal_mode
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    probe_script = (
+        "import sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], timeout=0.0); "
+        "c.execute('BEGIN IMMEDIATE')"
+    )
+
+    def assert_other_process_busy() -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", probe_script, str(db_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0, "other process unexpectedly acquired BEGIN IMMEDIATE"
+        assert "locked" in proc.stderr.lower()
+
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "UPDATE terms SET en = en WHERE id = (SELECT MIN(id) FROM terms)"
+        )
+        assert_other_process_busy()
+
+        service = TermService(db_path)
+        if journal_mode == "WAL":
+            # In WAL mode, ?mode=ro reads concurrently while writer holds BEGIN IMMEDIATE.
+            assert service.lookup_exact("声骸").exact is True
+            assert service.dictionary_identity().term_count > 0
+            assert_other_process_busy()
+        else:
+            # In DELETE mode, snapshot/lookup must not drop writer's RESERVED/EXCLUSIVE lock.
+            _ = service._identity()
+            assert service.lookup_exact("声骸").exact is True
+            assert service.dictionary_identity().term_count > 0
+            assert_other_process_busy()
+
+        service.close()
+        assert_other_process_busy()
+
+        del service
+        gc.collect()
+        assert_other_process_busy()
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_stale_nonempty_wal_atomic_replace_never_corrupts_new_db_bytes(
+    tmp_path: Path, sample_db: Path
+):
+    """?mode=ro never writes old WAL pages into an atomically replaced DB; clean checkpoint swaps cleanly."""
+    live_db = tmp_path / "stale-wal-replace.db"
     shutil.copy2(sample_db, live_db)
     init_conn = connect(live_db)
     try:
@@ -811,64 +854,33 @@ def test_last_closing_short_connection_cleans_up_wal_before_atomic_replace(
     finally:
         init_conn.close()
 
+    # Hold a reader so a non-empty -wal remains on disk after writer commits and closes.
+    pinned_reader = connect(live_db)
+    pinned_reader.execute("BEGIN")
+    pinned_reader.execute("SELECT COUNT(*) FROM terms").fetchone()
+
     writer = connect(live_db)
-    writer.execute("PRAGMA wal_autocheckpoint = 0")
-    insert_records(
-        writer,
-        [
-            TermRecord(
-                category="item",
-                source_file="old.json",
-                source_id="o1",
-                text_key="Old_1",
-                zh="旧尾词条",
-                en="Old Tail Term",
-            )
-        ],
-    )
-    writer.commit()
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="old.json",
+                    source_id="o1",
+                    text_key="Old_1",
+                    zh="旧尾词条",
+                    en="Old Tail Term",
+                )
+            ],
+        )
+        writer.commit()
+    finally:
+        writer.close()
 
-    # Coordinate so TermService opens its short connection BEFORE writer closes,
-    # writer closes FIRST, and TermService's short connection closes LAST.
-    reader_opened = threading.Event()
-    writer_closed = threading.Event()
-    from wuwaterm import lookup as lookup_mod
+    assert Path(f"{live_db}-wal").stat().st_size > 0
 
-    real_connect = lookup_mod._connect_for_snapshot
-
-    def coordinated_connect(path: Path) -> sqlite3.Connection:
-        conn = real_connect(path)
-        if not reader_opened.is_set():
-            reader_opened.set()
-            assert writer_closed.wait(timeout=5.0)
-        return conn
-
-    service = TermService(live_db)
-    monkeypatch.setattr(lookup_mod, "_connect_for_snapshot", coordinated_connect)
-
-    errors: list[BaseException] = []
-
-    def run_reader() -> None:
-        try:
-            assert service.lookup_exact("旧尾词条").exact is True
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
-
-    t = threading.Thread(target=run_reader)
-    t.start()
-    assert reader_opened.wait(timeout=5.0)
-    writer.close()
-    writer_closed.set()
-    t.join(timeout=5.0)
-    assert not errors
-
-    # Because TermService uses a standard RW short connection when writable,
-    # closing last cleanly checkpoints and removes -wal/-shm (matching main).
-    assert not Path(f"{live_db}-wal").exists()
-    assert not Path(f"{live_db}-shm").exists()
-
-    # Replace live_db atomically with a clean candidate and open in RW mode:
-    # zero old WAL pages can corrupt the new database.
     candidate = tmp_path / "clean-candidate.db"
     cand_conn = connect(candidate)
     try:
@@ -891,30 +903,93 @@ def test_last_closing_short_connection_cleans_up_wal_before_atomic_replace(
     finally:
         cand_conn.close()
 
+    expected_candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+    # Atomically replace live_db even while stale -wal is still present on disk.
     os.replace(candidate, live_db)
-    assert service.lookup_exact("干净新词").exact is True
-    assert service.lookup_exact("旧尾词条").exact is False
-    service.close()
 
-    verify = sqlite3.connect(live_db)
+    service = TermService(live_db)
     try:
-        assert verify.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert verify.execute("SELECT zh, en FROM terms").fetchall() == [
-            ("干净新词", "Clean Replacement")
-        ]
+        # First query via ?mode=ro must NEVER write old WAL pages into the replaced main DB file.
+        _ = service.lookup_exact("干净新词")
+        _ = service.dictionary_identity()
     finally:
-        verify.close()
+        service.close()
+        pinned_reader.close()
 
-    # Read-only fallback check: read-only file + directory still loads via ?mode=ro.
+    actual_live_sha = hashlib.sha256(live_db.read_bytes()).hexdigest()
+    assert actual_live_sha == expected_candidate_sha
+
+    # Proper WAL promotion: checkpoint(TRUNCATE) old WAL before os.replace(), then read new DB.
+    promo_db = tmp_path / "promo.db"
+    shutil.copy2(sample_db, promo_db)
+    p_conn = connect(promo_db)
+    try:
+        assert p_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        p_conn.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            p_conn,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="p_old.json",
+                    source_id="po1",
+                    text_key="PO_1",
+                    zh="旧升级词",
+                    en="Old Promo Term",
+                )
+            ],
+        )
+        p_conn.commit()
+    finally:
+        p_conn.close()
+
+    promo_svc = TermService(promo_db)
+    assert promo_svc.lookup_exact("旧升级词").exact is True
+
+    ckpt = connect(promo_db)
+    try:
+        ckpt.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    finally:
+        ckpt.close()
+
+    promo_cand = tmp_path / "promo-candidate.db"
+    pc = connect(promo_cand)
+    try:
+        initialize(pc)
+        pc.execute("INSERT INTO metadata VALUES ('schema_version', '2')")
+        insert_records(
+            pc,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="p_new.json",
+                    source_id="pn1",
+                    text_key="PN_1",
+                    zh="新升级词",
+                    en="New Promo Term",
+                )
+            ],
+        )
+        pc.commit()
+    finally:
+        pc.close()
+
+    os.replace(promo_cand, promo_db)
+    assert promo_svc.lookup_exact("新升级词").exact is True
+    assert promo_svc.lookup_exact("旧升级词").exact is False
+    promo_svc.close()
+
+    # Read-only directory + file still works seamlessly via ?mode=ro.
     ro_dir = tmp_path / "ro-dir"
     ro_dir.mkdir()
     ro_db = ro_dir / "ro.db"
-    shutil.copy2(live_db, ro_db)
+    shutil.copy2(promo_db, ro_db)
     os.chmod(ro_db, 0o444)
     os.chmod(ro_dir, 0o555)
     try:
         ro_svc = TermService(ro_db)
-        assert ro_svc.lookup_exact("干净新词").exact is True
+        assert ro_svc.lookup_exact("新升级词").exact is True
         ro_svc.close()
     finally:
         os.chmod(ro_dir, 0o755)
@@ -924,30 +999,16 @@ def test_last_closing_short_connection_cleans_up_wal_before_atomic_replace(
 def test_delete_mode_coarse_timestamp_same_size_inplace_update_invalidates_cache(
     monkeypatch, tmp_path: Path, sample_db: Path
 ):
-    """DELETE-mode same-second same-size in-place UPDATE invalidates via SQLite file_change_counter."""
+    """Whole-second coarse timestamps bypass cache so same-second same-size DELETE updates are seen."""
     db_path = tmp_path / "coarse-delete.db"
     shutil.copy2(sample_db, db_path)
-    service = TermService(db_path)
 
-    before_id = service.dictionary_identity()
-    before_exact = service.lookup_exact("声骸")
-    assert before_exact.best is not None and before_exact.best.entry.en == "Echo"
-
+    # Set coarse whole-second mtime and freeze stat to whole-second mtime & ctime (HFS+ semantics).
+    whole_sec = int(os.stat(db_path).st_mtime)
+    whole_sec_ns = whole_sec * 1_000_000_000
+    os.utime(db_path, ns=(whole_sec_ns, whole_sec_ns))
     frozen_stat = os.stat(db_path)
 
-    # In-place same-length UPDATE in DELETE journal mode.
-    w = connect(db_path)
-    try:
-        w.execute(
-            "UPDATE terms SET en = ?, en_norm = ? WHERE zh = ?",
-            ("Ech0", "ech0", "声骸"),
-        )
-        w.commit()
-    finally:
-        w.close()
-
-    # Simulate a coarse 1-second filesystem where stat (dev, ino, size, mtime, ctime) is identical.
-    os.utime(db_path, ns=(frozen_stat.st_atime_ns, frozen_stat.st_mtime_ns))
     from wuwaterm import lookup as lookup_mod
 
     real_stat_tuple = lookup_mod._stat_tuple
@@ -958,12 +1019,29 @@ def test_delete_mode_coarse_timestamp_same_size_inplace_update_invalidates_cache
                 frozen_stat.st_dev,
                 frozen_stat.st_ino,
                 frozen_stat.st_size,
-                frozen_stat.st_mtime_ns,
-                frozen_stat.st_ctime_ns,
+                whole_sec_ns,
+                whole_sec_ns,
             )
         return real_stat_tuple(path)
 
     monkeypatch.setattr(lookup_mod, "_stat_tuple", coarse_stat_tuple)
+
+    service = TermService(db_path)
+    before_id = service.dictionary_identity()
+    before_exact = service.lookup_exact("声骸")
+    assert before_exact.best is not None and before_exact.best.entry.en == "Echo"
+    assert service._snapshot_cache is None
+
+    # In-place same-length UPDATE in DELETE journal mode within the same whole second.
+    w = connect(db_path)
+    try:
+        w.execute(
+            "UPDATE terms SET en = ?, en_norm = ? WHERE zh = ?",
+            ("Ech0", "ech0", "声骸"),
+        )
+        w.commit()
+    finally:
+        w.close()
 
     after_id = service.dictionary_identity()
     after_exact = service.lookup_exact("声骸")
@@ -972,11 +1050,12 @@ def test_delete_mode_coarse_timestamp_same_size_inplace_update_invalidates_cache
     service.close()
 
 
+@pytest.mark.parametrize("run_analyze", [False, True])
 def test_exact_lookup_cross_index_zh_norm_vs_en_norm_tie_matches_sqlite(
-    tmp_path: Path,
+    tmp_path: Path, run_analyze: bool
 ):
-    """Cross-index tie (en_norm-only id=1 vs zh_norm+en_norm id=2) matches SQLite MULTI-INDEX OR."""
-    tie_db = tmp_path / "cross-index-tie.db"
+    """Exact lookup matches origin/main SQLite ordering both without and with ANALYZE stats."""
+    tie_db = tmp_path / f"cross-index-tie-{run_analyze}.db"
     conn = connect(tie_db)
     try:
         initialize(conn)
@@ -994,6 +1073,9 @@ def test_exact_lookup_cross_index_zh_norm_vs_en_norm_tie_matches_sqlite(
             ],
         )
         conn.commit()
+        if run_analyze:
+            conn.execute("ANALYZE")
+            conn.commit()
         sql_order = [
             (row["id"], row["zh"])
             for row in conn.execute(
@@ -1008,9 +1090,8 @@ def test_exact_lookup_cross_index_zh_norm_vs_en_norm_tie_matches_sqlite(
     finally:
         conn.close()
 
-    assert sql_order == [(2, "fo"), (1, "甲乙")]
     service = TermService(tie_db)
     result = service.lookup_exact("Foo", limit=10)
     assert result.exact is True
-    assert [(c.entry.id, c.entry.zh) for c in result.candidates] == [(2, "fo"), (1, "甲乙")]
+    assert [(c.entry.id, c.entry.zh) for c in result.candidates] == sql_order
     service.close()

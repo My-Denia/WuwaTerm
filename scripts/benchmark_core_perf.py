@@ -358,10 +358,6 @@ def _benchmark_scale(
     identity_cold = service.dictionary_identity()
     cold_identity_ms = (time.perf_counter() - t1) * 1000.0
 
-    t2 = time.perf_counter()
-    _ = snap.exact_index
-    cold_exact_index_ms = (time.perf_counter() - t2) * 1000.0
-
     t3 = time.perf_counter()
     _ = snap.scoring_rows
     cold_scoring_rows_ms = (time.perf_counter() - t3) * 1000.0
@@ -561,7 +557,6 @@ def _benchmark_scale(
         "cold_start": {
             "base_load_ms": round(cold_base_load_ms, 3),
             "identity_ms": round(cold_identity_ms, 3),
-            "exact_index_ms": round(cold_exact_index_ms, 3),
             "scoring_rows_ms": round(cold_scoring_rows_ms, 3),
             "lockable_ac_ms": round(cold_lockable_ac_ms, 3),
             "rss_before_mib": round(rss_before, 2),
