@@ -35,7 +35,7 @@ _DISABLE_ENV = "WUWATERM_DISABLE_NATIVE_KERNEL"
 # are not digits), operations that consult `isdigit()` automatically fall back
 # to pure Python so behavior matches `wuwaterm.text_spans` / `segmentation` 100%.
 _RUST_DIGIT_UNICODE_VERSION = "15.0.0"
-_DIGIT_PARITY_PROBES = ("\u11f50", "\u1e4f0", "\u00b2", "\u00bd")
+_DIGIT_PARITY_PROBES = ("\U00011f50", "\U0001e4f0", "\u00b2", "\u00bd")
 
 _UNSET = object()
 _native_module_cache: ModuleType | None | object = _UNSET

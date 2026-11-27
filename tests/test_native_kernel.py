@@ -209,7 +209,7 @@ def test_unicode_14_vs_15_isdigit_mismatch_falls_back_to_python(
         return _fn
 
     fake_mod = SimpleNamespace(
-        is_py_isdigit=lambda ch: ch in {"\u11f50", "\u1e4f0", "\u00b2"} or ch.isdigit(),
+        is_py_isdigit=lambda ch: ch in {"\U00011f50", "\U0001e4f0", "\u00b2"} or ch.isdigit(),
         sentence_ranges_v2=_boom("sentence_ranges_v2"),
         review_sentence_ranges_v2=_boom("review_sentence_ranges_v2"),
         segment_text=_boom("segment_text"),
@@ -220,7 +220,8 @@ def test_unicode_14_vs_15_isdigit_mismatch_falls_back_to_python(
     monkeypatch.setattr(native_kernel.unicodedata, "unidata_version", "14.0.0")
     monkeypatch.setattr(native_kernel, "_digit_parity_cache", None)
 
-    for sample in ("\u11f50.1", "\u1e4f0.1"):
+    for sample in ("\U00011f50.1", "\U0001e4f0.1"):
+        assert len(sample) == 3
         assert native_kernel.sentence_ranges_v2(sample) == text_spans.sentence_ranges_v2(sample)
         assert native_kernel.review_sentence_ranges_v2(
             sample
@@ -235,6 +236,42 @@ def test_unicode_14_vs_15_isdigit_mismatch_falls_back_to_python(
     # Non-isdigit operations still use native module normally.
     assert native_kernel.scalar_to_utf16("🌊A", 1) == 2
 
+    native_kernel.reset_native_kernel_cache()
+
+
+def test_digit_parity_probes_are_single_scalars_and_invoked_on_unicode_15(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard against supplementary-plane escape typos (e.g. \\u vs \\U) in _DIGIT_PARITY_PROBES."""
+    assert all(len(ch) == 1 for ch in native_kernel._DIGIT_PARITY_PROBES)
+    assert "\U00011f50" in native_kernel._DIGIT_PARITY_PROBES
+    assert "\U0001e4f0" in native_kernel._DIGIT_PARITY_PROBES
+
+    monkeypatch.delenv("WUWATERM_DISABLE_NATIVE_KERNEL", raising=False)
+    monkeypatch.setattr(native_kernel.unicodedata, "unidata_version", "15.0.0")
+    native_kernel.reset_native_kernel_cache()
+
+    probed: list[str] = []
+
+    def _strict_single_scalar_isdigit(ch: str) -> bool:
+        if len(ch) != 1:
+            raise ValueError("expected a single Unicode scalar")
+        probed.append(ch)
+        return ch.isdigit()
+
+    matching_mod = SimpleNamespace(is_py_isdigit=_strict_single_scalar_isdigit)
+    assert native_kernel._native_digit_parity_ok(matching_mod) is True
+    assert tuple(probed) == native_kernel._DIGIT_PARITY_PROBES
+
+    native_kernel.reset_native_kernel_cache()
+    mismatching_mod = SimpleNamespace(
+        is_py_isdigit=lambda ch: (
+            (_ for _ in ()).throw(ValueError("expected a single Unicode scalar"))
+            if len(ch) != 1
+            else not ch.isdigit()
+        )
+    )
+    assert native_kernel._native_digit_parity_ok(mismatching_mod) is False
     native_kernel.reset_native_kernel_cache()
 
 
@@ -274,7 +311,8 @@ def test_real_native_extension_parity_if_installed(monkeypatch: pytest.MonkeyPat
             assert native_out == case["pairs"], case["name"]
 
     # Unicode 14.0 vs 15.0 regression: U+11F50 (Kawi) and U+1E4F0 (Nag Mundari) + ".1" at limit=2.
-    for sample in ("\u11f50.1", "\u1e4f0.1"):
+    for sample in ("\U00011f50.1", "\U0001e4f0.1"):
+        assert len(sample) == 3
         assert native_kernel.sentence_ranges_v2(sample) == text_spans.sentence_ranges_v2(sample)
         assert native_kernel.review_sentence_ranges_v2(
             sample
