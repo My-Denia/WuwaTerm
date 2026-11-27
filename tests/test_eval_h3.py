@@ -451,6 +451,8 @@ def _write_live_preconditions(
     tools_sha = {
         "scripts/eval_h3_corpus.py": frozen_tools["scripts/eval_h3_corpus.py"],
         "scripts/eval_usability.py": frozen_tools["scripts/eval_usability.py"],
+        "scripts/eval_h3.py": frozen_tools["scripts/eval_h3.py"],
+        "scripts/eval_h3_export.py": frozen_tools["scripts/eval_h3_export.py"],
     }
     if tools_sha256_override:
         tools_sha.update(tools_sha256_override)
@@ -932,7 +934,7 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     assert pf_c4["approval_tokens"]["full"].startswith("unavailable")
     assert "windows_uncleared" in pf_c4["approval_tokens"]["full"]
 
-    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 mismatch).
+    # 8. Mismatched tools_sha256 -> unavailable (gate_sha256 or running tool SHA-256 mismatch).
     bad_tool_acc, _ = _write_live_preconditions(
         h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
         terms_db=env["db"], annotations=env["annotations"],
@@ -941,6 +943,25 @@ def test_acceptance_and_judges_preconditions_gate_preflight_and_live(h3, env, ca
     pf_tool = run_preflight(bad_tool_acc, judges)
     assert pf_tool["approval_tokens"]["full"].startswith("unavailable")
     assert "gate_sha256" in pf_tool["approval_tokens"]["full"]
+
+    # 8a. Mismatched scripts/eval_h3.py SHA-256 in acceptance receipt -> unavailable and run --live refused.
+    stale_runner_acc, _ = _write_live_preconditions(
+        h3, env["tmp"], manifest=env["manifest"], src_tree=_src_tree(),
+        terms_db=env["db"], annotations=env["annotations"],
+        tools_sha256_override={"scripts/eval_h3.py": "e" * 64},
+    )
+    pf_stale_runner = run_preflight(stale_runner_acc, judges)
+    assert pf_stale_runner["approval_tokens"]["full"].startswith("unavailable")
+    assert "scripts/eval_h3.py" in pf_stale_runner["approval_tokens"]["full"]
+    code, err = _run(
+        h3,
+        ["run", *pinned_args, *env["freeze"], "--freeze", str(stale_runner_acc), "--freeze", str(judges),
+         "--run-dir", str(env["run_dir"]), "--manifest", str(env["manifest"]),
+         "--stage", "pilot", "--arm", "raw_baseline", "--max-calls", "5",
+         "--live", "--owner-approval-token", "h3-live-000000000000000000000000", *cost_flags],
+        capsys,
+    )
+    assert code == 1 and "scripts/eval_h3.py" in err
 
     # 8b. freeze_core_commit equal to core_tag_commit -> unavailable.
     same_commit_acc, _ = _write_live_preconditions(
@@ -1389,7 +1410,7 @@ def test_expected_model_binding_and_anti_drift(h3, env, capsys, monkeypatch, no_
     )
     assert code == 1 and "deepseek-flash" in err
 
-    # 2. --expected-model gemini-4-neon refuses deepseek-flash (and refuses default_tok).
+    # 2. --expected-model gemini-4-neon refuses deepseek-flash.
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "deepseek-flash")
     neon_run_dir = env["tmp"] / "live_neon"
     code, err = _run(

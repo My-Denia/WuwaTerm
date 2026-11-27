@@ -782,6 +782,15 @@ def _validate_acceptance_receipt(
         return None, f"{name}: scripts/eval_usability.py SHA-256 differs from pinned scorer"
 
     bindings = data["bindings"]
+    tools_sha = bindings.get("tools_sha256")
+    if not isinstance(tools_sha, Mapping):
+        return None, f"{name}: bindings.tools_sha256 must be an object"
+    if tools_sha.get("scripts/eval_h3.py") != frozen_files_sha256.get("scripts/eval_h3.py"):
+        return None, f"{name}: scripts/eval_h3.py SHA-256 in {ACCEPTANCE_SCHEMA} differs from running tool"
+    for tool_rel, recorded_sha in tools_sha.items():
+        if tool_rel in frozen_files_sha256 and recorded_sha != frozen_files_sha256[tool_rel]:
+            return None, f"{name}: {tool_rel} SHA-256 in {ACCEPTANCE_SCHEMA} differs from running tool"
+
     inputs_sha = bindings["inputs_sha256"]
     frozen_sha_values = set(frozen_hashes.values())
 
