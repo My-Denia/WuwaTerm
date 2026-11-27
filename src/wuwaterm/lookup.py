@@ -481,7 +481,7 @@ def _is_coarse_timestamp(stat: tuple[int, int, int, int, int]) -> bool:
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    """Open a short-lived ``?mode=ro`` SQLite connection.
+    """Open a ``?mode=ro`` SQLite connection.
 
     Reads the main database file without writing to it (in WAL mode SQLite may
     still open or initialize the ``-wal``/``-shm`` sidecar files when reading).
@@ -491,6 +491,7 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
         f"{resolved.as_uri()}?mode=ro",
         uri=True,
         isolation_level=None,
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     return conn
@@ -502,7 +503,7 @@ def _read_validation_probe(
     """Read metadata provenance and terms (count, max(id)) in one ``?mode=ro`` snapshot."""
     conn = _connect_readonly(path)
     try:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN DEFERRED")
         try:
             metadata_rows = conn.execute(
                 "SELECT key, value FROM metadata ORDER BY key"
@@ -529,130 +530,310 @@ class TermService:
         self._lock = threading.RLock()
         self._snapshot_stamp: tuple[object, ...] | None = None
         self._snapshot_cache: DictionarySnapshot | None = None
+        self._version_conn: sqlite3.Connection | None = None
+        self._version_inode: tuple[int, int] | None = None
+        self._version_main_stat: tuple[int, int, int, int, int] | None = None
+        self._version_data_version: int | None = None
+
+    def _close_version_conn(self) -> None:
+        conn = self._version_conn
+        self._version_conn = None
+        self._version_inode = None
+        self._version_main_stat = None
+        self._version_data_version = None
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def close(self) -> None:
-        """Release the cached snapshot reference (no open handles are held)."""
+        """Release the cached snapshot and any idle DELETE-mode version handle."""
         with self._lock:
             self._snapshot_stamp = None
             self._snapshot_cache = None
+            self._close_version_conn()
 
-    def _storage_stamp(
-        self, *, include_probe: bool = True
-    ) -> tuple[tuple[object, ...], bool]:
-        """Return ``(storage_stamp, cacheable)`` using ``os.stat()`` + lightweight SQL probe.
+    def __del__(self) -> None:
+        conn = getattr(self, "_version_conn", None)
+        if conn is not None:
+            self._version_conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-        Opens zero raw OS file descriptors and holds zero persistent SQLite
-        connections, so in-process POSIX ``fcntl`` locks (DELETE and WAL) are
-        untouched.
-
-        Caching is allowed only when:
-        - no non-empty ``-wal`` sidecar exists (when ``-wal`` has bytes, every
-          read goes straight through a short ``?mode=ro`` SQLite connection so
-          WAL commits are immediately visible and mid-commit visibility windows
-          can never pin a stale snapshot), and
-        - the main DB file has sub-second timestamps (coarse whole-second
-          timestamps bypass cache so same-second same-size DELETE-mode updates
-          are always observed immediately).
-
-        When cacheable (or when ``include_probe=True`` for ``_identity()``), a
-        short ``?mode=ro`` probe reads ``metadata`` plus ``(COUNT(*), MAX(id))``
-        from ``terms`` so same-subsecond-tick equal-length metadata or row-count
-        changes still invalidate the cache cleanly.
-        """
-        path = self.db_path.resolve(strict=False)
-        main_stat = _stat_tuple(path)
+    def _sidecar_stats(
+        self, path: Path
+    ) -> tuple[
+        tuple[int, int, int, int, int] | None,
+        tuple[int, int, int, int, int] | None,
+        tuple[int, int, int, int, int] | None,
+        tuple[int, int, int, int, int] | None,
+        bool,
+    ]:
         wal_resolved = Path(f"{path}-wal")
+        shm_resolved = Path(f"{path}-shm")
         wal_direct = Path(f"{self.db_path}-wal")
+        shm_direct = Path(f"{self.db_path}-shm")
         wal_stat = _optional_stat_tuple(wal_resolved)
+        shm_stat = _optional_stat_tuple(shm_resolved)
         wal_direct_stat = (
             _optional_stat_tuple(wal_direct) if wal_direct != wal_resolved else None
         )
-        wal_nonempty = (wal_stat is not None and wal_stat[2] > 0) or (
-            wal_direct_stat is not None and wal_direct_stat[2] > 0
+        shm_direct_stat = (
+            _optional_stat_tuple(shm_direct) if shm_direct != shm_resolved else None
         )
-        cacheable = (not wal_nonempty) and (not _is_coarse_timestamp(main_stat))
-        probe = _read_validation_probe(path) if (include_probe or cacheable) else None
-        if wal_direct != wal_resolved:
-            stamp: tuple[object, ...] = (
-                str(path),
-                main_stat,
-                wal_stat,
-                wal_direct_stat,
-                probe,
-            )
-        else:
-            stamp = (str(path), main_stat, wal_stat, probe)
-        return stamp, cacheable
+        has_wal_or_shm = (
+            wal_stat is not None
+            or shm_stat is not None
+            or wal_direct_stat is not None
+            or shm_direct_stat is not None
+        )
+        return wal_stat, shm_stat, wal_direct_stat, shm_direct_stat, has_wal_or_shm
 
     def _identity(self) -> tuple[object, ...]:
         """Storage identity for cache validation, matching provenance + WAL awareness."""
-        stamp, _cacheable = self._storage_stamp(include_probe=True)
-        return stamp
+        with self._lock:
+            path = self.db_path.resolve(strict=False)
+            main_stat = _stat_tuple(path)
+            wal_stat, shm_stat, wal_direct_stat, shm_direct_stat, has_wal_or_shm = (
+                self._sidecar_stats(path)
+            )
+            if has_wal_or_shm:
+                self._close_version_conn()
+            dv: int | None = None
+            if (
+                not has_wal_or_shm
+                and self._version_conn is not None
+                and self._version_inode == (main_stat[0], main_stat[1])
+            ):
+                try:
+                    dv_row = self._version_conn.execute(
+                        "PRAGMA data_version"
+                    ).fetchone()
+                    dv = int(dv_row[0]) if dv_row is not None else None
+                except sqlite3.Error:
+                    self._close_version_conn()
+            probe = _read_validation_probe(path)
+            return (
+                str(path),
+                main_stat,
+                wal_stat,
+                shm_stat,
+                wal_direct_stat,
+                shm_direct_stat,
+                dv,
+                probe,
+            )
 
-    def _read_snapshot(
+    def _read_snapshot_on_conn(
+        self, conn: sqlite3.Connection, stamp: tuple[object, ...]
+    ) -> tuple[DictionarySnapshot, str, int, tuple[tuple[tuple[str, str], ...], int, int]]:
+        """Read journal_mode, metadata, terms, and data_version in one read transaction."""
+        conn.execute("BEGIN DEFERRED")
+        try:
+            mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+            journal_mode = (
+                str(mode_row[0]).lower() if mode_row is not None else "delete"
+            )
+            metadata_rows = conn.execute(
+                "SELECT key, value FROM metadata ORDER BY key"
+            ).fetchall()
+            term_rows = conn.execute(
+                """
+                SELECT * FROM terms
+                ORDER BY priority, zh_norm, en_norm, category, source_file, source_id
+                """
+            ).fetchall()
+            dv_row = conn.execute("PRAGMA data_version").fetchone()
+            data_version = int(dv_row[0]) if dv_row is not None else 0
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        provenance = tuple((row["key"], row["value"]) for row in metadata_rows)
+        max_id = max((int(row["id"]) for row in term_rows), default=0)
+        probe = (provenance, len(term_rows), max_id)
+        metadata = {row["key"]: row["value"] for row in metadata_rows}
+        entries = tuple(row_to_entry(row) for row in term_rows)
+        return (
+            DictionarySnapshot(
+                storage_stamp=stamp,
+                metadata=metadata,
+                entries=entries,
+            ),
+            journal_mode,
+            data_version,
+            probe,
+        )
+
+    def _read_snapshot_ephemeral(
         self, path: Path, stamp: tuple[object, ...]
     ) -> DictionarySnapshot:
         conn = _connect_readonly(path)
         try:
-            conn.execute("BEGIN")
-            try:
-                metadata_rows = conn.execute(
-                    "SELECT key, value FROM metadata ORDER BY key"
-                ).fetchall()
-                term_rows = conn.execute(
-                    """
-                    SELECT * FROM terms
-                    ORDER BY priority, zh_norm, en_norm, category, source_file, source_id
-                    """
-                ).fetchall()
-                conn.execute("COMMIT")
-            except BaseException:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                raise
+            snapshot, _mode, _dv, _probe = self._read_snapshot_on_conn(conn, stamp)
+            return snapshot
         finally:
             conn.close()
-        metadata = {row["key"]: row["value"] for row in metadata_rows}
-        entries = tuple(row_to_entry(row) for row in term_rows)
-        return DictionarySnapshot(
-            storage_stamp=stamp,
-            metadata=metadata,
-            entries=entries,
-        )
 
     def snapshot(self) -> DictionarySnapshot:
         """Return the current immutable :class:`DictionarySnapshot`.
 
-        Validates via ``os.stat()`` plus a short ``?mode=ro`` metadata/count
-        probe. Bypasses caching when a non-empty ``-wal`` file or coarse
-        whole-second timestamps are present, and caches only when
-        ``stamp_before == stamp_after`` with both cacheable.
+        In DELETE mode (no ``-wal``/``-shm`` sidecars and sub-second file
+        timestamps), keeps an idle ``?mode=ro`` handle to validate cache hits
+        via ``PRAGMA data_version``, catching even same-subsecond-tick
+        equal-length in-place ``UPDATE`` statements without holding any file
+        locks. Whenever ``-wal`` or ``-shm`` exists (or timestamps are coarse
+        whole-second), any idle handle is closed immediately and reads bypass
+        caching through a short-lived ``?mode=ro`` connection.
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
-                stamp_before, cacheable_before = self._storage_stamp(
-                    include_probe=False
-                )
-                if (
-                    cacheable_before
-                    and self._snapshot_cache is not None
-                    and stamp_before == self._snapshot_stamp
+                path = self.db_path.resolve(strict=False)
+                main_stat = _stat_tuple(path)
+                (
+                    wal_stat,
+                    shm_stat,
+                    wal_direct_stat,
+                    shm_direct_stat,
+                    has_wal_or_shm,
+                ) = self._sidecar_stats(path)
+
+                if has_wal_or_shm or _is_coarse_timestamp(main_stat):
+                    self._close_version_conn()
+                    self._snapshot_cache = None
+                    self._snapshot_stamp = None
+                    ephemeral_stamp: tuple[object, ...] = (
+                        str(path),
+                        main_stat,
+                        wal_stat,
+                        shm_stat,
+                        wal_direct_stat,
+                        shm_direct_stat,
+                    )
+                    return self._read_snapshot_ephemeral(path, ephemeral_stamp)
+
+                inode = (main_stat[0], main_stat[1])
+                if self._version_conn is not None:
+                    if self._version_inode != inode:
+                        self._close_version_conn()
+                    else:
+                        try:
+                            dv_row = self._version_conn.execute(
+                                "PRAGMA data_version"
+                            ).fetchone()
+                        except sqlite3.Error:
+                            self._close_version_conn()
+                        else:
+                            dv = int(dv_row[0]) if dv_row is not None else -1
+                            if (
+                                dv == self._version_data_version
+                                and main_stat == self._version_main_stat
+                                and self._snapshot_cache is not None
+                            ):
+                                return self._snapshot_cache
+                elif (
+                    self._snapshot_cache is not None
+                    and self._snapshot_stamp is not None
                 ):
-                    return self._snapshot_cache
-                resolved_path = self.db_path.resolve(strict=False)
-                snapshot = self._read_snapshot(resolved_path, stamp_before)
-                if not cacheable_before:
-                    return snapshot
-                stamp_after, cacheable_after = self._storage_stamp(
-                    include_probe=False
+                    self._snapshot_cache = None
+                    self._snapshot_stamp = None
+
+                reused_conn = (
+                    self._version_conn is not None
+                    and self._version_inode == inode
                 )
-                if cacheable_after and stamp_before == stamp_after:
-                    self._snapshot_stamp = stamp_after
-                    self._snapshot_cache = snapshot
+                conn = (
+                    self._version_conn
+                    if reused_conn and self._version_conn is not None
+                    else _connect_readonly(path)
+                )
+                stamp_seed: tuple[object, ...] = (str(path), main_stat)
+                try:
+                    snapshot, journal_mode, dv, _probe = self._read_snapshot_on_conn(
+                        conn, stamp_seed
+                    )
+                except sqlite3.Error:
+                    if reused_conn:
+                        self._close_version_conn()
+                        conn = _connect_readonly(path)
+                        reused_conn = False
+                        try:
+                            snapshot, journal_mode, dv, _probe = (
+                                self._read_snapshot_on_conn(conn, stamp_seed)
+                            )
+                        except BaseException:
+                            conn.close()
+                            raise
+                    else:
+                        conn.close()
+                        raise
+                except BaseException:
+                    if reused_conn:
+                        self._close_version_conn()
+                    else:
+                        conn.close()
+                    raise
+
+                main_stat_after = _stat_tuple(path)
+                (
+                    _wal_a,
+                    _shm_a,
+                    _wal_da,
+                    _shm_da,
+                    has_wal_or_shm_after,
+                ) = self._sidecar_stats(path)
+
+                if (
+                    journal_mode == "delete"
+                    and not has_wal_or_shm_after
+                    and not _is_coarse_timestamp(main_stat_after)
+                    and main_stat_after == main_stat
+                ):
+                    try:
+                        dv_after_row = conn.execute(
+                            "PRAGMA data_version"
+                        ).fetchone()
+                        dv_after = (
+                            int(dv_after_row[0]) if dv_after_row is not None else -1
+                        )
+                    except sqlite3.Error:
+                        if reused_conn:
+                            self._close_version_conn()
+                        else:
+                            conn.close()
+                        continue
+                    if dv_after == dv:
+                        self._version_conn = conn
+                        self._version_inode = inode
+                        self._version_main_stat = main_stat_after
+                        self._version_data_version = dv
+                        self._snapshot_stamp = (str(path), main_stat_after, "delete", dv)
+                        self._snapshot_cache = snapshot
+                        return snapshot
+                    if not reused_conn:
+                        conn.close()
+                    continue
+
+                # Non-DELETE mode (e.g. WAL) or sidecars appeared: NEVER retain handle
+                # and never cache so WAL mode stays 100% fresh even across checkpoints.
+                if reused_conn:
+                    self._close_version_conn()
+                else:
+                    conn.close()
+                self._snapshot_cache = None
+                self._snapshot_stamp = None
+                if (
+                    journal_mode != "delete"
+                    or has_wal_or_shm_after
+                    or _is_coarse_timestamp(main_stat_after)
+                ):
                     return snapshot
-            # DB changed twice while read or became uncacheable: return fresh
-            # snapshot without pinning it in cache.
+
             assert snapshot is not None
             return snapshot
 

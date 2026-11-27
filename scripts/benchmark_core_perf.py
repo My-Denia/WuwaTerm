@@ -319,8 +319,6 @@ def _build_scaled_db(
                 rows,
             )
             conn.commit()
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.commit()
         final_count = int(conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0])
     return dest, final_count
 
@@ -493,12 +491,19 @@ def _benchmark_scale(
         iterations=max(2, min(iterations, 5)),
     )
 
-    # 5. Dictionary identity: hot cached read + WAL write refresh.
+    # 5. Dictionary identity: hot cached read (production DELETE mode) + WAL write refresh.
     identity_hot = _measure(
         lambda: service.dictionary_identity(),
         warmup=warmup,
         iterations=iterations,
     )
+
+    wal_setup = connect(db_path)
+    try:
+        wal_setup.execute("PRAGMA journal_mode=WAL")
+        wal_setup.commit()
+    finally:
+        wal_setup.close()
 
     stat_before = os.stat(db_path)
     writer = connect(db_path)

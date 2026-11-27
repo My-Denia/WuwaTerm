@@ -318,10 +318,13 @@ def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_in
 
     wal_db = tmp_path / "wal-unified.db"
     wal_db.write_bytes(sample_db.read_bytes())
-    with connect(wal_db) as conn:
-        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    init_conn = connect(wal_db)
+    try:
+        mode = init_conn.execute("PRAGMA journal_mode=WAL").fetchone()
         assert mode is not None and mode[0].lower() == "wal"
-        conn.commit()
+        init_conn.commit()
+    finally:
+        init_conn.close()
 
     service = build_term_service(wal_db)
     translator = build_translator(wal_db, service=service)
@@ -354,8 +357,9 @@ def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_in
     dict_before = asyncio.run(get_dictionary())
     identity_before = dictionary_identity(service)
     assert dict_before["revision"] == identity_before.revision
-    # Hot read must hit the cached DictionaryIdentity instance without rescanning.
-    assert service.dictionary_identity() is identity_before
+    # WAL mode bypasses caching and holds no persistent handle while staying consistent.
+    assert service.dictionary_identity() == identity_before
+    assert service._version_conn is None
 
     fuzzy_before = service.lookup("xingchenmohe")
     assert all(c.entry.zh != "星尘魔核" for c in fuzzy_before.candidates)
@@ -1189,7 +1193,7 @@ def test_build_database_atomic_checkpoints_wal_and_fails_closed_when_reader_bloc
 
         assert Path(f"{blocked_target}-wal").stat().st_size > 0
 
-        with pytest.raises(BuildError, match="wal_checkpoint|active WAL"):
+        with pytest.raises(BuildError, match="wal_checkpoint|active WAL|active database|locked"):
             build_database_atomic(tmp_path, blocked_target)
 
         # Temp build file must be cleaned up and existing WAL database left intact.
@@ -1326,3 +1330,268 @@ def test_same_subsecond_tick_equal_length_metadata_and_terms_update_invalidates_
         assert exact.best.entry.en == "Subsecond Term"
     finally:
         service.close()
+
+
+def _install_fake_atomic_builder(monkeypatch, *, zh: str = "原子新词", en: str = "Atomic Replacement") -> None:
+    def fake_build_database(
+        _data_dir: str | Path, db_path: str | Path, profile_name: str | None = None
+    ) -> int:
+        del profile_name
+        conn = connect(db_path)
+        try:
+            initialize(conn)
+            conn.executemany(
+                "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                [
+                    ("schema_version", "2"),
+                    ("source_commit", "atomic-replacement-commit"),
+                    ("source_game_version", "3.8"),
+                ],
+            )
+            insert_records(
+                conn,
+                [
+                    TermRecord(
+                        category="item",
+                        source_file="atomic_new.json",
+                        source_id="an-1",
+                        text_key="AtomicNew_1",
+                        zh=zh,
+                        en=en,
+                    )
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return 1
+
+    monkeypatch.setattr("wuwaterm.builder.build_database", fake_build_database)
+
+
+def test_build_database_atomic_preserves_in_process_delete_write_lock(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """build_database_atomic must fail closed and never release another in-process DELETE write lock."""
+    _install_fake_atomic_builder(monkeypatch)
+    target = tmp_path / "delete-locked.db"
+    shutil.copy2(sample_db, target)
+
+    probe_script = (
+        "import sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], timeout=0.0); "
+        "c.execute('BEGIN IMMEDIATE')"
+    )
+
+    def assert_other_process_busy() -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", probe_script, str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0, "other process unexpectedly acquired BEGIN IMMEDIATE"
+        assert "locked" in proc.stderr.lower()
+
+    writer = sqlite3.connect(target, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "UPDATE terms SET en = en WHERE id = (SELECT MIN(id) FROM terms)"
+        )
+        assert_other_process_busy()
+
+        with pytest.raises(BuildError, match="active database|locked"):
+            build_database_atomic(tmp_path, target)
+
+        assert not list(tmp_path.glob(f".{target.name}.*.tmp"))
+        # Critical POSIX fcntl check: in-process writer's lock must still block other processes!
+        assert_other_process_busy()
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_build_database_atomic_holds_exclusive_lock_through_replace_and_rejects_orphan_wal(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """Exclusive lock stays held across os.replace and missing-target orphaned non-empty WAL fails closed."""
+    _install_fake_atomic_builder(monkeypatch)
+
+    # 1. During os.replace inside build_database_atomic, another process must be blocked
+    # from switching target to WAL mode or starting a write transaction.
+    target = tmp_path / "replace-mutex.db"
+    shutil.copy2(sample_db, target)
+    with connect(target) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        conn.commit()
+
+    from wuwaterm import builder as builder_mod
+
+    real_replace = os.replace
+    probe_results: list[tuple[int, str]] = []
+
+    def intercepted_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if Path(dst) == target:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sqlite3, sys; "
+                        "c = sqlite3.connect(sys.argv[1], timeout=0.0, isolation_level=None); "
+                        "c.execute('PRAGMA journal_mode = WAL')"
+                    ),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            probe_results.append((proc.returncode, proc.stderr))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(builder_mod.os, "replace", intercepted_replace)
+
+    assert build_database_atomic(tmp_path, target) == 1
+    assert len(probe_results) == 1
+    assert probe_results[0][0] != 0
+    assert "locked" in probe_results[0][1].lower()
+    assert not Path(f"{target}-wal").exists()
+    assert not Path(f"{target}-shm").exists()
+
+    # 2. Missing target DB with an orphaned non-empty -wal must fail closed.
+    orphan_target = tmp_path / "orphan-missing.db"
+    orphan_wal = Path(f"{orphan_target}-wal")
+    orphan_wal.write_bytes(b"orphaned-wal-frames" * 16)
+
+    with pytest.raises(BuildError, match="non-empty WAL sidecar"):
+        build_database_atomic(tmp_path, orphan_target)
+
+    assert not orphan_target.exists()
+    assert orphan_wal.exists()
+    assert not list(tmp_path.glob(f".{orphan_target.name}.*.tmp"))
+
+    # Empty (0-byte) orphaned sidecars are safely cleared on initial publish.
+    orphan_wal.write_bytes(b"")
+    Path(f"{orphan_target}-shm").write_bytes(b"")
+    assert build_database_atomic(tmp_path, orphan_target) == 1
+    assert orphan_target.exists()
+    assert not orphan_wal.exists()
+    assert not Path(f"{orphan_target}-shm").exists()
+
+
+def test_same_subsecond_tick_equal_length_terms_inplace_update_invalidates_cache(
+    tmp_path: Path, sample_db: Path
+):
+    """Equal-length in-place UPDATE terms with frozen sub-second mtime/ctime must invalidate cache."""
+    db_path = tmp_path / "subsec-inplace-terms.db"
+    shutil.copy2(sample_db, db_path)
+
+    initial_stat = os.stat(db_path)
+    subsec_ns = int(initial_stat.st_mtime) * 1_000_000_000 + 234_567_891
+    os.utime(db_path, ns=(subsec_ns, subsec_ns))
+
+    service = TermService(db_path)
+    try:
+        snap_before = service.snapshot()
+        assert service._snapshot_cache is snap_before
+        assert service._version_conn is not None
+        id_before = service.dictionary_identity()
+        rev_before = service.review_snapshot()
+        meta_before = service.metadata()
+        count_before = service.term_count()
+        exact_before = service.lookup_exact("声骸")
+        assert exact_before.best is not None and exact_before.best.entry.en == "Echo"
+
+        size_before = os.stat(db_path).st_size
+        with sqlite3.connect(db_path) as check_conn:
+            max_id_before = check_conn.execute("SELECT MAX(id) FROM terms").fetchone()[0]
+
+        # Perform equal-length in-place UPDATE on terms and restore exact sub-second mtime.
+        w = connect(db_path)
+        try:
+            w.execute(
+                "UPDATE terms SET en = 'Ech0', en_norm = 'ech0' WHERE en = 'Echo'"
+            )
+            w.commit()
+        finally:
+            w.close()
+        os.utime(db_path, ns=(subsec_ns, subsec_ns))
+
+        # Verify st_size, metadata, COUNT(*), and MAX(id) are all unchanged!
+        assert os.stat(db_path).st_size == size_before
+        with sqlite3.connect(db_path) as check_conn:
+            assert check_conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0] == count_before
+            assert check_conn.execute("SELECT MAX(id) FROM terms").fetchone()[0] == max_id_before
+
+        # All read paths must immediately observe 'Ech0' and a fresh revision via PRAGMA data_version.
+        exact_after = service.lookup_exact("声骸")
+        assert exact_after.best is not None and exact_after.best.entry.en == "Ech0"
+        snap_after = service.snapshot()
+        assert snap_after is not snap_before
+        assert any(e.zh == "声骸" and e.en == "Ech0" for e in snap_after.entries)
+        rev_after = service.review_snapshot()
+        assert rev_after.revision != rev_before.revision
+        assert any(e.zh == "声骸" and e.en == "Ech0" for e in rev_after.entries)
+        id_after = service.dictionary_identity()
+        assert id_after.revision != id_before.revision
+        assert id_after.term_count == count_before
+        assert service.metadata() == meta_before
+    finally:
+        service.close()
+
+
+def test_idle_term_service_in_delete_mode_does_not_block_atomic_replace_exclusive_or_wal(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """Idle DELETE-mode TermService must never block BEGIN EXCLUSIVE, WAL switch, or build_database_atomic."""
+    _install_fake_atomic_builder(monkeypatch)
+
+    # 1. Idle DELETE-mode TermService does not block BEGIN EXCLUSIVE or PRAGMA journal_mode=WAL.
+    db_a = tmp_path / "idle-a.db"
+    shutil.copy2(sample_db, db_a)
+    svc_a = TermService(db_a)
+    try:
+        snap = svc_a.snapshot()
+        assert svc_a._snapshot_cache is snap
+        assert svc_a._version_conn is not None
+
+        # Another connection immediately acquires EXCLUSIVE lock without waiting.
+        excl = sqlite3.connect(db_a, timeout=0.0, isolation_level=None)
+        try:
+            excl.execute("PRAGMA locking_mode = EXCLUSIVE")
+            excl.execute("BEGIN EXCLUSIVE")
+            excl.execute("COMMIT")
+        finally:
+            excl.close()
+
+        # Another connection immediately switches to WAL mode without waiting.
+        wal_conn = sqlite3.connect(db_a, timeout=0.0, isolation_level=None)
+        try:
+            mode = wal_conn.execute("PRAGMA journal_mode = WAL").fetchone()
+            assert mode is not None and mode[0].lower() == "wal"
+        finally:
+            wal_conn.close()
+
+        # Subsequent read observes WAL mode and drops _version_conn cleanly.
+        assert svc_a.dictionary_identity().term_count > 0
+        assert svc_a._version_conn is None
+    finally:
+        svc_a.close()
+
+    # 2. Idle DELETE-mode TermService does not block build_database_atomic() and sees the new DB.
+    db_b = tmp_path / "idle-b.db"
+    shutil.copy2(sample_db, db_b)
+    svc_b = TermService(db_b)
+    try:
+        snap_b = svc_b.snapshot()
+        assert svc_b._snapshot_cache is snap_b
+        assert svc_b._version_conn is not None
+
+        assert build_database_atomic(tmp_path, db_b) == 1
+        assert svc_b.lookup_exact("原子新词").exact is True
+        assert svc_b.dictionary_identity().source_commit == "atomic-replacement-commit"
+    finally:
+        svc_b.close()
