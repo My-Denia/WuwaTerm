@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wuwaterm.application import build_term_service, build_translator, dictionary_identity
+from wuwaterm.builder import BuildError, build_database_atomic
 from wuwaterm.cjk_span import crosses_cjk_word_boundary, single_character_name_context_ok
 from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.english_plural import plural_suffix_candidates as _plural_suffix_candidates
@@ -1095,3 +1096,233 @@ def test_exact_lookup_cross_index_zh_norm_vs_en_norm_tie_matches_sqlite(
     assert result.exact is True
     assert [(c.entry.id, c.entry.zh) for c in result.candidates] == sql_order
     service.close()
+
+
+def test_build_database_atomic_checkpoints_wal_and_fails_closed_when_reader_blocks(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """build_database_atomic drains WAL before os.replace and fails closed if a reader blocks."""
+
+    def fake_build_database(
+        _data_dir: str | Path, db_path: str | Path, profile_name: str | None = None
+    ) -> int:
+        del profile_name
+        conn = connect(db_path)
+        try:
+            initialize(conn)
+            conn.executemany(
+                "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                [
+                    ("schema_version", "2"),
+                    ("source_commit", "atomic-replacement-commit"),
+                    ("source_game_version", "3.8"),
+                ],
+            )
+            insert_records(
+                conn,
+                [
+                    TermRecord(
+                        category="item",
+                        source_file="atomic_new.json",
+                        source_id="an-1",
+                        text_key="AtomicNew_1",
+                        zh="原子新词",
+                        en="Atomic Replacement",
+                    )
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return 1
+
+    monkeypatch.setattr("wuwaterm.builder.build_database", fake_build_database)
+
+    # 1. Blocked live reader holding an older WAL snapshot must fail closed with BuildError.
+    blocked_target = tmp_path / "blocked-wal.db"
+    shutil.copy2(sample_db, blocked_target)
+    init_conn = connect(blocked_target)
+    try:
+        assert init_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        init_conn.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            init_conn,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="old_wal.json",
+                    source_id="ow-1",
+                    text_key="OldWal_1",
+                    zh="旧阻断词",
+                    en="Old Blocked Term",
+                )
+            ],
+        )
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    pinned_reader = connect(blocked_target)
+    try:
+        pinned_reader.execute("BEGIN")
+        assert pinned_reader.execute("SELECT COUNT(*) FROM terms").fetchone()[0] > 0
+
+        writer = connect(blocked_target)
+        try:
+            writer.execute("PRAGMA wal_autocheckpoint = 0")
+            insert_records(
+                writer,
+                [
+                    TermRecord(
+                        category="item",
+                        source_file="old_wal.json",
+                        source_id="ow-2",
+                        text_key="OldWal_2",
+                        zh="旧未刷词",
+                        en="Old Uncheckpointed Term",
+                    )
+                ],
+            )
+            writer.commit()
+        finally:
+            writer.close()
+
+        assert Path(f"{blocked_target}-wal").stat().st_size > 0
+
+        with pytest.raises(BuildError, match="wal_checkpoint|active WAL"):
+            build_database_atomic(tmp_path, blocked_target)
+
+        # Temp build file must be cleaned up and existing WAL database left intact.
+        assert not list(tmp_path.glob(f".{blocked_target.name}.*.tmp"))
+        check_svc = TermService(blocked_target)
+        try:
+            assert check_svc.lookup_exact("旧未刷词").exact is True
+            assert check_svc.lookup_exact("原子新词").exact is False
+        finally:
+            check_svc.close()
+
+        # Copy the uncheckpointed DB + non-empty -wal into a fresh unblocked target
+        # to verify normal WAL draining when a real non-empty -wal is present on disk.
+        unblocked_target = tmp_path / "unblocked-wal.db"
+        shutil.copy2(blocked_target, unblocked_target)
+        shutil.copy2(Path(f"{blocked_target}-wal"), Path(f"{unblocked_target}-wal"))
+    finally:
+        pinned_reader.close()
+
+    assert Path(f"{unblocked_target}-wal").stat().st_size > 0
+    existing_svc = TermService(unblocked_target)
+    try:
+        assert existing_svc.lookup_exact("旧未刷词").exact is True
+
+        # 2. Unblocked WAL target with non-empty -wal checkpoints, clears sidecars, and swaps cleanly.
+        count = build_database_atomic(tmp_path, unblocked_target)
+        assert count == 1
+        assert not Path(f"{unblocked_target}-wal").exists()
+        assert not Path(f"{unblocked_target}-shm").exists()
+        assert not list(tmp_path.glob(f".{unblocked_target.name}.*.tmp"))
+
+        assert existing_svc.lookup_exact("原子新词").exact is True
+        assert existing_svc.lookup_exact("旧未刷词").exact is False
+        assert existing_svc.dictionary_identity().source_commit == "atomic-replacement-commit"
+    finally:
+        existing_svc.close()
+
+    verify_conn = sqlite3.connect(unblocked_target)
+    try:
+        assert verify_conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert verify_conn.execute("SELECT zh, en FROM terms").fetchall() == [
+            ("原子新词", "Atomic Replacement")
+        ]
+    finally:
+        verify_conn.close()
+
+
+def test_same_subsecond_tick_equal_length_metadata_and_terms_update_invalidates_cache(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """Same-subsecond-tick equal-length metadata or terms updates must invalidate cached snapshots."""
+    db_path = tmp_path / "subsec-probe.db"
+    shutil.copy2(sample_db, db_path)
+
+    frozen = os.stat(db_path)
+    subsec_ns = int(frozen.st_mtime) * 1_000_000_000 + 123_456_789
+
+    from wuwaterm import lookup as lookup_mod
+
+    real_stat_tuple = lookup_mod._stat_tuple
+
+    def frozen_subsec_stat(path: Path) -> tuple[int, int, int, int, int]:
+        if path == db_path.resolve(strict=False):
+            return (
+                frozen.st_dev,
+                frozen.st_ino,
+                frozen.st_size,
+                subsec_ns,
+                subsec_ns,
+            )
+        return real_stat_tuple(path)
+
+    monkeypatch.setattr(lookup_mod, "_stat_tuple", frozen_subsec_stat)
+
+    service = TermService(db_path)
+    try:
+        snap1 = service.snapshot()
+        assert service._snapshot_cache is snap1
+        id1 = service.dictionary_identity()
+        assert service.dictionary_identity() is id1
+
+        old_commit = service.metadata().get("source_commit")
+        assert old_commit is not None and len(old_commit) > 0
+        replacement_commit = ("f" if old_commit[0] != "f" else "0") + old_commit[1:]
+        assert len(replacement_commit) == len(old_commit)
+
+        # 1. Equal-length metadata UPDATE with completely unchanged stat().
+        w = connect(db_path)
+        try:
+            w.execute(
+                "UPDATE metadata SET value = ? WHERE key = 'source_commit'",
+                (replacement_commit,),
+            )
+            w.commit()
+        finally:
+            w.close()
+
+        snap2 = service.snapshot()
+        assert snap2 is not snap1
+        assert service._snapshot_cache is snap2
+        assert service.metadata()["source_commit"] == replacement_commit
+        assert service.dictionary_identity().source_commit == replacement_commit
+        assert service.review_snapshot().metadata["source_commit"] == replacement_commit
+
+        # 2. Terms row insertion with completely unchanged stat().
+        w = connect(db_path)
+        try:
+            insert_records(
+                w,
+                [
+                    TermRecord(
+                        category="item",
+                        source_file="subsec.json",
+                        source_id="ss-1",
+                        text_key="Subsec_1",
+                        zh="子秒新词",
+                        en="Subsecond Term",
+                    )
+                ],
+            )
+            w.commit()
+        finally:
+            w.close()
+
+        snap3 = service.snapshot()
+        assert snap3 is not snap2
+        assert service._snapshot_cache is snap3
+        id3 = service.dictionary_identity()
+        assert id3.term_count == id1.term_count + 1
+        assert id3.revision != id1.revision
+        assert service.review_snapshot().term_count == id1.term_count + 1
+        exact = service.lookup_exact("子秒新词")
+        assert exact.exact is True and exact.best is not None
+        assert exact.best.entry.en == "Subsecond Term"
+    finally:
+        service.close()

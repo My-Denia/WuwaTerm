@@ -481,7 +481,11 @@ def _is_coarse_timestamp(stat: tuple[int, int, int, int, int]) -> bool:
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    """Open a short-lived read-only SQLite connection that never writes or checkpoints."""
+    """Open a short-lived ``?mode=ro`` SQLite connection.
+
+    Reads the main database file without writing to it (in WAL mode SQLite may
+    still open or initialize the ``-wal``/``-shm`` sidecar files when reading).
+    """
     resolved = path.resolve(strict=False)
     conn = sqlite3.connect(
         f"{resolved.as_uri()}?mode=ro",
@@ -490,6 +494,33 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _read_validation_probe(
+    path: Path,
+) -> tuple[tuple[tuple[str, str], ...], int, int]:
+    """Read metadata provenance and terms (count, max(id)) in one ``?mode=ro`` snapshot."""
+    conn = _connect_readonly(path)
+    try:
+        conn.execute("BEGIN")
+        try:
+            metadata_rows = conn.execute(
+                "SELECT key, value FROM metadata ORDER BY key"
+            ).fetchall()
+            stats_row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM terms"
+            ).fetchone()
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    provenance = tuple((row["key"], row["value"]) for row in metadata_rows)
+    count = int(stats_row[0]) if stats_row is not None else 0
+    max_id = int(stats_row[1]) if stats_row is not None else 0
+    return provenance, count, max_id
 
 
 class TermService:
@@ -505,13 +536,14 @@ class TermService:
             self._snapshot_stamp = None
             self._snapshot_cache = None
 
-    def _storage_stamp(self) -> tuple[tuple[object, ...], bool]:
-        """Return ``(storage_stamp, cacheable)`` using only ``os.stat()``.
+    def _storage_stamp(
+        self, *, include_probe: bool = True
+    ) -> tuple[tuple[object, ...], bool]:
+        """Return ``(storage_stamp, cacheable)`` using ``os.stat()`` + lightweight SQL probe.
 
-        Opens zero file descriptors and holds zero persistent SQLite
+        Opens zero raw OS file descriptors and holds zero persistent SQLite
         connections, so in-process POSIX ``fcntl`` locks (DELETE and WAL) are
-        untouched and atomic DB replacement cannot be polluted by stale WAL
-        checkpoints.
+        untouched.
 
         Caching is allowed only when:
         - no non-empty ``-wal`` sidecar exists (when ``-wal`` has bytes, every
@@ -521,6 +553,11 @@ class TermService:
         - the main DB file has sub-second timestamps (coarse whole-second
           timestamps bypass cache so same-second same-size DELETE-mode updates
           are always observed immediately).
+
+        When cacheable (or when ``include_probe=True`` for ``_identity()``), a
+        short ``?mode=ro`` probe reads ``metadata`` plus ``(COUNT(*), MAX(id))``
+        from ``terms`` so same-subsecond-tick equal-length metadata or row-count
+        changes still invalidate the cache cleanly.
         """
         path = self.db_path.resolve(strict=False)
         main_stat = _stat_tuple(path)
@@ -534,20 +571,22 @@ class TermService:
             wal_direct_stat is not None and wal_direct_stat[2] > 0
         )
         cacheable = (not wal_nonempty) and (not _is_coarse_timestamp(main_stat))
+        probe = _read_validation_probe(path) if (include_probe or cacheable) else None
         if wal_direct != wal_resolved:
             stamp: tuple[object, ...] = (
                 str(path),
                 main_stat,
                 wal_stat,
                 wal_direct_stat,
+                probe,
             )
         else:
-            stamp = (str(path), main_stat, wal_stat)
+            stamp = (str(path), main_stat, wal_stat, probe)
         return stamp, cacheable
 
     def _identity(self) -> tuple[object, ...]:
-        """Storage identity for cache validation, aware of SQLite WAL and file replacement."""
-        stamp, _cacheable = self._storage_stamp()
+        """Storage identity for cache validation, matching provenance + WAL awareness."""
+        stamp, _cacheable = self._storage_stamp(include_probe=True)
         return stamp
 
     def _read_snapshot(
@@ -584,15 +623,17 @@ class TermService:
     def snapshot(self) -> DictionarySnapshot:
         """Return the current immutable :class:`DictionarySnapshot`.
 
-        Uses pure ``os.stat()`` validation and short-lived ``?mode=ro`` SQLite
-        connections. Bypasses caching when a non-empty ``-wal`` file or coarse
+        Validates via ``os.stat()`` plus a short ``?mode=ro`` metadata/count
+        probe. Bypasses caching when a non-empty ``-wal`` file or coarse
         whole-second timestamps are present, and caches only when
         ``stamp_before == stamp_after`` with both cacheable.
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
-                stamp_before, cacheable_before = self._storage_stamp()
+                stamp_before, cacheable_before = self._storage_stamp(
+                    include_probe=False
+                )
                 if (
                     cacheable_before
                     and self._snapshot_cache is not None
@@ -603,7 +644,9 @@ class TermService:
                 snapshot = self._read_snapshot(resolved_path, stamp_before)
                 if not cacheable_before:
                     return snapshot
-                stamp_after, cacheable_after = self._storage_stamp()
+                stamp_after, cacheable_after = self._storage_stamp(
+                    include_probe=False
+                )
                 if cacheable_after and stamp_before == stamp_after:
                     self._snapshot_stamp = stamp_after
                     self._snapshot_cache = snapshot

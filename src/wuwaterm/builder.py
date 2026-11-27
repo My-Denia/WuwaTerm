@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import tempfile
 import unicodedata
 from collections import defaultdict
@@ -888,6 +889,81 @@ def build_database(
     return len(records)
 
 
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+
+
+def _prepare_target_for_atomic_replace(target: Path) -> None:
+    """Ensure an existing target database has no active or leftover WAL before replace.
+
+    If ``target`` is in WAL mode or has ``-wal``/``-shm`` sidecars, checkpoint
+    with ``PRAGMA wal_checkpoint(TRUNCATE)``, verify no frames remain
+    uncheckpointed and no reader/writer blocked the checkpoint, switch out of
+    WAL mode so SQLite clears its sidecars, and fail closed with
+    :class:`BuildError` if the live WAL cannot be drained cleanly.
+    """
+    if not target.exists():
+        return
+    wal_path = Path(f"{target}-wal")
+    shm_path = Path(f"{target}-shm")
+    has_sidecars = wal_path.exists() or shm_path.exists()
+    if not has_sidecars:
+        try:
+            with target.open("rb") as handle:
+                header = handle.read(len(_SQLITE_HEADER_MAGIC))
+        except OSError as exc:
+            raise BuildError(
+                f"refusing to replace database {target}: could not inspect existing target: {exc}"
+            ) from exc
+        if header != _SQLITE_HEADER_MAGIC:
+            return
+    try:
+        conn = sqlite3.connect(target, timeout=0.0, isolation_level=None)
+    except sqlite3.Error as exc:
+        raise BuildError(
+            f"refusing to replace database {target}: could not inspect existing target: {exc}"
+        ) from exc
+    try:
+        mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+        is_wal = mode_row is not None and str(mode_row[0]).lower() == "wal"
+        if is_wal:
+            ckpt = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if ckpt is None:
+                raise BuildError(
+                    f"refusing to replace WAL database {target}: checkpoint returned no status"
+                )
+            busy, log_frames, checkpointed = int(ckpt[0]), int(ckpt[1]), int(ckpt[2])
+            if busy != 0 or log_frames < 0 or checkpointed < log_frames:
+                raise BuildError(
+                    f"refusing to replace active WAL database {target}: "
+                    f"wal_checkpoint(TRUNCATE) incomplete "
+                    f"(busy={busy}, log={log_frames}, checkpointed={checkpointed})"
+                )
+            mode_after = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+            if mode_after is None or str(mode_after[0]).lower() != "delete":
+                raise BuildError(
+                    f"refusing to replace active WAL database {target}: "
+                    f"could not exit WAL mode cleanly (mode={mode_after})"
+                )
+    except sqlite3.Error as exc:
+        raise BuildError(
+            f"refusing to replace active WAL database {target}: {exc}"
+        ) from exc
+    finally:
+        conn.close()
+    for sidecar in (wal_path, shm_path):
+        if sidecar.exists():
+            try:
+                if sidecar == wal_path and sidecar.stat().st_size > 0:
+                    raise BuildError(
+                        f"refusing to replace database {target}: non-empty WAL sidecar remains"
+                    )
+                sidecar.unlink()
+            except OSError as exc:
+                raise BuildError(
+                    f"refusing to replace database {target}: could not clear {sidecar.name}: {exc}"
+                ) from exc
+
+
 def build_database_atomic(
     data_dir: str | Path,
     db_path: str | Path,
@@ -903,6 +979,7 @@ def build_database_atomic(
     tmp_path = Path(tmp)
     try:
         count = build_database(data_dir, tmp_path, profile_name=profile_name)
+        _prepare_target_for_atomic_replace(target)
         os.replace(tmp_path, target)
         return count
     except Exception:
