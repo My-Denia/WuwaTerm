@@ -363,6 +363,11 @@ def _benchmark_scale(
     t4 = time.perf_counter()
     bundle = snap.lockable_snapshot()
     cold_lockable_ac_ms = (time.perf_counter() - t4) * 1000.0
+    rss_after_lockable = _current_rss_mib()
+
+    t5 = time.perf_counter()
+    _ = snap.fuzzy_index
+    cold_fuzzy_index_ms = (time.perf_counter() - t5) * 1000.0
     rss_after = _current_rss_mib()
 
     # 2. Exact lookup P50/P95/P99.
@@ -564,7 +569,9 @@ def _benchmark_scale(
             "identity_ms": round(cold_identity_ms, 3),
             "scoring_rows_ms": round(cold_scoring_rows_ms, 3),
             "lockable_ac_ms": round(cold_lockable_ac_ms, 3),
+            "fuzzy_index_ms": round(cold_fuzzy_index_ms, 3),
             "rss_before_mib": round(rss_before, 2),
+            "rss_after_lockable_mib": round(rss_after_lockable, 2),
             "rss_after_mib": round(rss_after, 2),
         },
         "exact_lookup": {
