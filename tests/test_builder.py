@@ -989,3 +989,218 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
         "生活中枢 = Living Commons (location)",
     ):
         assert reference in system
+
+
+def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path):
+    texts = {
+        "Term151106_Title": ("SQL", "SQL"),
+        "ItemInfo_44010027_Name": ("存在异常，如有疑问请联系官方客服", "test/Universal Echo"),
+        "ItemInfo_31000013_Name": ("存在异常，如有疑问请联系官方客服", "Sundial"),
+        "ItemInfo_70139310_Name": ("日晷", "Sundial"),
+        "ItemInfo_80110401_Name": ("Saving Light", "Saving Light"),
+        "ItemInfo_80110409_Name": ("승소산의 메아리", "Thawing Fates"),
+        "Skill_1001908_SkillName": ("test/巧手烹调", "Skillful Cooking"),
+        "Skill_1002008_SkillName": ("1", "test/"),
+        "Area_1500001_Title": ("TD测试用例空气墙", "Invisible Walls for TD test cases"),
+        "Speaker_153_Name": ("？", "?"),
+        "Speaker_178_Name": ("？？？", "???"),
+        "Speaker_400058_Name": ("2", "2"),
+        "Speaker_850743_Name": ("P", "P"),
+        "Speaker_750088_Name": ("{PlayerName}", "{PlayerName}"),
+        "Speaker_250058_Name": ("2.7暂时空置", "2.7 Placeholder"),
+        "Speaker_1304_Name": ("今汐", "Jinhsi"),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 44010027, "Name": "ItemInfo_44010027_Name"},
+            {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
+            {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
+            {"Id": 80110401, "Name": "ItemInfo_80110401_Name"},
+            {"Id": 80110409, "Name": "ItemInfo_80110409_Name"},
+        ],
+        "skill/skill.json": [
+            {"Id": 1001908, "SkillName": "Skill_1001908_SkillName"},
+            {"Id": 1002008, "SkillName": "Skill_1002008_SkillName"},
+        ],
+        "area/area.json": [
+            {"AreaId": 1500001, "Title": "Area_1500001_Title"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps(
+            [
+                {"Id": 153},
+                {"Id": 178},
+                {"Id": 400058},
+                {"Id": 850743},
+                {"Id": 750088},
+                {"Id": 250058},
+                {"Id": 1304},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.category, r.source_id, r.zh, r.en) for r in records] == [
+        ("item", "70139310", "日晷", "Sundial"),
+        ("speaker", "1304", "今汐", "Jinhsi"),
+    ]
+
+
+def test_iter_records_cleans_speaker_comm_suffix_and_pronoun_misalignment(
+    tmp_path: Path,
+):
+    texts = {
+        "Speaker_288_Name": ("我", "Rover"),
+        "Speaker_900220_Name": ("通讯", "Contacting"),
+        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+        "Speaker_750563_Name": ("认真的天工匠(通讯中）", "Focused Artisan"),
+        "Speaker_100058_Name": ("布兰特（通讯）", "Brant (Contacting)"),
+        "Speaker_50092_Name": ("？？？（通讯中）", "???"),
+        "Speaker_50121_Name": ("{PlayerName}（通讯中）", "{PlayerName}"),
+        "Speaker_1001_Name": ("景燃", "Jingran"),
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, {})
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps(
+            [
+                {"Id": 288},
+                {"Id": 900220},
+                {"Id": 800498},
+                {"Id": 750563},
+                {"Id": 100058},
+                {"Id": 50092},
+                {"Id": 50121},
+                {"Id": 1001},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.source_id, r.zh, r.en) for r in records] == [
+        ("800498", "穗穗", "Suisui"),
+        ("750563", "认真的天工匠", "Focused Artisan"),
+        ("100058", "布兰特", "Brant"),
+        ("1001", "景燃", "Jingran"),
+    ]
+
+
+def test_iter_records_filters_generic_cooking_staple_items(tmp_path: Path):
+    texts = {
+        "ItemInfo_80050003_Name": ("糖", "Sugar"),
+        "ItemInfo_80050008_Name": ("盐", "Salt"),
+        "ItemInfo_80050006_Name": ("米", "Rice"),
+        "ItemInfo_80020004_Name": ("豆腐", "Tofu"),
+        "ItemInfo_42601210_Name": ("盐海珀", "Amber Halite"),
+        "ItemInfo_2_Name": ("贝币", "Shell Credit"),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 80050003, "ShowTypes": [26, 31], "Name": "ItemInfo_80050003_Name"},
+            {"Id": 80050008, "ShowTypes": [26, 31], "Name": "ItemInfo_80050008_Name"},
+            {"Id": 80050006, "ShowTypes": [26, 31], "Name": "ItemInfo_80050006_Name"},
+            {"Id": 80020004, "ShowTypes": [25, 26], "Name": "ItemInfo_80020004_Name"},
+            {"Id": 42601210, "ShowTypes": [26], "Name": "ItemInfo_42601210_Name"},
+            {"Id": 2, "Name": "ItemInfo_2_Name"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.source_id, r.zh, r.en) for r in records] == [
+        ("42601210", "盐海珀", "Amber Halite"),
+        ("2", "贝币", "Shell Credit"),
+    ]
+
+
+def test_build_database_excludes_cleaned_noise_and_keeps_schema_v2(
+    monkeypatch, tmp_path: Path
+):
+    from wuwaterm.constants import SOURCE_PROFILES
+
+    texts = {
+        "ItemInfo_80050003_Name": ("糖", "Sugar"),
+        "ItemInfo_31000013_Name": ("存在异常，如有疑问请联系官方客服", "Sundial"),
+        "ItemInfo_70139310_Name": ("日晷", "Sundial"),
+        "Skill_1002008_SkillName": ("1", "test/"),
+        "Speaker_288_Name": ("我", "Rover"),
+        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+    }
+    for idx in range(12):
+        texts[f"line_{idx}"] = (f"天气不错，第{idx}行。", f"test/ line {idx}.")
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 80050003, "ShowTypes": [26, 31], "Name": "ItemInfo_80050003_Name"},
+            {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
+            {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
+        ],
+        "skill/skill.json": [
+            {"Id": 1002008, "SkillName": "Skill_1002008_SkillName"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "README.md").write_text(
+        "# WW_Data\n\n> Game Version: 3.7.0</br>\n> Resource Version: 3.7.8</br>\n> Changelist: 8975829\n",
+        encoding="utf-8",
+    )
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps([{"Id": 288}, {"Id": 800498}]),
+        encoding="utf-8",
+    )
+    _git("init", "-b", "main", cwd=root)
+    _git("add", ".", cwd=root)
+    _git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+        cwd=root,
+    )
+    commit = _git("rev-parse", "HEAD", cwd=root)
+    profile = replace(SOURCE_PROFILES["arikatsu"], pinned_commit=commit)
+    monkeypatch.setitem(SOURCE_PROFILES, "arikatsu", profile)
+    _git("remote", "add", "origin", profile.repo_url, cwd=root)
+
+    db_path = tmp_path / "cleaned.db"
+    build_database(root, db_path, profile_name="arikatsu")
+
+    with connect(db_path) as conn:
+        metadata = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
+        rows = [
+            (r["category"], r["zh"], r["en"])
+            for r in conn.execute(
+                "SELECT category, zh, en FROM terms WHERE source_file != 'official_announcement' ORDER BY id"
+            )
+        ]
+
+    assert metadata["schema_version"] == "2"
+    assert rows == [
+        ("item", "日晷", "Sundial"),
+        ("speaker", "穗穗", "Suisui"),
+    ]
+    assert json.loads(metadata["free_text_lock_exclusions"])["surfaces"] == []
+    assert json.loads(metadata["free_text_lock_exclusions_zh"])["surfaces"] == []
