@@ -44,12 +44,18 @@ from .domain_knowledge import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_SCALARS,
     DomainKnowledgeCandidate,
+    NormalizedTextIndex,
+    ORDINARY_ENGLISH_OVERLAP_WORDS,
     TRUST_TIERS,
     TrustTier,
+    build_normalized_index,
+    find_normalized_spans,
+    is_rejected_lowercase_single_latin_candidate,
+    is_single_latin_word,
     prepare_prompt_domain_knowledge_candidates,
     select_domain_knowledge_candidates,
 )
-from .normalize import has_cjk, normalize_text
+from .normalize import normalize_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -697,6 +703,10 @@ class SqliteVecBackend:
                 expected_quantization=expected_quantization,
                 expected_backend="sqlite-vec",
             )
+            if meta.quantization != "fp32":
+                raise VectorIndexMetadataError(
+                    f"sqlite-vec backend only supports quantization='fp32', got {meta.quantization!r}"
+                )
             self._metadata = meta
         except Exception:
             self._conn.close()
@@ -734,7 +744,7 @@ class SqliteVecBackend:
         terms_db_revision: str,
         model_id: str,
         dim: int,
-        quantization: QuantizationMode = "int8",
+        quantization: QuantizationMode = "fp32",
     ) -> VectorIndexMetadata:
         if len(vectors) != len(entity_ids):
             raise ValueError("vectors and entity_ids lengths must match")
@@ -742,8 +752,11 @@ class SqliteVecBackend:
             raise ValueError("surfaces and entity_ids lengths must match")
         if dim <= 0:
             raise ValueError("dim must be positive")
-        if quantization not in SUPPORTED_QUANTIZATIONS:
-            raise ValueError(f"unsupported quantization: {quantization!r}")
+        if quantization != "fp32":
+            raise ValueError(
+                f"SqliteVecBackend only supports quantization='fp32' (got {quantization!r}); "
+                "use memmap backend for int8"
+            )
 
         sqlite_vec = _load_sqlite_vec_module()
         db_path = _resolve_sqlite_vec_path(output_path)
@@ -914,7 +927,10 @@ class FaissVectorBackend:
         if not self._meta_path.is_file() or not self._faiss_path.is_file():
             raise VectorIndexMetadataError("faiss index or metadata file is missing")
 
-        raw_meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        try:
+            raw_meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise VectorIndexMetadataError("unreadable vector metadata JSON") from exc
         if not isinstance(raw_meta, dict):
             raise VectorIndexMetadataError("vector metadata must be a JSON object")
         meta = VectorIndexMetadata.from_dict(raw_meta)
@@ -937,7 +953,12 @@ class FaissVectorBackend:
         else:
             raise VectorIndexMetadataError("surfaces count mismatch")
 
-        self._index = faiss_mod.read_index(str(self._faiss_path))
+        try:
+            self._index = faiss_mod.read_index(str(self._faiss_path))
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise VectorIndexMetadataError(
+                "unreadable or corrupted faiss index"
+            ) from exc
         if int(self._index.d) != meta.dim or int(self._index.ntotal) != meta.record_count:
             raise VectorIndexMetadataError("faiss index geometry mismatches metadata")
 
@@ -1251,12 +1272,45 @@ def open_vector_backend(
             exc,
         )
         return None
-    except (OSError, ValueError, sqlite3.Error):
+    except (OSError, ValueError, sqlite3.Error, RuntimeError):
         LOGGER.warning(
             "companion vector index could not be loaded (%s); degrading to pure lexical RAG",
             backend,
         )
         return None
+
+
+def _resolve_dense_source_surface(
+    text: str,
+    *,
+    zh: str,
+    en: str,
+    fallback: str = "",
+    norm_index: NormalizedTextIndex | None = None,
+) -> str:
+    """Choose ``source_surface`` for a dense hit so mixed-script Latin words cannot bypass gating.
+
+    When ``text`` is provided and ``zh`` does not occur in ``text``, any entity
+    whose ``en`` is a single Latin word, an ordinary English overlap word, or
+    directly present in ``text`` is aligned to ``en`` so
+    ``is_rejected_lowercase_single_latin_candidate`` enforces proper-noun casing
+    even in CJK+Latin mixed sentences (e.g. ``"观众大喊 encore 要求再来一首"``).
+    """
+    if not text:
+        return zh or en or fallback
+    idx = build_normalized_index(text) if norm_index is None else norm_index
+    zh_present = bool(zh) and bool(find_normalized_spans(idx, zh))
+    if zh_present:
+        return zh
+    if en:
+        en_stripped = en.strip()
+        en_present = bool(find_normalized_spans(idx, en))
+        en_single_or_overlap = is_single_latin_word(en_stripped) or (
+            en_stripped.casefold() in ORDINARY_ENGLISH_OVERLAP_WORDS
+        )
+        if en_present or en_single_or_overlap:
+            return en
+    return zh or en or fallback
 
 
 def vector_hits_to_candidates(
@@ -1267,7 +1321,7 @@ def vector_hits_to_candidates(
     min_score: float = 0.0,
 ) -> tuple[DomainKnowledgeCandidate, ...]:
     """Convert raw ``VectorHit`` items into isolated ``dense_semantic`` candidates."""
-    cjk_query = has_cjk(text) if text else True
+    norm_index = build_normalized_index(text) if text else None
     candidates: list[DomainKnowledgeCandidate] = []
     for hit in hits:
         if hit.score < min_score:
@@ -1291,10 +1345,12 @@ def vector_hits_to_candidates(
             )
         )
         gloss = str(row.get("context_gloss", ""))
-        preferred_surface = (
-            (zh or en or hit.source_surface)
-            if cjk_query
-            else (en or zh or hit.source_surface)
+        preferred_surface = _resolve_dense_source_surface(
+            text,
+            zh=zh,
+            en=en,
+            fallback=hit.source_surface,
+            norm_index=norm_index,
         )
         if not preferred_surface:
             continue
@@ -1380,26 +1436,34 @@ def hybrid_fuse_candidates(
             )
 
     fused: list[DomainKnowledgeCandidate] = []
-    cjk_query = has_cjk(text) if text else None
+    norm_index = build_normalized_index(text) if text else None
     for entity_id, base in chosen_base.items():
-        # For dense-only candidates with source text, keep surface aligned with
-        # the query script so Latin ordinary-word gating checks the English term.
+        # For dense-only candidates with source text, align surface even in
+        # mixed CJK+Latin text so Latin ordinary-word gating checks the English term.
         surface = base.source_surface
-        if (
-            cjk_query is False
-            and base.retrieval_channel == "dense_semantic"
-            and base.en
-            and normalize_text(surface) != normalize_text(base.en)
-        ):
-            surface = base.en
-        fused.append(
-            replace(
-                base,
-                source_surface=surface,
-                score=rrf_scores[entity_id],
-                lock_eligible=False,
+        if text and base.retrieval_channel == "dense_semantic":
+            surface = _resolve_dense_source_surface(
+                text,
+                zh=base.zh,
+                en=base.en,
+                fallback=base.source_surface,
+                norm_index=norm_index,
             )
+        candidate = replace(
+            base,
+            source_surface=surface,
+            score=rrf_scores[entity_id],
+            lock_eligible=False,
         )
+        if (
+            text
+            and candidate.retrieval_channel == "dense_semantic"
+            and is_rejected_lowercase_single_latin_candidate(
+                text, candidate, index=norm_index
+            )
+        ):
+            continue
+        fused.append(candidate)
 
     if text:
         return select_domain_knowledge_candidates(

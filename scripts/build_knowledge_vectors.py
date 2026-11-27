@@ -152,7 +152,7 @@ def build_knowledge_vectors(
     encoder: VectorEncoder | None = None,
     encoder_kind: str = "fake",
     dim: int = DEFAULT_VECTOR_DIM,
-    quantization: QuantizationMode = "int8",
+    quantization: QuantizationMode | None = None,
     model_id: str | None = None,
     onnx_model_path: str | Path | None = None,
     onnx_tokenizer_path: str | Path | None = None,
@@ -161,6 +161,18 @@ def build_knowledge_vectors(
     batch_size: int = 64,
 ) -> VectorIndexMetadata:
     """Build an atomic companion vector index from read-only ``knowledge.db``."""
+    resolved_quant: QuantizationMode
+    if quantization is None:
+        resolved_quant = "fp32" if backend == "sqlite-vec" else "int8"
+    else:
+        resolved_quant = quantization
+
+    if backend == "sqlite-vec" and resolved_quant != "fp32":
+        raise ValueError(
+            f"backend='sqlite-vec' only supports quantization='fp32' (got {resolved_quant!r}); "
+            "use backend='memmap' for int8"
+        )
+
     kb_path = Path(knowledge_db_path)
     target_dir = Path(out_dir) if out_dir is not None else kb_path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -205,7 +217,7 @@ def build_knowledge_vectors(
             terms_db_revision=terms_rev,
             model_id=active_encoder.model_id,
             dim=active_encoder.dim,
-            quantization=quantization,
+            quantization=resolved_quant,
         )
     if backend == "sqlite-vec":
         return SqliteVecBackend.build(
@@ -217,7 +229,7 @@ def build_knowledge_vectors(
             terms_db_revision=terms_rev,
             model_id=active_encoder.model_id,
             dim=active_encoder.dim,
-            quantization=quantization,
+            quantization=resolved_quant,
         )
     raise ValueError(f"unsupported vector backend: {backend!r}")
 
@@ -260,8 +272,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quantization",
         choices=("int8", "fp32"),
-        default="int8",
-        help="Vector storage quantization mode (default: int8).",
+        default=None,
+        help="Vector storage quantization mode (default: int8 for memmap, fp32 for sqlite-vec).",
     )
     parser.add_argument(
         "--model-id",
@@ -315,7 +327,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    quant: QuantizationMode = "int8" if args.quantization == "int8" else "fp32"
+    raw_quant = (
+        args.quantization
+        if args.quantization is not None
+        else ("fp32" if args.backend == "sqlite-vec" else "int8")
+    )
+    quant: QuantizationMode = "int8" if raw_quant == "int8" else "fp32"
     try:
         meta = build_knowledge_vectors(
             args.knowledge_db,

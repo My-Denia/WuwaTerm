@@ -349,6 +349,157 @@ def test_hybrid_fuse_candidates_enforces_lock_isolation_and_ordinary_word_gates(
     assert converted[0].lock_eligible is False
     assert hybrid_fuse_candidates([], converted, text="A faint echo.") == ()
 
+    # Mixed CJK + Latin sentences must not bypass ordinary Latin word gating.
+    mixed_encore_hits = [
+        VectorHit(entity_id="resonator:1203", score=0.93, source_surface="安可", rank=1)
+    ]
+    mixed_rows = {
+        "resonator:1203": {
+            "entity_type": "resonator",
+            "zh": "安可",
+            "en": "Encore",
+            "trust_tier": "official_authoritative",
+            "context_gloss": "黑海岸成员安可 | Encore of the Black Shores",
+        },
+        "term:850082": {
+            "entity_type": "term",
+            "zh": "声骸",
+            "en": "Echo",
+            "trust_tier": "official_authoritative",
+            "context_gloss": "Echo system",
+        },
+    }
+    mixed_encore_text = "观众大喊 encore 要求再来一首"
+    mixed_encore_cands = vector_hits_to_candidates(
+        mixed_encore_hits, mixed_rows, text=mixed_encore_text
+    )
+    assert mixed_encore_cands[0].source_surface == "Encore"
+    assert hybrid_fuse_candidates([], mixed_encore_cands, text=mixed_encore_text) == ()
+    # Even if a caller passes a pre-built candidate with zh surface ("安可"),
+    # hybrid_fuse_candidates realigns and rejects lowercase "encore".
+    assert hybrid_fuse_candidates([], [DomainKnowledgeCandidate(
+        entity_id="resonator:1203",
+        source_surface="安可",
+        zh="安可",
+        en="Encore",
+        entity_type="resonator",
+        trust_tier="official_authoritative",
+        retrieval_channel="dense_semantic",
+        score=0.93,
+        lock_eligible=False,
+    )], text=mixed_encore_text) == ()
+
+    mixed_echo_text = "山谷里传来 echo 回声"
+    mixed_echo_cands = vector_hits_to_candidates(hits, mixed_rows, text=mixed_echo_text)
+    assert mixed_echo_cands[0].source_surface == "Echo"
+    assert hybrid_fuse_candidates([], mixed_echo_cands, text=mixed_echo_text) == ()
+
+    # Capitalized Encore in a mixed CJK + Latin sentence is preserved with lock_eligible=False.
+    mixed_proper_text = "黑海岸的 Encore 和 Aalto"
+    mixed_proper_cands = vector_hits_to_candidates(
+        mixed_encore_hits, mixed_rows, text=mixed_proper_text
+    )
+    fused_mixed_proper = hybrid_fuse_candidates(
+        [], mixed_proper_cands, text=mixed_proper_text
+    )
+    assert len(fused_mixed_proper) == 1
+    assert fused_mixed_proper[0].entity_id == "resonator:1203"
+    assert fused_mixed_proper[0].source_surface == "Encore"
+    assert fused_mixed_proper[0].lock_eligible is False
+
+
+def test_sqlite_vec_rejects_int8_quantization_and_faiss_corrupt_index_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import types
+    import wuwaterm.retrieval_vector as rv
+
+    with pytest.raises(ValueError, match="fp32"):
+        SqliteVecBackend.build(
+            tmp_path,
+            vectors=[[1.0, 0.0]],
+            entity_ids=["e1"],
+            knowledge_db_sha256="a" * 64,
+            terms_db_revision="b" * 64,
+            model_id="m",
+            dim=2,
+            quantization="int8",
+        )
+
+    terms_db, kb_db = _build_synthetic_fixture(tmp_path / "fx")
+    del terms_db
+    rc = build_knowledge_vectors.main(
+        [
+            "--knowledge-db",
+            str(kb_db),
+            "--out-dir",
+            str(tmp_path / "vec"),
+            "--backend",
+            "sqlite-vec",
+            "--encoder",
+            "fake",
+            "--quantization",
+            "int8",
+        ]
+    )
+    assert rc == 2
+
+    # Corrupted .faiss file raising RuntimeError converts to VectorIndexMetadataError
+    # and open_vector_backend degrades fail-closed to None.
+    def _raise_runtime(_path: str) -> object:
+        raise RuntimeError("corrupt faiss index")
+
+    fake_faiss = types.SimpleNamespace(read_index=_raise_runtime)
+    fake_np = types.SimpleNamespace()
+    real_import = rv.importlib.import_module
+
+    def patched_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "faiss":
+            return fake_faiss
+        if name == "numpy":
+            return fake_np
+        return real_import(name)
+
+    monkeypatch.setattr(rv.importlib, "import_module", patched_import)
+    faiss_dir = tmp_path / "faiss_corrupt"
+    faiss_dir.mkdir()
+    (faiss_dir / "knowledge-vec.faiss").write_bytes(b"corrupt")
+    (faiss_dir / "knowledge-vec.meta.json").write_text(
+        json.dumps(
+            {
+                "vec_schema_version": VEC_SCHEMA_VERSION,
+                "knowledge_db_sha256": "a" * 64,
+                "terms_db_revision": "b" * 64,
+                "model_id": "m",
+                "dim": 4,
+                "quantization": "fp32",
+                "record_count": 1,
+                "backend": "faiss",
+                "entity_ids": ["e1"],
+                "surfaces": ["s1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(VectorIndexMetadataError, match="corrupted faiss"):
+        FaissVectorBackend(
+            faiss_dir,
+            expected_knowledge_db_sha256="a" * 64,
+            expected_terms_db_revision="b" * 64,
+        )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        degraded = open_vector_backend(
+            faiss_dir,
+            backend="faiss",
+            expected_knowledge_db_sha256="a" * 64,
+            expected_terms_db_revision="b" * 64,
+        )
+    assert degraded is None
+    assert caplog.messages
+    for msg in caplog.messages:
+        assert str(faiss_dir) not in msg
+
 
 def test_build_knowledge_vectors_cli_end_to_end_with_fake_encoder(
     tmp_path: Path,

@@ -34,6 +34,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
@@ -1446,8 +1448,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--vec-quantization",
         choices=("int8", "fp32"),
-        default="int8",
-        help="Vector quantization for --mode hybrid (default: int8).",
+        default=None,
+        help="Vector quantization for --mode hybrid (default: int8 for memmap, fp32 for sqlite-vec).",
     )
     parser.add_argument(
         "--onnx-model",
@@ -1541,7 +1543,12 @@ def _resolve_encoder_from_args(args: argparse.Namespace) -> VectorEncoder | None
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    quant: QuantizationMode = "int8" if args.vec_quantization == "int8" else "fp32"
+    raw_quant = (
+        args.vec_quantization
+        if args.vec_quantization is not None
+        else ("fp32" if args.vec_backend == "sqlite-vec" else "int8")
+    )
+    quant: QuantizationMode = "int8" if raw_quant == "int8" else "fp32"
     try:
         encoder = _resolve_encoder_from_args(args)
     except Exception as exc:
