@@ -1650,6 +1650,49 @@ def test_unified_probe_sqlite_alignment_and_tier_truncation_invariants(tmp_path:
         )
 
 
+def test_fts5_authoritative_per_probe_unicode_folding_regression(tmp_path: Path):
+    # Python .casefold() folds "ß" -> "ss", while SQLite FTS5 trigram does not.
+    # Attribution must come directly from SQLite FTS5 column-qualified queries,
+    # never Python .casefold() guessing.
+    kb_path = tmp_path / "unicode_fts_kb.db"
+    rev = "f" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="area:940",
+                entity_type="area",
+                source_file="BinData/area/area.json",
+                source_id="940",
+                zh="冬日街道",
+                en="Winter Straße",
+            ),
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # "Winter gear for Strasse" locked "Winter gear": SQLite only matches
+        # "Winter" (0, 6), NOT "Strasse", so Winter Straße must be filtered out.
+        assert (
+            reader.query(
+                "Winter gear for Strasse", locked_surfaces=("Winter gear",)
+            )
+            == ()
+        )
+        # Actual unlocked "Straße" in source IS matched by SQLite and retained.
+        kept = reader.query(
+            "Winter gear for Straße", locked_surfaces=("Winter gear",)
+        )
+        assert [c.entity_id for c in kept] == ["area:940"]
+        assert kept[0].lock_eligible is False
+
+
+
 
 
 

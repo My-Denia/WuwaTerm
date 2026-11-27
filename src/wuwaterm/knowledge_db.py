@@ -203,7 +203,6 @@ _MAX_SHORT_UNIGRAM_PROBES = 4096
 _MAX_SHORT_BIGRAM_PROBES = 4096
 _MAX_ALIAS_PROBES = 4096
 _MAX_FTS_PHRASES = 240
-_FTS_BATCH_SIZE = 24
 _SQL_IN_CHUNK = 200
 
 
@@ -450,27 +449,6 @@ def _as_trust_tier(value: str) -> TrustTier:
     raise KnowledgeBaseError(f"invalid trust_tier in knowledge.db: {value!r}")
 
 
-def _matched_probe_spans_for_field(
-    field_text: str,
-    probes: list[tuple[str, str, tuple[tuple[int, int], ...]]],
-) -> list[tuple[int, int]]:
-    """Return exact source spans of FTS5 probes that genuinely match ``field_text``.
-
-    Matches SQLite FTS5 ``trigram case_sensitive 0`` semantics directly
-    (raw ``len(probe) >= 3`` casefolded substring match without stripping
-    whitespace), so ``A B`` never falsely attributes to ``Frozen AB`` and
-    ``Ice`` never bleeds into unrelated words like ``price``.
-    """
-    if not field_text:
-        return []
-    field_cf = field_text.casefold()
-    spans: list[tuple[int, int]] = []
-    for probe_raw, probe_cf, probe_spans in probes:
-        if len(probe_raw) >= 3 and probe_cf in field_cf:
-            spans.extend(probe_spans)
-    return spans
-
-
 class KnowledgeBaseReader:
     """Read-only Lexical RAG retriever bound to a specific ``terms.db`` revision."""
 
@@ -662,33 +640,33 @@ class KnowledgeBaseReader:
         extracted = _extract_fts_probes(text)
         if not extracted:
             return []
-        probe_records = [
-            (probe, probe.casefold(), spans)
-            for probe, spans in extracted
-        ]
         cjk_query = has_cjk(text)
 
-        # Keep scores and spans strictly segregated by (entity_id, surface, tier_rank)
-        # so tier-1 gloss spans can never merge into tier-0 surface hits.
+        # Query SQLite FTS5 per probe with explicit column filters so SQLite
+        # itself decides every probe match and column tier (zero Python-side
+        # casefold/substring guessing, immune to Unicode folding differences
+        # such as German ß vs ss).
         scored: dict[tuple[str, str, int], float] = {}
         hit_spans: dict[tuple[str, str, int], set[tuple[int, int]]] = {}
-        batch_limit = max(limit * 4, 32)
-        for start in range(0, len(probe_records), _FTS_BATCH_SIZE):
-            batch = probe_records[start : start + _FTS_BATCH_SIZE]
-            fts_query = " OR ".join(
-                _quote_fts5_phrase(probe_raw) for probe_raw, _, _ in batch
-            )
+        per_probe_limit = max(limit * 4, 32)
+
+        # Tier 0: direct matches on name/alias columns {surface zh en}.
+        for probe_raw, probe_spans in extracted:
+            fts_direct_query = f"{{surface zh en}} : {_quote_fts5_phrase(probe_raw)}"
             try:
                 rows = self._conn.execute(
                     """
-                    SELECT entity_id, surface, zh, en, context_gloss,
+                    SELECT entity_id, surface, zh, en,
+                           highlight(kb_fts_trigram, 1, '[', ']') AS h_surface,
+                           highlight(kb_fts_trigram, 2, '[', ']') AS h_zh,
+                           highlight(kb_fts_trigram, 3, '[', ']') AS h_en,
                            bm25(kb_fts_trigram) AS rank_score
                     FROM kb_fts_trigram
                     WHERE kb_fts_trigram MATCH ?
                     ORDER BY rank_score ASC, entity_id ASC
                     LIMIT ?
                     """,
-                    (fts_query, batch_limit),
+                    (fts_direct_query, per_probe_limit),
                 ).fetchall()
             except sqlite3.OperationalError:
                 continue
@@ -698,52 +676,73 @@ class KnowledgeBaseReader:
                 surface = str(row["surface"])
                 zh = str(row["zh"])
                 en = str(row["en"])
-                gloss = str(row["context_gloss"])
-
-                surface_spans = _matched_probe_spans_for_field(surface, batch)
-                zh_spans = _matched_probe_spans_for_field(zh, batch)
-                en_spans = _matched_probe_spans_for_field(en, batch)
-
-                if surface_spans or zh_spans or en_spans:
-                    matched_surface = (
-                        surface if surface_spans else (zh if zh_spans else en)
-                    )
-                    matched_spans = [*surface_spans, *zh_spans, *en_spans]
-                    tier_rank = 0
+                if len(str(row["h_surface"])) > len(surface):
+                    matched_surface = surface
+                elif len(str(row["h_zh"])) > len(zh):
+                    matched_surface = zh
+                elif len(str(row["h_en"])) > len(en):
+                    matched_surface = en
                 else:
-                    # Gloss-only match: never report the entity's English name as
-                    # ``source_surface`` for a 1-char CJK entity, because that
-                    # would bypass single-character CJK ordinary-word filtering.
-                    if is_single_cjk_char(zh):
-                        matched_surface = zh
-                    else:
-                        matched_surface = zh if (cjk_query and zh) else (en or surface)
-                    matched_spans = _matched_probe_spans_for_field(gloss, batch)
-                    tier_rank = 1
+                    matched_surface = surface
 
-                key = (entity_id, matched_surface, tier_rank)
+                key = (entity_id, matched_surface, 0)
                 rank_score = float(row["rank_score"])
                 prev = scored.get(key)
                 if prev is None or rank_score < prev:
                     scored[key] = rank_score
-                hit_spans.setdefault(key, set()).update(matched_spans)
+                hit_spans.setdefault(key, set()).update(probe_spans)
 
-        # Entity-level evidence priority before returning from FTS.
-        direct_entities = {
-            entity_id
-            for entity_id, _surface, tier_rank in scored
-            if tier_rank == 0
-        }
+        direct_entities = {entity_id for entity_id, _surface, _tier in scored}
+
+        # Tier 1: gloss-only matches on context_gloss, skipping entities that
+        # already have direct tier-0 evidence.
+        for probe_raw, probe_spans in extracted:
+            fts_gloss_query = f"context_gloss : {_quote_fts5_phrase(probe_raw)}"
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT entity_id, surface, zh, en,
+                           bm25(kb_fts_trigram) AS rank_score
+                    FROM kb_fts_trigram
+                    WHERE kb_fts_trigram MATCH ?
+                    ORDER BY rank_score ASC, entity_id ASC
+                    LIMIT ?
+                    """,
+                    (fts_gloss_query, per_probe_limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue
+
+            for row in rows:
+                entity_id = str(row["entity_id"])
+                if entity_id in direct_entities:
+                    continue
+                surface = str(row["surface"])
+                zh = str(row["zh"])
+                en = str(row["en"])
+                if is_single_cjk_char(zh):
+                    matched_surface = zh
+                else:
+                    matched_surface = zh if (cjk_query and zh) else (en or surface)
+
+                key = (entity_id, matched_surface, 1)
+                rank_score = float(row["rank_score"])
+                prev = scored.get(key)
+                if prev is None or rank_score < prev:
+                    scored[key] = rank_score
+                hit_spans.setdefault(key, set()).update(probe_spans)
+
         ordered = sorted(
-            (
-                item
-                for item in scored.items()
-                if item[0][2] == 0 or item[0][0] not in direct_entities
-            ),
+            scored.items(),
             key=lambda item: (item[0][2], item[1], item[0][0], item[0][1]),
         )
         return [
-            (entity_id, surface, tier_rank, tuple(sorted(hit_spans.get((entity_id, surface, tier_rank), ()))))
+            (
+                entity_id,
+                surface,
+                tier_rank,
+                tuple(sorted(hit_spans.get((entity_id, surface, tier_rank), ()))),
+            )
             for (entity_id, surface, tier_rank), _score in ordered[: max(limit * 2, 16)]
         ]
 
