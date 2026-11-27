@@ -28,7 +28,7 @@ records are intentionally absent.
 | [0020](0020-held-out-usability-evaluation.md) | Held-out usability evaluation of translations | Accepted (evaluation protocol) |
 | [0021](0021-local-user-termbase.md) | Local user termbase (`wuwaterm-termbase-v1`) and Core engine next-step research | Proposed (architecture and format spec; pending implementation) |
 | [0022](0022-deterministic-structure-checks.md) | Deterministic structure checks are a separate review track | Accepted (contract and engine) |
-| [0023](0023-local-translation-memory.md) | Local sentence translation memory (`wuwaterm-tm-v1`) and incremental re-translation | Partially implemented (Windows SQLite MVP & Web in-memory import/export merged; three-state freshness & incremental skip in progress; self-hosted not implemented) |
+| [0023](0023-local-translation-memory.md) | Local sentence translation memory (`wuwaterm-tm-v1`) and incremental re-translation | Partially implemented (Windows SQLite TM, Public Web in-memory import/export, three-state freshness, trusted reuse, incremental skip, Core `GET /v1/dictionary`, and self-hosted Web `tm.sqlite3` merged on respective `main` branches; awaiting next release) |
 | [0024](0024-diagnose-then-repair-targeted-review.md) | Diagnose-then-repair layered review with targeted second-pass verification | Proposed (Layer 1 accepted under 0022; candidate reader and opt-in hint gate implemented, off by default) |
 
 Maintainer map: [Architecture](../architecture.md).
