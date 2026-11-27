@@ -75,6 +75,9 @@ constraint-dependencies = ["certifi>=2026.10.19"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+wuwaterm = ["cjk_words.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

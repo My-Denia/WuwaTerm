@@ -1,0 +1,93 @@
+name: Rust Text Kernel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "src/wuwaterm/native_kernel.py"
+      - "src/wuwaterm/text_spans.py"
+      - "src/wuwaterm/segmentation.py"
+      - "tests/test_native_kernel.py"
+      - "contracts/segmentation-v1.json"
+      - ".github/workflows/rust-text-kernel.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "src/wuwaterm/native_kernel.py"
+      - "src/wuwaterm/text_spans.py"
+      - "src/wuwaterm/segmentation.py"
+      - "tests/test_native_kernel.py"
+      - "contracts/segmentation-v1.json"
+      - ".github/workflows/rust-text-kernel.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  core-and-differential:
+    name: Core Rust tests & Python differential parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Run pure-Rust core and WASM-host unit tests
+        working-directory: crates
+        run: |
+          cargo test -p wuwaterm-text-kernel
+          cargo test -p wuwaterm-text-kernel-wasm
+      - name: Run Rust vs Python differential parity (40/40 contracts + 1.1M Unicode scalars + fuzz)
+        run: |
+          python -B crates/scripts/run_differential_and_bench.py --skip-bench
+
+  wasm-contracts:
+    name: WASM build & Node.js 40/40 contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Add wasm32-unknown-unknown target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build WASM release module
+        working-directory: crates
+        run: cargo build -p wuwaterm-text-kernel-wasm --target wasm32-unknown-unknown --release
+      - name: Verify contracts/segmentation-v1.json (40/40), scanTerms, and UTF-16 parity in Node.js
+        run: node crates/wuwaterm-text-kernel-wasm/js/test_contracts.mjs
+
+  pyo3-extension:
+    name: PyO3 native extension build & Python ${{ matrix.python-version }} parity
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install build and test tools
+        run: python -m pip install --upgrade pip "maturin>=1.7,<2.0" pytest httpx
+      - name: Build and install PyO3 wheel
+        run: |
+          maturin build --release -m crates/wuwaterm-text-kernel-py/Cargo.toml -o crates/target/wheels
+          python -m pip install --force-reinstall crates/target/wheels/*.whl
+      - name: Verify native extension loading and parity
+        env:
+          PYTHONPATH: src
+        run: |
+          python -c "from wuwaterm import native_kernel; assert native_kernel.native_kernel_available(), 'native extension not loaded'"
+          python -m pytest tests/test_native_kernel.py
+          python -B crates/scripts/run_differential_and_bench.py --skip-bench --verify-pyo3

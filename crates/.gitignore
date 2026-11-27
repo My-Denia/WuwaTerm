@@ -1,0 +1,8 @@
+/target/
+/wuwaterm-text-kernel-py/target/
+/wuwaterm-text-kernel-py/wheels/
+/wuwaterm-text-kernel-wasm/pkg/
+/wuwaterm-text-kernel-wasm/target/
+*.so
+*.pyd
+*.whl

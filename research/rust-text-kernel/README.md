@@ -1,5 +1,7 @@
 # Rust Text Kernel Prototype (`research/rust-text-kernel`)
 
+> Historical research prototype (2026-11-24). The promoted multi-target shared workspace (pure-Rust core, PyO3 binding, and WASM binding) now lives under [`crates/`](../../crates/README.md) with maintainer docs in [`docs/rust-text-kernel.md`](../../docs/rust-text-kernel.md).
+
 Zero-dependency (`std`-only) Rust prototype porting `wuwaterm.text_spans`, `wuwaterm.segmentation`, and exact multi-pattern Aho–Corasick term scanning + longest non-overlapping interval selection from [the pure text primitives](../../src/wuwaterm/text_spans.py) and [the segmentation spec](../../docs/segmentation-v1.md).
 
 Research-only: production Python under `src/wuwaterm/` remains unchanged.

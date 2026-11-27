@@ -3,11 +3,11 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     attribution_candidates, lookup, normalize, models, review,
-                   cjk_span, document_anchor, protected_text, english_plural,
-                   segmentation, semantic_review_contract, single_char_context,
-                   skill_references, term_classification, term_matching,
-                   term_preparation, termbase, text_spans
+  domain core:     attribution_candidates, lookup, native_kernel, normalize,
+                   models, review, cjk_span, document_anchor, protected_text,
+                   english_plural, segmentation, semantic_review_contract,
+                   single_char_context, skill_references, term_classification,
+                   term_matching, term_preparation, termbase, text_spans
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
@@ -109,6 +109,7 @@ DOMAIN_CORE = frozenset(
     {
         "attribution_candidates",
         "lookup",
+        "native_kernel",
         "normalize",
         "models",
         "review",
@@ -134,6 +135,7 @@ DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semant
 PURE_MATCHING = frozenset(
     {
         "attribution_candidates",
+        "native_kernel",
         "term_matching",
         "term_preparation",
         "cjk_span",

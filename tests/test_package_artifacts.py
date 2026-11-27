@@ -38,6 +38,8 @@ def build_wheel(
         "wuwaterm/cli.py": "def main():\n    return 0\n",
         "wuwaterm/bot.py": "",
         "wuwaterm/application.py": "",
+        "wuwaterm/cjk_span.py": "",
+        "wuwaterm/cjk_words.txt": "",
         "wuwaterm/protected_text.py": "",
         "wuwaterm_api/__init__.py": "",
         "wuwaterm_api/app.py": "",
@@ -77,6 +79,8 @@ def build_sdist(
         f"{root}/src/wuwaterm/cli.py": "",
         f"{root}/src/wuwaterm/bot.py": "",
         f"{root}/src/wuwaterm/application.py": "",
+        f"{root}/src/wuwaterm/cjk_span.py": "",
+        f"{root}/src/wuwaterm/cjk_words.txt": "",
         f"{root}/src/wuwaterm/protected_text.py": "",
         f"{root}/src/wuwaterm_api/__init__.py": "",
         f"{root}/src/wuwaterm_api/app.py": "",
@@ -176,6 +180,16 @@ def test_wheel_missing_required_member_fails(tmp_path: Path):
     wheel = build_wheel(tmp_path / "bad.whl", omit={"wuwaterm/bot.py"})
     failures = audit_wheel(wheel, VERSION)
     assert any("missing required member: wuwaterm/bot.py" in f for f in failures)
+
+
+def test_wheel_and_sdist_missing_cjk_words_fail(tmp_path: Path):
+    wheel = build_wheel(tmp_path / "bad.whl", omit={"wuwaterm/cjk_words.txt"})
+    wheel_failures = audit_wheel(wheel, VERSION)
+    assert any("missing required member: wuwaterm/cjk_words.txt" in f for f in wheel_failures)
+
+    sdist = build_sdist(tmp_path / "bad.tar.gz", omit={f"{SDIST_ROOT}/src/wuwaterm/cjk_words.txt"})
+    sdist_failures = audit_sdist(sdist, VERSION)
+    assert any("missing required member: src/wuwaterm/cjk_words.txt" in f for f in sdist_failures)
 
 
 def test_wheel_missing_the_web_subpackage_fails(tmp_path: Path):

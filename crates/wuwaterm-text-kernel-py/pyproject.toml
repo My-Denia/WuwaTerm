@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "wuwaterm-text-kernel"
+version = "0.1.0"
+description = "Optional native Rust text kernel extension for WuwaTerm."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "_wuwaterm_text_kernel"
