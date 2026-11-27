@@ -958,6 +958,7 @@ class SentenceTranslator:
             initial_thinking_mode=thinking_mode,
             lock_count=len(locked.locks),
             provider_profile=self._provider_profile,
+            prepared_scalars=len(locked.locked_text),
         )
         if budget is not None:
             budget.consume_corrective_call()

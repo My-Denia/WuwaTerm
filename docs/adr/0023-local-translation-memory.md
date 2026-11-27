@@ -1,7 +1,7 @@
 # ADR 0023: Local sentence translation memory (`wuwaterm-tm-v1`) and incremental re-translation
 
-- Status: **Proposed (architecture and format spec; not implemented)**
-- Date: 2026-11-26
+- Status: **Partially implemented (Windows SQLite MVP and Web explicit in-memory import/export merged; three-state freshness, trusted-reuse boundary, and incremental skip in progress under `MY-491`; self-hosted server persistence not implemented)**
+- Date: 2026-11-26 (synced with shipped `wuwaterm-tm-v1` schema and three-state freshness on 2026-11-27)
 - Related: `MY-491`, `MY-490`,
   [ADR 0004](0004-sqlite-terminology-data.md),
   [ADR 0006](0006-dictionary-first-before-llm.md),
@@ -35,48 +35,53 @@ Three existing layers do not cover this:
   and community *terms*; its own section 4 table defers whole-segment memory to
   `MY-491`.
 
-Nothing today keeps a human-confirmed segment reusable across documents or
-across edits of the same document.
+Nothing before `MY-491` kept a human-confirmed segment reusable across documents
+or across edits of the same document.
 
 ## Decision
 
-A local sentence translation memory: `wuwaterm-tm-v1`. User-local, exact-match
-only, manual-confirmed only, provenance-checked, and never a shared service.
+A local sentence translation memory: `wuwaterm-tm-v1`. User-local, deterministic
+matching only (no embeddings or fuzzy scoring), confirmed-only,
+provenance-checked, and never a shared service.
 
-1. **Only manual-confirmed pairs enter.** An entry exists because a human saved
-   and confirmed that target for that source (ADR 0015 manuscript confirmation,
-   or the same confirmation reached through the desktop or self-hosted
-   surface). A model translation never becomes an entry by being produced,
-   reviewed, or used. This is the same rule
+1. **Only confirmed pairs enter.** An entry enters only with `origin` in
+   `{"human_confirmed", "imported_confirmed"}` — a human accepted that target for
+   that source (or imported a confirmed entry from another machine). Machine
+   output, drafts, and rejected candidates are refused at both the reader and the
+   database constraint level. This is the same rule
    [ADR 0021](0021-local-user-termbase.md) applies to termbases, and the lesson
    `MY-228` states for review output: model output is a candidate, not
    knowledge.
-2. **Exact match only.** An entry is looked up by the hash of its normalized
-   source plus direction. No embeddings, no fuzzy ranking, no semantic
-   similarity. A sentence is reused or it is not; anything in between is left
-   to the model and the human.
-3. **Two match strengths.** A `context_exact` match (source *and* both
-   neighbours unchanged) is reusable without a model call. A `source_exact`
-   match (the source is the same, a neighbour changed) is a read-only
-   reference for that call, never applied silently — an inserted line moves the
-   surrounding sentences into different company.
-4. **Provenance decides freshness.** Every entry records the dictionary
-   revision and game version it was confirmed under. An entry whose provenance
-   no longer matches the running instance is `stale`: it is read, reported as
-   stale, and never auto-applied.
-5. **Storage is local and separate.** Windows desktop and self-hosted
-   instances keep a SQLite file next to their own data; the public Web keeps
-   zero automatic storage and only offers explicit
-   `wuwaterm-tm-v1` JSON import/export held in page memory.
+2. **Deterministic matching, no semantic guessing.** Lookup ranks exact context
+   matches first (`context_exact`), then exact source (`exact`), then ASCII
+   digit-template variants (`numeric_variant`) and whitespace-collapsed matches
+   (`normalized_exact`). No embeddings, no fuzzy similarity.
+3. **Trusted reuse boundary (`context_exact` + `verified_fresh` only).** Only a
+   `context_exact` match (both `prev_source_hash` and `next_source_hash`
+   present in request context and matching the entry on both sides) whose
+   freshness is `verified_fresh` may enter batch / incremental skip (reuse
+   without a model call). Every other match — `exact`, `numeric_variant`,
+   `normalized_exact`, `known_stale`, and `provenance_unknown` — is a read-only
+   reference only and is never auto-applied or skipped silently.
+4. **Three-state freshness decides trust.** Every entry records the dictionary
+   revision (`terms_db_revision`) and game version (`game_version`) it was
+   confirmed under. Lookup classifies every match into one of three states:
+   `verified_fresh`, `known_stale`, or `provenance_unknown`.
+5. **Storage is local and separate.** Windows desktop keeps a local SQLite file
+   (`%APPDATA%/WuwaTerm/tm.sqlite3`); the public Web keeps zero automatic
+   storage (`localStorage`, `sessionStorage`, and `IndexedDB` stay empty) and
+   only offers explicit `wuwaterm-tm-v1` JSON import/export held in React page
+   memory. Self-hosted server persistence is not yet implemented.
 6. **Incremental re-translation is the point.** Editing a document sends the
    edited segments and their boundary neighbours to the model; the untouched
-   interior is served from the memory, and the receipt says how much of the
+   interior that qualifies as `context_exact` + `verified_fresh` can be served
+   from memory without a model call, and the receipt says how much of the
    document was reused.
 
 ## Format: `wuwaterm-tm-v1`
 
-The same JSON document is what the SQLite store exports and what a user can
-import; there is no second format.
+The same JSON document is what the Windows SQLite store exports/imports and
+what the Web panel exports/imports; there is no second format.
 
 ```json
 {
@@ -85,18 +90,18 @@ import; there is no second format.
   "exported_at": "2026-11-26T00:00:00Z",
   "entries": [
     {
-      "id": "tm-001",
       "direction": "en",
-      "source": "攻击力提升20%，暴击率提升10%。",
-      "target": "ATK +20%, CRIT Rate +10%.",
-      "source_hash": "9f2c…",
-      "prev_source_hash": "1b7e…",
+      "source_text": "攻击力提升20%，暴击率提升10%。",
+      "target_text": "ATK +20%, CRIT Rate +10%.",
+      "prev_source_hash": "1b7e000000000000000000000000000000000000000000000000000000000000",
       "next_source_hash": null,
-      "origin": "manual_confirmed",
-      "document_kind": "guide",
+      "origin": "human_confirmed",
       "terms_db_revision": "3.7.8-9218d61",
       "game_version": "3.7.8",
-      "confirmed_at": "2026-11-25T09:12:00Z"
+      "note": "",
+      "use_count": 1,
+      "created_at": "2026-11-25T09:12:00Z",
+      "updated_at": "2026-11-25T09:12:00Z"
     }
   ]
 }
@@ -104,41 +109,51 @@ import; there is no second format.
 
 ### Fields and bounds (`additionalProperties: false` at both levels)
 
+Top-level keys (canonical order):
+
 - `format`: literal `"wuwaterm-tm-v1"`.
 - `schema_version`: literal integer `1`.
 - `exported_at`: RFC 3339 UTC timestamp.
-- `entries`: 0 to 20,000 entry objects per document; a larger memory exports
-  in several documents rather than one unbounded file.
-- `id`: unique within the document, `1..64` printable characters.
+- `entries`: `0` to `10,000` entry objects per document; serialized canonical
+  UTF-8 JSON (2-space indent, LF, trailing newline, no BOM) must not exceed
+  `8 MiB` (`8,388,608` bytes).
+
+Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_text), prev_source_hash ?? "", next_source_hash ?? "", target_text)`):
+
 - `direction`: `"en"` (`zh→en`) or `"zh"` (`en→zh`), matching the runtime
   direction of the confirmed translation.
-- `source`: `1..2000` Unicode scalars, the same side limit the API applies.
-- `target`: `1..2000` Unicode scalars.
-- `source_hash`: 64 lowercase hex characters — SHA-256 over
-  `normalize_text(source)` with the direction prepended, so `zh→en` and
-  `en→zh` never collide.
-- `prev_source_hash` / `next_source_hash`: the same hash of the neighbouring
-  source segments in the document the entry was confirmed in, or `null` at a
-  document edge. They are what makes `context_exact` checkable.
-- `origin`: literal `"manual_confirmed"`. The field exists so an imported file
-  that claims anything else is rejected rather than silently trusted.
-- `document_kind`: `"guide" | "announcement" | "manuscript" | "other"`.
-  Reporting only; it never changes matching.
-- `terms_db_revision`, `game_version`: the provenance the entry was confirmed
-  under, from the running instance at confirmation time.
-- `confirmed_at`: RFC 3339 UTC timestamp of the human confirmation.
+- `source_text`: `1..2000` Unicode scalars, non-blank, matching the API segment
+  bound.
+- `target_text`: `1..2000` Unicode scalars, non-blank.
+- `prev_source_hash` / `next_source_hash`: 64 lowercase hex characters (SHA-256
+  of the exact UTF-8 neighbouring source segment) or `null` at a document edge
+  or when the neighbour is blank/whitespace-only. Both sides are checked for
+  `context_exact`.
+- `origin`: `"human_confirmed" | "imported_confirmed"`. Any other value is
+  refused (`tm_unconfirmed_origin`). Repeated confirmation or merge never
+  downgrades `"human_confirmed"` to `"imported_confirmed"`.
+- `terms_db_revision`: `1..128` Unicode scalars or `null`.
+- `game_version`: `1..128` Unicode scalars or `null`.
+- `note`: `0..160` Unicode scalars (`""` when empty).
+- `use_count`: integer in `0..2,147,483,647`.
+- `created_at`: RFC 3339 UTC timestamp of initial confirmation.
+- `updated_at`: RFC 3339 UTC timestamp of most recent confirmation/update.
 
 ### SQLite on Windows desktop and self-hosted
 
-- Windows: `%APPDATA%/WuwaTerm/translation-memory.db`, written with the same
-  atomic replace discipline as the manuscript (ADR 0015), in its own file —
-  never inside a manuscript, never beside credentials.
-- Self-hosted: the instance's local data directory, same schema, one file per
-  instance. `.env` and `data/` handling follows the deploy rules the project
-  already has; the memory is user data, not shared dictionary data.
-- Schema: `PRAGMA user_version = 1`, one `tm_entries` table with the fields
-  above and indexes on `(direction, source_hash)` and
-  `(direction, source_hash, prev_source_hash, next_source_hash)`.
+- Windows (implemented): `%APPDATA%/WuwaTerm/tm.sqlite3` beside `config.json`,
+  opened with WAL journal mode and `PRAGMA synchronous = FULL`, and exported
+  atomically via temporary file + `fsync` + `os.replace` — never inside a
+  `.wuwaterm` manuscript, never beside device credentials.
+- Schema: `tm_schema` metadata table (`format = "wuwaterm-tm-v1"`,
+  `schema_version = "1"`) and `tm_entries` table with unique index
+  `tm_entries_candidate` on
+  `(direction, source_hash, COALESCE(prev_source_hash, ''), COALESCE(next_source_hash, ''), target_text)`,
+  plus `tm_entries_norm` (`(direction, source_norm)`) and `tm_entries_masked`
+  (`(direction, source_masked)`).
+- Self-hosted (not implemented): when added, will use the instance's local data
+  directory with the same schema and `.env` / `data/` deploy rules; user memory
+  stays separate from shared dictionary data.
 - The memory is not part of `terms.db` and is never written into it: official
   data stays reproducible from pinned TextMaps
   ([ADR 0004](0004-sqlite-terminology-data.md),
@@ -146,42 +161,68 @@ import; there is no second format.
 
 ### Public Web
 
-- Zero automatic browser storage: `localStorage` and `IndexedDB` stay empty,
+- Implemented in React page state only: zero automatic browser storage
+  (`localStorage`, `sessionStorage`, `IndexedDB`, and cookies stay untouched),
   matching ADR 0021 and [Privacy and LLM](../privacy-and-llm.md).
-- Explicit import and export of `wuwaterm-tm-v1` JSON are the only paths, and
-  the content lives in the current page memory only.
-- Imported entries are request-scoped for that page; nothing is written to the
-  server, aggregated, or kept after the tab closes.
+- Explicit import and export of `wuwaterm-tm-v1` JSON are the only persistence
+  paths; capacity (`10,000` entries, `8 MiB` UTF-8) is enforced on import,
+  confirmation, merge, and export.
+- Imported entries stay in page memory only; nothing is written to the server,
+  uploaded to any API, or embedded into `.wuwaterm` manuscripts, and closing or
+  refreshing the tab clears them.
 
-## Matching and staleness
+## Matching, three-state freshness, and reuse boundary
 
-| Match | Key | Effect |
+Match kinds (ranked `0..3`, ties broken by `use_count` desc, then parsed
+`updated_at` instant desc):
+
+| Match kind | Condition | Reusable for skip? |
 | --- | --- | --- |
-| `context_exact` | `direction` + `source_hash` + both neighbour hashes | Reused without a model call; the reuse is reported |
-| `source_exact` | `direction` + `source_hash`, neighbours differ | Read-only reference for that call; never applied silently |
-| `stale` | any of the above, and provenance ≠ current runtime | Reported as stale, never auto-applied |
-| none | — | The segment takes the normal translation path |
+| `context_exact` | Exact `source_text`, request provides context (`prev_source_hash !== null \|\| next_source_hash !== null`), and **both** `prev_source_hash` and `next_source_hash` equal the entry | Only when `freshness === "verified_fresh"` |
+| `exact` | Exact `source_text`, but no request context or either neighbour differs/is missing | Read-only reference only |
+| `numeric_variant` | `numeric_mask(source_text)` matches (ASCII digit runs differ) | Read-only reference only (`numeric_changed`) |
+| `normalized_exact` | Whitespace/line-ending normalized source matches | Read-only reference only |
+
+Deleting or changing either neighbour (`prev_source` or `next_source`) downgrades
+`context_exact` to `exact`.
+
+Three-state freshness (`freshness`):
+
+| Freshness | Condition | `stale_reasons` / effect |
+| --- | --- | --- |
+| `verified_fresh` | `current_terms_db_revision !== null` and `entry.terms_db_revision === current_terms_db_revision`, `game_version` sides are both `null` or equal, and not `numeric_variant` | `needs_recheck = false`; eligible for skip only if also `context_exact` |
+| `known_stale` | Both `terms_db_revision` values non-null and unequal (`terms_revision_changed`), or both `game_version` values non-null and unequal (`game_version_changed`), or `numeric_variant` (`numeric_changed`) | `needs_recheck = true`; read-only reference only, never auto-applied |
+| `provenance_unknown` | Neither `terms_revision_changed` nor `game_version_changed` triggered, and `current_terms_db_revision === null`, `entry.terms_db_revision === null`, or `game_version` is `null` on one side only | `provenance_unknown` added to `stale_reasons`; `needs_recheck = true`; read-only reference only, never auto-applied |
+
+**Trusted reuse invariant:** Only `context_exact` + `verified_fresh` may enter
+batch / incremental skip (served without a model call). All other matches —
+including `exact`, `numeric_variant`, `normalized_exact`, `known_stale`, and
+`provenance_unknown` — remain read-only suggestions requiring human review and
+never bypass translation or silently overwrite text.
 
 Rules that follow from this:
 
-1. **Layer 1 still runs on a reused pair.** A `context_exact` reuse is passed
-   through `structure-check-v1`
+1. **Layer 1 still runs on a reused pair.** A `context_exact` +
+   `verified_fresh` reuse is passed through `structure-check-v1`
    ([ADR 0022](0022-deterministic-structure-checks.md)) like any translated
    pair; a structural finding demotes it to `needs_review` instead of serving
    it as settled.
 2. **Provenance mismatch is staleness, not deletion.** A dictionary revision
    or game-version change can invalidate an official rendering or an entity
-   name. The entry stays, is reported stale, and earns its place again when a
+   name. The entry stays, is reported `known_stale` (or `provenance_unknown`
+   when provenance cannot be verified), and earns `verified_fresh` again when a
    human confirms it under the current provenance.
-3. **Latest confirmation wins, history stays.** Two confirmations for the same
-   key keep both rows; matching reads the newest by `confirmed_at`. Nothing is
-   rewritten in place.
-4. **No cross-document admission.** An entry born in one document is usable in
-   another only under the same rule that admitted it (manual confirmation) and
-   only for the same direction; `document_kind` is reporting, not permission.
-5. **Bounded work per lookup.** Exact hash lookups only, at most two memory
-   reads per segment (context, then source); no scan of the whole memory per
-   segment.
+3. **Multi-candidate coexistence; latest confirmation wins tie-breaks.** Distinct
+   `(direction, source_hash, prev_source_hash, next_source_hash, target_text)`
+   candidates coexist without overwriting each other; repeat confirmations
+   increment `use_count` and update `updated_at`, while ranking prefers higher
+   `use_count` then newer `updated_at`.
+4. **No cross-document auto-application.** An entry born in one document only
+   auto-reuses when both exact text and both neighbours match under
+   `verified_fresh` provenance; otherwise it is reference only.
+5. **Bounded work per lookup.** Indexed exact/normalized/masked lookups with
+   `MAX_LOOKUP_CANDIDATES` / `MAX_LOOKUP_LIMIT` caps; no unbounded full-table
+   scoring scan.
 
 ## Incremental re-translation
 
@@ -189,24 +230,28 @@ For an edited guide or announcement:
 
 1. Segment the document with segmentation-v1 (the same ranges the structure
    checks use) and hash every source segment plus its neighbours.
-2. Solve each segment: `context_exact` is filled from the memory with no model
-   call; `source_exact` and `stale` go to the model with the stored pair as a
-   bounded read-only reference; everything else takes the normal path.
+2. Classify each segment against memory: only `context_exact` +
+   `verified_fresh` is eligible for zero-model-call reuse; `exact`,
+   `numeric_variant`, `normalized_exact`, `known_stale`, and
+   `provenance_unknown` go through translation with the stored pair available
+   at most as a bounded read-only reference; unmatched segments take the normal
+   path.
 3. An insertion or deletion changes the neighbour hashes of at most the
    adjacent segments, so the untouched interior of a long document stays
    `context_exact` — this is the saving the memory exists for.
-4. The run receipt reports counts: reused (`context_exact`), referenced
-   (`source_exact`), stale, re-translated; plus `terms_db_revision` and
-   `game_version`. Counts and provenance only, never segment text.
+4. The run receipt reports counts (reused, referenced, stale/unknown,
+   re-translated) plus `terms_db_revision` and `game_version` — counts and
+   provenance only, never segment text.
 5. A human confirmation of a re-translated segment writes or refreshes its
-   entry with the neighbours it was confirmed under, which is what restores
-   `context_exact` after an edit settles.
+   entry with the neighbours and provenance it was confirmed under, which is
+   what restores `context_exact` + `verified_fresh` after an edit settles.
 
 ## Non-goals
 
-- **No vector store, no embeddings, no fuzzy or semantic ranking.** Exact
-  hashes only; the moment matching becomes a score, the "reused" claim stops
-  being checkable.
+- **No vector store, no embeddings, no fuzzy or semantic ranking.** Exact,
+  whitespace-normalized, and ASCII-numeric-masked deterministic keys only; the
+  moment matching becomes a similarity score, the "reused" claim stops being
+  checkable.
 - **No global or shared server translation memory.** No cross-user
   aggregation, no "community memory", no public endpoint that serves other
   users' confirmed text.
@@ -227,13 +272,15 @@ Frozen before any measurement, on fixed documents rather than ad-hoc samples:
 
 1. **Reuse correctness.** On a set of real edited guides, exactly the segments
    whose source or neighbours changed are sent to the model; every untouched
-   interior segment is reused with zero model calls.
-2. **Staleness.** 100% of entries whose `terms_db_revision` or `game_version`
-   differs from the running instance are reported stale and none is
-   auto-applied.
+   interior segment (`context_exact` + `verified_fresh`) is reused with zero
+   model calls, and deleting or changing either neighbour downgrades to `exact`.
+2. **Staleness & unknown provenance.** 100% of entries whose `terms_db_revision`
+   or `game_version` differs from the running instance are reported
+   `known_stale`, entries with missing/unverified provenance are reported
+   `provenance_unknown`, and none is auto-applied.
 3. **Manual-confirmed-only.** A test proves no code path creates an entry from
-   model output, review output, or an imported file that claims another
-   `origin`.
+   model output, review output, or an imported file that claims an `origin`
+   outside `"human_confirmed" | "imported_confirmed"`.
 4. **Structure checks still run.** Every reused pair passes through
    `check_segment_structure`, and a finding demotes it.
 5. **Privacy.** No entry text in logs, receipts, or error messages; the Web
@@ -246,10 +293,9 @@ Frozen before any measurement, on fixed documents rather than ad-hoc samples:
 
 - Editing a confirmed document costs model calls only for what changed, and
   the settled parts of the document stop drifting between runs.
-- The user owns their memory: it is one portable JSON document, it can be
-  exported, imported, and inspected without the service.
+- The user owns their memory: it is one portable `wuwaterm-tm-v1` JSON document
+  shared byte-for-byte between Windows and Web, inspectable without the
+  service.
 - The service gains no shared knowledge from it. Whatever the memory learns
-  stays on the machine that confirmed it, which is the constraint that keeps
-  the official dictionary and the public Web unchanged.
-- Implementation is not started: `MY-491` is the work item, and this ADR
-  fixes the format and the invariants before any code exists.
+  stays on the machine (or current Web page session) that confirmed it, keeping
+  the official dictionary and public Web stateless.
