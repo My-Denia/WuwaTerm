@@ -7,9 +7,9 @@ import json
 import logging
 import os
 import sqlite3
+import struct
 import sys
 import threading
-import weakref
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -352,7 +352,10 @@ def _build_exact_index(
     index: dict[str, tuple[LookupCandidate, ...]] = {}
     for norm, items in buckets.items():
         if len(items) > 1:
-            items.sort(key=lambda row: (row[0], row[1], row[2], row[3], row[4]))
+            # Match SQLite's index-scan / ORDER BY tie-breaking (id ASC).
+            items.sort(
+                key=lambda row: (row[0], row[1], row[2], row[3], row[4], row[5].id)
+            )
         candidates: list[LookupCandidate] = []
         seen: set[tuple[str, str, str]] = set()
         for _prio, _zh_len, _cat, _src_file, _src_id, entry in items:
@@ -415,7 +418,6 @@ class DictionarySnapshot:
         "_row_norms",
         "_derived_lock",
         "_dictionary_identity",
-        "_review_snapshot",
         "_exact_index",
         "_scoring_rows",
         "_lockable_snapshot",
@@ -445,7 +447,6 @@ class DictionarySnapshot:
             self._row_norms = row_norms
         self._derived_lock = threading.Lock()
         self._dictionary_identity: DictionaryIdentity | None = None
-        self._review_snapshot: ReviewSnapshot | None = None
         self._exact_index: Mapping[str, tuple[LookupCandidate, ...]] | None = None
         self._scoring_rows: tuple[_ScoringRow, ...] | None = None
         self._lockable_snapshot: LockableSnapshot | None = None
@@ -484,18 +485,13 @@ class DictionarySnapshot:
 
     @property
     def review_snapshot(self) -> ReviewSnapshot:
-        snap = self._review_snapshot
-        if snap is not None:
-            return snap
+        """Return a ReviewSnapshot with an isolated copy of metadata."""
         identity = self.dictionary_identity
-        with self._derived_lock:
-            if self._review_snapshot is None:
-                self._review_snapshot = ReviewSnapshot(
-                    metadata=dict(self._metadata),
-                    entries=self._entries,
-                    revision=identity.revision,
-                )
-            return self._review_snapshot
+        return ReviewSnapshot(
+            metadata=dict(self._metadata),
+            entries=self._entries,
+            revision=identity.revision,
+        )
 
     @property
     def exact_index(self) -> Mapping[str, tuple[LookupCandidate, ...]]:
@@ -545,122 +541,141 @@ def _stat_tuple(path: Path) -> tuple[int, int, int, int, int]:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _optional_stat_tuple(path: Path) -> tuple[int, int, int, int, int] | None:
+def _wal_fingerprint(wal_path: Path) -> tuple[object, ...] | None:
+    """Read a lightweight fingerprint of an optional SQLite ``-wal`` file.
+
+    Never opens the main database file or ``-shm`` (so POSIX ``fcntl`` locks
+    held by other in-process SQLite connections are never disturbed), and holds
+    no persistent file descriptor. Captures stat metadata, the 32-byte WAL
+    header (checkpoint sequence, salt1/salt2, header checksum), the active
+    frame count for the current salt generation (found in O(log N) seeks), and
+    the 24-byte header (including cumulative checksum) of the last active frame
+    and physical tail frame so both appends and pre-allocated WAL resets are
+    detected immediately.
+    """
     try:
-        st = os.stat(path)
+        st = os.stat(wal_path)
     except OSError:
         return None
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    wal_stat = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    if st.st_size == 0:
+        return (wal_stat, b"", 0, b"", b"")
+    try:
+        with open(wal_path, "rb") as handle:
+            header = handle.read(32)
+            if len(header) < 32:
+                return (wal_stat, header, 0, b"", b"")
+            page_size = struct.unpack_from(">I", header, 8)[0]
+            if page_size < 512 or page_size > 65536 or (page_size & (page_size - 1)):
+                tail_pos = max(32, st.st_size - 64)
+                handle.seek(tail_pos)
+                return (wal_stat, header, 0, b"", handle.read(64))
+            frame_size = 24 + page_size
+            num_frames = (st.st_size - 32) // frame_size
+            if num_frames <= 0:
+                return (wal_stat, header, 0, b"", b"")
+            header_salt = header[16:24]
+
+            def read_frame_header(idx: int) -> bytes:
+                handle.seek(32 + idx * frame_size)
+                return handle.read(24)
+
+            tail_hdr = read_frame_header(num_frames - 1)
+            if len(tail_hdr) == 24 and tail_hdr[8:16] == header_salt:
+                return (wal_stat, header, num_frames, tail_hdr, tail_hdr)
+
+            first_hdr = read_frame_header(0)
+            if len(first_hdr) < 24 or first_hdr[8:16] != header_salt:
+                return (wal_stat, header, 0, b"", tail_hdr)
+
+            lo, hi = 0, num_frames - 1
+            best_idx = 0
+            best_hdr = first_hdr
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                hdr = read_frame_header(mid)
+                if len(hdr) == 24 and hdr[8:16] == header_salt:
+                    best_idx = mid
+                    best_hdr = hdr
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            return (wal_stat, header, best_idx + 1, best_hdr, tail_hdr)
+    except OSError:
+        return None
 
 
-def _close_connection_holder(holder: list[sqlite3.Connection | None]) -> None:
-    conn = holder[0]
-    holder[0] = None
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    """Open a short-lived read-only SQLite connection that never checkpoints WAL."""
+    conn = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro",
+        uri=True,
+        isolation_level=None,
+    )
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 class TermService:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self._lock = threading.RLock()
-        self._conn_holder: list[sqlite3.Connection | None] = [None]
-        self._finalizer = weakref.finalize(
-            self, _close_connection_holder, self._conn_holder
-        )
-        self._watch_inode: tuple[str, int, int] | None = None
-        self._watch_epoch: int = 0
         self._snapshot_stamp: tuple[object, ...] | None = None
         self._snapshot_cache: DictionarySnapshot | None = None
 
     def close(self) -> None:
-        """Close the internal SQLite watcher connection, if open."""
+        """Release the cached snapshot reference (no persistent SQLite handles exist)."""
         with self._lock:
-            self._close_watch_conn_locked()
+            self._snapshot_stamp = None
+            self._snapshot_cache = None
 
-    def _close_watch_conn_locked(self) -> None:
-        _close_connection_holder(self._conn_holder)
-        self._watch_inode = None
+    def _storage_stamp(self) -> tuple[object, ...]:
+        """Return a WAL- and replacement-aware storage stamp without persistent connections.
 
-    def _ensure_watch_conn_locked(
-        self, path: Path, main_stat: tuple[int, int, int, int, int]
-    ) -> sqlite3.Connection:
-        inode_key = (str(path), main_stat[0], main_stat[1])
-        conn = self._conn_holder[0]
-        if conn is None or self._watch_inode != inode_key:
-            self._close_watch_conn_locked()
-            conn = sqlite3.connect(
-                path, check_same_thread=False, isolation_level=None
-            )
-            conn.row_factory = sqlite3.Row
-            self._conn_holder[0] = conn
-            self._watch_inode = inode_key
-            self._watch_epoch += 1
-        return conn
-
-    def _storage_stamp_locked(self) -> tuple[object, ...]:
-        """Return a WAL- and replacement-aware storage stamp without full scans.
-
-        Combines main-file stat (detecting atomic inode replacement), ``-wal``
-        file stat (detecting uncheckpointed WAL appends/truncations), and
-        SQLite ``PRAGMA data_version`` on a persistent watcher connection
-        (detecting any committed write by another connection in either WAL or
-        rollback journal mode, even when main-file stat is unchanged). Uses
-        only ``os.stat`` and SQLite's own VFS connection so POSIX ``fcntl``
-        locks held by other in-process SQLite connections are never disturbed.
+        Combines main-file stat (detecting atomic inode replacement and in-place
+        rollback-journal commits) with a read-only ``-wal`` file fingerprint
+        (stat + 32-byte header + active-frame salt/checksum). Holds no open
+        SQLite connection and never opens the main DB file directly, so atomic
+        DB replacement cannot trigger stale WAL checkpoints and in-process POSIX
+        ``fcntl`` locks are never disturbed.
         """
         path = self.db_path.resolve(strict=False)
         main_stat = _stat_tuple(path)
-        wal_stat = _optional_stat_tuple(Path(f"{path}-wal"))
-        conn = self._ensure_watch_conn_locked(path, main_stat)
-        try:
-            row = conn.execute("PRAGMA data_version").fetchone()
-            data_version = int(row[0]) if row is not None else 0
-        except sqlite3.Error:
-            # Reopen cleanly once if the underlying file was rotated mid-call.
-            self._close_watch_conn_locked()
-            main_stat = _stat_tuple(path)
-            wal_stat = _optional_stat_tuple(Path(f"{path}-wal"))
-            conn = self._ensure_watch_conn_locked(path, main_stat)
-            row = conn.execute("PRAGMA data_version").fetchone()
-            data_version = int(row[0]) if row is not None else 0
-        return (
-            str(path),
-            self._watch_epoch,
-            main_stat,
-            wal_stat,
-            data_version,
-        )
+        wal_resolved = Path(f"{path}-wal")
+        wal_direct = Path(f"{self.db_path}-wal")
+        wal_fp = _wal_fingerprint(wal_resolved)
+        if wal_direct != wal_resolved:
+            wal_direct_fp = _wal_fingerprint(wal_direct)
+            return (str(path), main_stat, wal_fp, wal_direct_fp)
+        return (str(path), main_stat, wal_fp)
 
     def _identity(self) -> tuple[object, ...]:
         """Storage identity for cache validation, aware of SQLite WAL commits."""
-        with self._lock:
-            return self._storage_stamp_locked()
+        return self._storage_stamp()
 
-    def _read_snapshot_locked(
-        self, stamp: tuple[object, ...]
+    def _read_snapshot(
+        self, path: Path, stamp: tuple[object, ...]
     ) -> DictionarySnapshot:
-        conn = self._conn_holder[0]
-        assert conn is not None
-        conn.execute("BEGIN")
+        conn = _connect_readonly(path)
         try:
-            metadata_rows = conn.execute(
-                "SELECT key, value FROM metadata ORDER BY key"
-            ).fetchall()
-            term_rows = conn.execute(
-                """
-                SELECT * FROM terms
-                ORDER BY priority, zh_norm, en_norm, category, source_file, source_id
-                """
-            ).fetchall()
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
+            conn.execute("BEGIN")
+            try:
+                metadata_rows = conn.execute(
+                    "SELECT key, value FROM metadata ORDER BY key"
+                ).fetchall()
+                term_rows = conn.execute(
+                    """
+                    SELECT * FROM terms
+                    ORDER BY priority, zh_norm, en_norm, category, source_file, source_id
+                    """
+                ).fetchall()
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
         metadata = {row["key"]: row["value"] for row in metadata_rows}
         entries = tuple(row_to_entry(row) for row in term_rows)
         row_norms = tuple(
@@ -678,21 +693,23 @@ class TermService:
         """Return the current immutable :class:`DictionarySnapshot`.
 
         Validates the cached snapshot against filesystem and SQLite WAL state
-        (including ``PRAGMA data_version``). Reloads atomically in a single
-        transaction when the database changed, while leaving any previously
-        returned snapshot untouched for in-flight requests.
+        without keeping any persistent SQLite connection open. Reloads
+        atomically in a single read-only transaction when the database changed,
+        while leaving any previously returned snapshot untouched for in-flight
+        requests.
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
-                stamp_before = self._storage_stamp_locked()
+                stamp_before = self._storage_stamp()
                 if (
                     self._snapshot_cache is not None
                     and stamp_before == self._snapshot_stamp
                 ):
                     return self._snapshot_cache
-                snapshot = self._read_snapshot_locked(stamp_before)
-                stamp_after = self._storage_stamp_locked()
+                resolved_path = self.db_path.resolve(strict=False)
+                snapshot = self._read_snapshot(resolved_path, stamp_before)
+                stamp_after = self._storage_stamp()
                 if stamp_before == stamp_after:
                     self._snapshot_stamp = stamp_after
                     self._snapshot_cache = snapshot

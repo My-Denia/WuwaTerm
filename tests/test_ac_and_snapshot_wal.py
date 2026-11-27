@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from wuwaterm.application import build_term_service, build_translator, dictionary_identity
 from wuwaterm.cjk_span import crosses_cjk_word_boundary, single_character_name_context_ok
-from wuwaterm.db import connect, insert_records
+from wuwaterm.db import connect, initialize, insert_records
 from wuwaterm.english_plural import plural_suffix_candidates as _plural_suffix_candidates
-from wuwaterm.lookup import DictionarySnapshot
+from wuwaterm.lookup import DictionarySnapshot, TermService
 from wuwaterm.models import TermRecord
 from wuwaterm.sentence import SentenceTranslator
 from wuwaterm.term_matching import (
@@ -375,6 +379,7 @@ def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_in
     )
 
     # Commit a new term into the WAL without checkpointing the main DB file.
+    # Keep writer open while verifying so SQLite does not auto-checkpoint on last close.
     writer = connect(wal_db)
     try:
         writer.execute("PRAGMA wal_autocheckpoint = 0")
@@ -392,57 +397,308 @@ def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_in
             ],
         )
         writer.commit()
+
+        stat_after = os.stat(wal_db)
+        main_stat_after = (
+            stat_after.st_dev,
+            stat_after.st_ino,
+            stat_after.st_size,
+            stat_after.st_mtime_ns,
+            stat_after.st_ctime_ns,
+        )
+        assert main_stat_after == main_stat_before, (
+            "main DB file stat changed unexpectedly; test must exercise uncheckpointed WAL"
+        )
+        wal_file = Path(f"{wal_db}-wal")
+        assert wal_file.is_file() and wal_file.stat().st_size > 0
+
+        # 1. /v1/dictionary and TermService.dictionary_identity() immediately see new revision & count.
+        dict_after = asyncio.run(get_dictionary())
+        identity_after = dictionary_identity(service)
+        assert dict_after["revision"] == identity_after.revision
+        assert dict_after["revision"] != dict_before["revision"]
+        assert dict_after["term_count"] == int(dict_before["term_count"]) + 1  # type: ignore[arg-type]
+
+        # 2. Fuzzy lookup and exact lookup immediately see the WAL-committed term.
+        fuzzy_after = service.lookup("xingchenmohe")
+        assert fuzzy_after.best is not None
+        assert fuzzy_after.best.entry.zh == "星尘魔核"
+        assert fuzzy_after.best.entry.en == "Stardust Core"
+        exact_after = service.lookup_exact("星尘魔核")
+        assert exact_after.exact is True
+        assert exact_after.best is not None
+        assert exact_after.best.entry.en == "Stardust Core"
+
+        # 3. Translation term locking (both shared-service and standalone) immediately locks the new term.
+        lock_after = translator.lock_terms("请携带星尘魔核进入副本。")
+        assert lock_after.restore(lock_after.locked_text) == "请携带Stardust Core进入副本。"
+        standalone_after = standalone_translator.lock_terms("请携带星尘魔核进入副本。")
+        assert (
+            standalone_after.restore(standalone_after.locked_text)
+            == "请携带Stardust Core进入副本。"
+        )
+
+        # 4. In-flight snapshot reference remains strictly immutable and isolated.
+        current_snapshot = service.snapshot()
+        assert current_snapshot is not inflight_snapshot
+        assert inflight_snapshot.dictionary_identity == inflight_identity
+        assert inflight_snapshot.term_count == inflight_scoring_count
+        assert inflight_snapshot.exact_index.get("星尘魔核") is None
+        assert inflight_snapshot.lockable_snapshot() is inflight_lockable
+        assert all(src != "星尘魔核" for src, _ in inflight_lockable.eligible_lockable)
     finally:
         writer.close()
 
-    stat_after = os.stat(wal_db)
-    main_stat_after = (
-        stat_after.st_dev,
-        stat_after.st_ino,
-        stat_after.st_size,
-        stat_after.st_mtime_ns,
-        stat_after.st_ctime_ns,
-    )
-    assert main_stat_after == main_stat_before, (
-        "main DB file stat changed unexpectedly; test must exercise uncheckpointed WAL"
-    )
-    wal_file = Path(f"{wal_db}-wal")
-    assert wal_file.is_file() and wal_file.stat().st_size > 0
-
-    # 1. /v1/dictionary and TermService.dictionary_identity() immediately see new revision & count.
-    dict_after = asyncio.run(get_dictionary())
-    identity_after = dictionary_identity(service)
-    assert dict_after["revision"] == identity_after.revision
-    assert dict_after["revision"] != dict_before["revision"]
-    assert dict_after["term_count"] == int(dict_before["term_count"]) + 1  # type: ignore[arg-type]
-
-    # 2. Fuzzy lookup and exact lookup immediately see the WAL-committed term.
-    fuzzy_after = service.lookup("xingchenmohe")
-    assert fuzzy_after.best is not None
-    assert fuzzy_after.best.entry.zh == "星尘魔核"
-    assert fuzzy_after.best.entry.en == "Stardust Core"
-    exact_after = service.lookup_exact("星尘魔核")
-    assert exact_after.exact is True
-    assert exact_after.best is not None
-    assert exact_after.best.entry.en == "Stardust Core"
-
-    # 3. Translation term locking (both shared-service and standalone) immediately locks the new term.
-    lock_after = translator.lock_terms("请携带星尘魔核进入副本。")
-    assert lock_after.restore(lock_after.locked_text) == "请携带Stardust Core进入副本。"
-    standalone_after = standalone_translator.lock_terms("请携带星尘魔核进入副本。")
-    assert (
-        standalone_after.restore(standalone_after.locked_text)
-        == "请携带Stardust Core进入副本。"
-    )
-
-    # 4. In-flight snapshot reference remains strictly immutable and isolated.
-    current_snapshot = service.snapshot()
-    assert current_snapshot is not inflight_snapshot
-    assert inflight_snapshot.dictionary_identity == inflight_identity
-    assert inflight_snapshot.term_count == inflight_scoring_count
-    assert inflight_snapshot.exact_index.get("星尘魔核") is None
-    assert inflight_snapshot.lockable_snapshot() is inflight_lockable
-    assert all(src != "星尘魔核" for src, _ in inflight_lockable.eligible_lockable)
-
     service.close()
     standalone_translator.service.close()
+
+
+def test_two_term_services_atomic_wal_db_replacement_does_not_corrupt_new_db(
+    tmp_path: Path, sample_db: Path
+):
+    """Two TermServices reading a WAL DB must not corrupt an atomically replaced DB."""
+    live_db = tmp_path / "live.db"
+    shutil.copy2(sample_db, live_db)
+    init_conn = connect(live_db)
+    try:
+        mode = init_conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode is not None and mode[0].lower() == "wal"
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    svc_a = TermService(live_db)
+    svc_b = TermService(live_db)
+
+    # Read the old WAL DB through both TermServices while an uncheckpointed WAL
+    # commit is active, then close the writer (the normal state before atomic DB
+    # promotion). With no persistent watcher connections held by TermService,
+    # SQLite cleanly releases the old WAL so os.replace() cannot leave stale WAL
+    # pages that corrupt the replacement database.
+    old_writer = connect(live_db)
+    try:
+        old_writer.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            old_writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="old_wal.json",
+                    source_id="old-1",
+                    text_key="OldWal_1",
+                    zh="旧库词条",
+                    en="Old WAL Term",
+                )
+            ],
+        )
+        old_writer.commit()
+
+        assert svc_a.lookup_exact("旧库词条").exact is True
+        assert svc_b.lookup_exact("旧库词条").exact is True
+        old_rev = svc_a.dictionary_identity().revision
+    finally:
+        old_writer.close()
+
+    # Build a clean replacement candidate with completely distinct content.
+    candidate = tmp_path / "candidate.db"
+    cand_conn = connect(candidate)
+    try:
+        initialize(cand_conn)
+        cand_conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            [
+                ("schema_version", "2"),
+                ("source_commit", "replacement-commit"),
+                ("source_game_version", "3.8"),
+            ],
+        )
+        insert_records(
+            cand_conn,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="new_db.json",
+                    source_id="new-1",
+                    text_key="NewDb_1",
+                    zh="新库词条",
+                    en="Fresh Replaced Term",
+                )
+            ],
+        )
+        cand_conn.commit()
+    finally:
+        cand_conn.close()
+
+    os.replace(candidate, live_db)
+
+    try:
+        # Both TermServices must immediately see the new DB and never write old WAL pages into it.
+        assert svc_a.lookup_exact("新库词条").exact is True
+        assert svc_a.lookup_exact("旧库词条").exact is False
+        assert svc_b.lookup_exact("新库词条").exact is True
+        assert svc_b.lookup_exact("旧库词条").exact is False
+        assert svc_a.dictionary_identity().revision == svc_b.dictionary_identity().revision
+        assert svc_a.dictionary_identity().revision != old_rev
+    finally:
+        svc_a.close()
+        svc_b.close()
+
+    # Independently reopen the replaced DB and verify integrity and exact contents.
+    verify_conn = sqlite3.connect(live_db)
+    try:
+        integrity = verify_conn.execute("PRAGMA integrity_check").fetchone()
+        assert integrity is not None and integrity[0] == "ok"
+        rows = verify_conn.execute("SELECT zh, en FROM terms").fetchall()
+        assert rows == [("新库词条", "Fresh Replaced Term")]
+    finally:
+        verify_conn.close()
+
+
+def test_asgi_lifespan_exit_leaves_no_open_sqlite_handles_for_wal_mode_switch(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """After ASGI lifespan shutdown, no open SQLite handle may block PRAGMA journal_mode=DELETE."""
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+
+    wal_db = tmp_path / "lifespan-wal.db"
+    shutil.copy2(sample_db, wal_db)
+    init_conn = connect(wal_db)
+    try:
+        mode = init_conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode is not None and mode[0].lower() == "wal"
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    device_db = tmp_path / "devices.db"
+    store = DeviceStore(device_db)
+    secret = "lifespan-test-secret-0123456789abcdef"
+    device = store.issue("lifespan-device", [SCOPE_META, SCOPE_TRANSLATE], secret=secret)
+    token = f"{TOKEN_SCHEME}.{device.device_id}.{secret}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    app = create_app(
+        ApiSettings(db_path=wal_db, device_db_path=device_db),
+        device_store=store,
+    )
+    with TestClient(app) as client:
+        assert client.get("/v1/dictionary", headers=headers).status_code == 200
+        assert client.get("/v1/terms", params={"q": "声骸"}, headers=headers).status_code == 200
+
+    # With lifespan exited, switching WAL -> DELETE with timeout=0.0 must succeed immediately.
+    conn = sqlite3.connect(wal_db, timeout=0.0)
+    try:
+        switched = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        assert switched is not None and switched[0].lower() == "delete"
+    finally:
+        conn.close()
+
+
+def test_review_snapshot_metadata_mutation_does_not_pollute_cache(sample_db: Path):
+    """Mutating metadata on one review_snapshot() must never pollute subsequent reads."""
+    service = TermService(sample_db)
+    snap1 = service.review_snapshot()
+    original_commit = snap1.metadata.get("source_commit")
+
+    snap1.metadata["source_commit"] = "poisoned-commit"
+    snap1.metadata["injected_key"] = "bad"
+
+    snap2 = service.review_snapshot()
+    assert snap2.metadata.get("source_commit") == original_commit
+    assert "injected_key" not in snap2.metadata
+    assert service.metadata().get("source_commit") == original_commit
+    assert "injected_key" not in service.metadata()
+    assert service.dictionary_identity().source_commit == original_commit
+
+
+def test_exact_lookup_tie_breaking_matches_sqlite_id_order_for_shared_en_surface(
+    tmp_path: Path,
+):
+    """Tied exact candidates sharing English surface preserve SQLite id ASC order."""
+    tie_db = tmp_path / "tie-order.db"
+    with connect(tie_db) as conn:
+        initialize(conn)
+        conn.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '2')")
+        # Insert 长离 (id=1, higher Unicode codepoint) BEFORE 今汐 (id=2, lower codepoint)
+        # with identical category, source_file, source_id, en, and len(zh) == 2.
+        conn.executemany(
+            """
+            INSERT INTO terms(
+              id, category, source_file, source_id, text_key, zh, en, zh_norm, en_norm,
+              pinyin, pinyin_abbrev, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "resonator", "RoleInfo.json", "shared-id", "k1", "长离", "Shared Hero", "长离", "sharedhero", "changli", "cl", 1),
+                (2, "resonator", "RoleInfo.json", "shared-id", "k2", "今汐", "Shared Hero", "今汐", "sharedhero", "jinxi", "jx", 1),
+            ],
+        )
+        conn.commit()
+        sql_order = [
+            row["zh"]
+            for row in conn.execute(
+                """
+                SELECT zh FROM terms
+                WHERE zh_norm = ? OR en_norm = ?
+                ORDER BY priority, length(zh), category, source_file, source_id
+                """,
+                ("sharedhero", "sharedhero"),
+            ).fetchall()
+        ]
+
+    assert sql_order == ["长离", "今汐"]
+    service = TermService(tie_db)
+    result = service.lookup_exact("Shared Hero", limit=10)
+    assert result.exact is True
+    assert [cand.entry.zh for cand in result.candidates] == ["长离", "今汐"]
+
+
+def test_benchmark_core_perf_fail_closed_and_wal_backup(tmp_path: Path, sample_db: Path):
+    """Benchmark script must fail-closed on missing --db and copy WAL commits via backup()."""
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "benchmark_core_perf.py"
+    missing = tmp_path / "does-not-exist.db"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--db", str(missing), "--quick"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "does not exist" in (proc.stderr + proc.stdout)
+
+    # Verify _build_scaled_db preserves uncheckpointed WAL commits via sqlite3.backup().
+    from scripts import benchmark_core_perf as bench
+
+    wal_src = tmp_path / "wal-src.db"
+    shutil.copy2(sample_db, wal_src)
+    with connect(wal_src) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.commit()
+
+    writer = connect(wal_src)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="wal_backup.json",
+                    source_id="wb-1",
+                    text_key="WalBackup_1",
+                    zh="备份验证词条",
+                    en="WAL Backup Term",
+                )
+            ],
+        )
+        writer.commit()
+
+        dest = tmp_path / "copied.db"
+        _, count = bench._build_scaled_db(wal_src, 0, dest)
+        assert count > 0
+        copied_svc = TermService(dest)
+        assert copied_svc.lookup_exact("备份验证词条").exact is True
+    finally:
+        writer.close()

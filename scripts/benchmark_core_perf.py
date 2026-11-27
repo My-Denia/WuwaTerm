@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import resource
-import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -234,9 +234,28 @@ def _build_scaled_db(
     target_rows: int,
     dest: Path,
 ) -> tuple[Path, int]:
-    """Create a WAL-enabled benchmark database scaled to ``target_rows`` terms."""
-    if base_db is not None and base_db.is_file():
-        shutil.copy2(base_db, dest)
+    """Create a WAL-enabled benchmark database scaled to ``target_rows`` terms.
+
+    Uses ``sqlite3.Connection.backup()`` when copying ``base_db`` so committed
+    frames sitting in an uncheckpointed ``-wal`` file are preserved in full.
+    """
+    if base_db is not None:
+        if not base_db.is_file() or base_db.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"Base dictionary database does not exist or is empty: {base_db}"
+            )
+        src_conn = sqlite3.connect(
+            f"{base_db.resolve().as_uri()}?mode=ro", uri=True
+        )
+        try:
+            dst_conn = sqlite3.connect(dest)
+            try:
+                src_conn.backup(dst_conn)
+                dst_conn.commit()
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
     else:
         with connect(dest) as conn:
             initialize(conn)
@@ -503,24 +522,24 @@ def _benchmark_scale(
             ],
         )
         writer.commit()
+        stat_after = os.stat(db_path)
+        main_stat_unchanged = (
+            stat_before.st_size == stat_after.st_size
+            and stat_before.st_mtime_ns == stat_after.st_mtime_ns
+            and stat_before.st_ino == stat_after.st_ino
+        )
+
+        t_wal = time.perf_counter()
+        identity_after_wal = service.dictionary_identity()
+        wal_identity_refresh_ms = (time.perf_counter() - t_wal) * 1000.0
+        locked_wal = translator.lock_terms("携带基准测试晶核")
+        wal_lock_ok = (
+            locked_wal.restore(locked_wal.locked_text) == "携带Bench Crystal Core"
+        )
+        assert identity_after_wal.revision != identity_cold.revision
+        assert wal_lock_ok
     finally:
         writer.close()
-    stat_after = os.stat(db_path)
-    main_stat_unchanged = (
-        stat_before.st_size == stat_after.st_size
-        and stat_before.st_mtime_ns == stat_after.st_mtime_ns
-        and stat_before.st_ino == stat_after.st_ino
-    )
-
-    t_wal = time.perf_counter()
-    identity_after_wal = service.dictionary_identity()
-    wal_identity_refresh_ms = (time.perf_counter() - t_wal) * 1000.0
-    locked_wal = translator.lock_terms("携带基准测试晶核")
-    wal_lock_ok = (
-        locked_wal.restore(locked_wal.locked_text) == "携带Bench Crystal Core"
-    )
-    assert identity_after_wal.revision != identity_cold.revision
-    assert wal_lock_ok
 
     service.close()
 
@@ -642,9 +661,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--md-out", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    base_db = args.db if args.db is not None else _discover_default_db()
+    if args.db is not None:
+        if not args.db.is_file() or args.db.stat().st_size == 0:
+            parser.error(
+                f"--db path does not exist or is empty: {args.db}"
+            )
+        base_db: Path | None = args.db
+    else:
+        base_db = _discover_default_db()
     if args.quick:
-        scales = [("real-12k" if base_db is not None else "12k", 0 if base_db else 12000)]
+        scales = [
+            ("real-12k" if base_db is not None else "synthetic-12k", 0 if base_db else 12000)
+        ]
         warmup = 1
         iterations = 10
         naive_iterations = 1
