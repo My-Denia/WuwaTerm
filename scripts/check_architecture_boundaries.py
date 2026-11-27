@@ -5,10 +5,11 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     attribution_candidates, domain_knowledge, entity_graph,
                    fuzzy_index, knowledge_db, lookup, native_kernel, normalize,
-                   models, review, cjk_span, document_anchor, protected_text,
-                   english_plural, segmentation, semantic_review_contract,
-                   single_char_context, skill_references, term_classification,
-                   term_matching, term_preparation, termbase, text_spans
+                   models, retrieval_vector, review, cjk_span, document_anchor,
+                   protected_text, english_plural, segmentation,
+                   semantic_review_contract, single_char_context,
+                   skill_references, term_classification, term_matching,
+                   term_preparation, termbase, text_spans
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
                    provider_capabilities (declarative provider capability profiles
                    and reasoning effort mappings),
@@ -121,6 +122,7 @@ DOMAIN_CORE = frozenset(
         "native_kernel",
         "normalize",
         "models",
+        "retrieval_vector",
         "review",
         "cjk_span",
         "protected_text",
@@ -173,7 +175,7 @@ PURE_MATCHING = frozenset(
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.
 PURE_MATCHING_FORBIDDEN_STORAGE = frozenset(
-    {"db", "entity_graph", "knowledge_db", "lookup", "review"}
+    {"db", "entity_graph", "knowledge_db", "lookup", "retrieval_vector", "review"}
 )
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel

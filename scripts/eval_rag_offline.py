@@ -61,6 +61,18 @@ from wuwaterm.knowledge_db import (  # noqa: E402
 )
 from wuwaterm.models import TermRecord  # noqa: E402
 from wuwaterm.normalize import normalize_text  # noqa: E402
+from wuwaterm.retrieval_vector import (  # noqa: E402
+    DEFAULT_VECTOR_DIM,
+    DeterministicHashEncoder,
+    OnnxInt8TextEncoder,
+    QuantizationMode,
+    VectorEncoder,
+    VectorIndexBackend,
+    compute_file_sha256,
+    hybrid_fuse_candidates,
+    open_vector_backend,
+    vector_hits_to_candidates,
+)
 from wuwaterm.sentence import SentenceTranslator  # noqa: E402
 from wuwaterm.translation_plan import (  # noqa: E402
     DEFAULT_PROVIDER_PROFILE,
@@ -686,17 +698,61 @@ def _check_lock_span_conflict(
     )
 
 
+def _load_entity_rows_map(kb_path: Path) -> dict[str, dict[str, object]]:
+    """Load read-only entity metadata keyed by ``entity_id`` for dense hit hydration."""
+    conn = sqlite3.connect(f"{kb_path.resolve().as_uri()}?mode=ro", uri=True)
+    with closing(conn):
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON;")
+        rows = conn.execute(
+            "SELECT entity_id, entity_type, zh, en, trust_tier, context_gloss FROM kb_entities"
+        ).fetchall()
+    return {
+        str(row["entity_id"]): {
+            "entity_type": str(row["entity_type"]),
+            "zh": str(row["zh"]),
+            "en": str(row["en"]),
+            "trust_tier": str(row["trust_tier"]),
+            "context_gloss": str(row["context_gloss"]),
+        }
+        for row in rows
+    }
+
+
+def _vector_artifact_size_bytes(index_dir: Path, backend: str) -> int:
+    if backend == "memmap":
+        total = 0
+        for name in ("knowledge-vec.bin", "knowledge-vec.meta.json"):
+            p = index_dir / name
+            if p.is_file():
+                total += p.stat().st_size
+        return total
+    if backend == "sqlite-vec":
+        p = index_dir / "knowledge-vec.sqlite3"
+        return p.stat().st_size if p.is_file() else 0
+    return 0
+
+
 def evaluate_offline_rag(
     *,
     terms_db_path: Path,
     knowledge_db_path: Path,
     mode: str,
     iterations: int = 5,
+    retrieval_mode: str = "lexical",
+    encoder: VectorEncoder | None = None,
+    vector_backend_name: str = "memmap",
+    vector_dim: int = DEFAULT_VECTOR_DIM,
+    vector_quantization: QuantizationMode = "int8",
+    vector_index_dir: Path | None = None,
+    min_vector_score: float = 0.15,
     negative_cases: tuple[NegativeCase, ...] | None = None,
     positive_cases: tuple[PositiveCase, ...] | None = None,
     graph_cases: tuple[GraphDisambiguationCase, ...] | None = None,
 ) -> dict[str, Any]:
     """Run the full 6-metric deterministic offline RAG evaluation."""
+    if retrieval_mode not in ("lexical", "hybrid"):
+        raise ValueError(f"unsupported retrieval_mode: {retrieval_mode!r}")
     iterations = max(1, int(iterations))
     if mode == "synthetic":
         neg_cases = negative_cases or SYNTHETIC_NEGATIVE_CASES
@@ -744,6 +800,88 @@ def evaluate_offline_rag(
         knowledge_db_path=knowledge_db_path,
     )
 
+    vec_temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    vec_backend: VectorIndexBackend | None = None
+    active_encoder: VectorEncoder | None = encoder
+    entity_rows_map: dict[str, dict[str, object]] = {}
+    vec_index_size_bytes = 0
+    vec_build_ms = 0.0
+    vec_meta_dict: dict[str, Any] | None = None
+
+    if retrieval_mode == "hybrid":
+        from scripts.build_knowledge_vectors import build_knowledge_vectors
+
+        if active_encoder is None:
+            active_encoder = DeterministicHashEncoder(dim=vector_dim)
+        kb_sha256 = compute_file_sha256(knowledge_db_path)
+        if vector_index_dir is None:
+            vec_temp_dir = tempfile.TemporaryDirectory(prefix="wuwaterm-eval-vec-")
+            resolved_vec_dir = Path(vec_temp_dir.name)
+            t_vec0 = time.perf_counter()
+            build_knowledge_vectors(
+                knowledge_db_path,
+                out_dir=resolved_vec_dir,
+                backend=vector_backend_name,
+                encoder=active_encoder,
+                dim=active_encoder.dim,
+                quantization=vector_quantization,
+            )
+            vec_build_ms = round((time.perf_counter() - t_vec0) * 1000.0, 3)
+        else:
+            resolved_vec_dir = vector_index_dir
+
+        vec_backend = open_vector_backend(
+            resolved_vec_dir,
+            backend=vector_backend_name,
+            expected_knowledge_db_sha256=kb_sha256,
+            expected_terms_db_revision=expected_revision,
+            expected_model_id=active_encoder.model_id,
+            expected_dim=active_encoder.dim,
+            expected_quantization=vector_quantization,
+        )
+        if vec_backend is None:
+            if vec_temp_dir is not None:
+                vec_temp_dir.cleanup()
+            raise RuntimeError(
+                "hybrid evaluation requested but companion vector backend failed validation or is unavailable"
+            )
+        vec_meta_dict = vec_backend.metadata.to_dict()
+        vec_index_size_bytes = _vector_artifact_size_bytes(
+            resolved_vec_dir, vector_backend_name
+        )
+        entity_rows_map = _load_entity_rows_map(knowledge_db_path)
+
+    def retrieve_with_diagnostics(
+        prepared_text: str,
+        *,
+        locked_surfaces: tuple[str, ...],
+        reference_surfaces: tuple[str, ...],
+    ) -> tuple[tuple[Any, ...], Any]:
+        lex_cands, graph_outcome = kb_reader.query_with_diagnostics(
+            prepared_text,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+            use_graph=True,
+        )
+        if retrieval_mode != "hybrid" or vec_backend is None or active_encoder is None:
+            return lex_cands, graph_outcome
+        q_vecs = active_encoder.encode_queries([prepared_text])
+        hits = vec_backend.search(q_vecs[0], top_k=16) if q_vecs else []
+        vec_cands = vector_hits_to_candidates(
+            hits,
+            entity_rows_map,
+            text=prepared_text,
+            min_score=min_vector_score,
+        )
+        fused = hybrid_fuse_candidates(
+            lex_cands,
+            vec_cands,
+            text=prepared_text,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+        )
+        return fused, graph_outcome
+
     try:
         # ------------------------------------------------------------------
         # Metric 1: Ordinary-word false-lock & false-injection rate
@@ -767,11 +905,10 @@ def evaluate_offline_rag(
             ref_surfaces = official_source_surfaces(
                 locked.locks, locked.references, to_chinese=case.to_chinese
             )
-            candidates, graph_outcome = kb_reader.query_with_diagnostics(
+            candidates, graph_outcome = retrieve_with_diagnostics(
                 prepared,
                 locked_surfaces=locked_surfaces,
                 reference_surfaces=ref_surfaces,
-                use_graph=True,
             )
             forbidden_norm = {normalize_text(s) for s in case.forbidden_surfaces}
             locked_hit = any(
@@ -833,11 +970,10 @@ def evaluate_offline_rag(
             ref_surfaces = official_source_surfaces(
                 locked.locks, locked.references, to_chinese=case.to_chinese
             )
-            candidates, _graph_out = kb_reader.query_with_diagnostics(
+            candidates, _graph_out = retrieve_with_diagnostics(
                 prepared,
                 locked_surfaces=locked_surfaces,
                 reference_surfaces=ref_surfaces,
-                use_graph=True,
             )
 
             expected_norm = {normalize_text(s) for s in case.expected_surfaces}
@@ -1030,11 +1166,10 @@ def evaluate_offline_rag(
                     locked.locks, locked.references, to_chinese=to_chinese
                 )
                 t2 = time.perf_counter()
-                _ = kb_reader.query(
+                _ = retrieve_with_diagnostics(
                     prepared,
                     locked_surfaces=locked_surfaces,
                     reference_surfaces=ref_surfaces,
-                    use_graph=True,
                 )
                 t3 = time.perf_counter()
                 rag_latencies_ms.append(((t1 - t0) + (t3 - t2)) * 1000.0)
@@ -1073,9 +1208,11 @@ def evaluate_offline_rag(
             and graph_tracemalloc_mib < MAX_GRAPH_MEMORY_MIB
         )
 
-        return {
+        vec_index_size_mib = round(vec_index_size_bytes / (1024.0 * 1024.0), 4)
+        report: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "mode": mode,
+            "retrieval_mode": retrieval_mode,
             "gates_passed": gates_passed,
             "ordinary_word_false_lock": {
                 "false_lock_rate": ordinary_word_false_lock_rate,
@@ -1135,16 +1272,37 @@ def evaluate_offline_rag(
                 "graph_tracemalloc_mib": graph_tracemalloc_mib,
                 "graph_memory_limit_mib": MAX_GRAPH_MEMORY_MIB,
                 "kb_file_size_mib": kb_file_size_mib,
+                "vector_index_file_size_mib": vec_index_size_mib,
                 "graph_node_count": graph.node_count,
                 "graph_edge_count": graph.edge_count,
             },
         }
+        if retrieval_mode == "hybrid" and vec_meta_dict is not None:
+            report["vector_index"] = {
+                "metadata": vec_meta_dict,
+                "index_size_bytes": vec_index_size_bytes,
+                "index_size_mib": vec_index_size_mib,
+                "build_ms": vec_build_ms,
+            }
+        return report
     finally:
+        if vec_backend is not None:
+            vec_backend.close()
+        if vec_temp_dir is not None:
+            vec_temp_dir.cleanup()
         rag_translator.close_knowledge_reader()
         kb_reader.close()
 
 
-def run_synthetic_eval(*, iterations: int = 5) -> dict[str, Any]:
+def run_synthetic_eval(
+    *,
+    iterations: int = 5,
+    retrieval_mode: str = "lexical",
+    encoder: VectorEncoder | None = None,
+    vector_backend_name: str = "memmap",
+    vector_dim: int = DEFAULT_VECTOR_DIM,
+    vector_quantization: QuantizationMode = "int8",
+) -> dict[str, Any]:
     """Run the self-contained synthetic offline RAG evaluation benchmark."""
     with tempfile.TemporaryDirectory(prefix="wuwaterm-eval-rag-") as tmp:
         terms_path, kb_path = _build_synthetic_fixture(Path(tmp))
@@ -1153,6 +1311,11 @@ def run_synthetic_eval(*, iterations: int = 5) -> dict[str, Any]:
             knowledge_db_path=kb_path,
             mode="synthetic",
             iterations=iterations,
+            retrieval_mode=retrieval_mode,
+            encoder=encoder,
+            vector_backend_name=vector_backend_name,
+            vector_dim=vector_dim,
+            vector_quantization=vector_quantization,
         )
 
 
@@ -1166,11 +1329,17 @@ def format_markdown_report(report: dict[str, Any]) -> str:
     short = rec["short_term_recall"]
     gr = rec["graph_disambiguation"]
     status = "PASS" if report["gates_passed"] else "FAIL"
+    retrieval_mode = report.get("retrieval_mode", "lexical")
+    arm_col = (
+        "Official Lock + `knowledge.db` + Vector RRF"
+        if retrieval_mode == "hybrid"
+        else "Official Lock + `knowledge.db` RAG"
+    )
 
     lines = [
         f"# WuwaTerm Offline RAG Evaluation ({report['mode']} — {status})",
         "",
-        "| Metric | Official Lock Only | Official Lock + `knowledge.db` RAG | Gate / Notes |",
+        f"| Metric | Official Lock Only | {arm_col} | Gate / Notes |",
         "| --- | --- | --- | --- |",
         (
             f"| 1. Ordinary-word false-lock rate | "
@@ -1200,7 +1369,7 @@ def format_markdown_report(report: dict[str, Any]) -> str:
             f"| 4. Query latency P50 / P95 | "
             f"{lat['baseline_p50_ms']:.3f} / {lat['baseline_p95_ms']:.3f} ms | "
             f"{lat['rag_p50_ms']:.3f} / {lat['rag_p95_ms']:.3f} ms | "
-            f"{lat['samples']} samples |"
+            f"{lat['samples']} samples (mode={retrieval_mode}) |"
         ),
         (
             f"| 5. KB & 1-hop graph memory | 0.00 MiB | "
@@ -1215,8 +1384,17 @@ def format_markdown_report(report: dict[str, Any]) -> str:
             f"positive={gr['positive_passed']}, negative_zero_trigger={gr['negative_passed']} | "
             f"schema={report['schema_version']} |"
         ),
-        "",
     ]
+    vec_info = report.get("vector_index")
+    if isinstance(vec_info, dict):
+        vmeta = vec_info.get("metadata", {})
+        lines.append(
+            f"| 7. Vector index artifact ({vmeta.get('backend', 'memmap')}) | N/A | "
+            f"{vec_info.get('index_size_bytes', 0)} bytes ({vec_info.get('index_size_mib', 0.0):.4f} MiB) | "
+            f"model={vmeta.get('model_id', '')}, dim={vmeta.get('dim', 0)}, "
+            f"quant={vmeta.get('quantization', '')}, build={vec_info.get('build_ms', 0.0):.2f} ms |"
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -1241,6 +1419,71 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to companion knowledge.db (default: sibling knowledge.db of terms-db).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("lexical", "hybrid"),
+        default="lexical",
+        help="Retrieval mode: pure lexical RAG (default) or lexical+vector RRF hybrid.",
+    )
+    parser.add_argument(
+        "--fake-encoder",
+        action="store_true",
+        help="Use deterministic zero-dep hash encoder for --mode hybrid offline regression.",
+    )
+    parser.add_argument(
+        "--vec-backend",
+        choices=("memmap", "sqlite-vec"),
+        default="memmap",
+        help="Vector index backend for --mode hybrid (default: memmap).",
+    )
+    parser.add_argument(
+        "--vec-dim",
+        type=int,
+        default=DEFAULT_VECTOR_DIM,
+        help=f"Vector embedding dimension for --mode hybrid (default: {DEFAULT_VECTOR_DIM}).",
+    )
+    parser.add_argument(
+        "--vec-quantization",
+        choices=("int8", "fp32"),
+        default="int8",
+        help="Vector quantization for --mode hybrid (default: int8).",
+    )
+    parser.add_argument(
+        "--onnx-model",
+        type=Path,
+        default=None,
+        help="Optional CPU ONNX model path for --mode hybrid.",
+    )
+    parser.add_argument(
+        "--onnx-tokenizer",
+        type=Path,
+        default=None,
+        help="Optional HuggingFace tokenizers JSON path for --onnx-model.",
+    )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="Optional explicit model identifier for vector metadata.",
+    )
+    parser.add_argument(
+        "--query-prefix",
+        type=str,
+        default="",
+        help="Optional query prefix for ONNX encoder (e.g. 'query: ').",
+    )
+    parser.add_argument(
+        "--passage-prefix",
+        type=str,
+        default="",
+        help="Optional passage prefix for ONNX encoder (e.g. 'passage: ').",
+    )
+    parser.add_argument(
+        "--vector-index-dir",
+        type=Path,
+        default=None,
+        help="Optional pre-built vector index directory (otherwise built temporarily).",
     )
     parser.add_argument(
         "--iterations",
@@ -1274,10 +1517,46 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _resolve_encoder_from_args(args: argparse.Namespace) -> VectorEncoder | None:
+    if args.mode != "hybrid":
+        return None
+    if args.fake_encoder:
+        return DeterministicHashEncoder(
+            dim=args.vec_dim,
+            model_id=args.model_id or "fake-hash-ngram-v1",
+        )
+    if args.onnx_model is not None:
+        return OnnxInt8TextEncoder(
+            model_path=args.onnx_model,
+            tokenizer_path=args.onnx_tokenizer,
+            model_id=args.model_id or args.onnx_model.stem,
+            dim=args.vec_dim,
+            query_prefix=args.query_prefix,
+            passage_prefix=args.passage_prefix,
+        )
+    raise ValueError(
+        "--mode hybrid requires either --fake-encoder or --onnx-model"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    quant: QuantizationMode = "int8" if args.vec_quantization == "int8" else "fp32"
+    try:
+        encoder = _resolve_encoder_from_args(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     if args.synthetic:
-        report = run_synthetic_eval(iterations=args.iterations)
+        report = run_synthetic_eval(
+            iterations=args.iterations,
+            retrieval_mode=args.mode,
+            encoder=encoder,
+            vector_backend_name=args.vec_backend,
+            vector_dim=args.vec_dim,
+            vector_quantization=quant,
+        )
     else:
         terms_path = args.terms_db or (ROOT / "data" / "terms.db")
         kb_path = args.knowledge_db or terms_path.with_name("knowledge.db")
@@ -1298,6 +1577,12 @@ def main(argv: list[str] | None = None) -> int:
             knowledge_db_path=kb_path,
             mode="real",
             iterations=args.iterations,
+            retrieval_mode=args.mode,
+            encoder=encoder,
+            vector_backend_name=args.vec_backend,
+            vector_dim=args.vec_dim,
+            vector_quantization=quant,
+            vector_index_dir=args.vector_index_dir,
         )
 
     json_text = json.dumps(report, ensure_ascii=False, indent=2)

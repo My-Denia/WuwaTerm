@@ -1,0 +1,216 @@
+name: RAG Offline Benchmark (CPU)
+
+# Manual workflow_dispatch only — never runs on push or pull_request and never
+# invokes any paid LLM API. Compares Lexical RAG vs optional CPU ONNX + INT8
+# vector RRF retrieval on free GitHub-hosted ubuntu-latest CPU runners.
+on:
+  workflow_dispatch:
+    inputs:
+      model_preset:
+        description: Candidate embedding model or offline dry-run preset
+        required: true
+        default: fake-encoder
+        type: choice
+        options:
+          - fake-encoder
+          - intfloat/multilingual-e5-small
+          - Qwen/Qwen3-Embedding-0.6B
+          - BAAI/bge-m3
+          - all
+      dim:
+        description: Target embedding dimension (MRL-512 supported where applicable)
+        required: true
+        default: "512"
+        type: string
+      quantization:
+        description: Vector index quantization format
+        required: true
+        default: int8
+        type: choice
+        options:
+          - int8
+          - fp32
+      iterations:
+        description: Timed iterations for P50/P95 latency sampling
+        required: true
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-matrix:
+    name: Resolve benchmark matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        env:
+          PRESET: ${{ inputs.model_preset }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          preset = os.environ["PRESET"]
+          all_models = [
+              {
+                  "name": "fake-encoder",
+                  "repo": "",
+                  "use_fake": True,
+                  "dim": 512,
+                  "query_prefix": "",
+                  "passage_prefix": "",
+              },
+              {
+                  "name": "multilingual-e5-small",
+                  "repo": "intfloat/multilingual-e5-small",
+                  "use_fake": False,
+                  "dim": 384,
+                  "query_prefix": "query: ",
+                  "passage_prefix": "passage: ",
+              },
+              {
+                  "name": "qwen3-embedding-0.6b-mrl512",
+                  "repo": "Qwen/Qwen3-Embedding-0.6B",
+                  "use_fake": False,
+                  "dim": 512,
+                  "query_prefix": "Instruct: Retrieve Wuthering Waves terminology\nQuery: ",
+                  "passage_prefix": "",
+              },
+              {
+                  "name": "bge-m3",
+                  "repo": "BAAI/bge-m3",
+                  "use_fake": False,
+                  "dim": 512,
+                  "query_prefix": "",
+                  "passage_prefix": "",
+              },
+          ]
+          if preset == "all":
+              selected = all_models
+          elif preset == "fake-encoder":
+              selected = [all_models[0]]
+          else:
+              selected = [m for m in all_models if m["repo"] == preset]
+          if not selected:
+              raise SystemExit(f"unknown preset: {preset}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("matrix=" + json.dumps({"include": selected}) + "\n")
+          PY
+
+  benchmark:
+    name: ${{ matrix.name }}
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install core (or optional CPU ONNX dependencies)
+        env:
+          USE_FAKE: ${{ matrix.use_fake }}
+        run: |
+          python -m pip install -U pip
+          if [ "$USE_FAKE" = "true" ]; then
+            python -m pip install -e .
+          else
+            python -m pip install -e ".[rag-onnx,rag-vec]" huggingface-hub optimum[onnxruntime]
+          fi
+
+      - name: Export / prepare CPU ONNX INT8 model (when non-fake)
+        if: matrix.use_fake != true
+        env:
+          HF_REPO: ${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/onnx-model"
+          optimum-cli export onnx --model "$HF_REPO" --task feature-extraction "$RUNNER_TEMP/onnx-raw"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from onnxruntime.quantization import QuantType, quantize_dynamic
+
+          raw_dir = Path(os.environ["RUNNER_TEMP"]) / "onnx-raw"
+          out_dir = Path(os.environ["RUNNER_TEMP"]) / "onnx-model"
+          src_onnx = raw_dir / "model.onnx"
+          dst_onnx = out_dir / "model.int8.onnx"
+          quantize_dynamic(
+              model_input=str(src_onnx),
+              model_output=str(dst_onnx),
+              weight_type=QuantType.QInt8,
+          )
+          tok_src = raw_dir / "tokenizer.json"
+          if tok_src.is_file():
+              (out_dir / "tokenizer.json").write_bytes(tok_src.read_bytes())
+          PY
+
+      - name: Run Lexical vs Hybrid offline comparison (zero LLM calls)
+        env:
+          CASE_NAME: ${{ matrix.name }}
+          USE_FAKE: ${{ matrix.use_fake }}
+          TARGET_DIM: ${{ matrix.dim }}
+          REQUESTED_DIM: ${{ inputs.dim }}
+          QUANT: ${{ inputs.quantization }}
+          ITERS: ${{ inputs.iterations }}
+          MODEL_REPO: ${{ matrix.repo }}
+          Q_PREFIX: ${{ matrix.query_prefix }}
+          P_PREFIX: ${{ matrix.passage_prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          python scripts/eval_rag_offline.py \
+            --synthetic \
+            --mode lexical \
+            --iterations "$ITERS" \
+            --strict \
+            --format markdown \
+            --json-out "reports/${CASE_NAME}-lexical.json" \
+            --markdown-out "reports/${CASE_NAME}-lexical.md"
+
+          if [ "$USE_FAKE" = "true" ]; then
+            python scripts/eval_rag_offline.py \
+              --synthetic \
+              --mode hybrid \
+              --fake-encoder \
+              --vec-dim "$REQUESTED_DIM" \
+              --vec-quantization "$QUANT" \
+              --iterations "$ITERS" \
+              --strict \
+              --format markdown \
+              --json-out "reports/${CASE_NAME}-hybrid.json" \
+              --markdown-out "reports/${CASE_NAME}-hybrid.md"
+          else
+            eff_dim="$TARGET_DIM"
+            if [ "$REQUESTED_DIM" -lt "$eff_dim" ] 2>/dev/null; then
+              eff_dim="$REQUESTED_DIM"
+            fi
+            python scripts/eval_rag_offline.py \
+              --synthetic \
+              --mode hybrid \
+              --onnx-model "$RUNNER_TEMP/onnx-model/model.int8.onnx" \
+              --onnx-tokenizer "$RUNNER_TEMP/onnx-model/tokenizer.json" \
+              --model-id "$MODEL_REPO" \
+              --vec-dim "$eff_dim" \
+              --vec-quantization "$QUANT" \
+              --query-prefix "$Q_PREFIX" \
+              --passage-prefix "$P_PREFIX" \
+              --iterations "$ITERS" \
+              --strict \
+              --format markdown \
+              --json-out "reports/${CASE_NAME}-hybrid.json" \
+              --markdown-out "reports/${CASE_NAME}-hybrid.md"
+          fi
+
+      - name: Upload offline benchmark reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: rag-offline-bench-${{ matrix.name }}
+          path: reports/
+          if-no-files-found: error

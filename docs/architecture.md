@@ -307,12 +307,15 @@ knowledge_builder (offline KB build)   scripts/verify_knowledge_db.py
   `-> knowledge_db (read-only KB) <----'
         |-> entity_graph (read-only 1-hop graph)
         `-> domain_knowledge (pure matching, lock_eligible=False)
+scripts/build_knowledge_vectors.py
+  `-> retrieval_vector (optional dense vector backend, fail-closed)
+        `-> domain_knowledge (pure matching, lock_eligible=False)
 ```
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
+| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `retrieval_vector`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `retrieval_vector`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -329,8 +332,12 @@ from mandatory placeholder locks: `domain_knowledge` sits in `PURE_MATCHING`
 joint span-coverage and single-character CJK gating, and budget caps;
 `knowledge_db` sits in `DOMAIN_CORE` (forbidden to `PURE_MATCHING`) as the
 read-only SQLite companion schema and Lexical RAG reader bound fail-closed to
-`terms_db_revision`; `knowledge_builder` sits in `BUILDER` for offline
-extraction and atomic database generation.
+`terms_db_revision`; `retrieval_vector` sits in `DOMAIN_CORE` (also forbidden to
+`PURE_MATCHING`) as the optional pluggable vector backend and deterministic RRF
+fuser, defaulting to zero third-party ML dependencies (INT8 memmap over stdlib
+`mmap` when `numpy` is absent) and degrading fail-closed to pure Lexical RAG on
+missing/mismatched `knowledge_db_sha256` or `terms_db_revision`; `knowledge_builder`
+sits in `BUILDER` for offline extraction and atomic database generation.
 
 Strict parsers for the builder's versioned free-text lock exclusion
 metadata live in `exclusion_metadata` — standard-library modules plus
