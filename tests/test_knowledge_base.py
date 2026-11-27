@@ -28,6 +28,7 @@ from wuwaterm.knowledge_builder import (
     build_knowledge_database,
     build_knowledge_database_atomic,
     clean_kb_text,
+    create_knowledge_database,
     extract_knowledge_records,
     extract_te_anchors,
     is_dirty_text,
@@ -969,4 +970,285 @@ def test_edge_validation_and_error_paths(tmp_path: Path):
     (no_textmap / "BinData").mkdir(parents=True)
     with pytest.raises(KnowledgeBuildError, match="missing MultiText"):
         extract_knowledge_records(no_textmap)
+
+
+def test_joint_single_char_and_locked_span_conflict_regression(tmp_path: Path):
+    # Finding 1a: "心大人今天心情很好" with locked "心大人" must not emit "心"
+    # (occ 1 is a name_mention but covered by lock; occ 2 is uncovered but ordinary_word).
+    hsin_candidate = DomainKnowledgeCandidate(
+        entity_id="resonator:1699",
+        source_surface="心",
+        zh="心",
+        en="Hsin",
+        entity_type="resonator",
+        trust_tier="official_authoritative",
+        retrieval_channel="short_ngram",
+        score=0.95,
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "心大人今天心情很好",
+            [hsin_candidate],
+            locked_surfaces=("心大人",),
+        )
+        == ()
+    )
+
+    # Finding 1b: case/whitespace-normalized span coverage blocks "Iron Forge"
+    # when "Ancient IRON FORGE" is locked.
+    forge_candidate = DomainKnowledgeCandidate(
+        entity_id="area:900",
+        source_surface="Iron Forge",
+        zh="铁砧炉",
+        en="Iron Forge",
+        entity_type="area",
+        trust_tier="official_authoritative",
+        retrieval_channel="lexical_alias",
+        score=0.9,
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Ancient IRON FORGE",
+            [forge_candidate],
+            locked_surfaces=("Ancient IRON FORGE",),
+        )
+        == ()
+    )
+    # Uncovered second occurrence is still admitted.
+    kept = select_domain_knowledge_candidates(
+        "Ancient IRON FORGE near Iron Forge",
+        [forge_candidate],
+        locked_surfaces=("Ancient IRON FORGE",),
+    )
+    assert [c.entity_id for c in kept] == ["area:900"]
+
+    # End-to-end reader verification on "心大人今天心情很好"
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    rev = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        hits = reader.query("心大人今天心情很好", locked_surfaces=("心大人",))
+        assert not any(c.zh == "心" for c in hits), hits
+
+
+def test_fts_gloss_match_cannot_bypass_single_char_ordinary_word_filter(tmp_path: Path):
+    # Finding 2: querying "平复心情" matches context_gloss of 1-char CJK entity 心 (Hsin),
+    # which must not bypass single-char ordinary_word filtering via surface="Hsin".
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    role_path = data_dir / "BinData" / "role" / "roleinfo.json"
+    roles = json.loads(role_path.read_text(encoding="utf-8"))
+    for row in roles:
+        if row.get("Id") == 1699:
+            row["Introduction"] = "FavorRoleInfo_1699_Info"
+    _write_json(role_path, roles)
+
+    for lang_dir, text in (
+        ("zh-Hans", "能帮助同伴平复心情的共鸣者。"),
+        ("en", "A resonator who calms companions' emotions."),
+    ):
+        mt_path = data_dir / "Textmaps" / lang_dir / "multi_text" / "MultiText.json"
+        rows = json.loads(mt_path.read_text(encoding="utf-8"))
+        rows.append({"Id": "FavorRoleInfo_1699_Info", "Content": text})
+        _write_json(mt_path, rows)
+
+    terms_db = tmp_path / "terms.db"
+    rev = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        assert not any(c.entity_id == "resonator:1699" for c in reader.query("平复心情"))
+        # Direct English query still recalls Hsin normally.
+        en_hits = reader.query("Hsin")
+        assert any(
+            c.entity_id == "resonator:1699" and c.lock_eligible is False
+            for c in en_hits
+        ), en_hits
+
+
+def test_long_input_tail_single_char_not_starved_by_bigrams(tmp_path: Path):
+    # Finding 3: 144+ char Chinese input with >130 distinct bigrams before tail "心大人".
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    rev = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+
+    # 150 distinct Chinese characters producing 149 distinct 2-char bigrams before "心大人".
+    filler_chars = [chr(0x4E00 + i) for i in range(150) if chr(0x4E00 + i) not in {"心", "椿"}]
+    long_text = "".join(filler_chars[:145]) + "，请转告心大人。"
+    assert len(long_text) > 144
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        hits = reader.query(long_text)
+        assert any(
+            c.entity_id == "resonator:1699"
+            and c.zh == "心"
+            and c.en == "Hsin"
+            and c.lock_eligible is False
+            for c in hits
+        ), hits
+
+
+def test_build_preserves_existing_db_on_failure_and_forbids_overwriting_terms_db(
+    tmp_path: Path,
+):
+    # Finding 4a: build failure must never delete or corrupt an existing knowledge.db.
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    rev = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+    original_kb_bytes = kb_path.read_bytes()
+    original_terms_bytes = terms_db.read_bytes()
+
+    with pytest.raises(KnowledgeBuildError, match="no knowledge entities"):
+        create_knowledge_database(
+            kb_path,
+            entities=[],
+            aliases=[],
+            contexts=[],
+            relations=[],
+            terms_db_revision=rev,
+            source_provenance=_provenance(),
+        )
+    assert kb_path.read_bytes() == original_kb_bytes
+
+    # Finding 4b: db_path pointing to terms_db_path must fail closed with ValueError.
+    with pytest.raises(ValueError, match="must not point to the same file"):
+        build_knowledge_database(
+            data_dir,
+            terms_db,
+            terms_db_path=terms_db,
+            source_provenance=_provenance(),
+        )
+    with pytest.raises(ValueError, match="must not point to the same file"):
+        build_knowledge_database_atomic(
+            data_dir,
+            terms_db,
+            terms_db_path=terms_db,
+            source_provenance=_provenance(),
+        )
+    assert terms_db.read_bytes() == original_terms_bytes
+
+
+def test_weapon_reson_multi_weapon_edges_en_only_te_anchors_and_strict_href(
+    tmp_path: Path,
+):
+    # Finding 5c: strict numeric href rejects truncated/alphanumeric IDs.
+    assert extract_te_anchors(
+        '<te href="12a">坏锚点</te><te href=12b>坏锚点2</te>'
+        '<te href="0">零</te><te href="850086">夜归正统</te>'
+    ) == [("850086", "夜归正统")]
+
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+
+    # Finding 5a: ResonId=21010024 shared across 5 valid weapons.
+    weapon_path = data_dir / "BinData" / "weapon" / "weaponconf.json"
+    weapons = json.loads(weapon_path.read_text(encoding="utf-8"))
+    shared_ids = [21010024, 21020024, 21030024, 21040024, 21050024]
+    for wid in shared_ids:
+        weapons.append(
+            {
+                "ItemId": wid,
+                "WeaponName": f"WeaponConf_{wid}_WeaponName",
+                "ResonId": 21010024,
+                "Desc": "",
+                "BgDescription": "",
+            }
+        )
+    _write_json(weapon_path, weapons)
+
+    reson_path = data_dir / "BinData" / "weapon" / "weaponreson.json"
+    resons = json.loads(reson_path.read_text(encoding="utf-8"))
+    resons.append(
+        {"Id": 24, "ResonId": 21010024, "Level": 1, "Name": "WeaponReson_24_Name"}
+    )
+    _write_json(reson_path, resons)
+
+    zh_mt = data_dir / "Textmaps" / "zh-Hans" / "multi_text" / "MultiText.json"
+    en_mt = data_dir / "Textmaps" / "en" / "multi_text" / "MultiText.json"
+    zh_rows = json.loads(zh_mt.read_text(encoding="utf-8"))
+    en_rows = json.loads(en_mt.read_text(encoding="utf-8"))
+    for idx, wid in enumerate(shared_ids, start=1):
+        zh_rows.append({"Id": f"WeaponConf_{wid}_WeaponName", "Content": f"共享武器{idx}"})
+        en_rows.append({"Id": f"WeaponConf_{wid}_WeaponName", "Content": f"Shared Weapon {idx}"})
+    zh_rows.append({"Id": "WeaponReson_24_Name", "Content": "共鸣同调"})
+    en_rows.append({"Id": "WeaponReson_24_Name", "Content": "Resonant Unison"})
+    # Finding 5b: English-only standalone <te href=...> text (zh side has no <te> tag).
+    zh_rows.append({"Id": "EnOnly_Te_Key", "Content": "纯中文说明不含锚点"})
+    en_rows.append(
+        {
+            "Id": "EnOnly_Te_Key",
+            "Content": "Only English has <te href=850086>Rangers Watch</te> and <te href=\"850086a\">Broken</te>.",
+        }
+    )
+    _write_json(zh_mt, zh_rows)
+    _write_json(en_mt, en_rows)
+
+    terms_db = tmp_path / "terms.db"
+    _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+
+    with closing(sqlite3.connect(kb_path)) as conn:
+        passive_targets = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT dst_entity_id FROM kb_relations "
+                "WHERE src_entity_id = 'weapon_reson:21010024' AND relation_type = 'passive_of'"
+            )
+        }
+        assert passive_targets == {f"weapon:{wid}" for wid in shared_ids}
+
+        en_te_aliases = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT alias_surface FROM kb_aliases "
+                "WHERE entity_id = 'term:850086' AND lang = 'en' AND alias_kind = 'te_anchor'"
+            )
+        }
+        assert "Rangers Watch" in en_te_aliases
+        assert "Broken" not in en_te_aliases
+
+
+def test_verify_knowledge_db_rejects_emptied_fts_and_short_ngram_indexes(tmp_path: Path):
+    # Finding 6: emptying kb_fts_trigram or kb_short_ngrams must fail verification.
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+
+    empty_fts = tmp_path / "empty_fts.db"
+    empty_fts.write_bytes(kb_path.read_bytes())
+    with closing(sqlite3.connect(empty_fts)) as conn:
+        conn.execute("DELETE FROM kb_fts_trigram")
+        conn.commit()
+    with pytest.raises(VerificationError, match="kb_fts_trigram missing"):
+        verify_knowledge_database(empty_fts, terms_db_path=terms_db)
+
+    empty_short = tmp_path / "empty_short.db"
+    empty_short.write_bytes(kb_path.read_bytes())
+    with closing(sqlite3.connect(empty_short)) as conn:
+        conn.execute("DELETE FROM kb_short_ngrams")
+        conn.commit()
+    with pytest.raises(VerificationError, match="kb_short_ngrams missing"):
+        verify_knowledge_database(empty_short, terms_db_path=terms_db)
+
 

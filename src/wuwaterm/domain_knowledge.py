@@ -7,12 +7,13 @@ never silently turn into mandatory placeholder term locks.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 from typing import Literal
 
 from .cjk_span import SINGLE_CHAR_ORDINARY_WORD, classify_single_character_mention
-from .normalize import normalize_text
+from .normalize import SPACE_RE, normalize_text
 
 
 TrustTier = Literal[
@@ -104,48 +105,79 @@ def candidate_scalar_length(candidate: DomainKnowledgeCandidate) -> int:
     )
 
 
-def _find_occurrences(text: str, needle: str) -> list[tuple[int, int]]:
+@dataclass(frozen=True)
+class _NormalizedTextIndex:
+    """Normalized text aligned back to original ``(start, end)`` spans."""
+
+    norm_text: str
+    orig_spans: tuple[tuple[int, int], ...]
+
+
+def _build_normalized_index(text: str) -> _NormalizedTextIndex:
+    norm_chars: list[str] = []
+    orig_spans: list[tuple[int, int]] = []
+    for idx, ch in enumerate(text):
+        piece = SPACE_RE.sub("", unicodedata.normalize("NFKC", ch).casefold())
+        for norm_ch in piece:
+            norm_chars.append(norm_ch)
+            orig_spans.append((idx, idx + 1))
+    return _NormalizedTextIndex(
+        norm_text="".join(norm_chars),
+        orig_spans=tuple(orig_spans),
+    )
+
+
+def _find_normalized_occurrences(
+    index: _NormalizedTextIndex, needle: str
+) -> list[tuple[int, int]]:
+    norm_needle = normalize_text(needle)
+    if not norm_needle or not index.norm_text:
+        return []
     spans: list[tuple[int, int]] = []
     start = 0
-    step = len(needle)
+    needle_len = len(norm_needle)
     while True:
-        idx = text.find(needle, start)
-        if idx < 0:
+        pos = index.norm_text.find(norm_needle, start)
+        if pos < 0:
             break
-        spans.append((idx, idx + step))
-        start = idx + 1
+        orig_start = index.orig_spans[pos][0]
+        orig_end = index.orig_spans[pos + needle_len - 1][1]
+        spans.append((orig_start, orig_end))
+        start = pos + 1
     return spans
 
 
-def _occupied_spans(text: str, surfaces: Collection[str]) -> list[tuple[int, int]]:
+def _occupied_spans(
+    index: _NormalizedTextIndex, surfaces: Collection[str]
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for surface in surfaces:
-        spans.extend(_find_occurrences(text, surface))
+        spans.extend(_find_normalized_occurrences(index, surface))
     return spans
 
 
-def _all_occurrences_covered(
-    text: str, surface: str, occupied: list[tuple[int, int]]
+def _is_span_covered(span: tuple[int, int], occupied: list[tuple[int, int]]) -> bool:
+    start, end = span
+    return any(occ_start <= start and end <= occ_end for occ_start, occ_end in occupied)
+
+
+def _has_uncovered_non_ordinary_single_cjk(
+    text: str,
+    index: _NormalizedTextIndex,
+    char: str,
+    occupied: list[tuple[int, int]],
 ) -> bool:
-    if not occupied:
-        return False
-    occurrences = _find_occurrences(text, surface)
-    if not occurrences:
-        return False
+    occurrences = _find_normalized_occurrences(index, char)
     for start, end in occurrences:
-        if not any(occ_start <= start and end <= occ_end for occ_start, occ_end in occupied):
-            return False
-    return True
-
-
-def _single_cjk_allowed_in_text(text: str, char: str) -> bool:
-    occurrences = _find_occurrences(text, char)
-    if not occurrences:
-        return False
-    return any(
-        classify_single_character_mention(text, start, end) != SINGLE_CHAR_ORDINARY_WORD
-        for start, end in occurrences
-    )
+        if _is_span_covered((start, end), occupied):
+            continue
+        if (
+            end - start == 1
+            and classify_single_character_mention(text, start, end)
+            != SINGLE_CHAR_ORDINARY_WORD
+        ):
+            return True
+    return False
 
 
 def select_domain_knowledge_candidates(
@@ -162,12 +194,15 @@ def select_domain_knowledge_candidates(
     Enforcement rules:
     - Rejects any candidate conflicting with ``locked_surfaces`` or
       ``reference_surfaces`` (either by normalized surface/zh/en equality or
-      when every occurrence in ``text`` is already covered by a locked or
-      referenced span).
-    - Hard-blocks 1-char CJK candidates when every occurrence in ``text`` is
-      classified as ``ordinary_word`` by
-      ``cjk_span.classify_single_character_mention`` (or when the 1-char CJK
-      surface does not appear in ``text``).
+      when every normalized occurrence in ``text`` is already covered by a
+      locked or referenced span).
+    - Jointly evaluates span coverage and single-character CJK classification
+      on the SAME uncovered source occurrence via
+      ``cjk_span.classify_single_character_mention``: a 1-char CJK candidate
+      must have at least one uncovered non-``ordinary_word`` occurrence in
+      ``text`` (and a non-surface/gloss match for a 1-char CJK entity cannot
+      bypass this gate when its ``source_surface`` is not directly matched in
+      ``text``).
     - Deduplicates by ``entity_id`` and normalized ``(zh, en)`` pair in
       deterministic score/trust order.
     - Caps output at ``max_candidates`` entries and ``max_scalars`` total
@@ -176,11 +211,12 @@ def select_domain_knowledge_candidates(
     if not text or max_candidates <= 0 or max_scalars <= 0:
         return ()
 
+    norm_index = _build_normalized_index(text)
     blocked_surfaces = tuple(s for s in (*locked_surfaces, *reference_surfaces) if s)
     blocked_norm = {
         norm for surface in blocked_surfaces if (norm := normalize_text(surface))
     }
-    occupied = _occupied_spans(text, blocked_surfaces)
+    occupied = _occupied_spans(norm_index, blocked_surfaces)
 
     ordered = sorted(
         candidates,
@@ -212,11 +248,33 @@ def select_domain_knowledge_candidates(
             or (en_norm and en_norm in blocked_norm)
         ):
             continue
-        if _all_occurrences_covered(text, candidate.source_surface, occupied):
+
+        surface_occs = _find_normalized_occurrences(norm_index, candidate.source_surface)
+        uncovered_surface_occs = [
+            span for span in surface_occs if not _is_span_covered(span, occupied)
+        ]
+        if surface_occs and not uncovered_surface_occs:
             continue
 
         if is_single_cjk_char(candidate.source_surface):
-            if not _single_cjk_allowed_in_text(text, candidate.source_surface):
+            if not _has_uncovered_non_ordinary_single_cjk(
+                text, norm_index, candidate.source_surface, occupied
+            ):
+                continue
+        elif is_single_cjk_char(candidate.zh):
+            # A 1-char CJK entity matched via a non-Chinese surface (e.g. its
+            # English name) is allowed only when that surface itself directly
+            # matches an uncovered span or substring of the input text.
+            # Otherwise (e.g. gloss-only FTS hits), require an uncovered
+            # non-ordinary occurrence of the 1-char CJK surface in ``text``.
+            surface_directly_matched = bool(uncovered_surface_occs) or (
+                len(norm_index.norm_text) >= 3
+                and bool(surface_norm)
+                and norm_index.norm_text in surface_norm
+            )
+            if not surface_directly_matched and not _has_uncovered_non_ordinary_single_cjk(
+                text, norm_index, candidate.zh, occupied
+            ):
                 continue
 
         pair_key = (zh_norm, en_norm)

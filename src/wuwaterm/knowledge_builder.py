@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import tempfile
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,8 +36,12 @@ class KnowledgeBuildError(RuntimeError):
 
 _SPACE_RE = re.compile(r"\s+")
 _TE_ANCHOR_RE = re.compile(
-    r"<te\s+href\s*=\s*['\"]?(\d+)['\"]?[^>]*>(.*?)</te>",
+    r"<te\b([^>]*)>(.*?)</te>",
     re.IGNORECASE | re.DOTALL,
+)
+_TE_HREF_ATTR_RE = re.compile(
+    r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""",
+    re.IGNORECASE,
 )
 _WORD_TBA_RE = re.compile(r"\b(?:tba|tbd)\b", re.IGNORECASE)
 _DIRTY_SUBSTRINGS = (
@@ -140,13 +145,28 @@ def clean_kb_text(raw: str | None) -> str:
 
 
 def extract_te_anchors(raw: str | None) -> list[tuple[str, str]]:
-    """Extract ``(term_id, cleaned_anchor_surface)`` pairs from ``<te href=...>`` tags."""
+    """Extract ``(term_id, cleaned_anchor_surface)`` pairs from ``<te href=...>`` tags.
+
+    Rejects non-numeric or truncated ``href`` values (such as ``href="12a"``)
+    and ``href="0"``.
+    """
     if not raw or "<te" not in raw.casefold() or is_dirty_text(raw):
         return []
     anchors: list[tuple[str, str]] = []
     for match in _TE_ANCHOR_RE.finditer(raw):
-        term_id = match.group(1).strip()
-        if not term_id or term_id == "0":
+        href_match = _TE_HREF_ATTR_RE.search(match.group(1))
+        if href_match is None:
+            continue
+        term_id = (
+            href_match.group(1)
+            if href_match.group(1) is not None
+            else (
+                href_match.group(2)
+                if href_match.group(2) is not None
+                else href_match.group(3)
+            )
+        ).strip()
+        if not term_id or not term_id.isascii() or not term_id.isdigit() or int(term_id) <= 0:
             continue
         surface = clean_kb_text(match.group(2))
         if surface:
@@ -623,7 +643,7 @@ def extract_knowledge_records(
         )
 
     # 10. weaponconf.json & weaponreson.json
-    reson_id_to_weapon: dict[str, str] = {}
+    reson_id_to_weapons: dict[str, list[str]] = defaultdict(list)
     for sid, row in _iter_valid_rows(bin_root / "weapon" / "weaponconf.json", "ItemId"):
         entity_id = f"weapon:{sid}"
         if (
@@ -642,8 +662,8 @@ def extract_knowledge_records(
         ):
             continue
         reson_id = _valid_id_str(row.get("ResonId"))
-        if reson_id is not None:
-            reson_id_to_weapon[reson_id] = entity_id
+        if reson_id is not None and entity_id not in reson_id_to_weapons[reson_id]:
+            reson_id_to_weapons[reson_id].append(entity_id)
 
     for _sid, row in _iter_valid_rows(bin_root / "weapon" / "weaponreson.json", "Id"):
         reson_id = _valid_id_str(row.get("ResonId"))
@@ -659,17 +679,17 @@ def extract_knowledge_records(
                 name_key=row.get("Name"),
             )
             is not None
-            and reson_id in reson_id_to_weapon
         ):
-            relations.append(
-                RelationSpec(
-                    src_entity_id=entity_id,
-                    relation_type="passive_of",
-                    dst_entity_id=reson_id_to_weapon[reson_id],
-                    source_file="BinData/weapon/weaponreson.json",
-                    evidence_key=f"weapon_reson:{reson_id}:weapon:{reson_id_to_weapon[reson_id]}",
+            for weapon_entity in reson_id_to_weapons.get(reson_id, ()):
+                relations.append(
+                    RelationSpec(
+                        src_entity_id=entity_id,
+                        relation_type="passive_of",
+                        dst_entity_id=weapon_entity,
+                        source_file="BinData/weapon/weaponreson.json",
+                        evidence_key=f"weapon_reson:{reson_id}:weapon:{weapon_entity}",
+                    )
                 )
-            )
 
     # 11. phantomfetter.json & phantomskill.json
     for sid, row in _iter_valid_rows(
@@ -788,14 +808,13 @@ def extract_knowledge_records(
                         )
                     )
 
-    for text_key in sorted(zh_raw_map):
-        if text_key in seen_context_keys:
-            continue
-        zh_raw = zh_raw_map[text_key]
-        if "<te" not in zh_raw.casefold():
-            continue
-        en_raw = en_raw_map.get(text_key, "")
-        for lang_code, raw_text in (("zh", zh_raw), ("en", en_raw)):
+    for lang_code, raw_map in (("zh", zh_raw_map), ("en", en_raw_map)):
+        for text_key in sorted(raw_map):
+            if text_key in seen_context_keys:
+                continue
+            raw_text = raw_map[text_key]
+            if "<te" not in raw_text.casefold():
+                continue
             for term_id, surface in extract_te_anchors(raw_text):
                 target_id = f"term:{term_id}"
                 if target_id in entities:
@@ -818,6 +837,17 @@ def extract_knowledge_records(
     )
 
 
+def _assert_distinct_terms_and_kb_paths(
+    db_path: str | Path, terms_db_path: str | Path | None
+) -> None:
+    if terms_db_path is None:
+        return
+    if Path(db_path).resolve() == Path(terms_db_path).resolve():
+        raise ValueError(
+            "knowledge db_path must not point to the same file as terms_db_path"
+        )
+
+
 def create_knowledge_database(
     db_path: str | Path,
     *,
@@ -828,14 +858,14 @@ def create_knowledge_database(
     terms_db_revision: str,
     source_provenance: SourceProvenance,
 ) -> KnowledgeBuildStats:
-    """Create a deterministic ``knowledge.db`` from extracted specs."""
+    """Create a deterministic ``knowledge.db`` atomically from extracted specs.
+
+    Builds into a sibling temporary file, verifies foreign keys and SQLite
+    integrity, and replaces ``db_path`` only after the new artifact succeeds.
+    Any failure preserves an existing database at ``db_path`` untouched.
+    """
     if not terms_db_revision or not terms_db_revision.strip():
         raise KnowledgeBuildError("terms_db_revision is required")
-
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        path.unlink()
 
     entity_by_id: dict[str, EntitySpec] = {}
     for spec in sorted(entities, key=lambda item: item.entity_id):
@@ -843,216 +873,252 @@ def create_knowledge_database(
     if not entity_by_id:
         raise KnowledgeBuildError("no knowledge entities were extracted")
 
-    conn = sqlite3.connect(path)
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
     try:
-        conn.row_factory = sqlite3.Row
-        initialize_knowledge_db(conn)
-        conn.execute("PRAGMA foreign_keys = ON;")
+        conn = sqlite3.connect(tmp_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            initialize_knowledge_db(conn)
+            conn.execute("PRAGMA foreign_keys = ON;")
 
-        metadata = {
-            "kb_schema_version": KB_SCHEMA_VERSION,
-            "terms_db_revision": terms_db_revision.strip(),
-            "source_profile": source_provenance.profile,
-            "source_repo_url": source_provenance.repo_url,
-            "source_commit": source_provenance.commit,
-            "source_game_version": source_provenance.game_version,
-            "source_resource_version": source_provenance.resource_version,
-            "source_changelist": source_provenance.changelist,
-        }
-        conn.executemany(
-            "INSERT INTO kb_metadata(key, value) VALUES (?, ?)",
-            sorted(metadata.items()),
-        )
-
-        entity_rows = [
-            (
-                spec.entity_id,
-                spec.entity_type,
-                spec.source_file,
-                spec.source_id,
-                spec.zh,
-                spec.en,
-                normalize_text(spec.zh),
-                normalize_text(spec.en),
-                spec.trust_tier,
-                spec.context_gloss,
+            metadata = {
+                "kb_schema_version": KB_SCHEMA_VERSION,
+                "terms_db_revision": terms_db_revision.strip(),
+                "source_profile": source_provenance.profile,
+                "source_repo_url": source_provenance.repo_url,
+                "source_commit": source_provenance.commit,
+                "source_game_version": source_provenance.game_version,
+                "source_resource_version": source_provenance.resource_version,
+                "source_changelist": source_provenance.changelist,
+            }
+            conn.executemany(
+                "INSERT INTO kb_metadata(key, value) VALUES (?, ?)",
+                sorted(metadata.items()),
             )
-            for spec in entity_by_id.values()
-        ]
-        conn.executemany(
-            """
-            INSERT INTO kb_entities(
-              entity_id, entity_type, source_file, source_id, zh, en,
-              zh_norm, en_norm, trust_tier, context_gloss
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            entity_rows,
-        )
 
-        alias_rows: list[tuple[str, str, str, str, str, str, int]] = []
-        seen_aliases: set[tuple[str, str, str, str]] = set()
-        for alias in sorted(
-            aliases,
-            key=lambda a: (a.entity_id, a.alias_surface, a.lang, a.alias_kind),
-        ):
-            norm = normalize_text(alias.alias_surface)
-            dedup_key = (alias.entity_id, alias.alias_surface, alias.lang, alias.alias_kind)
-            if alias.entity_id not in entity_by_id or not norm or dedup_key in seen_aliases:
-                continue
-            seen_aliases.add(dedup_key)
-            alias_rows.append(
+            entity_rows = [
                 (
+                    spec.entity_id,
+                    spec.entity_type,
+                    spec.source_file,
+                    spec.source_id,
+                    spec.zh,
+                    spec.en,
+                    normalize_text(spec.zh),
+                    normalize_text(spec.en),
+                    spec.trust_tier,
+                    spec.context_gloss,
+                )
+                for spec in entity_by_id.values()
+            ]
+            conn.executemany(
+                """
+                INSERT INTO kb_entities(
+                  entity_id, entity_type, source_file, source_id, zh, en,
+                  zh_norm, en_norm, trust_tier, context_gloss
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                entity_rows,
+            )
+
+            alias_rows: list[tuple[str, str, str, str, str, str, int]] = []
+            seen_aliases: set[tuple[str, str, str, str]] = set()
+            for alias in sorted(
+                aliases,
+                key=lambda a: (a.entity_id, a.alias_surface, a.lang, a.alias_kind),
+            ):
+                norm = normalize_text(alias.alias_surface)
+                dedup_key = (
                     alias.entity_id,
                     alias.alias_surface,
-                    norm,
                     alias.lang,
                     alias.alias_kind,
-                    alias.trust_tier,
-                    0,
                 )
-            )
-        conn.executemany(
-            """
-            INSERT INTO kb_aliases(
-              entity_id, alias_surface, alias_norm, lang, alias_kind,
-              trust_tier, lock_eligible
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            alias_rows,
-        )
-
-        context_rows: list[tuple[str, str, str, str, str, str]] = []
-        seen_contexts: set[tuple[str, str, str]] = set()
-        for ctx in sorted(
-            contexts,
-            key=lambda c: (c.entity_id, c.context_kind, c.text_key),
-        ):
-            ctx_key = (ctx.entity_id, ctx.context_kind, ctx.text_key)
-            if ctx.entity_id not in entity_by_id or ctx_key in seen_contexts:
-                continue
-            seen_contexts.add(ctx_key)
-            context_rows.append(
-                (
-                    ctx.entity_id,
-                    ctx.context_kind,
-                    ctx.source_file,
-                    ctx.text_key,
-                    ctx.zh_text,
-                    ctx.en_text,
+                if (
+                    alias.entity_id not in entity_by_id
+                    or not norm
+                    or dedup_key in seen_aliases
+                ):
+                    continue
+                seen_aliases.add(dedup_key)
+                alias_rows.append(
+                    (
+                        alias.entity_id,
+                        alias.alias_surface,
+                        norm,
+                        alias.lang,
+                        alias.alias_kind,
+                        alias.trust_tier,
+                        0,
+                    )
                 )
+            conn.executemany(
+                """
+                INSERT INTO kb_aliases(
+                  entity_id, alias_surface, alias_norm, lang, alias_kind,
+                  trust_tier, lock_eligible
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                alias_rows,
             )
-        conn.executemany(
-            """
-            INSERT INTO kb_contexts(
-              entity_id, context_kind, source_file, text_key, zh_text, en_text
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            context_rows,
-        )
 
-        relation_rows: list[tuple[str, str, str, str, str]] = []
-        seen_relations: set[tuple[str, str, str, str]] = set()
-        for rel in sorted(
-            relations,
-            key=lambda r: (
-                r.src_entity_id,
-                r.relation_type,
-                r.dst_entity_id,
-                r.evidence_key,
-            ),
-        ):
-            rel_key = (
-                rel.src_entity_id,
-                rel.relation_type,
-                rel.dst_entity_id,
-                rel.evidence_key,
-            )
-            if (
-                rel.src_entity_id not in entity_by_id
-                or rel.dst_entity_id not in entity_by_id
-                or rel_key in seen_relations
+            context_rows: list[tuple[str, str, str, str, str, str]] = []
+            seen_contexts: set[tuple[str, str, str]] = set()
+            for ctx in sorted(
+                contexts,
+                key=lambda c: (c.entity_id, c.context_kind, c.text_key),
             ):
-                continue
-            seen_relations.add(rel_key)
-            relation_rows.append(
-                (
+                ctx_key = (ctx.entity_id, ctx.context_kind, ctx.text_key)
+                if ctx.entity_id not in entity_by_id or ctx_key in seen_contexts:
+                    continue
+                seen_contexts.add(ctx_key)
+                context_rows.append(
+                    (
+                        ctx.entity_id,
+                        ctx.context_kind,
+                        ctx.source_file,
+                        ctx.text_key,
+                        ctx.zh_text,
+                        ctx.en_text,
+                    )
+                )
+            conn.executemany(
+                """
+                INSERT INTO kb_contexts(
+                  entity_id, context_kind, source_file, text_key, zh_text, en_text
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                context_rows,
+            )
+
+            relation_rows: list[tuple[str, str, str, str, str]] = []
+            seen_relations: set[tuple[str, str, str, str]] = set()
+            for rel in sorted(
+                relations,
+                key=lambda r: (
+                    r.src_entity_id,
+                    r.relation_type,
+                    r.dst_entity_id,
+                    r.evidence_key,
+                ),
+            ):
+                rel_key = (
                     rel.src_entity_id,
                     rel.relation_type,
                     rel.dst_entity_id,
-                    rel.source_file,
                     rel.evidence_key,
                 )
-            )
-        conn.executemany(
-            """
-            INSERT INTO kb_relations(
-              src_entity_id, relation_type, dst_entity_id, source_file, evidence_key
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            relation_rows,
-        )
-
-        short_rows: list[tuple[str, int, str, str, str]] = []
-        seen_short: set[tuple[str, str, str]] = set()
-        fts_rows: list[tuple[str, str, str, str, str]] = []
-        seen_fts: set[tuple[str, str]] = set()
-
-        def index_surface(entity: EntitySpec, surface: str, lang: str) -> None:
-            norm = normalize_text(surface)
-            if not norm:
-                return
-            if 1 <= len(norm) <= 2:
-                skey = (norm, entity.entity_id, surface)
-                if skey not in seen_short:
-                    seen_short.add(skey)
-                    short_rows.append((norm, len(norm), entity.entity_id, surface, lang))
-            if len(norm) >= 3 or len(surface.strip()) >= 3:
-                fkey = (entity.entity_id, surface)
-                if fkey not in seen_fts:
-                    seen_fts.add(fkey)
-                    fts_rows.append(
-                        (
-                            entity.entity_id,
-                            surface,
-                            entity.zh,
-                            entity.en,
-                            entity.context_gloss,
-                        )
+                if (
+                    rel.src_entity_id not in entity_by_id
+                    or rel.dst_entity_id not in entity_by_id
+                    or rel_key in seen_relations
+                ):
+                    continue
+                seen_relations.add(rel_key)
+                relation_rows.append(
+                    (
+                        rel.src_entity_id,
+                        rel.relation_type,
+                        rel.dst_entity_id,
+                        rel.source_file,
+                        rel.evidence_key,
                     )
+                )
+            conn.executemany(
+                """
+                INSERT INTO kb_relations(
+                  src_entity_id, relation_type, dst_entity_id, source_file, evidence_key
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                relation_rows,
+            )
 
-        for spec in entity_by_id.values():
-            index_surface(spec, spec.zh, _detect_lang(spec.zh))
-            index_surface(spec, spec.en, _detect_lang(spec.en))
-        for entity_id, alias_surface, _norm, lang, *_ in alias_rows:
-            index_surface(entity_by_id[entity_id], alias_surface, lang)
+            short_rows: list[tuple[str, int, str, str, str]] = []
+            seen_short: set[tuple[str, str, str]] = set()
+            fts_rows: list[tuple[str, str, str, str, str]] = []
+            seen_fts: set[tuple[str, str]] = set()
 
-        conn.executemany(
-            """
-            INSERT INTO kb_short_ngrams(ngram, ngram_len, entity_id, surface, lang)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            short_rows,
-        )
-        conn.executemany(
-            """
-            INSERT INTO kb_fts_trigram(entity_id, surface, zh, en, context_gloss)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            fts_rows,
-        )
+            def index_surface(entity: EntitySpec, surface: str, lang: str) -> None:
+                norm = normalize_text(surface)
+                if not norm:
+                    return
+                if 1 <= len(norm) <= 2:
+                    skey = (norm, entity.entity_id, surface)
+                    if skey not in seen_short:
+                        seen_short.add(skey)
+                        short_rows.append(
+                            (norm, len(norm), entity.entity_id, surface, lang)
+                        )
+                if len(norm) >= 3 or len(surface.strip()) >= 3:
+                    fkey = (entity.entity_id, surface)
+                    if fkey not in seen_fts:
+                        seen_fts.add(fkey)
+                        fts_rows.append(
+                            (
+                                entity.entity_id,
+                                surface,
+                                entity.zh,
+                                entity.en,
+                                entity.context_gloss,
+                            )
+                        )
 
-        conn.commit()
-        conn.execute("VACUUM")
-        return KnowledgeBuildStats(
-            entities=len(entity_rows),
-            aliases=len(alias_rows),
-            contexts=len(context_rows),
-            relations=len(relation_rows),
-            short_ngrams=len(short_rows),
-            fts_rows=len(fts_rows),
-        )
-    finally:
-        conn.close()
+            for spec in entity_by_id.values():
+                index_surface(spec, spec.zh, _detect_lang(spec.zh))
+                index_surface(spec, spec.en, _detect_lang(spec.en))
+            for entity_id, alias_surface, _norm, lang, *_ in alias_rows:
+                index_surface(entity_by_id[entity_id], alias_surface, lang)
+
+            conn.executemany(
+                """
+                INSERT INTO kb_short_ngrams(ngram, ngram_len, entity_id, surface, lang)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                short_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO kb_fts_trigram(entity_id, surface, zh, en, context_gloss)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                fts_rows,
+            )
+
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                raise KnowledgeBuildError(
+                    f"foreign key check failed with {len(fk_violations)} violation(s)"
+                )
+            integrity = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+            if integrity != ["ok"]:
+                raise KnowledgeBuildError(f"integrity check failed: {integrity!r}")
+
+            conn.commit()
+            conn.execute("VACUUM")
+            stats = KnowledgeBuildStats(
+                entities=len(entity_rows),
+                aliases=len(alias_rows),
+                contexts=len(context_rows),
+                relations=len(relation_rows),
+                short_ngrams=len(short_rows),
+                fts_rows=len(fts_rows),
+            )
+        finally:
+            conn.close()
+        os.replace(tmp_path, path)
+        return stats
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _profile_for_data_dir(
@@ -1076,7 +1142,8 @@ def build_knowledge_database(
     profile_name: str | None = None,
     source_provenance: SourceProvenance | None = None,
 ) -> KnowledgeBuildStats:
-    """Build ``knowledge.db`` from a WutheringData directory."""
+    """Build ``knowledge.db`` atomically from a WutheringData directory."""
+    _assert_distinct_terms_and_kb_paths(db_path, terms_db_path)
     root = Path(data_dir)
     if terms_db_revision is None:
         if terms_db_path is None:
@@ -1113,28 +1180,12 @@ def build_knowledge_database_atomic(
     profile_name: str | None = None,
     source_provenance: SourceProvenance | None = None,
 ) -> KnowledgeBuildStats:
-    """Build ``knowledge.db`` in the target directory, then atomically replace it."""
-    target = Path(db_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    """Atomic compatibility alias for :func:`build_knowledge_database`."""
+    return build_knowledge_database(
+        data_dir,
+        db_path,
+        terms_db_path=terms_db_path,
+        terms_db_revision=terms_db_revision,
+        profile_name=profile_name,
+        source_provenance=source_provenance,
     )
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        stats = build_knowledge_database(
-            data_dir,
-            tmp_path,
-            terms_db_path=terms_db_path,
-            terms_db_revision=terms_db_revision,
-            profile_name=profile_name,
-            source_provenance=source_provenance,
-        )
-        os.replace(tmp_path, target)
-        return stats
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        raise

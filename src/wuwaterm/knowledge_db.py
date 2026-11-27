@@ -25,9 +25,10 @@ from .domain_knowledge import (
     RetrievalChannel,
     TRUST_TIERS,
     TrustTier,
+    is_single_cjk_char,
     select_domain_knowledge_candidates,
 )
-from .normalize import normalize_text
+from .normalize import has_cjk, normalize_text
 
 
 KB_SCHEMA_VERSION = "1"
@@ -176,9 +177,11 @@ _CHANNEL_WEIGHTS: dict[RetrievalChannel, float] = {
     "dense_semantic": 0.95,
     "graph_neighbor": 0.85,
 }
-_MAX_SHORT_NGRAM_PROBES = 128
-_MAX_ALIAS_PROBES = 128
-_MAX_FTS_TERMS = 24
+_MAX_SHORT_UNIGRAM_PROBES = 4096
+_MAX_SHORT_BIGRAM_PROBES = 4096
+_MAX_ALIAS_PROBES = 4096
+_MAX_FTS_PHRASES = 240
+_FTS_BATCH_SIZE = 24
 _SQL_IN_CHUNK = 200
 
 
@@ -245,33 +248,48 @@ def compute_terms_db_revision(terms_db_path: str | Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _extract_short_ngram_probes(text: str) -> list[str]:
-    probes: list[str] = []
-    seen: set[str] = set()
+def _extract_short_ngram_probes(text: str) -> tuple[list[str], list[str]]:
+    """Extract deduplicated (bigrams, unigrams) in separate buckets.
 
-    def add(value: str) -> None:
-        if 1 <= len(value) <= 2 and value not in seen and len(probes) < _MAX_SHORT_NGRAM_PROBES:
-            seen.add(value)
-            probes.append(value)
+    Keeping 2-char and 1-char probes in separate high-ceiling buckets prevents
+    long inputs from exhausting unigram or tail-position recall.
+    """
+    bigrams: list[str] = []
+    unigrams: list[str] = []
+    seen_bi: set[str] = set()
+    seen_uni: set[str] = set()
+
+    def add_bi(value: str) -> None:
+        if len(value) == 2 and value not in seen_bi and len(bigrams) < _MAX_SHORT_BIGRAM_PROBES:
+            seen_bi.add(value)
+            bigrams.append(value)
+
+    def add_uni(value: str) -> None:
+        if len(value) == 1 and value not in seen_uni and len(unigrams) < _MAX_SHORT_UNIGRAM_PROBES:
+            seen_uni.add(value)
+            unigrams.append(value)
 
     norm_full = normalize_text(text)
-    if 1 <= len(norm_full) <= 2:
-        add(norm_full)
+    if len(norm_full) == 2:
+        add_bi(norm_full)
+    elif len(norm_full) == 1:
+        add_uni(norm_full)
 
     for run in _CJK_RUN_RE.findall(text):
         run_norm = normalize_text(run)
-        # Prefer 2-char bigrams before 1-char unigrams.
         for idx in range(len(run_norm) - 1):
-            add(run_norm[idx : idx + 2])
+            add_bi(run_norm[idx : idx + 2])
         for ch in run_norm:
-            add(ch)
+            add_uni(ch)
 
     for token in _LATIN_TOKEN_RE.findall(text):
         tok_norm = normalize_text(token)
-        if 1 <= len(tok_norm) <= 2:
-            add(tok_norm)
+        if len(tok_norm) == 2:
+            add_bi(tok_norm)
+        elif len(tok_norm) == 1:
+            add_uni(tok_norm)
 
-    return probes
+    return bigrams, unigrams
 
 
 def _extract_alias_probes(text: str) -> list[str]:
@@ -322,7 +340,7 @@ def _extract_fts_phrases(text: str) -> list[str]:
 
     def add(value: str) -> None:
         cleaned = value.strip()
-        if len(cleaned) >= 3 and cleaned not in seen and len(phrases) < _MAX_FTS_TERMS:
+        if len(cleaned) >= 3 and cleaned not in seen and len(phrases) < _MAX_FTS_PHRASES:
             seen.add(cleaned)
             phrases.append(cleaned)
 
@@ -357,6 +375,20 @@ def _as_trust_tier(value: str) -> TrustTier:
     if value == "community_curated":
         return "community_curated"
     raise KnowledgeBaseError(f"invalid trust_tier in knowledge.db: {value!r}")
+
+
+def _field_matches_query(
+    field_norm: str,
+    query_norm: str,
+    phrase_norms: tuple[str, ...],
+) -> bool:
+    if not field_norm:
+        return False
+    if field_norm in query_norm:
+        return True
+    if len(query_norm) >= 3 and query_norm in field_norm:
+        return True
+    return any(len(phrase) >= 3 and phrase in field_norm for phrase in phrase_norms)
 
 
 class KnowledgeBaseReader:
@@ -491,28 +523,27 @@ class KnowledgeBaseReader:
         return hits
 
     def _query_short_ngrams(self, text: str) -> list[tuple[str, str]]:
-        probes = _extract_short_ngram_probes(text)
-        if not probes:
-            return []
+        bigrams, unigrams = _extract_short_ngram_probes(text)
         hits: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
-        for start in range(0, len(probes), _SQL_IN_CHUNK):
-            chunk = probes[start : start + _SQL_IN_CHUNK]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = self._conn.execute(
-                f"""
-                SELECT entity_id, surface, ngram_len
-                FROM kb_short_ngrams
-                WHERE ngram IN ({placeholders})
-                ORDER BY ngram_len DESC, entity_id, surface
-                """,
-                chunk,
-            ).fetchall()
-            for row in rows:
-                key = (str(row["entity_id"]), str(row["surface"]))
-                if key not in seen:
-                    seen.add(key)
-                    hits.append(key)
+        for ngram_len, bucket in ((2, bigrams), (1, unigrams)):
+            for start in range(0, len(bucket), _SQL_IN_CHUNK):
+                chunk = bucket[start : start + _SQL_IN_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"""
+                    SELECT entity_id, surface
+                    FROM kb_short_ngrams
+                    WHERE ngram_len = ? AND ngram IN ({placeholders})
+                    ORDER BY entity_id, surface
+                    """,
+                    [ngram_len, *chunk],
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["entity_id"]), str(row["surface"]))
+                    if key not in seen:
+                        seen.add(key)
+                        hits.append(key)
         return hits
 
     def _query_fts_trigram(self, text: str, *, limit: int) -> list[tuple[str, str]]:
@@ -520,47 +551,75 @@ class KnowledgeBaseReader:
         if not phrases:
             return []
         query_norm = normalize_text(text)
-        fts_query = " OR ".join(_quote_fts5_phrase(phrase) for phrase in phrases)
-        try:
-            rows = self._conn.execute(
-                """
-                SELECT entity_id, surface, zh, en, bm25(kb_fts_trigram) AS rank_score
-                FROM kb_fts_trigram
-                WHERE kb_fts_trigram MATCH ?
-                ORDER BY rank_score ASC, entity_id ASC
-                LIMIT ?
-                """,
-                (fts_query, max(limit * 4, 32)),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        phrase_norms = tuple(
+            norm for phrase in phrases if (norm := normalize_text(phrase))
+        )
+        cjk_query = has_cjk(text)
 
-        scored: list[tuple[int, float, str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for row in rows:
-            entity_id = str(row["entity_id"])
-            surface = str(row["surface"])
-            zh = str(row["zh"])
-            en = str(row["en"])
-            key = (entity_id, surface)
-            if key in seen:
+        scored: dict[tuple[str, str], tuple[int, float]] = {}
+        batch_limit = max(limit * 4, 32)
+        for start in range(0, len(phrases), _FTS_BATCH_SIZE):
+            batch = phrases[start : start + _FTS_BATCH_SIZE]
+            fts_query = " OR ".join(_quote_fts5_phrase(phrase) for phrase in batch)
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT entity_id, surface, zh, en, bm25(kb_fts_trigram) AS rank_score
+                    FROM kb_fts_trigram
+                    WHERE kb_fts_trigram MATCH ?
+                    ORDER BY rank_score ASC, entity_id ASC
+                    LIMIT ?
+                    """,
+                    (fts_query, batch_limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
                 continue
-            seen.add(key)
-            # Prioritize rows where the surface/zh/en directly overlaps the query
-            # (either query is a >=3-scalar substring of surface or vice versa).
-            surf_norm = normalize_text(surface)
-            zh_norm = normalize_text(zh)
-            en_norm = normalize_text(en)
-            direct_overlap = any(
-                candidate_norm
-                and (candidate_norm in query_norm or query_norm in candidate_norm)
-                for candidate_norm in (surf_norm, zh_norm, en_norm)
-            )
-            tier_rank = 0 if direct_overlap else 1
-            scored.append((tier_rank, float(row["rank_score"]), entity_id, surface))
 
-        scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-        return [(entity_id, surface) for _, _, entity_id, surface in scored[: max(limit * 2, 16)]]
+            for row in rows:
+                entity_id = str(row["entity_id"])
+                surface = str(row["surface"])
+                zh = str(row["zh"])
+                en = str(row["en"])
+                surf_norm = normalize_text(surface)
+                zh_norm = normalize_text(zh)
+                en_norm = normalize_text(en)
+
+                surface_matched = _field_matches_query(
+                    surf_norm, query_norm, phrase_norms
+                )
+                zh_matched = _field_matches_query(zh_norm, query_norm, phrase_norms)
+                en_matched = _field_matches_query(en_norm, query_norm, phrase_norms)
+
+                if surface_matched:
+                    matched_surface = surface
+                    tier_rank = 0
+                elif zh_matched:
+                    matched_surface = zh
+                    tier_rank = 0
+                elif en_matched:
+                    matched_surface = en
+                    tier_rank = 0
+                else:
+                    # Gloss-only match: never report the entity's English name as
+                    # ``source_surface`` for a 1-char CJK entity, because that
+                    # would bypass single-character CJK ordinary-word filtering.
+                    if is_single_cjk_char(zh):
+                        matched_surface = zh
+                    else:
+                        matched_surface = zh if (cjk_query and zh) else (en or surface)
+                    tier_rank = 1
+
+                key = (entity_id, matched_surface)
+                cand_rank = (tier_rank, float(row["rank_score"]))
+                prev = scored.get(key)
+                if prev is None or cand_rank < prev:
+                    scored[key] = cand_rank
+
+        ordered = sorted(
+            scored.items(),
+            key=lambda item: (item[1][0], item[1][1], item[0][0], item[0][1]),
+        )
+        return [key for key, _ in ordered[: max(limit * 2, 16)]]
 
     def _load_entities(self, entity_ids: Collection[str]) -> dict[str, sqlite3.Row]:
         if not entity_ids:
@@ -604,8 +663,6 @@ class KnowledgeBaseReader:
         short_hits = self._query_short_ngrams(text)
         fts_hits = self._query_fts_trigram(text, limit=max(max_candidates, 8))
 
-        # Reciprocal Rank Fusion keyed by (entity_id, surface) so each hit
-        # preserves the matched surface for single-char CJK span checking.
         fused_scores: dict[tuple[str, str], float] = {}
         best_channel: dict[tuple[str, str], tuple[float, RetrievalChannel]] = {}
         tier_overrides: dict[tuple[str, str], TrustTier] = {}
