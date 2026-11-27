@@ -861,45 +861,87 @@ reconcile_web_pool_db_path() {
     new_pool_path="$db_dir/pool.sqlite3"
     host_tm_file="$data_dir/tm.sqlite3"
     host_pool_file="$data_dir/pool.sqlite3"
+    tmp_pool_file=""
+
     if [ -e "$host_tm_file" ]; then
         if [ -e "$host_pool_file" ]; then
             fail "both $host_pool_file and $host_tm_file exist while WUWATERM_LOCAL_DB_PATH in $web_env_file points to $local_db_path; inspect both SQLite files and point WUWATERM_LOCAL_DB_PATH at the admission pool database before rerunning"
         fi
-        if command -v python3 >/dev/null 2>&1; then
-            if ! python3 - "$host_tm_file" <<'PY'
+        command -v python3 >/dev/null 2>&1 \
+            || fail "python3 is required to verify and migrate $host_tm_file before relocating WUWATERM_LOCAL_DB_PATH"
+        # Stop the old Web container first so no writer commits to tm.sqlite3 or
+        # its WAL while we verify and create a consistent SQLite backup.
+        docker rm -f wuwaterm-web >/dev/null 2>&1 || true
+
+        tmp_pool_file="$host_pool_file.tmp.$$"
+        rm -f "$tmp_pool_file"
+        if ! python3 - "$host_tm_file" "$tmp_pool_file" <<'PY'
+import os
 import sqlite3
 import sys
 
-path = sys.argv[1]
-try:
-    with open(path, "rb") as f:
-        header = f.read(16)
-    if header != b"SQLite format 3\x00":
-        raise SystemExit(0)
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
-    finally:
-        conn.close()
-    if app_id == 0x5755544E:
+src_path, dst_path = sys.argv[1], sys.argv[2]
+expected_columns = [
+    "id",
+    "second_key",
+    "minute_key",
+    "day_key",
+    "upstream_used",
+    "translation_minute_used",
+    "terms_used",
+    "translation_used",
+    "character_used",
+    "meta_used",
+    "review_used",
+]
+
+with open(src_path, "rb") as handle:
+    if handle.read(16) != b"SQLite format 3\x00":
+        print(f"not a SQLite database: {src_path}", file=sys.stderr)
         raise SystemExit(2)
-except SystemExit:
-    raise
-except OSError:
-    pass
-except sqlite3.DatabaseError:
-    pass
+
+src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+try:
+    app_id = src.execute("PRAGMA application_id").fetchone()[0]
+    if app_id == 0x5755544E:
+        print(f"already a translation-memory database: {src_path}", file=sys.stderr)
+        raise SystemExit(3)
+    version = src.execute("PRAGMA user_version").fetchone()[0]
+    if app_id != 0x5755544D or version != 1:
+        print(
+            f"unrecognized admission pool database header (application_id={app_id:#x}, user_version={version}): {src_path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(4)
+    columns = [row[1] for row in src.execute("PRAGMA table_info(shared_pool)").fetchall()]
+    if columns != expected_columns:
+        print(f"missing or incompatible shared_pool table in {src_path}", file=sys.stderr)
+        raise SystemExit(5)
+    quick_check = src.execute("PRAGMA quick_check(1)").fetchone()
+    if not quick_check or quick_check[0] != "ok":
+        print(f"SQLite quick_check failed for {src_path}", file=sys.stderr)
+        raise SystemExit(6)
+finally:
+    src.close()
+
+# Re-open normally so SQLite backup reads any committed WAL frames into a
+# consistent single-file database copy without splitting main db and WAL.
+fd = os.open(dst_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.close(fd)
+src_rw = sqlite3.connect(src_path)
+dst = sqlite3.connect(dst_path)
+try:
+    src_rw.backup(dst)
+    dst.commit()
+finally:
+    dst.close()
+    src_rw.close()
+os.chmod(dst_path, 0o600)
 PY
-            then
-                fail "$host_tm_file is already a translation-memory database while WUWATERM_LOCAL_DB_PATH in $web_env_file points to $local_db_path; update WUWATERM_LOCAL_DB_PATH=$new_pool_path in $web_env_file"
-            fi
+        then
+            rm -f "$tmp_pool_file"
+            fail "refusing to migrate $host_tm_file to $host_pool_file; ensure it is a valid Web admission pool database or update WUWATERM_LOCAL_DB_PATH=$new_pool_path in $web_env_file manually"
         fi
-        mv -f "$host_tm_file" "$host_pool_file"
-        for suffix in -wal -shm; do
-            if [ -e "$host_tm_file$suffix" ]; then
-                mv -f "$host_tm_file$suffix" "$host_pool_file$suffix"
-            fi
-        done
     fi
 
     tmp_env="$web_env_file.tmp.$$"
@@ -907,9 +949,11 @@ PY
         umask 077
         WUWATERM_NEW_POOL_PATH="$new_pool_path" awk '
             BEGIN { replaced = 0; val = ENVIRON["WUWATERM_NEW_POOL_PATH"] }
-            index($0, "WUWATERM_LOCAL_DB_PATH=") == 1 {
-                print "WUWATERM_LOCAL_DB_PATH=" val
-                replaced = 1
+            /^[[:space:]]*WUWATERM_LOCAL_DB_PATH[[:space:]]*=/ {
+                if (!replaced) {
+                    print "WUWATERM_LOCAL_DB_PATH=" val
+                    replaced = 1
+                }
                 next
             }
             { print }
@@ -917,8 +961,31 @@ PY
                 if (!replaced) print "WUWATERM_LOCAL_DB_PATH=" val
             }
         ' "$web_env_file" >"$tmp_env"
-    ) && chmod 600 "$tmp_env" && mv -f "$tmp_env" "$web_env_file" \
-        || { rm -f "$tmp_env"; fail "could not update WUWATERM_LOCAL_DB_PATH in $web_env_file"; }
+    ) && chmod 600 "$tmp_env" \
+        || { rm -f "$tmp_env" "$tmp_pool_file"; fail "could not prepare updated $web_env_file"; }
+
+    effective_tmp=$(file_value "$tmp_env" WUWATERM_LOCAL_DB_PATH || true)
+    if [ "$effective_tmp" != "$new_pool_path" ] || [ "$(basename "$effective_tmp")" = "tm.sqlite3" ]; then
+        rm -f "$tmp_env" "$tmp_pool_file"
+        fail "rewritten $web_env_file still resolves WUWATERM_LOCAL_DB_PATH to $effective_tmp"
+    fi
+
+    mv -f "$tmp_env" "$web_env_file" \
+        || { rm -f "$tmp_env" "$tmp_pool_file"; fail "could not update WUWATERM_LOCAL_DB_PATH in $web_env_file"; }
+
+    effective_live=$(file_value "$web_env_file" WUWATERM_LOCAL_DB_PATH || true)
+    if [ "$effective_live" != "$new_pool_path" ] || [ "$(basename "$effective_live")" = "tm.sqlite3" ]; then
+        rm -f "$tmp_pool_file"
+        fail "effective WUWATERM_LOCAL_DB_PATH in $web_env_file resolved to $effective_live after rewrite"
+    fi
+
+    if [ -n "$tmp_pool_file" ]; then
+        mv -f "$tmp_pool_file" "$host_pool_file" \
+            || { rm -f "$tmp_pool_file"; fail "could not finalize $host_pool_file"; }
+        chmod 600 "$host_pool_file"
+        rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
+    fi
+
     printf 'setup: relocated WUWATERM_LOCAL_DB_PATH in %s from %s to %s to avoid colliding with tm.sqlite3.\n' \
         "$web_env_file" "$local_db_path" "$new_pool_path"
 }

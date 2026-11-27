@@ -573,7 +573,40 @@ def test_web_env_with_a_relative_database_path_is_refused(install_root):
     assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 
-def test_web_env_with_tm_sqlite3_pool_path_is_relocated_before_web_starts(install_root):
+def _create_legacy_pool_db(path: pathlib.Path, *, second_key: int = 123, wal: bool = False) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """CREATE TABLE shared_pool (
+                id INTEGER PRIMARY KEY NOT NULL CHECK(id=1),
+                second_key INTEGER NOT NULL CHECK(second_key>=0),
+                minute_key INTEGER NOT NULL CHECK(minute_key>=0),
+                day_key INTEGER NOT NULL CHECK(day_key>=0),
+                upstream_used INTEGER NOT NULL CHECK(upstream_used>=0),
+                translation_minute_used INTEGER NOT NULL CHECK(translation_minute_used>=0),
+                terms_used INTEGER NOT NULL CHECK(terms_used>=0),
+                translation_used INTEGER NOT NULL CHECK(translation_used>=0),
+                character_used INTEGER NOT NULL CHECK(character_used>=0),
+                meta_used INTEGER NOT NULL CHECK(meta_used>=0),
+                review_used INTEGER NOT NULL CHECK(review_used>=0)
+            )"""
+        )
+        conn.execute("PRAGMA application_id=0x5755544d")
+        conn.execute("PRAGMA user_version=1")
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO shared_pool VALUES (1, ?, 2, 3, 4, 5, 6, 7, 8, 9, 10)",
+            (second_key,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_web_env_with_tm_sqlite3_pool_path_is_relocated_with_wal_backup(install_root):
     import sqlite3
 
     write_env(install_root)
@@ -582,10 +615,10 @@ def test_web_env_with_tm_sqlite3_pool_path_is_relocated_before_web_starts(instal
     data = state / "data"
     data.mkdir(parents=True)
     legacy_pool = data / "tm.sqlite3"
-    with sqlite3.connect(legacy_pool) as conn:
-        conn.execute("PRAGMA application_id=0x5755544d")
-        conn.execute("CREATE TABLE shared_pool (id INTEGER PRIMARY KEY NOT NULL)")
+    _create_legacy_pool_db(legacy_pool, second_key=987, wal=True)
     legacy_pool.chmod(0o600)
+    # Include both unindented and indented duplicate entries to prove every
+    # matching line is rewritten before relocating the database.
     (state / "web.env").write_text(
         "WUWATERM_RUNTIME_MODE=selfhost\n"
         "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
@@ -594,7 +627,8 @@ def test_web_env_with_tm_sqlite3_pool_path_is_relocated_before_web_starts(instal
         "WUWATERM_API_BASE_URL=http://127.0.0.1:8788\n"
         "WUWATERM_SITE_DEVICE_TOKEN=wtd1.dev123.secret\n"
         "WUWATERM_TRANSLATION_ENABLED=true\n"
-        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n",
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n"
+        "  WUWATERM_LOCAL_DB_PATH = /var/lib/wuwaterm-web/tm.sqlite3\n",
         encoding="utf-8",
     )
 
@@ -611,13 +645,24 @@ def test_web_env_with_tm_sqlite3_pool_path_is_relocated_before_web_starts(instal
     assert result.returncode == 0, result.stderr
     values = web_env_values(install_root)
     assert values["WUWATERM_LOCAL_DB_PATH"] == "/var/lib/wuwaterm-web/pool.sqlite3"
+    env_lines = [line for line in (state / "web.env").read_text(encoding="utf-8").splitlines() if "WUWATERM_LOCAL_DB_PATH" in line]
+    assert env_lines == ["WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/pool.sqlite3"]
     assert mode_of(state / "web.env") == 0o600
     assert (data / "pool.sqlite3").is_file()
+    assert mode_of(data / "pool.sqlite3") == 0o600
     assert not (data / "tm.sqlite3").exists()
+    assert not (data / "tm.sqlite3-wal").exists()
+    assert not (data / "tm.sqlite3-shm").exists()
+
+    with sqlite3.connect(data / "pool.sqlite3") as conn:
+        row = conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone()
+    assert row == (987,)
+    assert "rm -f wuwaterm-web" in docker_log(install_root)
     assert "relocated WUWATERM_LOCAL_DB_PATH" in result.stdout
 
 
-def test_web_env_with_tm_sqlite3_pool_path_refuses_when_tm_db_already_exists(install_root):
+@pytest.mark.parametrize("kind", ["tm_db", "unknown_sqlite", "non_sqlite"])
+def test_web_env_with_tm_sqlite3_pool_path_fails_closed_on_unrecognized_file(install_root, kind):
     import sqlite3
 
     write_env(install_root)
@@ -625,18 +670,25 @@ def test_web_env_with_tm_sqlite3_pool_path_refuses_when_tm_db_already_exists(ins
     state = install_root / "state-web"
     data = state / "data"
     data.mkdir(parents=True)
-    tm_file = data / "tm.sqlite3"
-    with sqlite3.connect(tm_file) as conn:
-        conn.execute("PRAGMA application_id=0x5755544e")
-        conn.execute("CREATE TABLE tm_schema (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
-    (state / "web.env").write_text(
+    target = data / "tm.sqlite3"
+    if kind == "tm_db":
+        with sqlite3.connect(target) as conn:
+            conn.execute("PRAGMA application_id=0x5755544e")
+            conn.execute("CREATE TABLE tm_schema (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+    elif kind == "unknown_sqlite":
+        with sqlite3.connect(target) as conn:
+            conn.execute("CREATE TABLE other_app (id INTEGER PRIMARY KEY)")
+    else:
+        target.write_text("not a sqlite file\n", encoding="utf-8")
+
+    original_env = (
         "WUWATERM_RUNTIME_MODE=selfhost\n"
         "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
         f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
         "WUWATERM_WEB_BASE_PATH=\n"
-        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n",
-        encoding="utf-8",
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n"
     )
+    (state / "web.env").write_text(original_env, encoding="utf-8")
 
     result = run_setup(
         install_root,
@@ -649,7 +701,10 @@ def test_web_env_with_tm_sqlite3_pool_path_refuses_when_tm_db_already_exists(ins
     )
 
     assert result.returncode == 1
-    assert "already a translation-memory database" in result.stderr
+    assert "refusing to migrate" in result.stderr
+    assert (state / "web.env").read_text(encoding="utf-8") == original_env
+    assert target.exists()
+    assert not (data / "pool.sqlite3").exists()
     assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 

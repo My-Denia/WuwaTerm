@@ -134,6 +134,11 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
 
 @pytest.mark.parametrize(("source", "expected_web", "expected_windows"), [
     (
+        "716dbf85377c7a3661e0acc73a4703ba40781534",
+        "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "97c659e22b97f05b9a817c0740ca19d4add63441",
+    ),
+    (
         "df895009c9ed4ca723befaa2bdc1e388226214ef",
         "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
         "97c659e22b97f05b9a817c0740ca19d4add63441",
