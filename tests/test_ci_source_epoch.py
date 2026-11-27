@@ -132,6 +132,33 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     assert epoch.resolve(LAST, config)["source_epoch"] == "legacy"
 
 
+@pytest.mark.parametrize(("source", "expected_web", "expected_windows"), [
+    (
+        "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+        "13faa392cd6f4826d2115ae8ad04117a95577ffe",
+        "1ada119a0ff9284359fff2740f887140f6324545",
+    ),
+    (
+        "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
+        "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
+        "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
+    ),
+    (
+        "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
+        "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854",
+    ),
+])
+def test_historical_split_release_commits_resolve_with_their_pinned_consumers(
+    config, source, expected_web, expected_windows
+):
+    result = epoch.resolve(source, config)
+    assert result["source_epoch"] == "split"
+    assert result["web_revision"] == expected_web
+    assert result["windows_revision"] == expected_windows
+    assert result["required_jobs"][-1] == "API to Windows contract"
+
+
 def test_actual_pr_event_source_includes_last_bundled_main(config):
     if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
         pytest.skip("actual GitHub synthetic merge is supplied on pull_request only")

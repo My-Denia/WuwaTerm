@@ -11,6 +11,48 @@
     "split_web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
     "windows_repository": "My-Denia/WuwaTerm-Windows",
     "split_windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441",
+    "historical_split_pins": [
+      {
+        "source_commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+        "web_revision": "13faa392cd6f4826d2115ae8ad04117a95577ffe",
+        "windows_revision": "1ada119a0ff9284359fff2740f887140f6324545"
+      },
+      {
+        "source_commit": "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
+        "web_revision": "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
+        "windows_revision": "d87a66c37b1d4809774774c45bc5731f6ebb66d2"
+      },
+      {
+        "source_commit": "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
+        "web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+      },
+      {
+        "source_commit": "e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8",
+        "web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+      },
+      {
+        "source_commit": "6fb4d8a44b26f170a7b1c8e23f00f75b2bbfd2b8",
+        "web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+      },
+      {
+        "source_commit": "074f3cb72118db9dd063d30f8e53f9bd8085283a",
+        "web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+      },
+      {
+        "source_commit": "00395b59940e0ff2c7cce4d4f8ea06064d80cfc9",
+        "web_revision": "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "windows_revision": "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854"
+      },
+      {
+        "source_commit": "1d4bcdc8ef5c6edfccfb7720556d88c7fa998981",
+        "web_revision": "c1b9fd5c2a8dfd8ce1126f1d6c09d472f496c260",
+        "windows_revision": "4da26ba9f394475432ff0b2890ae24d21f7606b1"
+      }
+    ],
     "windows_recipe_workflow": ".github/workflows/legacy-core-validation.yml",
     "windows_recipe_sha": "974160e74286f03463ab98c4e1b1ab1d45be2bfc"
   },
