@@ -955,6 +955,15 @@ async def translate_protected_request_async(
         )
     normalized_input = normalize_prose_text(combined_visible)
     to_chinese = _resolve_to_chinese(normalized_input, request.forced_to_chinese)
+    if not llm_configured():
+        return ProtectedTranslationOutcome(
+            kind=KIND_ERROR,
+            text=TRANSLATION_UNAVAILABLE_NOTICE,
+            translated_segments=(),
+            to_chinese=to_chinese,
+            protected_used=False,
+            error_code=ERROR_LLM_UNAVAILABLE,
+        )
     protected = ProtectedText(request.visible_segments, request.structures)
     op_budget = (
         execution_budget

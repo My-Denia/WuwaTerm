@@ -1332,3 +1332,65 @@ def test_translate_protected_request_async_handles_success_and_fallback(
         assert too_long.error_code == ERROR_INPUT_TOO_LONG
     finally:
         asyncio.run(translator.aclose())
+
+
+@pytest.mark.parametrize("half_configured", [False, True])
+def test_translate_protected_request_async_refuses_without_spending_guard_or_transport(
+    monkeypatch, sample_db, half_configured
+):
+    from wuwaterm.application import (
+        ProtectedStructure,
+        ProtectedTranslationJob,
+        llm_configured,
+        translate_protected_request_async,
+    )
+
+    for name in (
+        "WUWATERM_OPENAI_BASE_URL",
+        "WUWATERM_OPENAI_API_KEY",
+        "WUWATERM_OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    if half_configured:
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    assert llm_configured() is False
+
+    service, _ = build_pair(sample_db)
+    transport_calls = 0
+    guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    def guard() -> None:  # pragma: no cover - must not run
+        nonlocal guard_calls
+        guard_calls += 1
+
+    translator = SentenceTranslator(
+        sample_db,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    try:
+        outcome = asyncio.run(
+            translate_protected_request_async(
+                service,
+                translator,
+                ProtectedTranslationJob(
+                    visible_segments=("", "今天使用了声骸", ""),
+                    structures=(ProtectedStructure(""), ProtectedStructure("")),
+                ),
+                before_llm_call=guard,
+            )
+        )
+        assert outcome.kind == KIND_ERROR
+        assert outcome.error_code == ERROR_LLM_UNAVAILABLE
+        assert outcome.protected_used is False
+        assert guard_calls == 0
+        assert transport_calls == 0
+    finally:
+        asyncio.run(translator.aclose())

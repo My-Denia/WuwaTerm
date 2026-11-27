@@ -22,6 +22,7 @@ from html import escape as _escape
 from wuwaterm.application import (
     DIRECTION_TO_CHINESE,
     DIRECTION_TO_ENGLISH,
+    KIND_DICTIONARY_FALLBACK,
     KIND_ERROR,
     KIND_EXACT,
     KIND_FUZZY,
@@ -41,6 +42,7 @@ _SOURCE_LABELS = {
     KIND_EXACT: "词典 · 官方译名",
     KIND_FUZZY: "词典 · 近似匹配",
     KIND_LLM: "模型",
+    KIND_DICTIONARY_FALLBACK: "词典 · 术语替换",
     KIND_NOOP: "无可翻译内容",
 }
 # KIND_ERROR never reaches a view: the handler turns it into an ApiError and the

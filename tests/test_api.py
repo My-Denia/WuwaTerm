@@ -4941,3 +4941,57 @@ def test_translations_long_text_opt_in_and_fail_closed_validation(
         )
         assert resp.status_code == 400, (bad_body, resp.text)
         assert resp.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("half_configured", [False, True])
+def test_protected_translation_without_llm_spares_budget_and_transport(
+    monkeypatch, tmp_path, sample_db, half_configured
+):
+    from wuwaterm.application import llm_configured
+    from wuwaterm.sentence import SentenceTranslator
+
+    disable_llm(monkeypatch)
+    if half_configured:
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    assert llm_configured() is False
+
+    transport_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    settings = build_settings(
+        tmp_path, sample_db, llm_calls_per_minute=1, max_body_bytes=64 * 1024
+    )
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    translator = SentenceTranslator(
+        sample_db,
+        en_zh_protocol=True,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    app = create_app(settings, device_store=store, translator=translator)
+    _, token = issue_device(store, "telegram client")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "to": "en",
+                "protected": {
+                    "visible_segments": ["", "今天使用声骸", ""],
+                    "structures": [{"visible_context": ""}, {"visible_context": ""}],
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"
+    assert transport_calls == 0
+    assert app.state.llm_budget.in_window() == 0
