@@ -188,10 +188,11 @@ errors retain their existing classification.
 
 A strict endpoint is served by the directions' defaults: `disabled` into English
 and `omit` into Chinese both send only the fields the endpoint accepts. Into
-Chinese `auto` is the opt-in that sends the reasoning fields (a short request as
-`low`, a long or lock-dense one as `disabled`), so a deployment that opts in
-there needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or a provider that
-supports them. The two corrective calls described under
+Chinese `auto` is the opt-in that sends the reasoning fields (an ordinary short
+request as `low`, a semantically complex or ambiguous one up to the configured
+`auto` ceiling, and a long or lock-dense one as `disabled`), so a deployment
+that opts in there needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or a
+provider that supports them. The two corrective calls described under
 [translation strategy](#llm-configuration) — one paragraph-count repair and one
 fast fallback on an `auto` timeout — are the only retries in the translation
 path, each at most one attempt, and a request rejected by the provider is still

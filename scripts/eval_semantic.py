@@ -124,7 +124,7 @@ TIMEOUT_STREAK_STOP = 3
 B1_SANITIZED = "work/B1-zh.sanitized.txt"
 SNAPSHOT_DB = "work/terms-3.7.snapshot.db"
 ENV_KEYS = re.compile(
-    r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_|WUWATERM_TRANSLATION_THINKING_)[A-Z_]+$"
+    r"^(WUWATERM_OPENAI_|OPENAI_|WUWATERM_SEMANTIC_REVIEW_|WUWATERM_TRANSLATION_THINKING_|WUWATERM_PROVIDER_)[A-Z_]+$"
 )
 
 MET = "met"
@@ -196,13 +196,14 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
     from wuwaterm.semantic_review_contract import PRECEDENT_WORDING
     from wuwaterm.term_preparation import TermOccurrence, TermReference
     from wuwaterm.translation_plan import (
-        DEFAULT_PROVIDER_PROFILE,
         RequestPolicy,
         TranslationPlan,
         build_paragraph_repair_request_spec,
         build_timeout_fallback_request_spec,
         build_translation_request_spec,
         canonical_json,
+        redact_provider_profile_name,
+        resolve_provider_profile_from_env,
         resolve_request_policy_from_env,
         sha256_bytes,
         sha256_text,
@@ -224,7 +225,7 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
         templates = sentence.current_prompt_templates()
         policy_plain = resolve_request_policy_from_env(en_zh_protocol=False)
         policy_en_zh_proto = resolve_request_policy_from_env(en_zh_protocol=True)
-        profile = DEFAULT_PROVIDER_PROFILE
+        profile = resolve_provider_profile_from_env()
 
         en_zh_context_plan = TranslationPlan(
             source_text="Line one.\n\nLine two.",
@@ -523,7 +524,7 @@ def config_fingerprint(version: int = FINGERPRINT_VERSION) -> dict[str, Any]:
             "gateway_host": httpx.URL(base_url).host if base_url else None,
             "translation_thinking_zh_en": policy_plain.configured_thinking_zh_en,
             "translation_thinking_en_zh": policy_plain.configured_thinking_en_zh,
-            "provider_profile": profile.name,
+            "provider_profile": redact_provider_profile_name(profile.name),
         }
         combined = sha256_bytes(canonical_json({"parts": parts, "options": options}))
         return {
@@ -2304,16 +2305,20 @@ class Runner:
 def build_runtime(
     inputs: Inputs, out_dir: Path, *, fake: bool, llm_timeout: float = 45.0
 ) -> tuple[SentenceTranslator, Any, Path]:
+    from wuwaterm.translation_plan import resolve_provider_profile_from_env
+
     db_copy = out_dir / "_db" / "terms.db"
     db_copy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(inputs.run_dir / SNAPSHOT_DB, db_copy)
     transport = httpx.MockTransport(fake_gateway) if fake else None
+    provider_profile = resolve_provider_profile_from_env()
     translator = SentenceTranslator(
         db_copy,
         llm_timeout_seconds=llm_timeout,
         llm_max_concurrency=1,
         llm_transport=transport,
         en_zh_protocol=True,
+        provider_profile=provider_profile,
     )
     return translator, app_layer.build_term_service(db_copy), db_copy
 
