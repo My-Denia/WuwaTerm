@@ -111,13 +111,16 @@ from .translation_plan import (
     ZH_EN_FIDELITY_INSTRUCTION,
     AttemptKind,
     ConcreteThinkingMode,
+    EffortResolution as EffortResolution,
     OperationExecutionBudget as OperationExecutionBudget,
     OperationIdentity as OperationIdentity,
     PromptTemplates as PromptTemplates,
     ProviderProfile as ProviderProfile,
+    ReasoningDecision as ReasoningDecision,
     RequestIdentity as RequestIdentity,
     RequestPolicy as RequestPolicy,
     SegmentExecutionBudget as SegmentExecutionBudget,
+    TermPlanningMetadata as TermPlanningMetadata,
     TranslationContextProtocol,
     TranslationPlan as TranslationPlan,
     TranslationRequestSpec as TranslationRequestSpec,
@@ -128,6 +131,7 @@ from .translation_plan import (
     coerce_term_reference as _coerce_term_reference,
     render_context_instruction,
     resolve_configured_thinking_mode,
+    resolve_provider_profile_from_env,
     resolve_request_policy_from_env,
     select_en_zh_auto_thinking as select_en_zh_auto_thinking,
     select_zh_en_auto_thinking as select_zh_en_auto_thinking,
@@ -267,14 +271,18 @@ class SentenceTranslator:
         llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
         llm_transport: httpx.AsyncBaseTransport | None = None,
         en_zh_protocol: bool = False,
-        provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
+        provider_profile: ProviderProfile | None = None,
     ):
         self.service = TermService(db_path)
         self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self.llm_max_concurrency = max(1, int(llm_max_concurrency))
         self._llm_transport = llm_transport
         self._en_zh_protocol = en_zh_protocol
-        self._provider_profile = provider_profile
+        self._provider_profile = (
+            resolve_provider_profile_from_env(logger=LOGGER)
+            if provider_profile is None
+            else provider_profile
+        )
         self._llm_slots: asyncio.Semaphore | None = None
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
         self._llm_client: httpx.AsyncClient | None = None
@@ -716,10 +724,23 @@ class SentenceTranslator:
             to_chinese=to_chinese,
             locked_text=locked.locked_text,
             lock_count=len(locked.locks),
+            references=locked.references,
+            context=context,
+            remaining_budget_seconds=(
+                op_budget.remaining_seconds()
+                if op_budget is not None
+                else request_trace.remaining_budget_seconds()
+            ),
         )
+        effort_resolution = self._provider_profile.resolve_effort(thinking_mode)
         request_trace.note_thinking(
             policy.configured_mode(to_chinese=to_chinese),
             thinking_mode,
+        )
+        request_trace.note_effort_resolution(
+            requested_effort=effort_resolution.requested_effort,
+            effective_effort=effort_resolution.effective_effort,
+            provider_profile=effort_resolution.provider_profile,
         )
         budget = (
             op_budget.segment_budget(
@@ -832,6 +853,10 @@ class SentenceTranslator:
         and skips the paragraph repair, so a segment whose ``low`` attempt timed
         out never spends a third call stepping back up into ``low``.
         """
+        op_budget = _resolve_operation_budget(execution_budget)
+        if op_budget is not None and op_budget.is_cancelled:
+            request_trace.note_cancelled()
+            op_budget.check_can_continue()
         active_policy = (
             self.request_policy(to_chinese=to_chinese)
             if policy is None
@@ -858,7 +883,6 @@ class SentenceTranslator:
             raise failure
         if budget is not None:
             budget.consume_corrective_call()
-        op_budget = _resolve_operation_budget(execution_budget)
         try:
             result = await self._call_llm_async_limited(
                 locked.locked_text,
@@ -878,6 +902,8 @@ class SentenceTranslator:
             request_trace.note_timeout_fallback(succeeded=True)
             return result
         except LLMTranslationError as exc:
+            if exc.reason == "cancelled":
+                raise
             request_trace.note_timeout_fallback(succeeded=False)
             raise failure from exc
 
@@ -918,6 +944,10 @@ class SentenceTranslator:
         caller reaches it only when the first attempt answered and no timeout
         fallback was spent (see ``translate_async``).
         """
+        op_budget = _resolve_operation_budget(execution_budget)
+        if op_budget is not None and op_budget.is_cancelled:
+            request_trace.note_cancelled()
+            op_budget.check_can_continue()
         active_policy = (
             self.request_policy(to_chinese=to_chinese)
             if policy is None
@@ -962,7 +992,6 @@ class SentenceTranslator:
         )
         if budget is not None:
             budget.consume_corrective_call()
-        op_budget = _resolve_operation_budget(execution_budget)
         try:
             retried = await self._call_llm_async_limited(
                 locked.locked_text,
@@ -979,7 +1008,9 @@ class SentenceTranslator:
             )
             retried = _require_nonblank_llm_output(retried)
             restored = locked.restore(retried, to_en=not to_chinese)
-        except LLMTranslationError:
+        except LLMTranslationError as exc:
+            if exc.reason == "cancelled":
+                raise
             request_trace.note_paragraph_repair(succeeded=False)
             return None
         if active_policy.paragraph_regroup_enabled:
@@ -1031,13 +1062,21 @@ class SentenceTranslator:
             protected, to_chinese=to_chinese, allow_plural_inflection=to_chinese
         )
         policy = self.request_policy(to_chinese=to_chinese)
+        initial_protected_mode = policy.resolve_initial_thinking_mode(
+            to_chinese=to_chinese,
+            locked_text=locked.locked_text,
+            lock_count=len(locked.locks),
+            references=locked.references,
+        )
+        protected_effort = self._provider_profile.resolve_effort(initial_protected_mode)
         request_trace.note_thinking(
             policy.configured_mode(to_chinese=to_chinese),
-            policy.resolve_initial_thinking_mode(
-                to_chinese=to_chinese,
-                locked_text=locked.locked_text,
-                lock_count=len(locked.locks),
-            ),
+            initial_protected_mode,
+        )
+        request_trace.note_effort_resolution(
+            requested_effort=protected_effort.requested_effort,
+            effective_effort=protected_effort.effective_effort,
+            provider_profile=protected_effort.provider_profile,
         )
         translated = await self._call_llm_async_limited(
             locked.locked_text,
@@ -1715,9 +1754,12 @@ async def _call_llm_async_with_client(
         timeout_override=timeout_seconds,
         attempt_kind=attempt_kind,
     )
-    return await llm_transport.post_chat_completion(
-        client,
-        [dict(message) for message in spec.messages],
-        purpose=spec.purpose,
-        **spec.transport_options(),
-    )
+    with llm_transport.activate_call_metadata(
+        spec.call_metadata(effective_timeout_seconds=effective_timeout)
+    ):
+        return await llm_transport.post_chat_completion(
+            client,
+            [dict(message) for message in spec.messages],
+            purpose=spec.purpose,
+            **spec.transport_options(),
+        )
