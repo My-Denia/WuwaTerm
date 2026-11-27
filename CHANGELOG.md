@@ -5,6 +5,32 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Installer
+
+- `deploy/setup.sh` defaults the installer to Web `v0.5.1`, the release
+  `contracts/products.json` now records. The Telegram default stays `v0.6.0`
+  (pinning Core `v0.13.0`).
+
+### Contract Pins
+
+- The Core CI client pins move to Web `v0.5.1` (`13faa392`) and Windows
+  `v0.7.1` (`1ada119a`). Neither patch release moved its own cross-repository
+  pins: Web `0.5.1` still names Core `v0.14.0` (`27375301`) in
+  `contracts/backend-ref.txt`, and Windows `0.7.1` still names Core `v0.14.0`
+  and Web `v0.5.0` in `contracts/sources.json`, so
+  `contracts/products.json` `ci_pins.web_tests_core` stays on `2737530`.
+
+### Release Records
+
+- `contracts/products.json`, `docs/products.md` and `docs/release-checklist.md`
+  record the published Core `v0.14.1`, Web `v0.5.1` and Windows `v0.7.1`
+  releases with their assets, SHA-256 values and workflow runs. The Core `r15`
+  `--runtime-only` production deployment is recorded too: `.deploy_commit`
+  `1949f8d`, an unchanged `terms.db` (`9ddee819…`), `RestartCount` 0 and the
+  retained `r14` rollback point. `README.md`, `README.zh-CN.md`,
+  `docs/self-hosting.md`, `docs/support-matrix.md` and `SECURITY.md` state the
+  same three versions.
+
 ## 0.14.1 - 2026-11-26
 
 ### Installer
