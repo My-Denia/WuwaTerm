@@ -262,3 +262,113 @@ def test_fuzzy_index_tracks_wal_updates_and_isolates_inflight_snapshot(
             assert hit.best.entry.en == "Astral Echo"
     finally:
         service.close()
+
+
+def test_six_tuple_tie_preserves_snapshot_row_order_across_distinct_pairs(
+    tmp_path: Path,
+):
+    """Exact 6-tuple ties across distinct (zh, en) pairs must break by row index."""
+    db_path = tmp_path / "tie_distinct.db"
+    with connect(db_path) as conn:
+        initialize(conn)
+        conn.executemany(
+            """
+            INSERT INTO terms(
+              category, source_file, source_id, text_key, zh, en, zh_norm, en_norm,
+              pinyin, pinyin_abbrev, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "item",
+                    "A.json",
+                    "same_id",
+                    "k1",
+                    "00000000",
+                    "abcdefgh",
+                    "00000000",
+                    "abcdefgh",
+                    "p0",
+                    "a0",
+                    5,
+                ),
+                (
+                    "item",
+                    "B.json",
+                    "same_id",
+                    "k2",
+                    "abcdefgx",
+                    "abcdefgh",
+                    "abcdefgx",
+                    "abcdefgh",
+                    "p1",
+                    "a1",
+                    5,
+                ),
+            ],
+        )
+        conn.commit()
+
+    service = TermService(db_path)
+    try:
+        for limit in (1, 2):
+            indexed = service._fuzzy("abcdefgh", limit)
+            reference = service._fuzzy_full_scan("abcdefgh", limit)
+            assert _candidate_signature(indexed) == _candidate_signature(reference)
+            assert indexed[0].entry.zh == "00000000"
+    finally:
+        service.close()
+
+
+def test_six_tuple_tie_preserves_snapshot_row_order_for_same_pair(tmp_path: Path):
+    """Exact 6-tuple ties on the same (zh, en) pair must keep the smaller row index."""
+    db_path = tmp_path / "tie_same.db"
+    with connect(db_path) as conn:
+        initialize(conn)
+        conn.executemany(
+            """
+            INSERT INTO terms(
+              category, source_file, source_id, text_key, zh, en, zh_norm, en_norm,
+              pinyin, pinyin_abbrev, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "item",
+                    "A.json",
+                    "s1",
+                    "k1",
+                    "xyzwvuts",
+                    "Star Sea",
+                    "xyzwvuts",
+                    "starsea",
+                    "zzzzzz",
+                    "z",
+                    5,
+                ),
+                (
+                    "item",
+                    "B.json",
+                    "s1",
+                    "k2",
+                    "xyzwvuts",
+                    "Star Sea",
+                    "xyzwvuts",
+                    "starsea",
+                    "xyzwvuts" + "q" * 32,
+                    "x",
+                    5,
+                ),
+            ],
+        )
+        conn.commit()
+
+    service = TermService(db_path)
+    try:
+        indexed = service._fuzzy("xyzwvuts", 5)
+        reference = service._fuzzy_full_scan("xyzwvuts", 5)
+        assert _candidate_signature(indexed) == _candidate_signature(reference)
+        assert indexed[0].entry.source_file == "A.json"
+        assert indexed[0].reason == "fuzzy"
+    finally:
+        service.close()

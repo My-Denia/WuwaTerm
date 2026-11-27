@@ -31,7 +31,7 @@ _DIRECT_UNIV_THRESHOLD = 32
 _BOUND_EPS = 1e-9
 
 Posting = tuple[int, ...] | int
-SortKey = tuple[float, int, int, int, str, str]
+SortKey = tuple[float, int, int, int, str, str, int]
 
 
 def source_priority(entry: TermEntry) -> int:
@@ -387,6 +387,7 @@ class FuzzyIndex:
                 len(entry.zh),
                 entry.en,
                 entry.source_id,
+                idx,
             )
             pair = (entry.zh, entry.en)
             prev = best_by_pair.get(pair)
