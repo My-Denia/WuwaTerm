@@ -321,11 +321,11 @@ def _journal(
     source_commit: str = NEW_COMMIT,
     new_db_sha: str,
     candidate_rel: str,
-    bot_id: str | None = OLD_IMAGE,
+    bot_id: str | None = None,
     api_id: str | None = OLD_IMAGE,
-    bot_ref: str | None = OLD_REF,
+    bot_ref: str | None = None,
     api_ref: str | None = OLD_REF,
-    bot_running: bool = True,
+    bot_running: bool = False,
     api_running: bool = True,
     tool_hash: str | None = None,
 ) -> dict:
@@ -437,9 +437,9 @@ def full_harness(tmp_path):
     backup = root / backup_rel
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(root / "data" / "terms.db", backup)
-    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=True)
+    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
-    # The interrupted deployment already tagged each old surface for rollback.
+    # The interrupted deployment already tagged the old API surface for rollback.
     (root / f"tag-{BOT_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     (root / f"tag-{API_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     return root, env, old_hash, new_hash, old_bytes, new_bytes, backup_rel
@@ -520,13 +520,9 @@ def test_sigkill_after_durable_promotion_before_phase_marker(full_harness):
         result = _run_recover(root, env)
         assert result.returncode == 0, result.stderr
         _old_binding_restored(root, old_hash)
-        # Old surfaces are back, each on its recorded image id and the
-        # rollback reference THIS transaction recorded.
-        assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+        # Old API surface is back on its recorded image id and rollback ref;
+        # the stopped legacy bot was left untouched.
         assert (root / "api-image").read_text(encoding="ascii").strip() == OLD_IMAGE
-        assert (root / "bot-ref").read_text(encoding="ascii").strip() == journal_after[
-            "rollback_image_ref"
-        ]
         assert (root / "api-ref").read_text(encoding="ascii").strip() == journal_after[
             "rollback_api_image_ref"
         ]
@@ -546,19 +542,16 @@ def test_killed_after_stop_recovers_without_touching_database(full_harness):
         new_db_sha="0" * 64,
         candidate_rel=f"data/candidates/terms.{TXN}.db",
     ))
-    # Reality at this phase: containers stopped, database not yet promoted.
-    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
+    # Reality at this phase: container stopped, database not yet promoted.
     _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=False)
 
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    # Nothing was re-copied: the untouched old database stayed in place and
-    # the recorded running surfaces came back on their rollback refs.
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
-    assert (root / "bot-ref").read_text(encoding="ascii").strip() == BOT_ROLLBACK_REF
+    assert (root / "api-ref").read_text(encoding="ascii").strip() == API_ROLLBACK_REF
 
 
 def test_killed_after_db_promote_restores_verified_backup(full_harness):
@@ -569,21 +562,18 @@ def test_killed_after_db_promote_restores_verified_backup(full_harness):
         candidate_rel=f"data/candidates/terms.{TXN}.db",
     ))
     # The candidate file was consumed by the durable replace; the live
-    # database is the new candidate; containers are stopped.
+    # database is the new candidate; container is stopped.
     _set_db(root, new_bytes)
-    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=False)
 
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-ref").read_text(encoding="ascii").strip() == BOT_ROLLBACK_REF
-    # The rollback start ran under this transaction's recorded rollback ref
-    # (docker.log carries the image env the daemon was asked to run).
+    assert (root / "api-ref").read_text(encoding="ascii").strip() == API_ROLLBACK_REF
     docker_log = _docker_log(root)
     assert any(
-        " up -d " in line and BOT_ROLLBACK_REF in line for line in docker_log
+        " up -d " in line and API_ROLLBACK_REF in line for line in docker_log
     )
 
 
@@ -643,13 +633,13 @@ def test_killed_after_start_quiesces_then_restores(full_harness):
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
-    assert (root / "bot-ref").read_text(encoding="ascii").strip() == BOT_ROLLBACK_REF
+    assert (root / "api-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    assert (root / "api-ref").read_text(encoding="ascii").strip() == API_ROLLBACK_REF
     # Nothing may serve while the binding is restored: quiescence is issued
     # and confirmed before the database moves.
     actions = _actions(root)
     stop_at = next(
-        i for i, line in enumerate(actions) if " stop wuwaterm " in line
+        i for i, line in enumerate(actions) if " stop wuwaterm-api" in line
     )
     up_at = next(i for i, line in enumerate(actions) if " up -d " in line)
     assert stop_at < up_at
@@ -757,13 +747,13 @@ def test_recovery_is_reentrant_after_interrupted_rollback(full_harness):
     assert hashlib.sha256(
         (root / "data" / "terms.db").read_bytes()
     ).hexdigest() == old_hash
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "false"
 
     # The second attempt completes from exactly the state the first left.
     result = _run_recover(root, env)
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
 
 
 def test_first_deploy_restores_recorded_absence(full_harness):
@@ -804,7 +794,7 @@ def test_per_surface_images_restore_exactly(full_harness):
         root, phase="armed", old_db_sha=old_hash, db_backup=backup_rel,
         new_db_sha="0" * 64,
         candidate_rel=f"data/candidates/terms.{TXN}.db",
-        bot_id=bot_id, api_id=api_id,
+        bot_id=bot_id, bot_ref=OLD_REF, api_id=api_id,
     ))
     (root / f"tag-{BOT_ROLLBACK_REF}").write_text(f"{bot_id}\n", encoding="ascii")
     (root / f"tag-{API_ROLLBACK_REF}").write_text(f"{api_id}\n", encoding="ascii")
@@ -815,9 +805,7 @@ def test_per_surface_images_restore_exactly(full_harness):
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == bot_id
     assert (root / "api-image").read_text(encoding="ascii").strip() == api_id
-    assert (root / "bot-ref").read_text(encoding="ascii").strip() == BOT_ROLLBACK_REF
     assert (root / "api-ref").read_text(encoding="ascii").strip() == API_ROLLBACK_REF
 
 
@@ -830,8 +818,6 @@ def test_previously_stopped_surface_is_not_started(full_harness):
         api_running=False,
     ))
     _set_db(root, new_bytes)
-    _surface(root, "bot", image=NEW_IMAGE,
-             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
     _surface(root, "api", image=NEW_IMAGE,
              ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
 
@@ -839,7 +825,6 @@ def test_previously_stopped_surface_is_not_started(full_harness):
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "false"
     api_ups = [
         line for line in _docker_log(root)
@@ -1245,8 +1230,8 @@ def test_ordinary_rollback_clears_journal_through_binding_verifier(
 
 
 def _started_reality(full_harness):
-    """Started-phase reality: promoted new database, replacement surfaces on
-    the target image, valid backup, per-surface rollback tags."""
+    """Started-phase reality: promoted new database, replacement API on
+    the target image, valid backup, rollback tag."""
 
     root, env, old_hash, new_hash, _ob, new_bytes, backup_rel = full_harness
     _plant(root, _journal(
@@ -1255,8 +1240,7 @@ def _started_reality(full_harness):
         candidate_rel=f"data/candidates/terms.{TXN}.db",
     ))
     _set_db(root, new_bytes)
-    _surface(root, "bot", image=NEW_IMAGE,
-             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
+    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(root, "api", image=NEW_IMAGE,
              ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
     return root, env, old_hash, new_hash, new_bytes
@@ -1267,7 +1251,7 @@ def test_unknown_old_side_service_identity_refuses_before_mutation(full_harness)
     state: recovery must refuse BEFORE stopping or replacing it."""
 
     root, env, old_hash, _new_hash, new_bytes = _started_reality(full_harness)
-    _surface(root, "bot", image=UNKNOWN_IMAGE, ref="unrelated-runtime:unrelated",
+    _surface(root, "api", image=UNKNOWN_IMAGE, ref="unrelated-runtime:unrelated",
              running=True)
 
     result = _run_recover(root, env)
@@ -1275,14 +1259,11 @@ def test_unknown_old_side_service_identity_refuses_before_mutation(full_harness)
     assert result.returncode == 1
     assert "full_recovery_unresolved" in result.stderr
     assert (root / JOURNAL_RELPATH).exists()
-    # Read-only inspection is not a mutation; nothing that changes state
-    # (no stop, no start) and the observed bytes and flags are untouched.
     assert not any(
         " stop " in line or " up -d " in line for line in _docker_log(root)
     ), result.stdout + result.stderr
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == UNKNOWN_IMAGE
+    assert (root / "api-image").read_text(encoding="ascii").strip() == UNKNOWN_IMAGE
     assert (root / "data" / "terms.db").read_bytes() == new_bytes
 
 
@@ -1291,7 +1272,7 @@ def test_drifted_rollback_tag_refuses_before_any_execution(full_harness):
     per-surface old id must be detected BEFORE it can run."""
 
     root, env, _old_hash, _new_hash, new_bytes = _started_reality(full_harness)
-    (root / f"tag-{BOT_ROLLBACK_REF}").write_text(
+    (root / f"tag-{API_ROLLBACK_REF}").write_text(
         f"{UNKNOWN_IMAGE}\n", encoding="ascii"
     )
 
@@ -1304,14 +1285,13 @@ def test_drifted_rollback_tag_refuses_before_any_execution(full_harness):
         "the drifted image must never execute"
     )
     assert not any(" stop " in line for line in _docker_log(root))
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == NEW_IMAGE
+    assert (root / "api-image").read_text(encoding="ascii").strip() == NEW_IMAGE
     assert (root / "data" / "terms.db").read_bytes() == new_bytes
 
 
 def test_mixed_partial_transition_is_admissible(full_harness):
-    """Positive control for the identity preflight: a partially transitioned
-    host (one surface on the target, one still on the old binding) is a
-    known, recoverable state."""
+    """Positive control for the identity preflight: an API container back on
+    the old binding while DB is promoted is a known, recoverable state."""
 
     root, env, old_hash, _new_hash, new_bytes = _started_reality(full_harness)
     _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=False)
@@ -1320,7 +1300,6 @@ def test_mixed_partial_transition_is_admissible(full_harness):
 
     assert result.returncode == 0, result.stderr
     _old_binding_restored(root, old_hash)
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
     assert (root / "api-image").read_text(encoding="ascii").strip() == OLD_IMAGE
 
 
@@ -1342,8 +1321,6 @@ def test_inspect_daemon_failure_blocks_recovery(full_harness):
         bot_running=False, api_running=False,
     ))
     _set_db(root, new_bytes)
-    _surface(root, "bot", image=NEW_IMAGE,
-             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
     _surface(root, "api", image=NEW_IMAGE,
              ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
     fake_docker = root.parent / "bin" / "docker"
@@ -1362,7 +1339,7 @@ def test_inspect_daemon_failure_blocks_recovery(full_harness):
     assert "full_recovery_unobservable" in result.stderr
     assert (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == new_bytes
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert not any(" stop " in line for line in _docker_log(root))
 
 
@@ -1371,7 +1348,7 @@ def test_invalid_running_output_blocks_recovery(full_harness):
     stopped: the refusal happens before any mutation."""
 
     root, env, _old_hash, _new_hash, new_bytes = _started_reality(full_harness)
-    (root / "bot-running").write_text("maybe\n", encoding="ascii")
+    (root / "api-running").write_text("maybe\n", encoding="ascii")
 
     result = _run_recover(root, env)
 
@@ -1381,7 +1358,7 @@ def test_invalid_running_output_blocks_recovery(full_harness):
     assert not any(
         " stop " in line or " up -d " in line for line in _docker_log(root)
     )
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "maybe"
+    assert (root / "api-running").read_text(encoding="ascii").strip() == "maybe"
     assert (root / "data" / "terms.db").read_bytes() == new_bytes
 
 
@@ -1406,7 +1383,6 @@ def test_old_manifest_symlink_refuses_before_stop(full_harness, tmp_path):
     assert "full_journal_path_unconfined" in result.stderr
     assert (root / JOURNAL_RELPATH).exists()
     assert not any(" stop " in line for line in _docker_log(root))
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "data" / "terms.db").read_bytes() == new_bytes
 
@@ -1536,7 +1512,7 @@ def _fail_running_inspects(root: Path, service: str, times: int) -> None:
     fake.write_text(script.replace(needle, needle + inject, 1), encoding="utf-8")
 
 
-@pytest.mark.parametrize("service", ["bot", "api"])
+@pytest.mark.parametrize("service", ["api"])
 def test_transient_running_inspect_failure_restores_the_real_old_state(
     full_harness, service
 ):
@@ -1562,16 +1538,10 @@ def test_transient_running_inspect_failure_restores_the_real_old_state(
         line for line in _docker_log(root)
         if "up -d" in line and "rollback" in line
     ]
-    if service == "api":
-        assert any(
-            line.endswith("wuwaterm-api") and "rollback-api-" in line
-            for line in rollback_ups
-        ), rollback_ups
-    else:
-        assert any(
-            line.endswith(" wuwaterm") and "rollback-api-" not in line
-            for line in rollback_ups
-        ), rollback_ups
+    assert any(
+        line.endswith("wuwaterm-api") and "rollback-api-" in line
+        for line in rollback_ups
+    ), rollback_ups
 
 
 @pytest.mark.parametrize("service", ["bot", "api"])
@@ -1590,7 +1560,6 @@ def test_unconfirmed_running_state_refuses_before_mutation(full_harness, service
     assert hashlib.sha256(
         (root / "data" / "terms.db").read_bytes()
     ).hexdigest() == old_hash
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert not any(" stop " in line for line in _docker_log(root))
 
@@ -1665,11 +1634,9 @@ def test_a_surface_the_journal_recorded_stopped_is_not_certified_running(full_ha
         root, phase="committed", old_db_sha=old_hash, db_backup=backup_rel,
         new_db_sha=hashlib.sha256(new_bytes).hexdigest(),
         candidate_rel=f"data/candidates/terms.{TXN}.db",
-        bot_running=False,
+        api_running=False,
     ))
     _published_new_binding(root, new_bytes=new_bytes)
-    _surface(root, "bot", image=NEW_IMAGE,
-             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
     _surface(root, "api", image=NEW_IMAGE,
              ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
 
@@ -1680,14 +1647,8 @@ def test_a_surface_the_journal_recorded_stopped_is_not_certified_running(full_ha
     assert (root / JOURNAL_RELPATH).exists()
 
 
-def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_harness):
-    """End to end: the host shape that runs today.
-
-    The legacy bot is present and stopped, the API runs. The deployment must
-    move both to the new release, start only the API, never run the bot smoke,
-    and confirm its own transaction so that `--recover-full` afterwards has
-    nothing to do.
-    """
+def test_a_full_deployment_publishes_without_touching_stopped_legacy_bot(full_harness):
+    """End to end: stopped legacy wuwaterm-bot stays untouched while API upgrades."""
     root, env, old_hash, _new_hash, _ob, new_bytes, _backup_rel = full_harness
     _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(root, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
@@ -1695,26 +1656,20 @@ def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_har
     result = _run_mode(root, env, [])
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "docker rm wuwaterm-bot" in result.stderr
     commands = _commands(root)
-    # Never started, and never smoked: the bot is retired on this host.
-    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert any(" build wuwaterm-api" in c for c in commands), commands
+    assert not [c for c in commands if c.endswith(" wuwaterm")], commands
     assert not [c for c in commands if "exec -T wuwaterm " in c]
-    # Re-created stopped, on the new release: a hand start cannot resurrect the
-    # previous release.
-    assert [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
     assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == NEW_IMAGE
-    assert (root / "bot-ref").read_text(encoding="ascii").strip() == (
-        f"wuwaterm-runtime:{NEW_COMMIT}"
-    )
-    # The API moved and is serving.
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    assert (root / "bot-ref").read_text(encoding="ascii").strip() == OLD_REF
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
     assert (root / "api-image").read_text(encoding="ascii").strip() == NEW_IMAGE
-    # The transaction certified itself; nothing is left for recovery.
     assert not (root / JOURNAL_RELPATH).exists()
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
-    assert "deployment bot surface: stopped" in result.stdout
     assert "deployment api surface: running" in result.stdout
+    assert "deployment legacy bot: stopped" in result.stdout
 
     again = _run_recover(root, env)
 
@@ -1723,11 +1678,7 @@ def test_a_full_deployment_publishes_without_starting_a_retired_surface(full_har
 
 
 def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(full_harness):
-    """No recorded pointer, and the standalone product already serves Telegram.
-
-    The inline bot would be a second poller for the same token, so a first
-    deployment leaves it absent while the API comes up.
-    """
+    """No recorded pointer: a first deployment starts wuwaterm-api only."""
     root, env, _old_hash, _new_hash, _ob, _nb, _backup_rel = full_harness
     (root / ".deploy_commit").unlink()
     _surface(root, "telegram", image=OLD_IMAGE, ref="wuwaterm-telegram:0.2.8", running=True)
@@ -1740,11 +1691,10 @@ def test_a_first_deployment_does_not_start_the_inline_bot_beside_the_product(ful
 
     assert result.returncode == 0, result.stdout + result.stderr
     commands = _commands(root)
-    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
-    assert not [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
+    assert not [c for c in commands if c.endswith(" wuwaterm")], commands
     assert not (root / "bot-present").exists()
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
-    assert "deployment bot surface: absent" in result.stdout
+    assert "deployment api surface: running" in result.stdout
 
 
 # --- a first deployment must confirm a serving API ---------------------------

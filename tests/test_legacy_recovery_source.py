@@ -236,6 +236,8 @@ print(hashlib.sha256(new.read_bytes()).hexdigest())
     else:
         info = db.stat()
         txn = historical[:12] + "-1234"
+        runtime_tool = (root / "scripts/runtime_update.py").read_text(encoding="utf-8")
+        api_only_runtime = '"legacy_bot_running"' in runtime_tool
         payload = {"schema_version": 1, "mode": "runtime-only", "status": "unresolved",
                    "phase": "unresolved", "transaction_id": txn,
                    "source_commit": historical, "target_image_ref": f"wuwaterm-runtime:{historical}",
@@ -243,13 +245,13 @@ print(hashlib.sha256(new.read_bytes()).hexdigest())
                    "target_image_revision": historical, "old_pointer": OLD_COMMIT,
                    "old_manifest_path": f".deployments/{OLD_COMMIT}.json",
                    "old_image_ref": "wuwaterm-runtime:old", "old_image_id": OLD_RUNTIME_IMAGE_ID,
-                   "old_bot_running": True, "old_api_running": True,
+                   "old_bot_running": not api_only_runtime, "old_api_running": True,
                    "rollback_image_ref": f"wuwaterm-runtime:rollback-runtime-{txn}",
                    "db_sha256": hashlib.sha256(db.read_bytes()).hexdigest(),
                    "db_stat": {"ino": info.st_ino, "size": info.st_size,
                                "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns},
                    "tool_hash": hashes["runtime"]}
-        if '"old_bot_present"' in (root / "scripts/runtime_update.py").read_text(encoding="utf-8"):
+        if '"old_bot_present"' in runtime_tool:
             payload["old_bot_present"] = True
         (root / ".deployments/.runtime-transaction.json").write_text(json.dumps(payload))
     lock = root / ".deployments/.deployment.lock"

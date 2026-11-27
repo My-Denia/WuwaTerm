@@ -311,8 +311,8 @@ knowledge_builder (offline KB build)   scripts/verify_knowledge_db.py
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
+| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -659,7 +659,7 @@ aids for a single writer, not a cluster protocol.
 | Credential store | Missing, deleted, locked, corrupt | `503` (store unusable), never `401` — a valid device is never told to re-pair because of a database hiccup |
 | Filesystem state | Disk full, lock errors, durability errors | Settings/reply-index raise typed errors; startup migration refuses overwrite of existing targets |
 | Ingress route | Proxy down, route removed | The client renders an offline or timeout state; the service keeps running on loopback and the bot is unaffected |
-| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for both serving containers |
+| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop (and refuses preflight if legacy `wuwaterm-bot` is still running; a stopped `wuwaterm-bot` is left untouched with a manual `docker rm` hint), or rolls back image + DB + pointer for `wuwaterm-api` after failed post-promote steps |
 
 No automatic cross-region failover. Recovery is restart, restore from
 timestamped backups under `data/deployment-backups` (the newest five snapshots;
@@ -678,13 +678,12 @@ From repo scripts and docs only (no live VPS mutation required to understand):
 3. **Verify** — `verify-db`, seed/exact/idempotent scripts as wired in
    `deploy/vps-update.sh` and `docs/validation.md`.
 4. **Build immutable runtime image** labeled with source commit revision.
-5. **Promote** — stop both serving containers, swap DB, start the exact image,
-   smoke (`scripts/deploy_smoke.py` with diagnostic send disabled in updater
-   path, plus an in-container readiness probe for the API), write immutable
+5. **Promote** — stop `wuwaterm-api`, swap DB, start `wuwaterm-api` on the exact
+   image, verify in-container `/readyz` readiness, write immutable
    `.deployments/<commit>.json`, atomic `.deploy_commit`.
 6. **Rollback** — on post-promote failure restore previous DB, rollback image
    tag, and pointer (`deploy/vps-update.sh` `rollback_on_failure`), restarting
-   only the surfaces that were running before.
+   `wuwaterm-api`.
 
 Runtime vs builder separation: [ADR 0007](adr/0007-runtime-builder-separation.md).
 Dictionary-before-LLM: [ADR 0006](adr/0006-dictionary-first-before-llm.md).

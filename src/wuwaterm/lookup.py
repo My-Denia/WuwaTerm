@@ -26,6 +26,7 @@ from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
 )
+from .fuzzy_index import FuzzyIndex, source_priority as _source_priority
 from .models import LookupCandidate, LookupResult, TermEntry
 from .normalize import normalize_ascii, normalize_text
 from .skill_references import SkillReference, skill_references
@@ -46,18 +47,6 @@ from .term_matching import (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _source_priority(entry: TermEntry) -> int:
-    if entry.source_id.startswith("OccupationConfig_") and entry.source_id.endswith(
-        "_Name"
-    ):
-        return 0
-    if "RoleInfo" in entry.source_file:
-        return 1
-    if entry.category == "speaker":
-        return 8
-    return 5
 
 
 def preferred_exact_entry(service: TermService, query: str) -> TermEntry | None:
@@ -370,6 +359,7 @@ class DictionarySnapshot:
         "_derived_lock",
         "_dictionary_identity",
         "_scoring_rows",
+        "_fuzzy_index",
         "_lockable_snapshot",
     )
 
@@ -386,6 +376,7 @@ class DictionarySnapshot:
         self._derived_lock = threading.Lock()
         self._dictionary_identity: DictionaryIdentity | None = None
         self._scoring_rows: tuple[_ScoringRow, ...] | None = None
+        self._fuzzy_index: FuzzyIndex | None = None
         self._lockable_snapshot: LockableSnapshot | None = None
 
     @property
@@ -440,6 +431,16 @@ class DictionarySnapshot:
                 self._scoring_rows = _build_scoring_rows(self._entries)
             return self._scoring_rows
 
+    @property
+    def fuzzy_index(self) -> FuzzyIndex:
+        index = self._fuzzy_index
+        if index is not None:
+            return index
+        with self._derived_lock:
+            if self._fuzzy_index is None:
+                self._fuzzy_index = FuzzyIndex.build(self._entries)
+            return self._fuzzy_index
+
     def lockable_snapshot(
         self, *, logger: logging.Logger | None = None
     ) -> LockableSnapshot:
@@ -458,6 +459,7 @@ class DictionarySnapshot:
         _ = self.dictionary_identity
         _ = self.review_snapshot
         _ = self.scoring_rows
+        _ = self.fuzzy_index
         _ = self.lockable_snapshot(logger=logger)
         return self
 
@@ -1073,6 +1075,9 @@ class TermService:
         return self.snapshot().scoring_rows
 
     def _fuzzy(self, query: str, limit: int) -> list[LookupCandidate]:
+        return self.snapshot().fuzzy_index.search(query, limit=limit)
+
+    def _fuzzy_full_scan(self, query: str, limit: int) -> list[LookupCandidate]:
         q_norm = normalize_text(query)
         q_ascii = normalize_ascii(query)
         fuzzy_query = _FuzzyQuery(

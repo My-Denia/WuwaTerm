@@ -2,19 +2,23 @@
 # Official one-command install and opt-in enablement for this checkout.
 #
 #   ./deploy/setup.sh                      Core API only (shared translation service)
-#   ./deploy/setup.sh --with-telegram      hand the Telegram surface to its own product
+#   ./deploy/setup.sh --with-web --web-origin https://...
+#                                          Core API + WuwaTerm-Web workbench
+#   ./deploy/setup.sh --with-windows       Core API + Windows desktop token & pairing info
+#   ./deploy/setup.sh --with-telegram      Core API + standalone WuwaTerm-Telegram (HTTP mode)
+#   ./deploy/setup.sh --with-all --web-origin https://...
+#                                          Core API + Web + Telegram + Windows
 #   ./deploy/setup.sh --with-legacy-bot    deprecated: start the inline bot in this checkout
-#   ./deploy/setup.sh --with-web           add the WuwaTerm-Web workbench
 #   ./deploy/setup.sh --status | --check   report what is installed and healthy
 #
 # Re-running the same command is the supported way to add a surface to an
 # existing installation: the .env, the data build, the credential store, the
-# Web secrets and the Compose services are only created when they are missing.
-# Nothing here prints a secret; the operator receives file paths instead.
+# Web/Telegram secrets and the Compose services are only created when they are
+# missing. Nothing here prints a secret; the operator receives file paths instead.
 #
-# The Telegram bot is a separate product with its own repository, release and
-# Compose file, so --with-telegram routes to that entry instead of installing
-# the inline bot this checkout still carries. See install_telegram().
+# Core (wuwaterm-api + data/terms.db) is the single shared base. Web, Windows
+# and Telegram each receive an independent device token and state directory
+# (state-api/, state-web/, state-telegram/) and consume Core over HTTP /v1.
 #
 # Requirements: Linux with Docker (Compose v2), curl, and a POSIX shell. The
 # source checkout stays necessary because the Compose files, entrypoints and
@@ -29,10 +33,12 @@ cd "$code_root"
 with_telegram=0
 with_legacy_bot=0
 telegram_dir=
+telegram_package=
 with_web=0
 web_prefix=
 web_package=
 web_origin=
+with_windows=0
 build_local=0
 image_tag=${WUWATERM_IMAGE_TAG:-}
 mode=install
@@ -43,29 +49,13 @@ usage() {
     cat <<'EOF'
 Usage: ./deploy/setup.sh [options]
 
-Start the shared translation service, and add the surfaces you choose.
+Start the shared Core translation service (wuwaterm-api + data/terms.db), and
+add any combination of client surfaces.
 
   (no flag)             Core HTTP API only: dictionary lookup, translation,
                         review, device credentials. No bot is started, so an
                         API-only installation cannot fall into a bot restart
                         loop.
-  --with-telegram       Install the Telegram surface through its own product,
-                        WuwaTerm-Telegram, which has its own repository,
-                        release and Compose file. This checkout starts no bot:
-                        it prints that product's install steps, filled in with
-                        this installation's database path. Pass --telegram-dir
-                        to also write that checkout's .env and copy the
-                        database into it.
-  --telegram-dir PATH   WuwaTerm-Telegram checkout to prepare (implies
-                        --with-telegram): writes its .env at mode 0600 from
-                        this .env and copies data/terms.db into it. Requires
-                        TELEGRAM_BOT_TOKEN in .env.
-  --with-legacy-bot     Deprecated. Also start the inline bot this checkout
-                        still carries (wuwaterm-bot). Requires
-                        TELEGRAM_BOT_TOKEN in .env; OWNER_USER_ID is strongly
-                        recommended (empty means private chat rejects everyone).
-                        The supported Telegram surface is the standalone
-                        product instead: --with-telegram.
   --with-web            Also install and start the WuwaTerm-Web workbench.
                         Requires a published Web package: either the official
                         GitHub release assets (manifest-{root|prefix}.json and
@@ -81,6 +71,45 @@ Start the shared translation service, and add the surfaces you choose.
                         terminating TLS; the Web process uses this origin for
                         its session cookies. Defaults to WUWATERM_WEB_ORIGIN,
                         then the value already stored in state-web/web.env.
+  --with-windows        Also issue a dedicated Windows desktop device token
+                        (state-api/windows-device.token, mode 0600) and print
+                        the verified WuwaTerm-Windows release download, SHA-256
+                        and HTTPS reverse-proxy pairing instructions from
+                        contracts/products.json.
+  --with-telegram       Also orchestrate standalone WuwaTerm-Telegram in HTTP
+                        mode against Core (requires >= v0.7.0 or an explicit
+                        compatible --telegram-package; v0.6.1 has no HTTP
+                        backend and fails closed): issues a dedicated telegram
+                        device token (state-telegram/device.token, mode 0600),
+                        writes state-telegram/telegram.env (mode 0600) with
+                        WUWATERM_CORE_API_URL and WUWATERM_CORE_API_TOKEN,
+                        verifies image.oci.tar against SHA256SUMS, mounts
+                        data/ read-only and state-telegram/state/ read-write,
+                        and starts/health-checks wuwaterm-telegram labeled
+                        org.wuwaterm.managed-by=setup.sh. Requires
+                        TELEGRAM_BOT_TOKEN in .env (or already in
+                        state-telegram/telegram.env).
+  --telegram-package PATH
+                        Use a local WuwaTerm-Telegram OCI archive (image.oci.tar
+                        or a directory containing image.oci.tar and optional
+                        SHA256SUMS) instead of downloading the release asset.
+                        Implies --with-telegram.
+  --telegram-dir PATH   Legacy checkout-prep mode (implies --with-telegram):
+                        writes a WuwaTerm-Telegram checkout's .env at mode 0600
+                        from this .env, copies data/terms.db into it and prints
+                        its wheel-build steps instead of starting a container.
+                        Requires TELEGRAM_BOT_TOKEN in .env.
+  --with-all            Idempotent combination of Core + Web + Telegram +
+                        Windows (equivalent to --with-web --with-telegram
+                        --with-windows). Each client gets its own device token
+                        and state directory while sharing wuwaterm-api and
+                        data/terms.db.
+  --with-legacy-bot     Deprecated. Also start the inline bot this checkout
+                        still carries (wuwaterm-bot). Requires
+                        TELEGRAM_BOT_TOKEN in .env; OWNER_USER_ID is strongly
+                        recommended (empty means private chat rejects everyone).
+                        The supported Telegram surface is the standalone
+                        product instead: --with-telegram.
   --build-local         Build the runtime images from this checkout instead of
                         pulling the official images.
   --image-tag TAG       Official image tag to pull. Default: v<declared version>.
@@ -95,13 +124,16 @@ Start the shared translation service, and add the surfaces you choose.
 
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
-WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release the printed
-steps name (default: the tag contracts/products.json of this checkout records,
-v0.6.1 here; the script's own constant when that file is absent).
+WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release tag to install
+(default: the tag contracts/products.json of this checkout records, v0.6.1 here;
+the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
 v0.7.0, the current published release, or latest (default: the tag
 contracts/products.json records, v0.7.0 here; the script's own constant when
 that file is absent).
+WUWATERM_WINDOWS_VERSION selects the WuwaTerm-Windows release tag named in
+pairing instructions (default: the tag contracts/products.json records, v0.9.0
+here; the script's own constant when that file is absent).
 EOF
 }
 
@@ -127,6 +159,9 @@ while [ "$#" -gt 0 ]; do
         --telegram-dir)
             need_value "$@"; telegram_dir=$2; shift ;;
         --telegram-dir=*) telegram_dir=${1#--telegram-dir=} ;;
+        --telegram-package)
+            need_value "$@"; telegram_package=$2; shift ;;
+        --telegram-package=*) telegram_package=${1#--telegram-package=} ;;
         --with-web) with_web=1 ;;
         --web-prefix)
             need_value "$@"; web_prefix=$2; shift ;;
@@ -137,6 +172,11 @@ while [ "$#" -gt 0 ]; do
         --web-origin)
             need_value "$@"; web_origin=$2; shift ;;
         --web-origin=*) web_origin=${1#--web-origin=} ;;
+        --with-windows) with_windows=1 ;;
+        --with-all)
+            with_web=1
+            with_telegram=1
+            with_windows=1 ;;
         --build-local) build_local=1 ;;
         --image-tag)
             need_value "$@"; image_tag=$2; shift ;;
@@ -159,9 +199,12 @@ esac
 if [ -n "$web_package" ] || [ -n "$web_prefix" ]; then
     with_web=1
 fi
-# Preparing the product checkout is asking for the Telegram surface.
-if [ -n "$telegram_dir" ]; then
+# Preparing a Telegram checkout or passing a local OCI package asks for Telegram.
+if [ -n "$telegram_dir" ] || [ -n "$telegram_package" ]; then
     with_telegram=1
+fi
+if [ -n "$telegram_dir" ] && [ -n "$telegram_package" ]; then
+    usage_error "--telegram-dir and --telegram-package are alternatives"
 fi
 # Routing the surface and installing the deprecated inline bot are two
 # different installations, and one host cannot run both against one token.
@@ -223,6 +266,10 @@ ensure_layout() {
         mkdir -p "$code_root/state-web"
         chmod 700 "$code_root/state-web"
     fi
+    if [ "$with_telegram" = 1 ] && [ -z "$telegram_dir" ]; then
+        mkdir -p "$code_root/state-telegram" "$code_root/state-telegram/state"
+        chmod 700 "$code_root/state-telegram" "$code_root/state-telegram/state"
+    fi
     if [ ! -f "$code_root/.env" ]; then
         [ -f "$code_root/deploy/env.example" ] || fail "deploy/env.example is missing"
         cp "$code_root/deploy/env.example" "$code_root/.env"
@@ -237,14 +284,27 @@ validate_config() {
     require_env WUWATERM_OPENAI_BASE_URL
     require_env WUWATERM_OPENAI_API_KEY
     require_env WUWATERM_OPENAI_MODEL
-    # Routing the surface needs no token here; the product has its own .env.
-    # Writing that .env, or starting the deprecated inline bot, does.
     if [ "$with_legacy_bot" = 1 ] || [ -n "$telegram_dir" ]; then
         require_env TELEGRAM_BOT_TOKEN
         warn_if_empty OWNER_USER_ID
+    elif [ "$with_telegram" = 1 ]; then
+        existing_tg_token=$(file_value "$code_root/state-telegram/telegram.env" TELEGRAM_BOT_TOKEN || true)
+        if [ -z "$existing_tg_token" ]; then
+            require_env TELEGRAM_BOT_TOKEN
+        fi
+        existing_tg_owner=$(file_value "$code_root/state-telegram/telegram.env" OWNER_USER_ID || true)
+        if [ -z "$existing_tg_owner" ]; then
+            warn_if_empty OWNER_USER_ID
+        fi
     fi
     if [ "$with_web" = 1 ]; then
         resolve_web_origin
+    fi
+    if [ "$with_windows" = 1 ]; then
+        case "$windows_product_release" in
+            v[0-9]*) ;;
+            *) fail "WUWATERM_WINDOWS_VERSION must look like v0.9.0, not: $windows_product_release" ;;
+        esac
     fi
 }
 
@@ -384,6 +444,7 @@ ensure_api_device() {
 # drift, so this script routes to that product's own entry instead.
 telegram_product_repo=https://github.com/My-Denia/WuwaTerm-Telegram
 web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
+windows_product_repo=https://github.com/My-Denia/WuwaTerm-Windows
 
 # The releases these instructions name. contracts/products.json is the recorded
 # snapshot and docs/products.md points readers at it, so when that file can be
@@ -391,6 +452,7 @@ web_product_repo=https://github.com/My-Denia/WuwaTerm-Web
 # instead of three. The constants stay for a checkout or a host without python3.
 DEFAULT_TELEGRAM_VERSION=v0.6.1
 DEFAULT_WEB_VERSION=v0.7.0
+DEFAULT_WINDOWS_VERSION=v0.9.0
 
 recorded_product_tag() {
     [ -f "$code_root/contracts/products.json" ] || return 1
@@ -418,10 +480,77 @@ raise SystemExit(1)
 PY
 }
 
+recorded_product_asset_sha256() {
+    [ -f "$code_root/contracts/products.json" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$code_root/contracts/products.json" "$1" "$2" "$3" 2>/dev/null <<'PY'
+import json
+import sys
+
+path, product_id, expected_tag, asset_name = sys.argv[1:5]
+try:
+    with open(path, encoding="utf-8") as stream:
+        snapshot = json.load(stream)
+    products = snapshot.get("products")
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+if not isinstance(products, list):
+    raise SystemExit(1)
+for product in products:
+    if isinstance(product, dict) and product.get("id") == product_id:
+        release = product.get("release")
+        if not isinstance(release, dict) or release.get("tag") != expected_tag:
+            raise SystemExit(1)
+        digests = release.get("asset_sha256")
+        if isinstance(digests, dict):
+            digest = digests.get(asset_name)
+            if isinstance(digest, str) and len(digest) == 64:
+                print(digest)
+                raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+recorded_windows_zip_name() {
+    [ -f "$code_root/contracts/products.json" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$code_root/contracts/products.json" "$1" 2>/dev/null <<'PY'
+import json
+import sys
+
+path, expected_tag = sys.argv[1:3]
+try:
+    with open(path, encoding="utf-8") as stream:
+        snapshot = json.load(stream)
+    products = snapshot.get("products")
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+if not isinstance(products, list):
+    raise SystemExit(1)
+for product in products:
+    if isinstance(product, dict) and product.get("id") == "windows":
+        release = product.get("release")
+        if not isinstance(release, dict) or release.get("tag") != expected_tag:
+            raise SystemExit(1)
+        assets = release.get("assets")
+        if isinstance(assets, list):
+            for name in assets:
+                if isinstance(name, str) and name.endswith(".zip"):
+                    print(name)
+                    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 telegram_product_default=$(recorded_product_tag telegram) || telegram_product_default=$DEFAULT_TELEGRAM_VERSION
 web_product_default=$(recorded_product_tag web) || web_product_default=$DEFAULT_WEB_VERSION
+windows_product_default=$(recorded_product_tag windows) || windows_product_default=$DEFAULT_WINDOWS_VERSION
 telegram_product_release=${WUWATERM_TELEGRAM_VERSION:-$telegram_product_default}
 web_product_release=${WUWATERM_WEB_VERSION:-$web_product_default}
+windows_product_release=${WUWATERM_WINDOWS_VERSION:-$windows_product_default}
+telegram_oci_archive=
+telegram_image=
+telegram_image_version=
 
 # Only the bot's own settings travel to the product .env. The Web and API
 # secrets in this .env belong to other processes; the product's Compose file
@@ -575,30 +704,374 @@ print_telegram_steps() {
     printf 'setup:          python -B -m wuwaterm_telegram.operations health\n'
 }
 
+telegram_http_optional_env_keys() {
+    cat <<'EOF'
+OWNER_USER_ID
+WUWATERM_LOG_LEVEL
+WUWATERM_RATE_LIMIT_PER_MINUTE
+WUWATERM_REDACTION_SECRET
+WUWATERM_TR_REJECT_SILENT
+WUWATERM_GROUP_TR_REJECT_TEXT
+WUWATERM_PRIVATE_TR_REJECT_TEXT
+WUWATERM_CHANNEL_AUTOTRANSLATE
+WUWATERM_CHANNEL_MIN_CJK
+WUWATERM_CHANNEL_MIN_LATIN
+WUWATERM_CHANNEL_TEXT_LIMIT
+WUWATERM_CHANNEL_CAPTION_LIMIT
+WUWATERM_CHANNEL_MAX_PENDING
+WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE
+WUWATERM_CHANNEL_MAX_AGE_SECONDS
+EOF
+}
+
+telegram_version_supports_http() {
+    ver=$1
+    case "$ver" in
+        v[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    ver=${ver#v}
+    ver=${ver%%-*}
+    ver=${ver%%+*}
+    old_ifs=$IFS
+    IFS=.
+    set -- $ver
+    IFS=$old_ifs
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 1
+    major=$1
+    minor=$2
+    case "$major" in ''|*[!0-9]*) return 1 ;; esac
+    case "$minor" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$#" -eq 3 ]; then
+        patch=$3
+        case "$patch" in ''|*[!0-9]*) return 1 ;; esac
+    fi
+    if [ "$major" -gt 0 ]; then
+        return 0
+    fi
+    [ "$minor" -ge 7 ]
+}
+
+sync_telegram_env_value() {
+    env_file=$1
+    env_key=$2
+    env_val=$3
+    tmp_env="$env_file.tmp.$$"
+    (
+        umask 077
+        WUWATERM_SYNC_KEY="$env_key" WUWATERM_SYNC_VAL="$env_val" awk '
+            BEGIN {
+                replaced = 0
+                key = ENVIRON["WUWATERM_SYNC_KEY"]
+                val = ENVIRON["WUWATERM_SYNC_VAL"]
+                pat = "^[[:space:]]*" key "[[:space:]]*="
+            }
+            $0 ~ pat {
+                if (!replaced) {
+                    print key "=" val
+                    replaced = 1
+                }
+                next
+            }
+            { print }
+            END {
+                if (!replaced) print key "=" val
+            }
+        ' "$env_file" >"$tmp_env"
+    ) && chmod 600 "$tmp_env" \
+        || { rm -f "$tmp_env"; fail "could not prepare updated $env_file"; }
+    mv -f "$tmp_env" "$env_file" \
+        || { rm -f "$tmp_env"; fail "could not update $env_key in $env_file"; }
+}
+
+write_telegram_http_env() {
+    target=$1
+    token=$2
+    bot_token=$(env_value TELEGRAM_BOT_TOKEN || true)
+    [ -n "$bot_token" ] || fail "TELEGRAM_BOT_TOKEN is empty in .env. Edit $code_root/.env before running setup."
+    scratch="$target.$$"
+    if ! (
+        umask 077
+        exec >"$scratch"
+        printf '# Written by deploy/setup.sh for WuwaTerm-Telegram (Core HTTP mode).\n'
+        printf 'WUWATERM_CORE_API_URL=http://127.0.0.1:%s\n' "$(api_port)"
+        printf 'WUWATERM_CORE_API_TOKEN=%s\n' "$token"
+        printf 'WUWATERM_STATE_DIR=/app/state\n'
+        printf 'WUWATERM_POLL_HEALTH=1\n'
+        printf 'TELEGRAM_BOT_TOKEN=%s\n' "$bot_token"
+        telegram_http_optional_env_keys | while IFS= read -r key; do
+            value=$(env_value "$key" || true)
+            [ -n "$value" ] || continue
+            printf '%s=%s\n' "$key" "$value"
+        done
+    ); then
+        rm -f "$scratch"
+        fail "cannot write $target"
+    fi
+    mv "$scratch" "$target" || { rm -f "$scratch"; fail "cannot write $target"; }
+    chmod 600 "$target"
+}
+
+# Detect legacy inline bot or unmanaged standalone Telegram containers before
+# any destructive action. Only a container explicitly labeled
+# org.wuwaterm.managed-by=setup.sh may be replaced by this script; existing
+# Compose-managed or manually started Telegram containers fail closed so an
+# operator deployment is never deleted and two pollers never race on one token.
+preflight_telegram_containers() {
+    [ "$with_telegram" = 1 ] || return 0
+    [ -z "$telegram_dir" ] || return 0
+    if [ "$(container_state wuwaterm-bot)" = running ]; then
+        fail "deprecated inline bot (wuwaterm-bot) is running; stop it first (docker compose -f deploy/docker-compose.yml stop wuwaterm) before starting wuwaterm-telegram"
+    fi
+    if ! tg_compose_ids=$(docker ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram 2>&1); then
+        fail "could not inspect existing Compose-managed wuwaterm-telegram containers via docker ps: $tg_compose_ids"
+    fi
+    if [ -n "$tg_compose_ids" ]; then
+        tg_compose_summary=
+        for tg_cid in $tg_compose_ids; do
+            tg_cstate=$(container_state "$tg_cid")
+            tg_compose_summary="${tg_compose_summary:+$tg_compose_summary, }${tg_cid}(${tg_cstate:-unknown})"
+        done
+        fail "existing Compose-managed wuwaterm-telegram container(s) detected: $tg_compose_summary; stop and remove them via WuwaTerm-Telegram's docker compose before running --with-telegram (refusing to delete unmanaged containers or start dual pollers)"
+    fi
+    tg_named_state=$(container_state wuwaterm-telegram)
+    if [ -n "$tg_named_state" ]; then
+        tg_managed=$(docker inspect -f '{{ index .Config.Labels "org.wuwaterm.managed-by" }}' \
+            wuwaterm-telegram 2>/dev/null || true)
+        if [ "$tg_managed" != "setup.sh" ]; then
+            fail "existing wuwaterm-telegram container (state: $tg_named_state) is not managed by deploy/setup.sh; stop and remove or migrate it manually before running --with-telegram (refusing to delete unmanaged containers)"
+        fi
+    fi
+}
+
+resolve_telegram_package() {
+    [ "$with_telegram" = 1 ] || return 0
+    [ -z "$telegram_dir" ] || return 0
+    case "$telegram_product_release" in
+        v[0-9]*) ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.7.0, not: $telegram_product_release" ;;
+    esac
+    tg_state="$code_root/state-telegram"
+    tg_cached_ref=
+    tg_cached_ver=
+    if [ -s "$tg_state/image.ref" ]; then
+        tg_cached_ref=$(head -n 1 "$tg_state/image.ref" | tr -d '\r')
+    fi
+    if [ -s "$tg_state/image.version" ]; then
+        tg_cached_ver=$(head -n 1 "$tg_state/image.version" | tr -d '\r')
+    fi
+    if [ -n "$telegram_package" ]; then
+        if [ -n "${WUWATERM_TELEGRAM_VERSION:-}" ] \
+            && ! telegram_version_supports_http "$telegram_product_release"; then
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
+        fi
+    elif [ -z "${WUWATERM_TELEGRAM_VERSION:-}" ] \
+        && [ "$tg_cached_ver" = "local-package" ] \
+        && [ -n "$tg_cached_ref" ] \
+        && docker image inspect "$tg_cached_ref" >/dev/null 2>&1; then
+        telegram_image=$tg_cached_ref
+        telegram_oci_archive=
+        telegram_image_version=local-package
+        printf 'setup: reusing the installed Telegram image %s (local-package).\n' "$telegram_image"
+        return 0
+    else
+        if ! telegram_version_supports_http "$telegram_product_release"; then
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, pass --telegram-package <path> with a compatible OCI archive, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
+        fi
+    fi
+    mkdir -p "$tg_state" "$tg_state/state"
+    chmod 700 "$tg_state" "$tg_state/state"
+    if [ -z "$telegram_package" ] \
+        && [ -n "$tg_cached_ref" ] \
+        && [ "$tg_cached_ver" = "$telegram_product_release" ] \
+        && docker image inspect "$tg_cached_ref" >/dev/null 2>&1; then
+        telegram_image=$tg_cached_ref
+        telegram_oci_archive=
+        telegram_image_version=$telegram_product_release
+        printf 'setup: reusing the installed Telegram image %s (%s).\n' "$telegram_image" "$telegram_product_release"
+        return 0
+    fi
+    if [ -n "$telegram_package" ]; then
+        [ -e "$telegram_package" ] || fail "--telegram-package path does not exist: $telegram_package"
+        sums_file=
+        if [ -d "$telegram_package" ]; then
+            pkg_dir=$(CDPATH= cd -- "$telegram_package" && pwd -P)
+            telegram_oci_archive="$pkg_dir/image.oci.tar"
+            [ -f "$telegram_oci_archive" ] \
+                || fail "--telegram-package directory is missing image.oci.tar: $pkg_dir"
+            if [ -f "$pkg_dir/SHA256SUMS" ]; then
+                sums_file="$pkg_dir/SHA256SUMS"
+            fi
+        elif [ -f "$telegram_package" ]; then
+            telegram_oci_archive="$telegram_package"
+            pkg_dir=$(dirname -- "$telegram_package")
+            if [ -f "$pkg_dir/SHA256SUMS" ]; then
+                sums_file="$pkg_dir/SHA256SUMS"
+            fi
+        else
+            fail "--telegram-package must be an OCI archive file (image.oci.tar) or a directory holding it"
+        fi
+        if [ -n "$sums_file" ]; then
+            archive_name=$(basename -- "$telegram_oci_archive")
+            expected=$(awk -v name="$archive_name" '$2 == name || $2 == "*" name {print $1}' \
+                "$sums_file" | head -n 1)
+            [ -n "$expected" ] || fail "$sums_file does not list $archive_name"
+            actual=$(sha256_of "$telegram_oci_archive")
+            [ "$expected" = "$actual" ] \
+                || fail "the Telegram OCI archive checksum does not match $sums_file"
+        fi
+        if [ -n "${WUWATERM_TELEGRAM_VERSION:-}" ]; then
+            telegram_image_version=$telegram_product_release
+        else
+            telegram_image_version=local-package
+        fi
+        return 0
+    fi
+    telegram_image_version=$telegram_product_release
+    base="$telegram_product_repo/releases/download/$telegram_product_release"
+    sums_file="$tg_state/SHA256SUMS"
+    archive_file="$tg_state/image.oci.tar"
+    curl -fsSL --max-time 30 "$base/SHA256SUMS" -o "$sums_file" \
+        || fail "could not download Telegram SHA256SUMS ($base/SHA256SUMS); refusing an unverified Telegram package"
+    expected=$(awk -v name="image.oci.tar" '$2 == name || $2 == "*" name {print $1}' \
+        "$sums_file" | head -n 1)
+    [ -n "$expected" ] || fail "Telegram SHA256SUMS does not list image.oci.tar"
+    if recorded_sha=$(recorded_product_asset_sha256 telegram "$telegram_product_release" image.oci.tar); then
+        [ "$expected" = "$recorded_sha" ] \
+            || fail "Telegram SHA256SUMS digest for image.oci.tar disagrees with contracts/products.json"
+    fi
+    curl -fsSL --max-time 600 "$base/image.oci.tar" -o "$archive_file" \
+        || fail "could not download Telegram OCI archive ($base/image.oci.tar)"
+    actual=$(sha256_of "$archive_file")
+    [ "$expected" = "$actual" ] \
+        || fail "the downloaded Telegram image.oci.tar checksum does not match SHA256SUMS"
+    telegram_oci_archive=$archive_file
+}
+
+wait_for_telegram() {
+    tries=0
+    while [ "$tries" -lt 30 ]; do
+        if docker exec wuwaterm-telegram python -B -m wuwaterm_telegram.operations health >/dev/null 2>&1; then
+            return 0
+        fi
+        tries=$((tries + 1))
+        sleep 2
+    done
+    fail "wuwaterm-telegram did not pass health check; check docker logs wuwaterm-telegram"
+}
+
 install_telegram() {
     [ "$with_telegram" = 1 ] || return 0
     case "$telegram_product_release" in
         v[0-9]*) ;;
-        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.3.0, not: $telegram_product_release" ;;
+        *) fail "WUWATERM_TELEGRAM_VERSION must look like v0.7.0, not: $telegram_product_release" ;;
     esac
-    wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
     if [ -n "$telegram_dir" ]; then
+        wheel="wuwaterm_telegram-${telegram_product_release#v}-py3-none-any.whl"
         prepare_telegram_checkout
         where=$telegram_checkout
         prepared=1
+        printf '\nsetup: the Telegram bot is the standalone product %s,\n' "$telegram_product_repo"
+        printf 'setup: release %s. This checkout starts no bot in --telegram-dir mode.\n' "$telegram_product_release"
+        print_telegram_steps "$wheel" "$where" "$prepared"
+        if [ "$(container_state wuwaterm-bot)" = running ]; then
+            printf 'setup: the deprecated inline bot is running here; stop it before the product\n'
+            printf 'setup: polls the same token: docker compose -f deploy/docker-compose.yml stop wuwaterm\n'
+        fi
+        return 0
+    fi
+    preflight_telegram_containers
+    [ -f "$code_root/data/terms.db" ] \
+        || fail "$code_root/data/terms.db is missing; cannot start wuwaterm-telegram without the dictionary database"
+    tg_root="$code_root/state-telegram"
+    tg_state_dir="$tg_root/state"
+    tg_env="$tg_root/telegram.env"
+    tg_token_file="$tg_root/device.token"
+    mkdir -p "$tg_root" "$tg_state_dir"
+    chmod 700 "$tg_root" "$tg_state_dir"
+    tg_token_reissued=0
+    if [ ! -s "$tg_token_file" ]; then
+        tg_token_reissued=1
+    fi
+    issue_device "telegram" "translate,meta" "$tg_token_file"
+    tg_device_token=$(cat "$tg_token_file")
+    if [ ! -f "$tg_env" ]; then
+        write_telegram_http_env "$tg_env" "$tg_device_token"
+        printf 'setup: wrote Telegram HTTP-mode env to %s (mode 600).\n' "$tg_env"
     else
-        where='<product-dir>'
-        prepared=0
+        chmod 600 "$tg_env"
+        existing_core_token=$(file_value "$tg_env" WUWATERM_CORE_API_TOKEN || true)
+        if [ "$tg_token_reissued" = 1 ] || [ "$existing_core_token" != "$tg_device_token" ]; then
+            sync_telegram_env_value "$tg_env" WUWATERM_CORE_API_TOKEN "$tg_device_token"
+            printf 'setup: updated WUWATERM_CORE_API_TOKEN in %s from %s.\n' "$tg_env" "$tg_token_file"
+        else
+            printf 'setup: %s already present; keeping it.\n' "$tg_env"
+        fi
     fi
-    printf '\nsetup: the Telegram bot is the standalone product %s,\n' "$telegram_product_repo"
-    printf 'setup: release %s. This checkout starts no bot.\n' "$telegram_product_release"
-    print_telegram_steps "$wheel" "$where" "$prepared"
-    printf '\nsetup: the bot uses the Core library from its own pinned wheel, so the API\n'
-    printf 'setup: above is not in its path and does not have to be published for it.\n'
-    if [ "$(container_state wuwaterm-bot)" = running ]; then
-        printf 'setup: the deprecated inline bot is running here; stop it before the product\n'
-        printf 'setup: polls the same token: docker compose -f deploy/docker-compose.yml stop wuwaterm\n'
+    tg_check_bot_token=$(file_value "$tg_env" TELEGRAM_BOT_TOKEN || true)
+    [ -n "$tg_check_bot_token" ] || fail "TELEGRAM_BOT_TOKEN is empty in $tg_env"
+    tg_check_api_url=$(file_value "$tg_env" WUWATERM_CORE_API_URL || true)
+    [ -n "$tg_check_api_url" ] || fail "WUWATERM_CORE_API_URL is empty in $tg_env"
+    tg_check_api_token=$(file_value "$tg_env" WUWATERM_CORE_API_TOKEN || true)
+    [ -n "$tg_check_api_token" ] || fail "WUWATERM_CORE_API_TOKEN is empty in $tg_env"
+    if [ -n "$telegram_oci_archive" ]; then
+        load_output=$(docker load -i "$telegram_oci_archive" 2>&1) \
+            || fail "could not load Telegram OCI archive $telegram_oci_archive"
+        telegram_image=$(printf '%s\n' "$load_output" \
+            | sed -n 's/^Loaded image:[[:space:]]*//p' | tail -n 1 | tr -d '\r')
+        if [ -z "$telegram_image" ]; then
+            telegram_image=$(printf '%s\n' "$load_output" \
+                | sed -n 's/^Loaded image ID:[[:space:]]*//p' | tail -n 1 | tr -d '\r')
+        fi
+        [ -n "$telegram_image" ] \
+            || fail "docker load did not report a loaded image reference for $telegram_oci_archive"
+        (umask 077; printf '%s\n' "$telegram_image" >"$tg_root/image.ref")
+        chmod 600 "$tg_root/image.ref"
+        (umask 077; printf '%s\n' "$telegram_image_version" >"$tg_root/image.version")
+        chmod 600 "$tg_root/image.version"
     fi
+    [ -n "$telegram_image" ] || fail "no Telegram container image resolved"
+    if [ -n "$(container_state wuwaterm-telegram)" ]; then
+        docker rm -f wuwaterm-telegram >/dev/null 2>&1 \
+            || fail "could not replace existing setup.sh-managed wuwaterm-telegram container"
+    fi
+    docker run -d --name wuwaterm-telegram --restart unless-stopped \
+        --network host \
+        --label org.wuwaterm.managed-by=setup.sh \
+        --env-file "$tg_env" \
+        -v "$code_root/data:/app/data:ro" \
+        -v "$tg_state_dir:/app/state:rw" \
+        --tmpfs /run/wuwaterm-telegram:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+        "$telegram_image" >/dev/null \
+        || fail "could not start wuwaterm-telegram"
+    wait_for_telegram
+    printf 'setup: wuwaterm-telegram is running in HTTP mode against http://127.0.0.1:%s.\n' "$(api_port)"
+}
+
+enable_windows() {
+    [ "$with_windows" = 1 ] || return 0
+    case "$windows_product_release" in
+        v[0-9]*) ;;
+        *) fail "WUWATERM_WINDOWS_VERSION must look like v0.9.0, not: $windows_product_release" ;;
+    esac
+    win_token_file="$code_root/state-api/windows-device.token"
+    issue_device "windows" "translate,meta" "$win_token_file"
+    win_zip=$(recorded_windows_zip_name "$windows_product_release") \
+        || win_zip="WuwaTerm-${windows_product_release#v}-windows-x64.zip"
+    win_sha=$(recorded_product_asset_sha256 windows "$windows_product_release" "$win_zip" || true)
+    win_release_url="$windows_product_repo/releases/tag/$windows_product_release"
+    win_download_url="$windows_product_repo/releases/download/$windows_product_release/$win_zip"
+    printf '\nsetup: Windows desktop pairing (%s):\n' "$windows_product_release"
+    printf 'setup:   release page: %s\n' "$win_release_url"
+    printf 'setup:   archive URL:  %s\n' "$win_download_url"
+    if [ -n "$win_sha" ]; then
+        printf 'setup:   SHA-256:      %s\n' "$win_sha"
+    else
+        printf 'setup:   checksums:    %s/releases/download/%s/SHA256SUMS\n' \
+            "$windows_product_repo" "$windows_product_release"
+    fi
+    printf 'setup:   device token: %s (mode 0600; copy into Windows Settings -> Connection)\n' "$win_token_file"
+    printf 'setup:   Core API:     http://127.0.0.1:%s (expose over HTTPS via your reverse proxy, forwarding Authorization unchanged)\n' "$(api_port)"
 }
 
 # Kept for existing installations and for an explicit rollback. The install
@@ -1341,6 +1814,13 @@ print(
     else
         printf 'web:          not configured\n'
     fi
+    if [ -s "$code_root/state-api/windows-device.token" ]; then
+        printf 'windows:      token ready (%s, mode %s)\n' \
+            "$code_root/state-api/windows-device.token" \
+            "$(file_mode "$code_root/state-api/windows-device.token")"
+    else
+        printf 'windows:      not configured\n'
+    fi
     if is_adopted; then
         printf 'updates:      adopted (deploy/product-update.sh)\n'
     else
@@ -1371,19 +1851,23 @@ esac
 
 ensure_layout
 validate_config
-# Resolve the Web package and the Telegram checkout before the data build: a
-# missing package or a wrong path should stop the install instead of after a
+# Resolve the Telegram checkout/containers/package and the Web package before
+# the data build: an incompatible version, conflicting container, missing
+# package, or wrong path should stop the install instead of surfacing after a
 # gigabyte of upstream data was fetched.
+resolve_telegram_dir
+preflight_telegram_containers
+resolve_telegram_package
 if [ "$with_web" = 1 ]; then
     resolve_web_package
 fi
-resolve_telegram_dir
 build_data
 start_api
 ensure_api_device
 install_telegram
 enable_legacy_bot
 enable_web
+enable_windows
 maybe_adopt
 
 printf '\nsetup: done.\n'

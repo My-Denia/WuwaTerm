@@ -245,7 +245,7 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "      ;;\n"
         "    *' exec -T '*wuwaterm-api*)\n"
         "      if [ \"${RUNTIME_FAKE_READINESS_FAIL:-0}\" = 1 ]; then exit 44; fi\n"
-        "      if [ \"${RUNTIME_FAKE_ROLLBACK_READINESS_FAIL:-0}\" = 1 ] && grep -q rollback \"$FAKE_DEPLOY_ROOT/bot-ref\"; then exit 44; fi\n"
+        "      if [ \"${RUNTIME_FAKE_ROLLBACK_READINESS_FAIL:-0}\" = 1 ] && grep -q rollback \"$FAKE_DEPLOY_ROOT/api-ref\"; then exit 44; fi\n"
         "      ;;\n"
         "  esac\n"
         "  exit 0\n"
@@ -261,7 +261,9 @@ def _write_runtime_fake_docker(root: Path) -> None:
         (root / f"{service}-ref").write_text(
             "wuwaterm-runtime:old\n", encoding="ascii"
         )
-        (root / f"{service}-running").write_text("true\n", encoding="ascii")
+        (root / f"{service}-running").write_text(
+            "true\n" if service == "api" else "false\n", encoding="ascii"
+        )
         (root / f"{service}-present").write_text("1\n", encoding="ascii")
     # The standalone Telegram product is absent by default: `--runtime-only`
     # refuses only when it is PROVEN running, and a test for the dual-poller
@@ -571,7 +573,7 @@ def test_runtime_only_success_has_no_data_commands_or_db_writes(runtime_harness)
         (root / ".deployments" / f"{NEW_COMMIT}.json").read_text(encoding="utf-8")
     )
     assert manifest["backup_path"] == "none"
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
 
 
@@ -585,7 +587,7 @@ def test_runtime_only_builds_cached_runtime_target_when_missing(runtime_harness)
     assert result.returncode == 0, result.stdout + result.stderr
     assert _snapshot_database(root) == before
     actions = (root / "actions.log").read_text(encoding="utf-8")
-    assert " build wuwaterm" in actions
+    assert " build wuwaterm-api" in actions
     assert "wuwaterm-builder" not in actions
     assert (root / "target-image-created").exists()
 
@@ -597,7 +599,7 @@ def test_review_unmanifested_target_tag_is_rebuilt(runtime_harness):
     # but there is deliberately no immutable manifest binding it to a build.
     result = _run_runtime(root, env)
     assert result.returncode == 0, result.stderr
-    assert " build wuwaterm" in (root / "actions.log").read_text()
+    assert " build wuwaterm-api" in (root / "actions.log").read_text()
     assert _snapshot_database(root) == before
 
 
@@ -612,7 +614,7 @@ def test_review_pre_activation_failure_preserves_old_services_and_retries(runtim
     failed = _run_runtime(root, env)
     assert failed.returncode != 0
     actions = (root / "actions.log").read_text()
-    assert " stop wuwaterm" not in actions
+    assert " stop wuwaterm-api" not in actions
     assert " up -d " not in actions
     assert {p: _snapshot_file(root / p) for p in serving} == serving
     assert _snapshot_database(root) == before
@@ -657,10 +659,9 @@ def test_review_closed_rollback_cannot_stop_later_full_deployment(runtime_harnes
     )
     write_manifest(root / ".deployments" / f"{NEW_COMMIT}.json", manifest)
     publish_commit_pointer(root / ".deploy_commit", NEW_COMMIT)
-    for service in ("bot", "api"):
-        (root / f"{service}-image").write_text(NEW_RUNTIME_IMAGE_ID + "\n")
-        (root / f"{service}-ref").write_text(f"wuwaterm-runtime:{NEW_COMMIT}\n")
-        (root / f"{service}-running").write_text("true\n")
+    (root / "api-image").write_text(NEW_RUNTIME_IMAGE_ID + "\n")
+    (root / "api-ref").write_text(f"wuwaterm-runtime:{NEW_COMMIT}\n")
+    (root / "api-running").write_text("true\n")
     db_before = _snapshot_database(root)
     journal_before = journal_path.read_bytes()
     log_before = (root / "docker.log").read_bytes()
@@ -670,7 +671,7 @@ def test_review_closed_rollback_cannot_stop_later_full_deployment(runtime_harnes
     assert (root / "docker.log").read_bytes() == log_before
     assert journal_path.read_bytes() == journal_before
     assert _snapshot_database(root) == db_before
-    assert (root / "bot-running").read_text().strip() == "true"
+    assert (root / "bot-running").read_text().strip() == "false"
     assert (root / "api-running").read_text().strip() == "true"
 
 
@@ -827,11 +828,8 @@ def test_runtime_only_partial_start_rolls_back_both_services(runtime_harness):
         (root / "bot-image").read_text(encoding="ascii").strip()
         == OLD_RUNTIME_IMAGE_ID
     )
-    assert (
-        (root / "api-image").read_text(encoding="ascii").strip()
-        == OLD_RUNTIME_IMAGE_ID
-    )
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (root / "api-image").read_text(encoding="ascii").strip() == OLD_RUNTIME_IMAGE_ID
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
 
 
@@ -870,7 +868,7 @@ def test_runtime_only_rollback_partial_start_quiesces_both_and_stays_unresolved(
     assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (root / "api-running").read_text(encoding="ascii").strip() == "false"
     actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
-    assert sum(" stop wuwaterm wuwaterm-api" in line for line in actions) >= 2
+    assert sum(" stop wuwaterm-api" in line for line in actions) >= 2
 
 
 def test_runtime_only_rollback_stop_failure_attempts_final_quiesce(runtime_harness):
@@ -890,7 +888,7 @@ def test_runtime_only_rollback_stop_failure_attempts_final_quiesce(runtime_harne
     )
     assert journal["status"] == "unresolved"
     actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
-    assert sum(" stop wuwaterm wuwaterm-api" in line for line in actions) >= 3
+    assert sum(" stop wuwaterm-api" in line for line in actions) >= 3
 
 
 def test_runtime_only_old_rollback_health_failure_stays_unresolved(runtime_harness):
@@ -1012,8 +1010,8 @@ def test_runtime_only_recovery_failure_attempts_final_quiesce(runtime_harness):
     )
     assert journal["status"] == "unresolved"
     actions_after = (root / "actions.log").read_text(encoding="utf-8").splitlines()
-    assert sum(" stop wuwaterm wuwaterm-api" in line for line in actions_after) >= (
-        sum(" stop wuwaterm wuwaterm-api" in line for line in actions_before) + 2
+    assert sum(" stop wuwaterm-api" in line for line in actions_after) >= (
+        sum(" stop wuwaterm-api" in line for line in actions_before) + 2
     )
 
 
@@ -1072,14 +1070,13 @@ def test_runtime_only_ignores_stale_rolled_back_journal_after_new_binding(
         root / ".deployments" / f"{ALT_COMMIT}.json", alt_manifest
     )
     publish_commit_pointer(root / ".deploy_commit", ALT_COMMIT)
-    for service in ("bot", "api"):
-        (root / f"{service}-image").write_text(
-            f"{ALT_RUNTIME_IMAGE_ID}\n", encoding="ascii"
-        )
-        (root / f"{service}-ref").write_text(
-            f"wuwaterm-runtime:{ALT_COMMIT}\n", encoding="ascii"
-        )
-        (root / f"{service}-running").write_text("true\n", encoding="ascii")
+    (root / "api-image").write_text(
+        f"{ALT_RUNTIME_IMAGE_ID}\n", encoding="ascii"
+    )
+    (root / "api-ref").write_text(
+        f"wuwaterm-runtime:{ALT_COMMIT}\n", encoding="ascii"
+    )
+    (root / "api-running").write_text("true\n", encoding="ascii")
     env.pop("FAKE_POINTER_DURABILITY_FAILURE")
     env["RUNTIME_FAKE_HEAD_COMMIT"] = NEXT_COMMIT
     env["RUNTIME_FAKE_REMOTE_COMMIT"] = NEXT_COMMIT
@@ -1336,32 +1333,46 @@ def _bot_only_stopped(root: Path) -> None:
     (root / "bot-running").write_text("false\n", encoding="ascii")
 
 
-def test_runtime_only_updates_an_api_only_host_without_starting_the_bot(runtime_harness):
+def test_runtime_only_updates_api_and_leaves_stopped_legacy_bot_untouched(runtime_harness):
+    """A stopped legacy wuwaterm-bot is left untouched with a cleanup hint."""
     root, env, old_hash, _new_hash = runtime_harness
     _bot_only_stopped(root)
+    # Even if the stopped legacy bot carries a different/older image and Compose
+    # no longer has a wuwaterm service, upgrading wuwaterm-api must succeed.
+    (root / "bot-image").write_text(f"{ALT_RUNTIME_IMAGE_ID}\n", encoding="ascii")
+    (root / "bot-ref").write_text("wuwaterm-runtime:r15-legacy\n", encoding="ascii")
+    fake_docker = root.parent / "bin" / "docker"
+    script = fake_docker.read_text(encoding="utf-8")
+    guard = (
+        'if [ "${1:-}" = compose ]; then\n'
+        '  case "$*" in *" wuwaterm"|*" wuwaterm "*) echo "no such service: wuwaterm" >&2; exit 1 ;; esac\n'
+    )
+    fake_docker.write_text(script.replace('if [ "${1:-}" = compose ]; then\n', guard, 1), encoding="utf-8")
 
     result = _run_runtime(root, env)
 
     assert result.returncode == 0, result.stderr
-    # The API moved to the new image and runs.
+    assert "docker rm wuwaterm-bot" in result.stdout
     assert (root / "api-image").read_text(encoding="ascii").strip() == NEW_RUNTIME_IMAGE_ID
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
-    # The bot was never started; its stopped object carries the new reference.
+    # Legacy bot object was never rebuilt, stopped, created, or started.
     assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == NEW_RUNTIME_IMAGE_ID
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == ALT_RUNTIME_IMAGE_ID
     commands = [line.split("|", 1)[1] for line in
                 (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
-    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
-    assert [c for c in commands if " create " in c and c.endswith(" wuwaterm")], commands
-    # Nothing moved the database, and the transaction closed itself.
+    assert any(" build wuwaterm-api" in c for c in commands), commands
+    assert not [c for c in commands if c.endswith(" wuwaterm")], commands
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
     journal = root / ".deployments" / ".runtime-transaction.json"
-    assert json.loads(journal.read_text(encoding="utf-8"))["status"] == "committed"
+    parsed = json.loads(journal.read_text(encoding="utf-8"))
+    assert parsed["status"] == "committed"
+    assert parsed["old_bot_present"] is True
+    assert parsed["old_bot_running"] is False
 
 
 def test_runtime_only_leaves_an_absent_bot_absent(runtime_harness):
-    """A removed container is not re-created just so its image can move."""
+    """A removed container is never re-created by wuwaterm-api upgrades."""
     root, env, _old_hash, _new_hash = runtime_harness
     (root / "bot-present").unlink()
 
@@ -1371,25 +1382,36 @@ def test_runtime_only_leaves_an_absent_bot_absent(runtime_harness):
     assert not (root / "bot-present").exists()
     commands = [line.split("|", 1)[1] for line in
                 (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
-    assert not [c for c in commands if " create " in c and c.endswith(" wuwaterm")]
-    assert not [c for c in commands if " up -d " in c and c.endswith(" wuwaterm")]
+    assert not [c for c in commands if c.endswith(" wuwaterm")], commands
     assert (root / "api-running").read_text(encoding="ascii").strip() == "true"
+    journal = json.loads(
+        (root / ".deployments" / ".runtime-transaction.json").read_text(encoding="utf-8")
+    )
+    assert journal["old_bot_present"] is False
+    assert journal["old_bot_running"] is False
 
 
-def test_runtime_only_refuses_the_dual_poller_state(runtime_harness):
+@pytest.mark.parametrize("with_standalone", [False, True])
+def test_runtime_only_refuses_running_legacy_bot_in_preflight(
+    runtime_harness, with_standalone
+):
+    """Any running legacy wuwaterm-bot fails closed with migration guidance."""
     root, env, old_hash, _new_hash = runtime_harness
-    (root / "telegram-running").write_text("true\n", encoding="ascii")
-    (root / "telegram-present").write_text("1\n", encoding="ascii")
+    (root / "bot-running").write_text("true\n", encoding="ascii")
+    if with_standalone:
+        (root / "telegram-running").write_text("true\n", encoding="ascii")
+        (root / "telegram-present").write_text("1\n", encoding="ascii")
 
     result = _run_runtime(root, env)
 
     assert result.returncode == 1
-    assert "conflicting_telegram_poller" in result.stderr
+    assert "legacy_bot_running" in result.stderr
+    assert "WuwaTerm-Telegram" in result.stderr
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     commands = [line.split("|", 1)[1] for line in
                 (root / "docker.log").read_text(encoding="utf-8").splitlines() if "|" in line]
-    assert not [c for c in commands if " stop " in c or " up -d " in c or c.startswith("rm ")]
+    assert not [c for c in commands if " build " in c or " stop " in c or " up -d " in c or c.startswith("rm ")]
     journal = root / ".deployments" / ".runtime-transaction.json"
     assert not journal.exists()
 
@@ -1406,169 +1428,45 @@ def test_runtime_only_refuses_when_the_api_is_not_running(runtime_harness):
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
 
 
-def test_runtime_only_refuses_a_poller_named_after_its_compose_project(
-    runtime_harness,
-):
-    """`docker compose up` names that product container after its project.
-
-    Telegram v0.2.9 and earlier ship without an explicit container_name, so the
-    container runs as `deploy-wuwaterm-telegram-1` carrying the Compose service
-    label. Asking only for `wuwaterm-telegram` found nothing there and let the
-    in-Core bot start beside a working poller.
-    """
-    root, env, old_hash, _new_hash = runtime_harness
-    (root / "deploy-wuwaterm-telegram-1-present").write_text("1\n", encoding="ascii")
-    (root / "deploy-wuwaterm-telegram-1-running").write_text(
-        "true\n", encoding="ascii"
-    )
-    (root / "telegram-label-ids").write_text(
-        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
-    )
-
-    result = _run_runtime(root, env)
-
-    assert result.returncode == 1
-    assert "conflicting_telegram_poller" in result.stderr
-    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
-    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-    commands = [
-        line.split("|", 1)[1]
-        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
-        if "|" in line
-    ]
-    assert [
-        command
-        for command in commands
-        if command.startswith(
-            "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram"
-        )
-    ], commands
-    assert not [c for c in commands if " stop " in c or " up -d " in c or c.startswith("rm ")]
-    assert not (root / ".deployments" / ".runtime-transaction.json").exists()
-
-
-# --- a stopped surface that disappears during the replacement ---------------
-#
-# The journal records which surfaces existed before the transaction, so a
-# rollback restores that shape even when the host no longer shows it. Reading
-# the live host instead certified `rolled_back` on a bot it had lost.
-
-
-def _stopped_bot_that_vanishes(root: Path, env: dict[str, str]) -> None:
-    """A present-but-stopped bot whose object disappears mid-transaction."""
-
-    (root / "bot-running").write_text("false\n", encoding="ascii")
-    env["RUNTIME_FAKE_BOT_VANISHES_ON_API_UP"] = "1"
-
-
-def test_runtime_only_rollback_recreates_a_stopped_bot_that_disappeared(
-    runtime_harness,
-):
-    root, env, old_hash, _new_hash = runtime_harness
-    _stopped_bot_that_vanishes(root, env)
-
-    result = _run_runtime(root, env)
-
-    assert result.returncode == 1
-    assert "service_not_running" in result.stderr
-    # The object really disappeared, and the rollback put it back: the recorded
-    # existence, not the observed one, decided that.
-    assert (root / "bot-vanished").exists()
-    assert (root / "bot-present").exists()
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_RUNTIME_IMAGE_ID
-    docker_log = (root / "docker.log").read_text(encoding="utf-8").splitlines()
-    assert [
-        line
-        for line in docker_log
-        if " create " in line
-        and "rollback-runtime-" in line
-        and line.split("|", 1)[1].endswith(" wuwaterm")
-    ], docker_log
-    journal = json.loads(
-        (root / ".deployments" / ".runtime-transaction.json").read_text(
-            encoding="ascii"
-        )
-    )
-    assert journal["status"] == "rolled_back"
-    assert journal["old_bot_present"] is True
-    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
-    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-
-
-def test_runtime_only_rollback_refuses_to_certify_a_lost_stopped_bot(
-    runtime_harness,
-):
-    """A bot the rollback cannot rebuild keeps the journal unresolved."""
+def test_closed_legacy_journal_without_old_bot_present_allows_new_deploy(runtime_harness):
+    """Historical closed journals (LEGACY_JOURNAL_KEYS) remain read-only compatible."""
     root, env, _old_hash, _new_hash = runtime_harness
-    _stopped_bot_that_vanishes(root, env)
-    env["RUNTIME_FAKE_ROLLBACK_CREATE_FAIL"] = "1"
+    db = root / "data" / "terms.db"
+    info = db.stat()
+    txn = f"{OLD_COMMIT[:12]}-77"
+    journal_path = root / ".deployments" / ".runtime-transaction.json"
+    legacy = {
+        "schema_version": 1,
+        "mode": "runtime-only",
+        "status": "committed",
+        "phase": "committed",
+        "transaction_id": txn,
+        "source_commit": OLD_COMMIT,
+        "target_image_ref": f"wuwaterm-runtime:{OLD_COMMIT}",
+        "target_image_id": OLD_RUNTIME_IMAGE_ID,
+        "target_image_digest": OLD_RUNTIME_IMAGE_ID,
+        "target_image_revision": OLD_COMMIT,
+        "old_pointer": OLD_COMMIT,
+        "old_manifest_path": f".deployments/{OLD_COMMIT}.json",
+        "old_image_ref": "wuwaterm-runtime:old",
+        "old_image_id": OLD_RUNTIME_IMAGE_ID,
+        "old_bot_running": True,
+        "old_api_running": True,
+        "rollback_image_ref": f"wuwaterm-runtime:rollback-runtime-{txn}",
+        "db_sha256": hashlib.sha256(db.read_bytes()).hexdigest(),
+        "db_stat": {
+            "ino": info.st_ino,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "ctime_ns": info.st_ctime_ns,
+        },
+        "tool_hash": "0" * 64,
+    }
+    journal_path.write_text(json.dumps(legacy) + "\n", encoding="ascii")
 
     result = _run_runtime(root, env)
-
-    assert result.returncode == 1
-    assert (root / "bot-vanished").exists()
-    assert not (root / "bot-present").exists()
-    journal = json.loads(
-        (root / ".deployments" / ".runtime-transaction.json").read_text(
-            encoding="ascii"
-        )
-    )
-    assert journal["status"] == "unresolved"
-    assert journal["old_bot_present"] is True
-    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-
-
-def test_runtime_only_recovery_recreates_a_stopped_bot_that_disappeared(
-    runtime_harness,
-):
-    root, env, _old_hash, _new_hash = runtime_harness
-    _stopped_bot_that_vanishes(root, env)
-    env["RUNTIME_FAKE_ROLLBACK_CREATE_FAIL"] = "1"
-    assert _run_runtime(root, env).returncode == 1
-    assert not (root / "bot-present").exists()
-
-    recovery_env = dict(env)
-    recovery_env.pop("RUNTIME_FAKE_ROLLBACK_CREATE_FAIL")
-    result = _run_runtime(root, recovery_env, recover=True)
-
     assert result.returncode == 0, result.stderr
-    assert (root / "bot-present").exists()
-    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
-    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_RUNTIME_IMAGE_ID
-    journal = json.loads(
-        (root / ".deployments" / ".runtime-transaction.json").read_text(
-            encoding="ascii"
-        )
-    )
-    assert journal["status"] == "rolled_back"
-
-
-def test_runtime_only_refuses_a_bot_object_that_appeared_where_none_existed(
-    runtime_harness,
-):
-    """The third shape: a bot the journal recorded as absent stays absent.
-
-    An object nobody announced is not something this transaction created, so
-    the rollback keeps the journal unresolved instead of certifying it.
-    """
-    root, env, _old_hash, _new_hash = runtime_harness
-    (root / "bot-present").unlink()
-    env["RUNTIME_FAKE_BOT_APPEARS_ON_API_UP"] = "1"
-
-    result = _run_runtime(root, env)
-
-    assert result.returncode == 1
-    assert "service_state_mismatch" in result.stderr
-    assert (root / "bot-appeared").exists()
-    journal = json.loads(
-        (root / ".deployments" / ".runtime-transaction.json").read_text(
-            encoding="ascii"
-        )
-    )
-    assert journal["status"] == "unresolved"
-    assert journal["old_bot_present"] is False
-    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{NEW_COMMIT}\n"
 
 
 def test_legacy_open_journal_refuses_current_recovery_as_tool_mismatch(

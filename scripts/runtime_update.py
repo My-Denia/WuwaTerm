@@ -59,26 +59,15 @@ JOURNAL_NAME = ".runtime-transaction.json"
 # restores the tool of its own source commit.
 JOURNAL_SCHEMA_VERSION = 1
 RUNTIME_BACKUP_SENTINEL = "none"
-SERVICES = ("wuwaterm", "wuwaterm-api")
-CONTAINERS = {"wuwaterm": "wuwaterm-bot", "wuwaterm-api": "wuwaterm-api"}
-# The journal records what each surface was doing when the transaction began,
-# so a restart, a rollback and the final verifier all agree on which surfaces
-# this deployment is responsible for. A host whose legacy in-Core bot was
-# retired (the standalone Telegram product serves instead) records
-# old_bot_running=false and is never started by an update.
+SERVICES = ("wuwaterm-api",)
+CONTAINERS = {"wuwaterm-api": "wuwaterm-api"}
+LEGACY_BOT_CONTAINER = "wuwaterm-bot"
+# The journal keeps the historical old_bot_* keys so upgraded hosts can still
+# read closed pre-decoupling records, while new transactions only manage
+# wuwaterm-api and refuse to run while a legacy wuwaterm-bot container is up.
 _SURFACE_RUNNING_KEYS = {
-    "wuwaterm": "old_bot_running",
     "wuwaterm-api": "old_api_running",
 }
-STANDALONE_TELEGRAM_CONTAINER = "wuwaterm-telegram"
-# The standalone Telegram product is not always called `wuwaterm-telegram`.
-# Telegram v0.2.9 and earlier ship without an explicit container_name, so Compose
-# named the container after its project (`deploy-wuwaterm-telegram-1`). Compose
-# labels every one of them with the service name, which is the only stable way
-# to find an installation the fixed name misses.
-STANDALONE_TELEGRAM_FILTER = (
-    f"label=com.docker.compose.service={STANDALONE_TELEGRAM_CONTAINER}"
-)
 JOURNAL_KEYS = {
     "schema_version",
     "mode",
@@ -699,76 +688,53 @@ def _present_surfaces() -> dict[str, bool]:
     }
 
 
-def _health_surface(journal: dict[str, Any]) -> str:
-    """A running container that mounts the terminology database read-only."""
+def _health_surface(_journal: dict[str, Any]) -> str:
+    """The running API container that mounts the terminology database read-only."""
 
-    return "wuwaterm" if journal["old_bot_running"] else "wuwaterm-api"
+    return "wuwaterm-api"
 
 
-def _standalone_telegram_containers() -> list[str]:
-    """Every container the standalone Telegram product's Compose service owns.
+def _preflight_legacy_bot() -> bool:
+    """Inspect any legacy in-Core wuwaterm-bot container before mutating state.
 
-    A refused listing is a failed observation, not an empty host, so it raises
-    instead of answering with no container.
+    A running legacy wuwaterm-bot fails closed with migration guidance to the
+    standalone WuwaTerm-Telegram product. A stopped legacy container is left
+    untouched with a manual-cleanup notice so wuwaterm-api upgrades proceed
+    without depending on a Compose `wuwaterm` service.
     """
 
-    try:
-        returncode, stdout, _stderr = _execute(
-            ["docker", "ps", "-aq", "--filter", STANDALONE_TELEGRAM_FILTER]
+    bot_state = _surface_state(LEGACY_BOT_CONTAINER)
+    if bot_state is None:
+        return False
+    if bot_state[0]:
+        print(
+            "refusing runtime-only deployment: legacy wuwaterm-bot container is "
+            "running; stop it and migrate to standalone WuwaTerm-Telegram "
+            "(https://github.com/My-Denia/WuwaTerm-Telegram) before upgrading.",
+            file=sys.stderr,
         )
-    except OSError:
-        raise RuntimeUpdateError("command_unavailable") from None
-    if returncode != 0:
-        raise RuntimeUpdateError("inspect_failed")
-    _check_termination()
-    return [line.strip() for line in stdout.splitlines() if line.strip()]
-
-
-def _standalone_telegram_running() -> bool:
-    """Whether the separate Telegram product serves this host's token.
-
-    Two pollers on one bot token answer every update twice, so an update must
-    refuse rather than start a second one. Only a positively observed running
-    state counts: an absent product is the ordinary case.
-
-    The fixed container name is asked first, because that is what a current
-    release creates. An installation started from a release without an
-    explicit container_name runs as `<project>-wuwaterm-telegram-1`, and the
-    Compose service label is what identifies it; checking only the fixed name
-    missed every one of those hosts and let a second poller start.
-    """
-
-    host = STANDALONE_TELEGRAM_CONTAINER
-    pinned = _observe(host, "{{.State.Running}}")
-    if pinned is not None and pinned not in ("true", "false"):
-        raise RuntimeUpdateError("invalid_command_output")
-    if pinned == "true":
-        return True
-    for container in _standalone_telegram_containers():
-        # A container removed between the listing and the inspect answers the
-        # daemon's own "No such object", which _observe reports as absent.
-        running = _observe(container, "{{.State.Running}}")
-        if running is None:
-            continue
-        if running not in ("true", "false"):
-            raise RuntimeUpdateError("invalid_command_output")
-        if running == "true":
-            return True
-    return False
+        raise RuntimeUpdateError("legacy_bot_running")
+    _human(
+        "note: stopped legacy wuwaterm-bot container detected; leaving it "
+        "untouched while upgrading wuwaterm-api "
+        "(you can remove it manually with: docker rm wuwaterm-bot)"
+    )
+    return True
 
 
 def _recorded_presence(journal: dict[str, Any]) -> dict[str, bool]:
-    """Which surface objects existed when the transaction began.
+    """Which managed surface objects existed when the transaction began.
 
-    The API is the surface this updater refuses to run without, so it was
-    present by construction. The bot's existence is recorded, because a bot
-    that was present and stopped before the transaction has to come back in
-    that state after a rollback even when the replacement removed its object.
+    The API is the sole managed surface, so it was present by construction.
+    Open historical journals written before `old_bot_present` still fail as
+    `recovery_tool_mismatch` so historical-source recovery handles them.
     """
 
     if "old_bot_present" not in journal:
         raise RuntimeUpdateError("recovery_tool_mismatch")
-    return {"wuwaterm": journal["old_bot_present"], "wuwaterm-api": True}
+    if journal["old_bot_running"]:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
+    return {"wuwaterm-api": True}
 
 
 def _surface_flags(journal: dict[str, Any]) -> dict[str, bool]:
@@ -834,6 +800,8 @@ def _assert_surfaces(
     """
 
     if "old_bot_present" not in journal:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
+    if journal["old_bot_running"]:
         raise RuntimeUpdateError("recovery_tool_mismatch")
     flags = _surface_flags(journal)
     present = _recorded_presence(journal)
@@ -911,7 +879,9 @@ def _observed_service_ref(allowed_refs: set[str]) -> tuple[str, dict[str, bool]]
         if state is not None
     }
     running = {service: bool(state and state[0]) for service, state in observed.items()}
-    if not any(running.values()) or not refs or refs - allowed_refs:
+    if not any(running.values()):
+        raise RuntimeUpdateError("service_not_running")
+    if not refs or refs - allowed_refs:
         raise RuntimeUpdateError("service_binding_mismatch")
     serving = {state[2] for state in observed.values() if state is not None and state[0]}
     if len(serving) != 1:
@@ -1397,6 +1367,7 @@ def _new_deployment() -> int:
         existing = _load_journal()
         if existing["status"] in {"active", "unresolved"}:
             raise RuntimeUpdateError("recovery_required")
+    legacy_bot_present = _preflight_legacy_bot()
     if _idempotent_target(source_commit, db_snapshot, pointer):
         return 0
     target_manifest_path = ROOT / ".deployments" / f"{source_commit}.json"
@@ -1435,22 +1406,20 @@ def _new_deployment() -> int:
     current_old_ref, running = _observed_service_ref(allowed_old_refs)
     if not running["wuwaterm-api"]:
         raise RuntimeUpdateError("service_not_running")
-    if _standalone_telegram_running() and running["wuwaterm"]:
-        raise RuntimeUpdateError("conflicting_telegram_poller")
     _assert_published_surfaces(
         expected_ref=current_old_ref,
         expected_image_id=_image_id(old_manifest["image"]["id"]),
         expected_revision=pointer,
     )
     present = _present_surfaces()
-    old_bot_running = running["wuwaterm"]
+    old_bot_running = False
     old_api_running = running["wuwaterm-api"]
     journal = _journal_from_preflight(
         source_commit=source_commit,
         old_pointer=pointer,
         old_manifest=old_manifest,
         db_snapshot=db_snapshot,
-        old_bot_present=present["wuwaterm"],
+        old_bot_present=legacy_bot_present,
         old_bot_running=old_bot_running,
         old_api_running=old_api_running,
         target_manifest=target_manifest,
@@ -1466,7 +1435,7 @@ def _new_deployment() -> int:
             target = _image_binding(journal["target_image_ref"])
         else:
             _set_journal(journal, phase="image_build")
-            _compose("build", "wuwaterm", env=_runtime_env(journal["target_image_ref"]))
+            _compose("build", "wuwaterm-api", env=_runtime_env(journal["target_image_ref"]))
             target = _image_binding(journal["target_image_ref"])
         target_id, target_digest, target_revision = target
         if target_revision != source_commit:
@@ -1567,6 +1536,8 @@ def _recovery() -> str:
     if journal["status"] == "rolled_back":
         raise RuntimeUpdateError("no_recovery_needed")
     if "old_bot_present" not in journal:
+        raise RuntimeUpdateError("recovery_tool_mismatch")
+    if journal["old_bot_running"]:
         raise RuntimeUpdateError("recovery_tool_mismatch")
     if _run_output(
         ["git", "status", "--porcelain", "--untracked-files=all"], allow_empty=True

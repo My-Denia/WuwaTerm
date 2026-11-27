@@ -192,7 +192,7 @@ def full_host(tmp_path):
     _write_full_fake_python(host.fake_bin.parent / "install")
     assert host.migrate().returncode == 0
     adopt_release_commit(host)
-    _surface(host.base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=True)
+    _surface(host.base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(host.base, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
     return host
 
@@ -295,10 +295,10 @@ def test_a_rollback_keeps_current_on_the_serving_release(full_host):
     backup_rel = f"data/deployment-backups/terms.{TXN}.{old_hash}.db"
     (base / backup_rel).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(base / "data" / "terms.db", base / backup_rel)
-    # The interruption: the database was promoted and both surfaces now run the
+    # The interruption: the database was promoted and the API runs the
     # candidate, before the manifest and pointer were published.
     (base / "data" / "terms.db").write_bytes(new_bytes)
-    _surface(base, "bot", image=NEW_IMAGE, ref=f"wuwaterm-runtime:{commit}", running=True)
+    _surface(base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(base, "api", image=NEW_IMAGE, ref=f"wuwaterm-runtime:{commit}", running=True)
     (base / f"tag-{BOT_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     (base / f"tag-{API_ROLLBACK_REF}").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
@@ -352,7 +352,7 @@ def migrated_host(tmp_path):
     _write_full_fake_docker(host.fake_bin.parent / "install")
     _write_full_fake_python(host.fake_bin.parent / "install")
     assert host.migrate().returncode == 0
-    _surface(host.base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=True)
+    _surface(host.base, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     _surface(host.base, "api", image=OLD_IMAGE, ref=OLD_REF, running=True)
     return host
 
@@ -418,6 +418,7 @@ def test_a_per_surface_old_binding_is_settled_without_moving_current(
             new_db_sha="0" * 64,
             candidate_rel=f"data/candidates/terms.{TXN}.db",
             bot_id=OLD_IMAGE,
+            bot_ref=OLD_REF,
             api_id=API_ALT_IMAGE,
             bot_running=False,
             api_running=True,
@@ -556,7 +557,7 @@ def test_an_old_side_restore_does_not_authorize_the_candidate(full_host):
     assert (base / "data" / "terms.db").read_bytes() == old_db
     assert (base / "bot-image").read_text(encoding="ascii").strip() == served_bot
     assert (base / "api-image").read_text(encoding="ascii").strip() == served_api
-    assert (base / "bot-running").read_text(encoding="ascii").strip() == "true"
+    assert (base / "bot-running").read_text(encoding="ascii").strip() == "false"
     assert (base / "api-running").read_text(encoding="ascii").strip() == "true"
     assert surface_starts(base / "docker.log") > starts
     assert (base / ".deploy_commit").read_text(encoding="ascii") == f"{commit}\n"

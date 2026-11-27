@@ -718,101 +718,37 @@ capture_running_state() {
   exit 1
 }
 
-# The standalone Telegram product is not always called `wuwaterm-telegram`.
-# Telegram v0.2.9 and earlier ship without an explicit container_name, so
-# `docker compose -f deploy/docker-compose.yml up -d` named the container after
-# its project (`deploy-wuwaterm-telegram-1`, or `<project>-wuwaterm-telegram-1`).
-# Compose labels every one of them with the service name, so the label finds
-# the installation the fixed name misses; the fixed name is asked first because
-# it is what a current release creates.
-#
-# A listing the daemon refused is not "no container": it is retried like an
-# inspect, and if it stays unconfirmed the update refuses instead of reading
-# the silence as an absent product.
-capture_standalone_telegram_running() {
-  sat_pinned="$(capture_running_state wuwaterm-telegram)" || return 1
-  if [ "$sat_pinned" = "true" ]; then
-    printf '%s' true
-    return 0
-  fi
-  sat_attempt=0
-  while [ "$sat_attempt" -lt 3 ]; do
-    sat_attempt=$((sat_attempt + 1))
-    sat_err="/tmp/wuwaterm-telegram-ps.$$"
-    set +e
-    sat_containers="$(docker ps -aq \
-      --filter label=com.docker.compose.service=wuwaterm-telegram \
-      2>"$sat_err")"
-    sat_status="$?"
-    set -e
-    if [ "$sat_status" -eq 0 ]; then
-      rm -f "$sat_err"
-      for sat_container in $sat_containers; do
-        # A container deleted between the listing and the inspect answers
-        # "No such object", which capture_running_state reports as stopped.
-        sat_running="$(capture_running_state "$sat_container")" || return 1
-        if [ "$sat_running" = "true" ]; then
-          printf '%s' true
-          return 0
-        fi
-      done
-      printf '%s' false
-      return 0
-    fi
-    rm -f "$sat_err"
-  done
-  echo "refusing deployment: standalone wuwaterm-telegram containers could not" >&2
-  echo "be listed; not recording the product as absent" >&2
-  exit 1
-}
-old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
 old_bot_running="$(capture_running_state wuwaterm-bot)"
-old_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-bot 2>/dev/null || true)"
+old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
+if [ "$old_bot_running" = "true" ]; then
+  echo "refusing deployment: legacy wuwaterm-bot container is running; stop it" >&2
+  echo "and migrate to standalone WuwaTerm-Telegram" >&2
+  echo "(https://github.com/My-Denia/WuwaTerm-Telegram) before running this updater." >&2
+  exit 1
+fi
+if [ -n "$old_image_id" ]; then
+  echo "note: stopped legacy wuwaterm-bot container detected; leaving it untouched" >&2
+  echo "while upgrading wuwaterm-api (you can remove it manually with: docker rm wuwaterm-bot)" >&2
+fi
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 old_api_running="$(capture_running_state wuwaterm-api)"
 old_api_ref="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null || true)"
-standalone_telegram_running="$(capture_standalone_telegram_running)"
 
-# A deployment publishes code and data; it does not decide which surfaces
-# serve. The legacy in-Core bot is retired on a host where the standalone
-# Telegram product serves instead, and an unconditional start would put it
-# back on every release. So the target running state is derived from what was
-# observed here, and the read-back after the start proves it. Every refusal
-# below happens before the transaction is armed, before the builder runs and
-# before any database or service is touched.
-if [ "$old_pointer_present" -eq 1 ] && \
-  [ "$old_bot_running" != "true" ] && [ "$old_api_running" != "true" ]; then
-  echo "refusing deployment: neither wuwaterm-bot nor wuwaterm-api is running," >&2
-  echo "but $pointer_path records a deployment. A host with no serving surface" >&2
-  echo "cannot be updated in place; start the surface this host should serve," >&2
-  echo "then deploy again." >&2
-  exit 1
-fi
-if [ "$standalone_telegram_running" = "true" ] && [ "$old_bot_running" = "true" ]; then
-  echo "refusing deployment: both wuwaterm-bot and standalone wuwaterm-telegram" >&2
-  echo "are running; stop legacy wuwaterm-bot first (they would both poll the" >&2
-  echo "same bot token and duplicate every update)." >&2
+# A deployment publishes code and data for wuwaterm-api; the legacy in-Core
+# bot is no longer managed here. Every refusal below happens before the
+# transaction is armed, before the builder runs and before any database or
+# service is touched.
+if [ "$old_pointer_present" -eq 1 ] && [ "$old_api_running" != "true" ]; then
+  echo "refusing deployment: wuwaterm-api is not running, but $pointer_path" >&2
+  echo "records a deployment. A host with no serving surface cannot be updated" >&2
+  echo "in place; start wuwaterm-api, then deploy again." >&2
   exit 1
 fi
 if [ "$old_pointer_present" -eq 1 ]; then
-  target_bot_running="$old_bot_running"
   target_api_running="$old_api_running"
 else
-  # First deployment from a host with no recorded pointer: the API always
-  # serves, and the inline bot starts only where nothing else already serves
-  # Telegram.
+  # First deployment from a host with no recorded pointer: wuwaterm-api serves.
   target_api_running=true
-  if [ "$standalone_telegram_running" = "true" ]; then
-    target_bot_running=false
-  else
-    target_bot_running=true
-  fi
-fi
-# Tagged per surface: a host running only one of them still has an image to
-# roll back to, and a host whose two containers are on different images keeps
-# both of them.
-if [ -n "$old_image_id" ]; then
-  docker image tag "$old_image_id" "$rollback_image_ref"
 fi
 if [ -n "$old_api_image_id" ]; then
   docker image tag "$old_api_image_id" "$rollback_api_image_ref"
@@ -850,7 +786,7 @@ fi
 fail_if verify
 
 SOURCE_COMMIT="$source_commit" WUWATERM_RUNTIME_IMAGE="$new_image_ref" \
-  compose build wuwaterm
+  compose build wuwaterm-api
 image_id="$(docker image inspect --format '{{.Id}}' "$new_image_ref")"
 image_digest="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$new_image_ref")"
 image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$new_image_ref")"
@@ -921,7 +857,7 @@ rollback_on_failure() {
   # only what was running before the deployment comes back afterwards.
   containers_quiesced=1
   if [ "$runtime_stopped" -eq 1 ]; then
-    if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
+    if ! compose stop wuwaterm-api >/dev/null 2>&1; then
       echo "warning: replacement containers could not be stopped before rollback" >&2
       rollback_failed=1
       containers_quiesced=0
@@ -991,32 +927,6 @@ rollback_on_failure() {
   # down, which is the correct outcome for a host that was not running it.
   if [ "$runtime_stopped" -eq 1 ]; then
     if [ "$db_binding_restored" -eq 1 ]; then
-      # Same rule for both surfaces, and each is gated on ITS OWN state: a
-      # host running only the API has no bot image, and that must not decide
-      # whether the API comes back.
-      if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
-        if ! rollback_image_matches "$rollback_image_ref" "$old_image_id"; then
-          echo "warning: old runtime rollback image binding changed; refusing restart" >&2
-          rollback_failed=1
-        elif ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
-          compose up -d --no-build --force-recreate wuwaterm; then
-          echo "warning: old runtime image could not be restarted" >&2
-          rollback_failed=1
-        fi
-      elif [ -n "$old_image_id" ]; then
-        # The surface was recorded STOPPED on that image, and this deployment
-        # re-created it on the new one. It stays stopped, but it goes back to
-        # the image it was recorded on; otherwise the rollback would leave a
-        # stopped object nobody deployed under the surface's name.
-        if ! rollback_image_matches "$rollback_image_ref" "$old_image_id"; then
-          echo "warning: old stopped runtime rollback image binding changed; refusing restore" >&2
-          rollback_failed=1
-        elif ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
-          compose create --no-build --force-recreate --pull never wuwaterm; then
-          echo "warning: stopped runtime object could not be restored" >&2
-          rollback_failed=1
-        fi
-      fi
       # Only bring the api surface back if this host was actually RUNNING it
       # when the deployment started. On a first upgrade there is nothing to
       # restore, and a container that existed but was stopped (an earlier
@@ -1085,11 +995,11 @@ python3 scripts/full_update.py prepare \
   --db-backup "$db_backup" \
   --old-db-sha "${old_db_hash:-none}" \
   --candidate-path "$candidate_path" \
-  --old-image-id "${old_image_id:-none}" \
+  --old-image-id none \
   --old-api-image-id "${old_api_image_id:-none}" \
-  --old-ref "${old_ref:-none}" \
+  --old-ref none \
   --old-api-ref "${old_api_ref:-none}" \
-  --old-bot-running "$old_bot_running" \
+  --old-bot-running false \
   --old-api-running "$old_api_running" \
   --rollback-image-ref "$rollback_image_ref" \
   --rollback-api-image-ref "$rollback_api_image_ref" \
@@ -1098,11 +1008,9 @@ python3 scripts/full_update.py prepare \
   --target-image-digest "$image_digest" \
   --target-image-revision "$image_revision"
 # The transition is recorded BEFORE the command, for the same reason
-# db_promoted is: a combined stop that fails partway may already have stopped
-# one surface, and a rollback that believes nothing was touched would leave the
-# previously running bot down without saying so.
+# db_promoted is: a stop that fails partway must still arm rollback.
 runtime_stopped=1
-compose stop wuwaterm wuwaterm-api
+compose stop wuwaterm-api
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
   --source "$candidate_path" --destination "$db_path"
@@ -1137,18 +1045,8 @@ for state_file in chat_settings.json channel_replies.json; do
 done
 fail_if state
 
-# Start only the surfaces this deployment is responsible for. A surface that
-# was running is re-created on the new image and stays up; one that was
-# present but stopped is re-created stopped (`compose create`), so its image
-# reference still moves with the release without starting it; one that was
-# absent is left absent.
-if [ "$target_bot_running" = "true" ]; then
-  WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose up -d --no-build \
-    --force-recreate wuwaterm
-elif [ -n "$old_image_id" ]; then
-  WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose create --no-build \
-    --force-recreate --pull never wuwaterm
-fi
+# Start wuwaterm-api on the validated image; the retired legacy wuwaterm-bot
+# container is never created, stopped or started by this updater.
 if [ "$target_api_running" = "true" ]; then
   WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose up -d --no-build \
     --force-recreate wuwaterm-api
@@ -1158,13 +1056,6 @@ elif [ -n "$old_api_image_id" ]; then
 fi
 python3 scripts/full_update.py phase started
 fail_if start
-# Each smoke needs the surface it checks to be running. The bot smoke runs
-# inside the bot container, so a host that serves Telegram elsewhere skips it
-# instead of starting a second poller to satisfy a check.
-if [ "$target_bot_running" = "true" ]; then
-  WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
-    -e TELEGRAM_TEST_CHAT_ID= wuwaterm python scripts/deploy_smoke.py
-fi
 # The api surface binds loopback only, so its smoke runs inside its own
 # container and needs nothing exposed to the host. Readiness, not liveness:
 # /healthz answers while the terminology database is missing or mounted at the
@@ -1234,19 +1125,12 @@ surface_state() {
   esac
 }
 
-bot_expected=absent
-if [ "$target_bot_running" = "true" ]; then
-  bot_expected=running
-elif [ -n "$old_image_id" ]; then
-  bot_expected=stopped
-fi
 api_expected=absent
 if [ "$target_api_running" = "true" ]; then
   api_expected=running
 elif [ -n "$old_api_image_id" ]; then
   api_expected=stopped
 fi
-bot_surface_state="$(surface_state wuwaterm-bot "$bot_expected")"
 api_surface_state="$(surface_state wuwaterm-api "$api_expected")"
 
 python3 scripts/deployment_manifest.py create \
@@ -1294,8 +1178,10 @@ backup_retention_prune "$backup_dir" 5 "$deployment_id" ||
 
 echo "deployment source commit: $source_commit"
 echo "deployment image id: $image_id"
-echo "deployment bot surface: $bot_surface_state"
 echo "deployment api surface: $api_surface_state"
+if [ -n "$old_image_id" ]; then
+  echo "deployment legacy bot: stopped (untouched; remove manually with: docker rm wuwaterm-bot)"
+fi
 echo "deployment image digest: $image_digest"
 echo "deployment database sha256: $db_hash"
 echo "deployment manifest: $manifest_path"

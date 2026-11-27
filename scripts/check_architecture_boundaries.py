@@ -4,8 +4,8 @@
 Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     attribution_candidates, domain_knowledge, entity_graph,
-                   knowledge_db, lookup, native_kernel, normalize, models,
-                   review, cjk_span, document_anchor, protected_text,
+                   fuzzy_index, knowledge_db, lookup, native_kernel, normalize,
+                   models, review, cjk_span, document_anchor, protected_text,
                    english_plural, segmentation, semantic_review_contract,
                    single_char_context, skill_references, term_classification,
                    term_matching, term_preparation, termbase, text_spans
@@ -63,10 +63,12 @@ nested subpackages discovered via rglob):
    ``SCRIPTS_ONE_WAY`` may not import the module it is called from, and no new
    strongly connected component may appear — a two-module mutual import is one
    cycle shape, not the only one.
-11. Pure matching modules (``attribution_candidates``, ``term_matching``,
+11. Pure matching modules (``attribution_candidates``, ``domain_knowledge``,
+   ``fuzzy_index``, ``native_kernel``, ``term_matching``,
    ``term_preparation``, ``cjk_span``, ``document_anchor``, ``protected_text``,
    ``segmentation``, ``english_plural``, ``single_char_context``,
-   ``skill_references``, ``term_classification``, ``termbase``, ``text_spans``)
+   ``skill_references``, ``structural_checks``, ``term_classification``,
+   ``termbase``, ``text_spans``)
    must not import
    storage ``db``, storage-coupled modules (``lookup``, ``review``), or
    ``sqlite3`` (including under ``TYPE_CHECKING``).
@@ -113,6 +115,7 @@ DOMAIN_CORE = frozenset(
         "attribution_candidates",
         "domain_knowledge",
         "entity_graph",
+        "fuzzy_index",
         "knowledge_db",
         "lookup",
         "native_kernel",
@@ -151,6 +154,7 @@ PURE_MATCHING = frozenset(
     {
         "attribution_candidates",
         "domain_knowledge",
+        "fuzzy_index",
         "native_kernel",
         "term_matching",
         "term_preparation",
