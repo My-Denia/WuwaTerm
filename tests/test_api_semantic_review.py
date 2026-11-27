@@ -207,7 +207,7 @@ def read_capabilities(app, token):
     return body["capabilities"]
 
 
-def test_capabilities_lists_all_five_when_a_model_is_configured(
+def test_capabilities_lists_all_when_a_model_is_configured(
     tmp_path, sample_db, monkeypatch
 ):
     configure_llm(monkeypatch)
@@ -215,7 +215,10 @@ def test_capabilities_lists_all_five_when_a_model_is_configured(
 
     assert read_capabilities(app, token) == [
         "ambiguous-mention-v1",
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
+        "long-text-translation-v1",
+        "protected-translation-v1",
         "semantic-review-v1",
         "structure-check-v1",
         "translation-context-v1",
@@ -226,14 +229,15 @@ def test_capabilities_list_only_model_free_features_without_a_model(
     tmp_path, sample_db, monkeypatch
 ):
     # ambiguous-mention-v1 is a review-v2 feature that needs only the
-    # dictionary, dictionary-identity-v1 reads dictionary identity, and
-    # structure-check-v1 calls no model, so all three are listed even when no
-    # model is configured.
+    # dictionary, dictionary-fallback-v1 and dictionary-identity-v1 need no
+    # model, and structure-check-v1 calls no model, so all four are listed
+    # even when no model is configured.
     unconfigure_llm(monkeypatch)
     app, _, token = semantic_app(tmp_path, sample_db)
 
     assert read_capabilities(app, token) == [
         "ambiguous-mention-v1",
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
         "structure-check-v1",
     ]
@@ -1041,7 +1045,10 @@ def test_semantic_review_is_off_by_default_but_translation_context_stays(
     caps = run(call(app, "GET", "/v1/capabilities", headers=bearer(token))).json()
     assert caps["capabilities"] == [
         "ambiguous-mention-v1",
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
+        "long-text-translation-v1",
+        "protected-translation-v1",
         "structure-check-v1",
         "translation-context-v1",
     ]
@@ -1065,7 +1072,10 @@ def test_enabled_semantic_review_is_listed_and_served(tmp_path, sample_db, monke
     caps = run(call(app, "GET", "/v1/capabilities", headers=bearer(token))).json()
     assert caps["capabilities"] == [
         "ambiguous-mention-v1",
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
+        "long-text-translation-v1",
+        "protected-translation-v1",
         "semantic-review-v1",
         "structure-check-v1",
         "translation-context-v1",

@@ -113,23 +113,41 @@ LOGGER = logging.getLogger(__name__)
 # Stable application outcome vocabulary
 # --------------------------------------------------------------------------
 
-TranslationKind = Literal["noop", "exact", "fuzzy", "llm", "error"]
+TranslationKind = Literal[
+    "noop", "exact", "fuzzy", "llm", "dictionary_fallback", "error"
+]
 TranslationDirection = Literal["en", "zh"]
 ServiceCapability = Literal[
     "ambiguous-mention-v1",
+    "dictionary-fallback-v1",
     "dictionary-identity-v1",
+    "hybrid-rag-v1",
+    "knowledge-retrieval-v1",
+    "long-text-translation-v1",
+    "protected-translation-v1",
     "semantic-review-v1",
     "structure-check-v1",
     "translation-context-v1",
+    "unified-snapshot-v1",
 ]
 
 KIND_NOOP: Literal["noop"] = "noop"
 KIND_EXACT: Literal["exact"] = "exact"
 KIND_FUZZY: Literal["fuzzy"] = "fuzzy"
 KIND_LLM: Literal["llm"] = "llm"
+KIND_DICTIONARY_FALLBACK: Literal["dictionary_fallback"] = "dictionary_fallback"
 KIND_ERROR: Literal["error"] = "error"
 
-TRANSLATION_KINDS = frozenset({KIND_NOOP, KIND_EXACT, KIND_FUZZY, KIND_LLM, KIND_ERROR})
+TRANSLATION_KINDS = frozenset(
+    {
+        KIND_NOOP,
+        KIND_EXACT,
+        KIND_FUZZY,
+        KIND_LLM,
+        KIND_DICTIONARY_FALLBACK,
+        KIND_ERROR,
+    }
+)
 
 # Error codes are part of the published contract: adapters map them to their
 # own transport (HTTP status, Telegram notice) but must not invent new ones
@@ -201,6 +219,51 @@ def _safe_business_reason(value: object) -> str | None:
 # --------------------------------------------------------------------------
 
 
+KnowledgeRetrievalMode = Literal["off", "lexical", "hybrid"]
+KNOWLEDGE_RETRIEVAL_MODES: tuple[KnowledgeRetrievalMode, ...] = (
+    "off",
+    "lexical",
+    "hybrid",
+)
+
+
+@dataclass(frozen=True)
+class KnowledgeQuery:
+    """Reserved request type for domain knowledge retrieval (knowledge-retrieval-v1 / hybrid-rag-v1)."""
+
+    query: str
+    top_k: int = 5
+    mode: Literal["lexical", "hybrid"] = "lexical"
+    categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class KnowledgeHit:
+    """Reserved response item type for one retrieved domain knowledge chunk."""
+
+    chunk_id: str
+    title: str
+    category: str
+    snippet: str
+    score: float
+    source_ref: str
+
+
+@dataclass(frozen=True)
+class KnowledgeQueryOutcome:
+    """Reserved response type for domain knowledge retrieval results."""
+
+    knowledge_revision: str
+    mode_used: Literal["lexical", "hybrid"]
+    hits: tuple[KnowledgeHit, ...] = ()
+
+
+class KnowledgeRetriever(Protocol):
+    """Reserved application-layer hook for domain knowledge / Hybrid RAG retrieval."""
+
+    async def query_async(self, request: KnowledgeQuery) -> KnowledgeQueryOutcome: ...
+
+
 @dataclass(frozen=True)
 class TranslationContext:
     """Explicit document context for one translation (translation-context-v1).
@@ -226,6 +289,9 @@ class TranslationContext:
       background candidates (default empty). They render strictly as read-only
       background references, never enter ``LockedSentence.locks``, and require
       ``lock_eligible is False``.
+    * ``retrieval_mode`` — reserved knob for domain knowledge retrieval
+      (``off`` | ``lexical`` | ``hybrid``); ignored unless enabled by the
+      runtime capability set.
     """
 
     before: ContextBefore | None = None
@@ -233,6 +299,47 @@ class TranslationContext:
     document_anchor: DocumentAnchor | None = None
     user_glossary_references: tuple[UserGlossaryReference, ...] = ()
     domain_knowledge_candidates: tuple[DomainKnowledgeCandidate, ...] = ()
+    retrieval_mode: KnowledgeRetrievalMode = "off"
+
+
+PROTECTED_MAX_STRUCTURES = 256
+PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS = 32
+
+
+@dataclass(frozen=True)
+class ProtectedTranslationJob:
+    """Protocol-neutral protected-segment translation request."""
+
+    visible_segments: tuple[str, ...]
+    structures: tuple[ProtectedStructure, ...]
+    forced_to_chinese: bool | None = None
+    context: TranslationContext | None = None
+    fallback_text: str | None = None
+    fallback_to_plain: bool = False
+
+
+@dataclass(frozen=True)
+class ProtectedTranslationOutcome:
+    """Result of :func:`translate_protected_request_async`."""
+
+    kind: TranslationKind
+    text: str
+    translated_segments: tuple[str, ...] = ()
+    to_chinese: bool = False
+    dictionary_miss: bool = False
+    protected_used: bool = False
+    error_code: str | None = None
+    llm_failure: LLMFailureDiagnostic | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    @property
+    def direction(self) -> TranslationDirection:
+        return DIRECTION_TO_CHINESE if self.to_chinese else DIRECTION_TO_ENGLISH
+
+    @property
+    def failed(self) -> bool:
+        return self.kind == KIND_ERROR
 
 
 @dataclass(frozen=True)
@@ -676,6 +783,7 @@ async def translate_request_async(
     before_llm_call: LlmCallGuard | None = None,
     offload: Offload | None = None,
     execution_budget: OperationExecutionBudget | None = None,
+    allow_dictionary_fallback: bool = False,
 ) -> TranslationOutcome:
     """Run the shared dictionary-first pipeline for one job."""
     if offload is None:
@@ -694,7 +802,7 @@ async def translate_request_async(
         # ``splitter`` is ignored: segmentation-v1 is the one long-text rule.
         # It cuts the text as submitted, so every separator, blank lines
         # included, is the source's own; each core is prepared on its own.
-        return await _translate_long_plain_text(
+        outcome = await _translate_long_plain_text(
             translator,
             request.text,
             to_chinese=to_chinese,
@@ -702,6 +810,15 @@ async def translate_request_async(
             before_llm_call=before_llm_call,
             execution_budget=execution_budget,
         )
+        if allow_dictionary_fallback and outcome.kind == KIND_LLM and not llm_configured():
+            return TranslationOutcome(
+                kind=KIND_DICTIONARY_FALLBACK,
+                text=outcome.text,
+                to_chinese=outcome.to_chinese,
+                dictionary_miss=outcome.dictionary_miss,
+                markup_used=outcome.markup_used,
+            )
+        return outcome
 
     op_budget = (
         execution_budget
@@ -769,7 +886,7 @@ async def translate_request_async(
                     to_chinese,
                 )
 
-        return await _translate_plain_async(
+        outcome = await _translate_plain_async(
             translator,
             prepared,
             to_chinese=to_chinese,
@@ -780,6 +897,188 @@ async def translate_request_async(
             source_text=request.text if request.context is not None else None,
             execution_budget=op_budget,
         )
+        if allow_dictionary_fallback and outcome.kind == KIND_LLM and not llm_configured():
+            return TranslationOutcome(
+                kind=KIND_DICTIONARY_FALLBACK,
+                text=outcome.text,
+                to_chinese=outcome.to_chinese,
+                dictionary_miss=outcome.dictionary_miss,
+                markup_used=outcome.markup_used,
+            )
+        return outcome
+
+
+def _interleave_visible_context(
+    visible_segments: Sequence[str],
+    structures: Sequence[ProtectedStructure],
+) -> tuple[str, ...]:
+    parts: list[str] = []
+    for segment, structure in zip(visible_segments, structures, strict=False):
+        parts.append(segment)
+        if structure.visible_context:
+            parts.append(structure.visible_context)
+    parts.append(visible_segments[-1])
+    return tuple(parts)
+
+
+_PROTECTED_FALLBACK_REASONS = frozenset(
+    {"protected_text_integrity", "html_integrity", "invalid_response"}
+)
+
+
+async def translate_protected_request_async(
+    service: TermService,
+    translator: SentenceTranslator,
+    request: ProtectedTranslationJob,
+    *,
+    before_llm_call: LlmCallGuard | None = None,
+    offload: Offload | None = None,
+    execution_budget: OperationExecutionBudget | None = None,
+) -> ProtectedTranslationOutcome:
+    """Translate visible segments with opaque structural boundaries preserved."""
+    if len(request.visible_segments) != len(request.structures) + 1:
+        raise ValueError("one more visible segment than structures is required")
+    if len(request.structures) > PROTECTED_MAX_STRUCTURES:
+        raise ValueError(f"at most {PROTECTED_MAX_STRUCTURES} structures are allowed")
+    if any(
+        len(item.visible_context) > PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS
+        for item in request.structures
+    ):
+        raise ValueError(
+            f"visible_context must be at most {PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS} scalars"
+        )
+    if sum(len(segment) for segment in request.visible_segments) > LLM_INPUT_CHAR_LIMIT:
+        return ProtectedTranslationOutcome(
+            kind=KIND_ERROR,
+            text=input_too_long_message(LLM_INPUT_CHAR_LIMIT),
+            to_chinese=False,
+            error_code=ERROR_INPUT_TOO_LONG,
+        )
+    combined_visible = "".join(
+        _interleave_visible_context(request.visible_segments, request.structures)
+    )
+    if not any(segment.strip() for segment in request.visible_segments):
+        return ProtectedTranslationOutcome(
+            kind=KIND_NOOP,
+            text=combined_visible if request.structures else EMPTY_INPUT_MESSAGE,
+            translated_segments=request.visible_segments,
+            to_chinese=False,
+            protected_used=True,
+        )
+    normalized_input = normalize_prose_text(combined_visible)
+    to_chinese = _resolve_to_chinese(normalized_input, request.forced_to_chinese)
+    if not llm_configured():
+        return ProtectedTranslationOutcome(
+            kind=KIND_ERROR,
+            text=TRANSLATION_UNAVAILABLE_NOTICE,
+            translated_segments=(),
+            to_chinese=to_chinese,
+            protected_used=False,
+            error_code=ERROR_LLM_UNAVAILABLE,
+        )
+    protected = ProtectedText(request.visible_segments, request.structures)
+    op_budget = (
+        execution_budget
+        if execution_budget is not None
+        else OperationExecutionBudget.for_segments(1)
+    )
+    with op_budget.activate():
+        try:
+            translated_protected = await translator.translate_protected_async(
+                protected,
+                to_chinese=to_chinese,
+                context=request.context,
+                before_llm_call=before_llm_call,
+                execution_budget=op_budget,
+            )
+        except LLMTranslationError as exc:
+            business_reason = _safe_business_reason(getattr(exc, "reason", None))
+            if (
+                request.fallback_to_plain
+                and request.fallback_text is not None
+                and business_reason in _PROTECTED_FALLBACK_REASONS
+            ):
+                if op_budget.is_cancelled or op_budget.deadline_expired():
+                    reason = "cancelled" if op_budget.is_cancelled else "timeout"
+                    failure = _llm_failure_outcome(
+                        LLMTranslationError(
+                            TRANSLATION_UNAVAILABLE_NOTICE, reason=reason
+                        ),
+                        to_chinese,
+                    )
+                    return ProtectedTranslationOutcome(
+                        kind=KIND_ERROR,
+                        text=failure.text,
+                        translated_segments=(),
+                        to_chinese=to_chinese,
+                        protected_used=False,
+                        error_code=failure.error_code,
+                        llm_failure=failure.llm_failure,
+                    )
+                if op_budget.calls_used > 0 and not op_budget.try_consume_html_fallback():
+                    failure = _llm_failure_outcome(
+                        LLMTranslationError(
+                            TRANSLATION_UNAVAILABLE_NOTICE, reason="operation_budget"
+                        ),
+                        to_chinese,
+                    )
+                    return ProtectedTranslationOutcome(
+                        kind=KIND_ERROR,
+                        text=failure.text,
+                        translated_segments=(),
+                        to_chinese=to_chinese,
+                        protected_used=False,
+                        error_code=failure.error_code,
+                        llm_failure=failure.llm_failure,
+                    )
+                plain = await translate_request_async(
+                    service,
+                    translator,
+                    TranslationJob(
+                        text=request.fallback_text,
+                        forced_to_chinese=request.forced_to_chinese,
+                        context=request.context,
+                    ),
+                    before_llm_call=before_llm_call,
+                    offload=offload,
+                    execution_budget=op_budget,
+                )
+                return ProtectedTranslationOutcome(
+                    kind=plain.kind,
+                    text=plain.text,
+                    translated_segments=(),
+                    to_chinese=plain.to_chinese,
+                    dictionary_miss=plain.dictionary_miss,
+                    protected_used=False,
+                    error_code=plain.error_code,
+                    llm_failure=plain.llm_failure,
+                )
+            failure = _llm_failure_outcome(exc, to_chinese)
+            return ProtectedTranslationOutcome(
+                kind=KIND_ERROR,
+                text=failure.text,
+                translated_segments=(),
+                to_chinese=to_chinese,
+                protected_used=False,
+                error_code=failure.error_code,
+                llm_failure=failure.llm_failure,
+            )
+    rendered = "".join(
+        _interleave_visible_context(
+            translated_protected.visible_segments, request.structures
+        )
+    )
+    prepared_plain = translator.prepare_text(combined_visible)
+    return ProtectedTranslationOutcome(
+        kind=KIND_LLM,
+        text=rendered,
+        translated_segments=translated_protected.visible_segments,
+        to_chinese=to_chinese,
+        dictionary_miss=_should_append_dict_miss(
+            prepared_plain, translator, rendered, to_chinese=to_chinese
+        ),
+        protected_used=True,
+    )
 
 
 def translate_request(
@@ -1220,6 +1519,22 @@ def semantic_review_enabled() -> bool:
 CAPABILITY_DICTIONARY_IDENTITY: Literal["dictionary-identity-v1"] = (
     "dictionary-identity-v1"
 )
+CAPABILITY_DICTIONARY_FALLBACK: Literal["dictionary-fallback-v1"] = (
+    "dictionary-fallback-v1"
+)
+CAPABILITY_LONG_TEXT_TRANSLATION: Literal["long-text-translation-v1"] = (
+    "long-text-translation-v1"
+)
+CAPABILITY_PROTECTED_TRANSLATION: Literal["protected-translation-v1"] = (
+    "protected-translation-v1"
+)
+CAPABILITY_UNIFIED_SNAPSHOT: Literal["unified-snapshot-v1"] = (
+    "unified-snapshot-v1"
+)
+CAPABILITY_KNOWLEDGE_RETRIEVAL: Literal["knowledge-retrieval-v1"] = (
+    "knowledge-retrieval-v1"
+)
+CAPABILITY_HYBRID_RAG: Literal["hybrid-rag-v1"] = "hybrid-rag-v1"
 
 
 def service_capabilities() -> tuple[ServiceCapability, ...]:
@@ -1227,30 +1542,30 @@ def service_capabilities() -> tuple[ServiceCapability, ...]:
 
     A capability is listed only when it actually works, so a client can turn a
     feature on from this list alone. ``ambiguous-mention-v1``,
-    ``dictionary-identity-v1`` and ``structure-check-v1`` need no model, so they
-    are always listed. ``translation-context-v1`` needs a configured model;
-    ``semantic-review-v1`` also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``.
+    ``dictionary-fallback-v1``, ``dictionary-identity-v1`` and
+    ``structure-check-v1`` need no model, so they are always listed.
+    ``long-text-translation-v1``, ``protected-translation-v1`` and
+    ``translation-context-v1`` need a configured model; ``semantic-review-v1``
+    also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``. Reserved snapshot/knowledge
+    capabilities are omitted until enabled.
     """
-    if not llm_configured():
-        return (
-            REVIEW_FEATURE_AMBIGUOUS_MENTION,
-            CAPABILITY_DICTIONARY_IDENTITY,
-            CAPABILITY_STRUCTURE_CHECK,
-        )
-    if not semantic_review_enabled():
-        return (
-            REVIEW_FEATURE_AMBIGUOUS_MENTION,
-            CAPABILITY_DICTIONARY_IDENTITY,
-            CAPABILITY_STRUCTURE_CHECK,
-            _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
-        )
-    return (
+    capabilities: list[ServiceCapability] = [
         REVIEW_FEATURE_AMBIGUOUS_MENTION,
+        CAPABILITY_DICTIONARY_FALLBACK,
         CAPABILITY_DICTIONARY_IDENTITY,
-        _semantic_contract.CAPABILITY_SEMANTIC_REVIEW,
         CAPABILITY_STRUCTURE_CHECK,
-        _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
-    )
+    ]
+    if llm_configured():
+        capabilities.extend(
+            (
+                CAPABILITY_LONG_TEXT_TRANSLATION,
+                CAPABILITY_PROTECTED_TRANSLATION,
+                _semantic_contract.CAPABILITY_TRANSLATION_CONTEXT,
+            )
+        )
+        if semantic_review_enabled():
+            capabilities.append(_semantic_contract.CAPABILITY_SEMANTIC_REVIEW)
+    return tuple(sorted(capabilities))
 
 
 @dataclass(frozen=True)
