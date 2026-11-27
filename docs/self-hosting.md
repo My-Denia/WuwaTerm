@@ -188,12 +188,13 @@ What it does, in this order:
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
 5. `--with-telegram` orchestrates standalone `WuwaTerm-Telegram` in HTTP mode
-   against the shared Core API (**requires `>= v0.7.0`** or an explicit
-   compatible `--telegram-package`; `v0.6.1`, the current default in
-   `contracts/products.json`, does not include the HTTP Core backend and fails
-   closed unless you deploy `v0.6.1` via `--telegram-dir <checkout>` and
-   `WuwaTerm-Telegram`'s own `deploy/docker-compose.yml`). For `>= v0.7.0` (or
-   `--telegram-package`), it issues a dedicated `telegram` device token
+   against the shared Core API (**requires `>= v0.7.0`** — no published release
+   includes the HTTP Core backend yet; the latest published release is
+   `v0.6.1`, which is the current default in `contracts/products.json` and
+   fails closed unless you pass an explicit compatible `--telegram-package` or
+   deploy `v0.6.1` via `--telegram-dir <checkout>` and `WuwaTerm-Telegram`'s
+   own `deploy/docker-compose.yml`). For `>= v0.7.0` (once published) or
+   `--telegram-package`, it issues a dedicated `telegram` device token
    (`state-telegram/device.token`, mode `0600`), writes
    `state-telegram/telegram.env` (mode `0600`) with
    `WUWATERM_CORE_API_URL=http://127.0.0.1:<api_port>`,

@@ -55,7 +55,12 @@ case "$*" in
     printf '%s\\n' "${STUB_PRODUCT_MANAGED_BY:-}" ;;
   "inspect -f {{.State.Status}} deploy-wuwaterm-telegram-1") printf '%s\\n' "${STUB_AUTO_PRODUCT_STATE:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-telegram-wuwaterm-telegram-1") printf '%s\\n' "${STUB_PROJECT_PRODUCT_STATE:-}" ;;
-  "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram") printf '%s\\n' "${STUB_PRODUCT_LABEL_IDS:-}" ;;
+  "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram")
+    if [ "${STUB_DOCKER_PS_FAIL:-0}" = 1 ]; then
+      printf 'Error: simulated docker ps failure\\n' >&2
+      exit 1
+    fi
+    printf '%s\\n' "${STUB_PRODUCT_LABEL_IDS:-}" ;;
   "inspect -f {{.State.Status}} wuwaterm-web")
     if [ "${STUB_WEB_ABSENT:-0}" = 1 ]; then
       printf 'Error: No such object: wuwaterm-web\\n' >&2
@@ -438,8 +443,10 @@ def test_with_telegram_and_with_all_fail_closed_on_default_v061(install_root):
     tg_only = run_setup(install_root, "--with-telegram", "--no-adopt")
     assert tg_only.returncode == 1
     assert "v0.6.1 does not include the HTTP Core backend" in tg_only.stderr
+    assert "No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1)" in tg_only.stderr
     assert ">= v0.7.0" in tg_only.stderr
     assert "--telegram-dir" in tg_only.stderr
+    assert "Pass WUWATERM_TELEGRAM_VERSION=v0.7.0" not in tg_only.stderr
     assert not (install_root / "data" / "terms.db").exists()
     assert not (install_root / "curl.log").exists()
     assert "run -d --name wuwaterm-telegram" not in docker_log(install_root)
@@ -577,6 +584,10 @@ def test_with_telegram_v070_release_orchestrates_and_invalidates_cache_on_versio
                 "STUB_AUTO_PRODUCT_STATE": "exited",
             },
             "existing Compose-managed wuwaterm-telegram container",
+        ),
+        (
+            {"STUB_DOCKER_PS_FAIL": "1"},
+            "could not inspect existing Compose-managed wuwaterm-telegram containers via docker ps",
         ),
     ],
 )

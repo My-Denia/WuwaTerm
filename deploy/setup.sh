@@ -823,8 +823,9 @@ preflight_telegram_containers() {
     if [ "$(container_state wuwaterm-bot)" = running ]; then
         fail "deprecated inline bot (wuwaterm-bot) is running; stop it first (docker compose -f deploy/docker-compose.yml stop wuwaterm) before starting wuwaterm-telegram"
     fi
-    tg_compose_ids=$(docker ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram \
-        2>/dev/null || true)
+    if ! tg_compose_ids=$(docker ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram 2>&1); then
+        fail "could not inspect existing Compose-managed wuwaterm-telegram containers via docker ps: $tg_compose_ids"
+    fi
     if [ -n "$tg_compose_ids" ]; then
         tg_compose_summary=
         for tg_cid in $tg_compose_ids; do
@@ -862,7 +863,7 @@ resolve_telegram_package() {
     if [ -n "$telegram_package" ]; then
         if [ -n "${WUWATERM_TELEGRAM_VERSION:-}" ] \
             && ! telegram_version_supports_http "$telegram_product_release"; then
-            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN, requires >= v0.7.0); use a >= v0.7.0 package or deploy $telegram_product_release with --telegram-dir and WuwaTerm-Telegram's deploy/docker-compose.yml"
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
         fi
     elif [ -z "${WUWATERM_TELEGRAM_VERSION:-}" ] \
         && [ "$tg_cached_ver" = "local-package" ] \
@@ -875,7 +876,7 @@ resolve_telegram_package() {
         return 0
     else
         if ! telegram_version_supports_http "$telegram_product_release"; then
-            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN, introduced in >= v0.7.0). Pass WUWATERM_TELEGRAM_VERSION=v0.7.0 (or newer), pass --telegram-package <path> with a compatible OCI archive, or deploy $telegram_product_release via --telegram-dir <checkout> and WuwaTerm-Telegram's own deploy/docker-compose.yml"
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, pass --telegram-package <path> with a compatible OCI archive, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
         fi
     fi
     mkdir -p "$tg_state" "$tg_state/state"
