@@ -1108,3 +1108,25 @@ def test_admission_manifest_rejects_import_module_aliases(
     monkeypatch.setattr(cab, "SCRIPTS", scripts)
     failures = cab.check_deployment_admission_manifest()
     assert any("raw import_module call bypasses" in f for f in failures), failures
+
+
+def test_entity_graph_and_domain_knowledge_layer_boundaries():
+    from scripts import check_architecture_boundaries as cab
+
+    assert "domain_knowledge" in cab.PURE_MATCHING
+    assert "entity_graph" in cab.DOMAIN_CORE
+    assert "entity_graph" not in cab.PURE_MATCHING
+    assert "entity_graph" in cab.PURE_MATCHING_FORBIDDEN_STORAGE
+
+    modules = cab._pkg_modules()
+    eg_imports = {
+        imported
+        for imported, _type_only, _lineno in cab._iter_import_events(
+            modules["entity_graph"]
+        )
+        if imported in modules
+    }
+    assert "knowledge_db" not in eg_imports
+    assert "sentence" not in eg_imports
+    assert "application" not in eg_imports
+    assert "translation_plan" not in eg_imports

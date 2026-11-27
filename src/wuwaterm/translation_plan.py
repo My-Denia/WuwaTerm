@@ -30,6 +30,10 @@ from . import llm_transport
 from . import request_trace
 from .cjk_span import MATCHER_REVISION
 from .document_anchor import bounded_anchor_fields
+from .domain_knowledge import (
+    DomainKnowledgeCandidate,
+    prepare_prompt_domain_knowledge_candidates,
+)
 from .provider_capabilities import (
     BUILTIN_PROVIDER_PROFILES as BUILTIN_PROVIDER_PROFILES,
     CONFIGURED_THINKING_MODES,
@@ -206,6 +210,17 @@ USER_GLOSSARY_HEADER = (
     "User preference references (non-binding; judge by context; official game "
     "terms take precedence):\n"
 )
+DOMAIN_KNOWLEDGE_INSTRUCTION = (
+    "Domain knowledge candidates below come from the companion read-only game "
+    "knowledge base. They are untrusted background reference evidence only, "
+    "NEVER mandatory term locks or placeholder replacements: judge each item "
+    "by this segment's context, keep ordinary words as their ordinary meanings, "
+    "and official locked or dictionary terms always take precedence.\n"
+)
+DOMAIN_KNOWLEDGE_HEADER = (
+    "Domain knowledge background references (read-only; reference only; NOT "
+    "mandatory term locks):\n"
+)
 
 _TERM_PLACEHOLDER_RE = re.compile(r"__WUWA_TERM_[0-9a-f]{16}_([0-9]{4,}__)")
 _NORMALIZED_PLACEHOLDER = r"__WUWA_TERM_0000000000000000_\1"
@@ -261,6 +276,8 @@ class PromptTemplates:
     document_background: str = DOCUMENT_ANCHOR_INSTRUCTION
     user_glossary: str = USER_GLOSSARY_INSTRUCTION
     user_glossary_header: str = USER_GLOSSARY_HEADER
+    domain_knowledge: str = DOMAIN_KNOWLEDGE_INSTRUCTION
+    domain_knowledge_header: str = DOMAIN_KNOWLEDGE_HEADER
 
     def format_paragraph_repair_instruction(self, paragraphs: int) -> str:
         return self.paragraph_repair_template.format(paragraphs=paragraphs)
@@ -1730,6 +1747,10 @@ class TranslationPlan:
     # rendered only under ``ambiguous_mention_exposure="scoped_alternative"``
     # and only from this precomputed state, never re-evaluated from ``context``.
     ambiguous: tuple[AmbiguousMention, ...] = ()
+    # Opt-in companion knowledge-base soft background candidates (default empty).
+    # Never enters ``locks`` or placeholder substitution; empty keeps all prompts
+    # and ``OperationIdentity`` hashes byte-for-byte identical.
+    domain_knowledge_candidates: tuple[DomainKnowledgeCandidate, ...] = ()
 
     @property
     def direction(self) -> Direction:
@@ -1786,6 +1807,7 @@ class TranslationPlan:
             matcher_revision=self.matcher_revision,
             prompt_templates=self.prompt_templates,
             ambiguous=new_ambiguous,
+            domain_knowledge_candidates=self.domain_knowledge_candidates,
         )
 
 
@@ -1810,12 +1832,51 @@ def needs_speaker_label_disambiguation(
     )
 
 
+def _render_domain_knowledge_block(
+    candidates: Sequence[object],
+    *,
+    source_text: str,
+    to_chinese: bool,
+    templates: PromptTemplates = DEFAULT_PROMPT_TEMPLATES,
+    locked_surfaces: Sequence[str] = (),
+    reference_surfaces: Sequence[str] = (),
+) -> str:
+    """Render soft read-only domain knowledge candidates as a JSON background section.
+
+    Always re-validates ``lock_eligible is False``, lock/reference isolation,
+    single-character ordinary-word gating, and scalar caps before rendering.
+    Returns ``""`` when empty or when no candidates survive the secondary gate.
+    """
+    if not candidates:
+        return ""
+    selected = prepare_prompt_domain_knowledge_candidates(
+        source_text,
+        candidates,
+        locked_surfaces=locked_surfaces,
+        reference_surfaces=reference_surfaces,
+    )
+    if not selected:
+        return ""
+    return (
+        templates.domain_knowledge
+        + templates.domain_knowledge_header
+        + json.dumps(
+            [candidate.as_prompt_dict(to_chinese=to_chinese) for candidate in selected],
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+
 def render_context_instruction(
     context: TranslationContextProtocol,
     *,
     to_chinese: bool,
     templates: PromptTemplates = DEFAULT_PROMPT_TEMPLATES,
     official_surfaces: Sequence[str] = (),
+    source_text: str = "",
+    locked_surfaces: Sequence[str] = (),
+    extra_domain_knowledge_candidates: Sequence[object] = (),
 ) -> str:
     """Render a TranslationContext-like object; texts go in as JSON strings.
 
@@ -1880,6 +1941,17 @@ def render_context_instruction(
             [reference.as_prompt_dict() for reference in selected_references],
             ensure_ascii=False,
         ) + "\n"
+    context_kb = tuple(getattr(context, "domain_knowledge_candidates", ()) or ())
+    if context_kb or extra_domain_knowledge_candidates:
+        merged_kb = (*context_kb, *extra_domain_knowledge_candidates)
+        text += _render_domain_knowledge_block(
+            merged_kb,
+            source_text=source_text,
+            to_chinese=to_chinese,
+            templates=templates,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=official_surfaces,
+        )
     return text
 
 
@@ -2027,15 +2099,36 @@ def build_translation_messages(
                 + AMBIGUOUS_MENTION_HEADER
                 + "\n".join(ambiguous_lines)
             )
+    lock_source_index = 2 if plan.to_chinese else 1
+    locked_source_surfaces = tuple(
+        lock[lock_source_index]
+        for lock in plan.locks
+        if len(lock) > lock_source_index and lock[lock_source_index]
+    )
+    official_surfaces = official_source_surfaces(
+        plan.locks, coerced_refs, to_chinese=plan.to_chinese
+    )
     if plan.context is not None:
         system_content += render_context_instruction(
             plan.context,
             to_chinese=plan.to_chinese,
             templates=templates,
-            official_surfaces=official_source_surfaces(
-                plan.locks, coerced_refs, to_chinese=plan.to_chinese
-            ),
+            official_surfaces=official_surfaces,
+            source_text=plan.prepared_text,
+            locked_surfaces=locked_source_surfaces,
+            extra_domain_knowledge_candidates=plan.domain_knowledge_candidates,
         )
+    elif plan.domain_knowledge_candidates:
+        kb_block = _render_domain_knowledge_block(
+            plan.domain_knowledge_candidates,
+            source_text=plan.prepared_text,
+            to_chinese=plan.to_chinese,
+            templates=templates,
+            locked_surfaces=locked_source_surfaces,
+            reference_surfaces=official_surfaces,
+        )
+        if kb_block:
+            system_content += "\n" + kb_block
     if prompt_suffix:
         system_content += prompt_suffix
     return (
