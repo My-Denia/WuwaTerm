@@ -189,12 +189,13 @@ Match kinds (ranked `0..3`, ties broken by `use_count` desc, then parsed
 | Match kind | Condition | Reusable for skip? |
 | --- | --- | --- |
 | `context_exact` | Exact `source_text`, request supplies at least one neighbour hash (`prev_source_hash !== null \|\| next_source_hash !== null`, document edges `null`, neighbours > `2,000` scalars cannot be hashed/certified), and **both** `prev_source_hash` and `next_source_hash` equal the entry | Only when `freshness === "verified_fresh"` |
-| `exact` | Exact `source_text`, but no request context or either neighbour differs/is missing | Read-only reference only |
+| `exact` | Exact `source_text` that does not pass `context_exact` (a neighbour differs or is missing, both neighbours are `null` in a single-segment document, or an adjacent neighbour exceeds `2,000` scalars and cannot be hashed) | Read-only reference only |
 | `numeric_variant` | `numeric_mask(source_text)` matches (ASCII digit runs differ) | Read-only reference only (`numeric_changed`) |
 | `normalized_exact` | Whitespace/line-ending normalized source matches | Read-only reference only |
 
 Deleting or changing either neighbour (`prev_source` or `next_source`) downgrades
-`context_exact` to `exact`. Strict two-sided comparison is being aligned across
+`context_exact` to `exact`. Strict two-sided comparison and disqualifying
+neighbours over `2,000` scalars from `context_exact` are implemented across both
 the Windows and Web `MY-491` remediation branches (not yet merged on `main`).
 
 Three-state freshness (`freshness`), evaluated with a single cross-client
@@ -299,20 +300,24 @@ For an edited guide or announcement:
 
 Frozen before any measurement, on fixed documents rather than ad-hoc samples:
 
-1. **Reuse correctness.** On a set of real edited guides whose baseline entries
-   were confirmed under the running dictionary revision and game version,
-   every qualifying (`context_exact` + `verified_fresh`) untouched interior
-   segment is reused with zero model calls; every segment whose source or
-   neighbours changed, as well as any untouched segment whose provenance is
-   `known_stale` or `provenance_unknown`, goes to the model (never silently
-   reused); and deleting or changing either neighbour downgrades to `exact`.
-2. **Staleness & unknown provenance.** 100% of entries with an explicit
-   `terms_db_revision` or `game_version` mismatch are classified `known_stale`,
-   and 100% of entries with missing or one-sided `null` provenance (without an
-   explicit mismatch) are classified `provenance_unknown` (while mixed
-   mismatch-plus-missing entries keep `known_stale` and still retain
-   `provenance_unknown` in `stale_reasons`); neither class may ever be
-   auto-applied or skipped.
+1. **Reuse correctness.** On a fixed set of real edited guides exercised
+   separately against three memory fixture sets — (a) entries confirmed under
+   the running dictionary revision and game version, (b) `known_stale` entries,
+   and (c) `provenance_unknown` entries — every qualifying (`context_exact` +
+   `verified_fresh`) untouched interior segment in (a) is reused with zero
+   model calls; every segment whose source or neighbours changed, as well as
+   every untouched segment in (b) `known_stale` and (c) `provenance_unknown`,
+   goes to the model rather than being silently reused; and deleting, changing,
+   or exceeding `2,000` scalars on either neighbour downgrades to `exact`.
+2. **Staleness & unknown provenance.** 100% of entries with a `known_stale`
+   cause (`terms_revision_changed`, `game_version_changed`, or
+   `numeric_changed`) are classified `known_stale`, and 100% of entries with
+   missing or one-sided `null` provenance and no `known_stale` cause are
+   classified `provenance_unknown`. As an explicit gate case (aligned on
+   Windows and Web), a `numeric_variant` entry with missing or one-sided
+   `null` provenance must be classified `known_stale` while retaining both
+   `numeric_changed` and `provenance_unknown` in `stale_reasons`. Neither
+   `known_stale` nor `provenance_unknown` may ever be auto-applied or skipped.
 3. **Manual-confirmed-only.** A test proves no code path creates an entry from
    model output, review output, or an imported file that claims an `origin`
    outside `"human_confirmed" | "imported_confirmed"`.
