@@ -133,7 +133,7 @@ from .translation_plan import (
     redact_provider_profile_name,
     render_context_instruction,
     resolve_configured_thinking_mode,
-    resolve_provider_profile_from_env,
+    resolve_provider_profile_from_env as resolve_provider_profile_from_env,
     resolve_request_policy_from_env,
     select_en_zh_auto_thinking as select_en_zh_auto_thinking,
     select_zh_en_auto_thinking as select_zh_en_auto_thinking,
@@ -281,7 +281,7 @@ class SentenceTranslator:
         self._llm_transport = llm_transport
         self._en_zh_protocol = en_zh_protocol
         self._provider_profile = (
-            resolve_provider_profile_from_env(logger=LOGGER)
+            DEFAULT_PROVIDER_PROFILE
             if provider_profile is None
             else provider_profile
         )

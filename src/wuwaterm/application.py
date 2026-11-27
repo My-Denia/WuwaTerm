@@ -90,10 +90,12 @@ from .sentence import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMFailureDiagnostic,  # Intentionally re-exported for adapters.
     LLMTranslationError,
+    ProviderProfile,
     SentenceTranslator,
     TRANSLATION_UNAVAILABLE_NOTICE as TRANSLATION_UNAVAILABLE_NOTICE,
     llm_configured as _llm_configured,
     log_llm_failure,
+    resolve_provider_profile_from_env,
     safe_llm_failure_diagnostic,
 )
 from .translation_plan import OperationExecutionBudget as OperationExecutionBudget
@@ -829,17 +831,24 @@ def build_translator(
     timeout: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
     en_zh_protocol: bool = False,
+    provider_profile: ProviderProfile | None = None,
 ) -> SentenceTranslator:
     """Create a term-locking translator with adapter-owned LLM budgets.
 
     Each adapter builds its own translator, so the LLM concurrency limit is
     per process and per adapter — never a global budget.
     """
+    resolved_profile = (
+        resolve_provider_profile_from_env(logger=LOGGER)
+        if provider_profile is None
+        else provider_profile
+    )
     return SentenceTranslator(
         db_path,
         llm_timeout_seconds=timeout,
         llm_max_concurrency=max_concurrency,
         en_zh_protocol=en_zh_protocol,
+        provider_profile=resolved_profile,
     )
 
 

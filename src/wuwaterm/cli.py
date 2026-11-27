@@ -10,7 +10,7 @@ from .constants import DEFAULT_SOURCE_PROFILE_NAME, source_profile_choices
 from .data_source import refresh_data
 from .db import category_counts, connect
 from .lookup import TermService
-from .sentence import SentenceTranslator
+from .sentence import SentenceTranslator, resolve_provider_profile_from_env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,10 +67,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "lookup":
         text = TermService(args.db).term_text(args.query)
-        print(text or SentenceTranslator(args.db).translate(args.query))
+        print(
+            text
+            or SentenceTranslator(
+                args.db,
+                provider_profile=resolve_provider_profile_from_env(),
+            ).translate(args.query)
+        )
         return 0
     if args.command == "sentence":
-        print(SentenceTranslator(args.db).translate(args.text))
+        print(
+            SentenceTranslator(
+                args.db,
+                provider_profile=resolve_provider_profile_from_env(),
+            ).translate(args.text)
+        )
         return 0
     if args.command == "bot":
         try:

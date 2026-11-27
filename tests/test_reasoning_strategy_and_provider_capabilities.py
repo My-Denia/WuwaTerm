@@ -299,7 +299,9 @@ def test_custom_openai_compatible_and_neon_gateway_profiles(
     assert res.extra_body == {"reasoning_mode": "adaptive", "thought_level": "high"}
     assert resolved_profile.to_identity_dict() != DEFAULT_PROVIDER_PROFILE.to_identity_dict()
 
-    # Verify outbound wire body through SentenceTranslator (resolving profile from env).
+    # Verify outbound wire body through runtime build_translator (resolving profile from env).
+    from wuwaterm.application import build_translator
+
     db_path = _make_encore_db(tmp_path)
     sent: list[dict[str, Any]] = []
     records: list[llm_transport.LlmCallRecord] = []
@@ -311,9 +313,8 @@ def test_custom_openai_compatible_and_neon_gateway_profiles(
         )
 
     remove_obs = llm_transport.add_call_observer(records.append)
-    translator = SentenceTranslator(
-        db_path, llm_transport=httpx.MockTransport(handler)
-    )
+    translator = build_translator(db_path)
+    translator._llm_transport = httpx.MockTransport(handler)
     try:
         asyncio.run(translator.translate_async("一段普通句子。", to_chinese=False))
     finally:
@@ -1657,7 +1658,8 @@ def test_custom_profile_without_explicit_disable_body_skips_timeout_fallback(
 def test_translator_env_provider_profile_aligns_with_operation_identity_and_redaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Env-resolved provider profiles keep SentenceTranslator and OperationIdentity aligned."""
+    """Runtime build_translator env resolution aligns with OperationIdentity and redaction."""
+    from wuwaterm.application import build_translator
     from wuwaterm.provider_capabilities import redact_provider_profile_name
     from wuwaterm.translation_plan import canonical_json, sha256_bytes
 
@@ -1672,7 +1674,7 @@ def test_translator_env_provider_profile_aligns_with_operation_identity_and_reda
     )
     policy = RequestPolicy(configured_thinking_zh_en="high")
 
-    t_default = SentenceTranslator(db_path)
+    t_default = build_translator(db_path)
     try:
         assert t_default._provider_profile == DEFAULT_PROVIDER_PROFILE
         op_default = build_translation_request_spec(
@@ -1688,7 +1690,7 @@ def test_translator_env_provider_profile_aligns_with_operation_identity_and_reda
         asyncio.run(t_default.aclose())
 
     monkeypatch.setenv(PROVIDER_PROFILE_ENV, "neon_gateway")
-    t_neon = SentenceTranslator(db_path)
+    t_neon = build_translator(db_path)
     try:
         assert t_neon._provider_profile == NEON_GATEWAY_PROVIDER_PROFILE
         op_neon = build_translation_request_spec(
@@ -1702,6 +1704,13 @@ def test_translator_env_provider_profile_aligns_with_operation_identity_and_reda
     finally:
         asyncio.run(t_neon.aclose())
 
+    # Caller override takes precedence over environment variables.
+    t_override = build_translator(db_path, provider_profile=DEFAULT_PROVIDER_PROFILE)
+    try:
+        assert t_override._provider_profile == DEFAULT_PROVIDER_PROFILE
+    finally:
+        asyncio.run(t_override.aclose())
+
     secret_name = "sk-eval-secret-profile"
     monkeypatch.setenv(
         PROVIDER_CAPABILITIES_JSON_ENV,
@@ -1713,7 +1722,7 @@ def test_translator_env_provider_profile_aligns_with_operation_identity_and_reda
             }
         ),
     )
-    t_custom = SentenceTranslator(db_path)
+    t_custom = build_translator(db_path)
     try:
         assert t_custom._provider_profile.name == secret_name
         spec_custom = build_translation_request_spec(
@@ -1732,3 +1741,126 @@ def test_translator_env_provider_profile_aligns_with_operation_identity_and_reda
         assert secret_name not in json.dumps(exec_meta)
     finally:
         asyncio.run(t_custom.aclose())
+
+
+def test_frozen_eval_semantic_stays_on_default_profile_while_runtime_entries_honor_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frozen eval_semantic and direct SentenceTranslator stay on DEFAULT_PROVIDER_PROFILE.
+
+    When WUWATERM_PROVIDER_PROFILE=neon_gateway is set in the shell:
+    - eval_semantic.config_fingerprint() and eval_semantic.build_runtime() both use
+      DEFAULT_PROVIDER_PROFILE (DeepSeek), so outbound wire requests match the
+      fingerprinted provider profile byte-for-byte.
+    - Direct SentenceTranslator(db_path) without explicit provider_profile also
+      uses DEFAULT_PROVIDER_PROFILE.
+    - Normal application/API/bot/CLI entry points explicitly resolve
+      WUWATERM_PROVIDER_PROFILE=neon_gateway.
+    """
+    import importlib.util
+    import shutil
+    import sys
+    from types import SimpleNamespace
+
+    from wuwaterm.application import build_translator
+    from wuwaterm_api.app import create_app
+    from wuwaterm_api.settings import ApiSettings
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "eval_semantic.py"
+    eval_semantic = sys.modules.get("eval_semantic")
+    if eval_semantic is None:
+        spec = importlib.util.spec_from_file_location("eval_semantic", script_path)
+        assert spec is not None and spec.loader is not None
+        eval_semantic = importlib.util.module_from_spec(spec)
+        sys.modules["eval_semantic"] = eval_semantic
+        spec.loader.exec_module(eval_semantic)
+
+    db_path = _make_encore_db(tmp_path)
+    run_dir = tmp_path / "eval_run"
+    snapshot_dst = run_dir / eval_semantic.SNAPSHOT_DB
+    snapshot_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(db_path, snapshot_dst)
+    inputs = SimpleNamespace(run_dir=run_dir)
+
+    baseline_fp = eval_semantic.config_fingerprint()
+
+    monkeypatch.setenv(PROVIDER_PROFILE_ENV, "neon_gateway")
+    neon_env_fp = eval_semantic.config_fingerprint()
+    assert neon_env_fp["config_sha256"] == baseline_fp["config_sha256"]
+
+    # 1. Frozen eval_semantic.build_runtime() emits default DeepSeek wire payload.
+    eval_bodies: list[dict[str, Any]] = []
+
+    def capture_eval(request: httpx.Request) -> httpx.Response:
+        eval_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hello."}}]})
+
+    eval_translator, _eval_service, _db_copy = eval_semantic.build_runtime(
+        inputs, tmp_path / "eval_out", fake=True
+    )
+    eval_translator._llm_transport = httpx.MockTransport(capture_eval)
+    try:
+        assert eval_translator._provider_profile == DEFAULT_PROVIDER_PROFILE
+        out_eval = asyncio.run(
+            eval_translator.translate_async("你好世界。", to_chinese=False)
+        )
+        assert out_eval == "Hello."
+    finally:
+        asyncio.run(eval_translator.aclose())
+
+    assert len(eval_bodies) == 1
+    assert eval_bodies[0].get("thinking") == {"type": "disabled"}
+    assert "reasoning_effort" not in eval_bodies[0]
+
+    # 2. Direct SentenceTranslator without provider_profile also stays on DEFAULT_PROVIDER_PROFILE.
+    direct_bodies: list[dict[str, Any]] = []
+
+    def capture_direct(request: httpx.Request) -> httpx.Response:
+        direct_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hello."}}]})
+
+    direct_translator = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(capture_direct)
+    )
+    try:
+        assert direct_translator._provider_profile == DEFAULT_PROVIDER_PROFILE
+        out_direct = asyncio.run(
+            direct_translator.translate_async("你好世界。", to_chinese=False)
+        )
+        assert out_direct == "Hello."
+    finally:
+        asyncio.run(direct_translator.aclose())
+
+    assert len(direct_bodies) == 1
+    assert direct_bodies[0].get("thinking") == {"type": "disabled"}
+    assert "reasoning_effort" not in direct_bodies[0]
+
+    # 3. Normal application layer (build_translator) and HTTP API (create_app) resolve neon_gateway.
+    app_bodies: list[dict[str, Any]] = []
+
+    def capture_app(request: httpx.Request) -> httpx.Response:
+        app_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hello."}}]})
+
+    app_translator = build_translator(db_path)
+    app_translator._llm_transport = httpx.MockTransport(capture_app)
+    try:
+        assert app_translator._provider_profile == NEON_GATEWAY_PROVIDER_PROFILE
+        out_app = asyncio.run(
+            app_translator.translate_async("你好世界。", to_chinese=False)
+        )
+        assert out_app == "Hello."
+    finally:
+        asyncio.run(app_translator.aclose())
+
+    assert len(app_bodies) == 1
+    assert app_bodies[0].get("reasoning_effort") == "none"
+    assert "thinking" not in app_bodies[0]
+
+    api_app = create_app(
+        ApiSettings(db_path=db_path, device_db_path=tmp_path / "devices.db")
+    )
+    try:
+        assert api_app.state.translator._provider_profile == NEON_GATEWAY_PROVIDER_PROFILE
+    finally:
+        asyncio.run(api_app.state.translator.aclose())

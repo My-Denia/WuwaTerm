@@ -57,6 +57,7 @@ from .sentence import (
     LLMTranslationError,
     SentenceTranslator,
     llm_configured as _llm_configured,
+    resolve_provider_profile_from_env,
 )
 from .runtime_keys import (
     ADMIN_CACHE_KEY,
@@ -846,6 +847,7 @@ def create_application(
         db_path,
         llm_timeout_seconds=config.llm_timeout_seconds,
         llm_max_concurrency=config.llm_max_concurrency,
+        provider_profile=resolve_provider_profile_from_env(logger=LOGGER),
     )
     app.bot_data[TRANSLATOR_KEY] = translator
     app.bot_data[CONFIG_KEY] = config
