@@ -1652,3 +1652,83 @@ def test_custom_profile_without_explicit_disable_body_skips_timeout_fallback(
 
     assert caught.value.reason == "timeout"
     assert calls == 1
+
+
+def test_translator_env_provider_profile_aligns_with_operation_identity_and_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env-resolved provider profiles keep SentenceTranslator and OperationIdentity aligned."""
+    from wuwaterm.provider_capabilities import redact_provider_profile_name
+    from wuwaterm.translation_plan import canonical_json, sha256_bytes
+
+    db_path = _make_encore_db(tmp_path)
+    plan = TranslationPlan(
+        source_text="你好世界。",
+        prepared_text="你好世界。",
+        locked_text="你好世界。",
+        locks=(),
+        references=(),
+        to_chinese=False,
+    )
+    policy = RequestPolicy(configured_thinking_zh_en="high")
+
+    t_default = SentenceTranslator(db_path)
+    try:
+        assert t_default._provider_profile == DEFAULT_PROVIDER_PROFILE
+        op_default = build_translation_request_spec(
+            plan,
+            policy=policy,
+            provider_profile=t_default._provider_profile,
+            model=TEST_MODEL,
+        ).operation_identity(policy, t_default._provider_profile)
+        assert op_default.provider_profile_sha256 == sha256_bytes(
+            canonical_json(DEFAULT_PROVIDER_PROFILE.to_identity_dict())
+        )
+    finally:
+        asyncio.run(t_default.aclose())
+
+    monkeypatch.setenv(PROVIDER_PROFILE_ENV, "neon_gateway")
+    t_neon = SentenceTranslator(db_path)
+    try:
+        assert t_neon._provider_profile == NEON_GATEWAY_PROVIDER_PROFILE
+        op_neon = build_translation_request_spec(
+            plan,
+            policy=policy,
+            provider_profile=t_neon._provider_profile,
+            model=TEST_MODEL,
+        ).operation_identity(policy, t_neon._provider_profile)
+        assert op_neon.provider_profile_sha256 != op_default.provider_profile_sha256
+        assert op_neon.operation_sha256 != op_default.operation_sha256
+    finally:
+        asyncio.run(t_neon.aclose())
+
+    secret_name = "sk-eval-secret-profile"
+    monkeypatch.setenv(
+        PROVIDER_CAPABILITIES_JSON_ENV,
+        json.dumps(
+            {
+                "name": secret_name,
+                "effort_mapping": {"low": "low", "high": "high"},
+                "disabled_extra_body": {"reasoning_effort": "none"},
+            }
+        ),
+    )
+    t_custom = SentenceTranslator(db_path)
+    try:
+        assert t_custom._provider_profile.name == secret_name
+        spec_custom = build_translation_request_spec(
+            plan,
+            policy=policy,
+            provider_profile=t_custom._provider_profile,
+            model=TEST_MODEL,
+        )
+        op_custom = spec_custom.operation_identity(policy, t_custom._provider_profile)
+        assert op_custom.provider_profile_sha256 not in {
+            op_default.provider_profile_sha256,
+            op_neon.provider_profile_sha256,
+        }
+        exec_meta = spec_custom.execution_metadata_dict()
+        assert exec_meta["provider_profile"] == redact_provider_profile_name(secret_name)
+        assert secret_name not in json.dumps(exec_meta)
+    finally:
+        asyncio.run(t_custom.aclose())
