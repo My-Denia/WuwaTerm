@@ -93,10 +93,9 @@ ROLLBACK_API_REF_RE = re.compile(
 JOURNAL_NAME = ".full-transaction.json"
 JOURNAL_SCHEMA_VERSION = 2
 PHASES = ("armed", "promoted", "started", "published", "committed")
-SERVICES = ("wuwaterm", "wuwaterm-api")
-CONTAINERS = {"wuwaterm": "wuwaterm-bot", "wuwaterm-api": "wuwaterm-api"}
+SERVICES = ("wuwaterm-api",)
+CONTAINERS = {"wuwaterm-api": "wuwaterm-api"}
 SURFACE_KEYS = {
-    "wuwaterm": ("old_bot_image_id", "old_bot_ref", "old_bot_running", "rollback_image_ref"),
     "wuwaterm-api": (
         "old_api_image_id",
         "old_api_ref",
@@ -1249,12 +1248,15 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         parsed_surfaces.append((image_id, reference, running))
     (bot_id, bot_ref, bot_running), (api_id, api_ref, api_running) = parsed_surfaces
 
-    # A pointer says some deployment serves from this host. If the surfaces
-    # that deployment left running have since all been stopped, there is no
-    # serving binding for this transaction to replace, and a rollback would
-    # restore nothing. Refuse before the journal is armed; a deliberate
-    # retirement is expressed by starting the surface that should serve.
-    if old_pointer_present and not bot_running and not api_running:
+    # This updater manages wuwaterm-api only; a running legacy wuwaterm-bot
+    # must be stopped and migrated to standalone WuwaTerm-Telegram first.
+    if bot_running:
+        raise FullUpdateError("legacy_bot_running")
+
+    # A pointer says some deployment serves from this host. If wuwaterm-api
+    # is stopped, there is no serving binding for this transaction to replace,
+    # and a rollback would restore nothing. Refuse before the journal is armed.
+    if old_pointer_present and not api_running:
         raise FullUpdateError("no_serving_surface")
 
     present, value = _pointer_state()

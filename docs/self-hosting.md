@@ -151,29 +151,35 @@ SDK. For the combined Bot and API runtime without data-build tooling, install
 ## One Command: `deploy/setup.sh`
 
 The commands below are the explicit path, and every one of them has a
-counterpart in one idempotent script. From the checkout:
+counterpart in one idempotent script. Core (`wuwaterm-api` + `data/terms.db`)
+is the single shared base, and you can combine any subset of client surfaces
+around it. From the checkout:
 
 ```bash
-./deploy/setup.sh                     # shared translation service (Core API) only
-./deploy/setup.sh --with-telegram     # install the Telegram surface, from its own product
-./deploy/setup.sh --with-legacy-bot   # deprecated: the inline bot in this checkout
-./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
-                                      # also install WuwaTerm-Web
-./deploy/setup.sh --status            # what is installed, its data version, health
-./deploy/setup.sh --check             # same, exit non-zero when the API is not ready
+./deploy/setup.sh                                                      # 1. Core API only
+./deploy/setup.sh --with-web --web-origin https://wuwaterm.example     # 2. Core + Web
+./deploy/setup.sh --with-windows                                       # 3. Core + Windows pairing
+./deploy/setup.sh --with-telegram                                      # 4. Core + Telegram (HTTP mode)
+./deploy/setup.sh --with-all --web-origin https://wuwaterm.example     # 5. Core + Web + Telegram + Windows
+./deploy/setup.sh --with-legacy-bot                                    # deprecated: the inline bot in this checkout
+./deploy/setup.sh --status                                             # what is installed, its data version, health
+./deploy/setup.sh --check                                              # same, exit non-zero when the API is not ready
 ```
 
 What it does, in this order:
 
 1. Creates `data/`, `state/` and `state-api/` with `state*` at mode `0700`
-   (`state-web/` and `state-web/data/` are created too when `--with-web` is
+   (`state-web/` and `state-web/data/` when `--with-web` is given;
+   `state-telegram/` and `state-telegram/state/` when `--with-telegram` is
    given), and copies `deploy/env.example` to `.env` at mode `0600` if `.env`
    is missing.
 2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
    `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
-   `TELEGRAM_BOT_TOKEN` only when the bot is actually being installed, which is
-   `--with-legacy-bot` or `--telegram-dir`. No bot is started otherwise, so an
-   API-only installation cannot fall into a restart loop.
+   `TELEGRAM_BOT_TOKEN` only when a Telegram surface is requested
+   (`--with-telegram`, `--telegram-dir`, or `--with-legacy-bot`; re-runs of
+   `--with-telegram` reuse an existing `state-telegram/telegram.env`). No bot
+   is started otherwise, so an API-only installation cannot fall into a restart
+   loop.
 3. Pulls the official GHCR images for the declared version unless
    `--build-local` is given, and builds `data/terms.db` when it is missing:
    `refresh-data` → `build-db --atomic` on a candidate → `verify-db` → promote.
@@ -181,9 +187,27 @@ What it does, in this order:
 4. Starts `wuwaterm-api`, waits for `/readyz`, and issues one
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
-5. `--with-telegram` installs no bot here. It resolves the Telegram product,
-   prepares its checkout when `--telegram-dir` is given (below), and prints
-   that product's own install steps with this installation's paths filled in.
+5. `--with-telegram` orchestrates standalone `WuwaTerm-Telegram` in HTTP mode
+   against the shared Core API (**requires `>= v0.7.0`** — no published release
+   includes the HTTP Core backend yet; the latest published release is
+   `v0.6.1`, which is the current default in `contracts/products.json` and
+   fails closed unless you pass an explicit compatible `--telegram-package` or
+   deploy `v0.6.1` via `--telegram-dir <checkout>` and `WuwaTerm-Telegram`'s
+   own `deploy/docker-compose.yml`). For `>= v0.7.0` (once published) or
+   `--telegram-package`, it issues a dedicated `telegram` device token
+   (`state-telegram/device.token`, mode `0600`), writes
+   `state-telegram/telegram.env` (mode `0600`) with
+   `WUWATERM_CORE_API_URL=http://127.0.0.1:<api_port>`,
+   `WUWATERM_CORE_API_TOKEN` and `TELEGRAM_BOT_TOKEN`, verifies the release
+   `image.oci.tar` against `SHA256SUMS` (and `contracts/products.json`, or a
+   local archive via `--telegram-package`), refuses to overwrite any existing
+   unmanaged `wuwaterm-telegram` or Compose-managed Telegram container, starts
+   `wuwaterm-telegram` labeled `org.wuwaterm.managed-by=setup.sh` with
+   `--network host`, `data:/app/data:ro`, `state-telegram/state:/app/state:rw`
+   and a private tmpfs, and runs
+   `python -B -m wuwaterm_telegram.operations health`. Pass
+   `--telegram-dir <checkout>` if you instead want the legacy checkout-prep
+   path that copies `data/terms.db` and prints manual wheel-build steps.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
    tag this checkout's `contracts/products.json` records (`v0.6.1` on `main` and
    the `v0.16.0` tag,
@@ -204,7 +228,15 @@ What it does, in this order:
    The issued token is kept in `state-web/device.token` (mode `0600`), the
    chosen port in `state-web/web.port`, and the Web workbench's own SQLite
    state under `state-web/data/` — `pool.sqlite3` for the shared quota pool.
-7. Adopts the installed topology into `deploy/product-update.sh` metadata when
+7. `--with-windows` issues a dedicated `windows` device token into
+   `state-api/windows-device.token` (mode `0600`) and prints the pinned
+   `WuwaTerm-Windows` release URL, ZIP download URL, SHA-256 checksum from
+   `contracts/products.json`, and HTTPS reverse-proxy pairing instructions.
+8. `--with-all` idempotently combines `--with-web`, `--with-telegram`, and
+   `--with-windows`: every client receives its own device token and state
+   directory (`state-api/`, `state-web/`, `state-telegram/`) while sharing the
+   single `wuwaterm-api` container and `data/terms.db`.
+9. Adopts the installed topology into `deploy/product-update.sh` metadata when
    a standalone `docker-compose` binary and its `.sha256` receipt are present,
    so later upgrades use the transactional path. Pass `--no-adopt` to skip it;
    the script says when it skipped and why.

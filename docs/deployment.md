@@ -830,24 +830,22 @@ Run this from `/opt/wuwaterm/current` after reviewing and merging the change.
 The updater requires the release it deploys to be clean and at freshly fetched
 `origin/main`, and builds that release first when `current` is behind (see
 [Release layout](#release-layout)).
-It moves every serving container it finds to one immutable image, so the
-existing manifest's single source/image identity continues to describe the bot
-and API. Only the surfaces that were serving are stopped and restarted; a
-surface that was already stopped or absent stays that way, and a stopped object
-is re-created (not started) on the new image so a hand start cannot resurrect
-the previous release. It does not change Telegram configuration or send a
-Telegram test message.
+It builds and moves `wuwaterm-api` to one immutable image, so the existing
+manifest's single source/image identity describes the Core API service. It does
+not build, stop, recreate, or start the legacy inline `wuwaterm-bot` container:
+if `wuwaterm-bot` is running, preflight refuses (`legacy_bot_running`) and
+directs the operator to migrate to standalone `WuwaTerm-Telegram`; if a stopped
+`wuwaterm-bot` container is still present, the updater leaves it untouched on
+its old image, prints a manual `docker rm wuwaterm-bot` cleanup hint, and
+continues upgrading `wuwaterm-api`. It does not change Telegram configuration
+or send a Telegram test message.
 
 Admission requires an existing, consistent pointer, an immutable manifest, a
-running API, and read-only data mounts. The in-Core bot may be running, stopped
-or absent: the maintained shape stops it and serves Telegram through the
-separate WuwaTerm-Telegram product, so requiring it would make that host
-undeployable. A host with no running surface at all is refused, because there
-is nothing to restore if the transaction fails. So is a host where both
-`wuwaterm-bot` and a standalone `wuwaterm-telegram` container are running: two
-pollers on one bot token answer every update twice. Admission rejects missing or
-mismatched state, an unsupported database, symlinked database paths, and SQLite
-journal sidecars.
+running `wuwaterm-api`, and a read-only `/app/data` mount. A host where
+`wuwaterm-api` is not running is refused (`service_not_running`), because there
+is no active Core surface to restore if the transaction fails. Admission
+rejects missing or mismatched state, an unsupported database, symlinked
+database paths, and SQLite journal sidecars.
 Database validation uses immutable read-only SQLite access, schema/provenance
 and integrity checks, and file identity plus SHA-256 comparisons. The same
 database must remain unchanged through activation and recovery.
@@ -864,14 +862,11 @@ reviewed checkout; a revision label alone is not proof of source provenance.
 
 Full and runtime-only updates share one deployment lock. Runtime-only progress
 is recorded durably before operations that may partially succeed. Success
-requires every surface to be in the state the transaction recorded — a surface
-that was running matches the new image and answers its checks, one that was
-stopped is still stopped on that image, one that was absent is still absent —
-and the manifest and pointer to pass readback. An ordinary failure restores the
-previous pair and pointer, including the image reference of a surface that was
-recorded stopped. A recovery failure is reported as unresolved; it is never
-described as a successful rollback.
-Ordinary failures before the first service-stop attempt leave the old pair
+requires `wuwaterm-api` to be running on the new image and pass its checks, and
+the manifest and pointer to pass readback. An ordinary failure restores the
+previous `wuwaterm-api` image and pointer. A recovery failure is reported as
+unresolved; it is never described as a successful rollback.
+Ordinary failures before the first service-stop attempt leave `wuwaterm-api`
 running only after its database, pointer, manifest and runtime binding are
 reverified unchanged. Partial stop failures still require rollback. A completed
 rollback journal cannot be replayed over a later full deployment.
@@ -1260,15 +1255,14 @@ cd /opt/wuwaterm
 export WUWATERM_STATE_ROOT=/opt/wuwaterm
 cat .deploy_commit
 python3 -m json.tool ".deployments/$(cat .deploy_commit).json"
-docker inspect --format '{{.Image}}' wuwaterm-bot
 docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
 docker compose -f current/deploy/docker-compose.yml exec -T wuwaterm-api \
   python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8788'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
 ```
 
-The pointer must equal the intended source SHA exactly; BOTH running image IDs
-and the DB hash must match the manifest, and the health check must print
-`200`. These are runtime evidence only when read
+The pointer must equal the intended source SHA exactly; the running
+`wuwaterm-api` image ID and the DB hash must match the manifest, and the health
+check must print `200`. These are runtime evidence only when read
 from the actual VPS after deployment. Local tests and failure injection are
 offline/deployment validation, not proof that production changed.

@@ -1,13 +1,43 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+CHANNEL_REPLY_INDEX_VERSION = 1
 
-from wuwaterm.channel_reply_schema import parse_channel_reply_payload  # noqa: E402
+
+class ChannelReplyPayloadError(ValueError):
+    pass
+
+
+def _strict_int(value: Any, name: str) -> int:
+    if type(value) is not int:
+        raise ChannelReplyPayloadError(f"{name} must be an integer")
+    return value
+
+
+def _validate_channel_reply_row(raw: Any) -> None:
+    if not isinstance(raw, dict):
+        raise ChannelReplyPayloadError("entry must be an object")
+    _strict_int(raw.get("chat_id"), "chat_id")
+    _strict_int(raw.get("message_id"), "message_id")
+    expires_raw = raw.get("expires_at")
+    if isinstance(expires_raw, bool) or not isinstance(expires_raw, (int, float)):
+        raise ChannelReplyPayloadError("expires_at must be numeric")
+    try:
+        expires_at = float(expires_raw)
+    except (OverflowError, ValueError) as exc:
+        raise ChannelReplyPayloadError("expires_at is out of range") from exc
+    if not math.isfinite(expires_at):
+        raise ChannelReplyPayloadError("expires_at must be finite")
+    reply_raw = raw.get("reply_message_ids")
+    if not isinstance(reply_raw, list) or not reply_raw:
+        raise ChannelReplyPayloadError("reply_message_ids must be a non-empty list")
+    for value in reply_raw:
+        _strict_int(value, "reply_message_id")
 
 
 def _chat_id_from_json(value: object) -> int | None:
@@ -41,7 +71,18 @@ def validate_chat_settings(payload: object) -> None:
 
 
 def validate_channel_replies(payload: object) -> None:
-    parse_channel_reply_payload(payload)
+    if not isinstance(payload, dict):
+        raise ChannelReplyPayloadError("payload must be an object")
+    if (
+        type(payload.get("version")) is not int
+        or payload["version"] != CHANNEL_REPLY_INDEX_VERSION
+    ):
+        raise ChannelReplyPayloadError("unsupported payload version")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ChannelReplyPayloadError("entries must be a list")
+    for raw in entries:
+        _validate_channel_reply_row(raw)
 
 
 def validate(path: str | Path, filename: str) -> None:
