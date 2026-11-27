@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -29,13 +30,35 @@ from . import llm_transport
 from . import request_trace
 from .cjk_span import MATCHER_REVISION
 from .document_anchor import bounded_anchor_fields
+from .provider_capabilities import (
+    BUILTIN_PROVIDER_PROFILES as BUILTIN_PROVIDER_PROFILES,
+    CONFIGURED_THINKING_MODES,
+    DEEPSEEK_EFFORT_MAPPING as DEEPSEEK_EFFORT_MAPPING,
+    DEFAULT_PROVIDER_PROFILE as DEFAULT_PROVIDER_PROFILE,
+    ConcreteThinkingMode as ConcreteThinkingMode,
+    ConfiguredThinkingMode as ConfiguredThinkingMode,
+    EffortResolution as EffortResolution,
+    ProviderProfile as ProviderProfile,
+    REASONING_ACTIVE_MODES,
+    SEMANTIC_EFFORT_LEVELS,
+    ThinkingProtocol as ThinkingProtocol,
+    clamp_effort_to_ceiling,
+    parse_concrete_thinking_mode,
+    parse_configured_thinking_mode,
+    redact_effective_effort,
+    redact_provider_profile_name,
+    resolve_provider_profile_from_env as resolve_provider_profile_from_env,
+)
 from .semantic_review_contract import PRECEDENT_WORDING
 from .structural_checks import paragraph_line_counts as paragraph_line_counts
 from .term_preparation import (
+    CONTEXTUAL_REFERENCE_CATEGORIES,
     AmbiguousMention,
+    TermOccurrence,
     TermReference,
     format_ambiguous_mention_lines,
     format_scoped_reference_lines,
+    is_occurrence_scoped_reference,
     partition_references_for_prompt,
     references_need_scope_instruction,
     validated_reference_ranges,
@@ -45,10 +68,7 @@ from .termbase import select_prompt_references
 LOGGER = logging.getLogger(__name__)
 
 Direction = Literal["zh->en", "en->zh"]
-ConcreteThinkingMode = Literal["disabled", "low", "high", "omit"]
-ConfiguredThinkingMode = Literal["disabled", "low", "high", "omit", "auto"]
 AttemptKind = Literal["initial", "timeout_fallback", "paragraph_repair"]
-ThinkingProtocol = Literal["deepseek_thinking_and_reasoning_effort", "omit_all"]
 AmbiguousMentionExposure = Literal["off", "scoped_alternative"]
 AMBIGUOUS_MENTION_EXPOSURES: tuple[AmbiguousMentionExposure, ...] = (
     "off",
@@ -56,34 +76,23 @@ AMBIGUOUS_MENTION_EXPOSURES: tuple[AmbiguousMentionExposure, ...] = (
 )
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
+AUTO_HIGH_MIN_TIMEOUT_SECONDS = 30.0
 TRANSLATION_THINKING_ZH_EN_ENV = "WUWATERM_TRANSLATION_THINKING_ZH_EN"
 TRANSLATION_THINKING_EN_ZH_ENV = "WUWATERM_TRANSLATION_THINKING_EN_ZH"
-TRANSLATION_THINKING_MODES: tuple[ConcreteThinkingMode, ...] = (
-    "disabled",
-    "low",
-    "high",
-    "omit",
-)
+TRANSLATION_THINKING_AUTO_CEILING_ENV = "WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT"
+TRANSLATION_THINKING_MODES: tuple[ConcreteThinkingMode, ...] = SEMANTIC_EFFORT_LEVELS
 TRANSLATION_THINKING_AUTO: Literal["auto"] = "auto"
 TRANSLATION_THINKING_EN_ZH_MODES: tuple[ConfiguredThinkingMode, ...] = (
-    "disabled",
-    "low",
-    "high",
-    "omit",
-    "auto",
+    CONFIGURED_THINKING_MODES
 )
 TRANSLATION_THINKING_ZH_EN_MODES: tuple[ConfiguredThinkingMode, ...] = (
-    "disabled",
-    "low",
-    "high",
-    "omit",
-    "auto",
+    CONFIGURED_THINKING_MODES
 )
 TRANSLATION_THINKING_ZH_EN_DEFAULT: ConcreteThinkingMode = "disabled"
 TRANSLATION_THINKING_EN_ZH_DEFAULT: ConcreteThinkingMode = "omit"
+TRANSLATION_THINKING_AUTO_CEILING_DEFAULT: ConcreteThinkingMode = "high"
 TRANSLATION_THINKING_REASONING_MODES: tuple[ConcreteThinkingMode, ...] = (
-    "low",
-    "omit",
+    REASONING_ACTIVE_MODES
 )
 EN_ZH_AUTO_LOCK_LIMIT = 4
 EN_ZH_AUTO_PARAGRAPH_LIMIT = 25
@@ -260,41 +269,6 @@ class PromptTemplates:
 DEFAULT_PROMPT_TEMPLATES = PromptTemplates()
 
 
-@dataclass(frozen=True)
-class ProviderProfile:
-    """Protocol capabilities and wire mapping for an LLM gateway/model family."""
-
-    name: str = "openai_compatible_deepseek"
-    thinking_protocol: ThinkingProtocol = "deepseek_thinking_and_reasoning_effort"
-    supports_structured_output: bool = False
-
-    def reasoning_extra_body(self, mode: ConcreteThinkingMode) -> dict[str, Any]:
-        """Map a resolved concrete thinking mode onto provider-specific JSON fields."""
-        if self.thinking_protocol == "omit_all" or mode == "omit":
-            return {}
-        if mode == "disabled":
-            return {"thinking": {"type": "disabled"}}
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": mode}
-
-    def distinguishes_thinking_modes(
-        self,
-        from_mode: ConcreteThinkingMode,
-        to_mode: ConcreteThinkingMode,
-    ) -> bool:
-        """Return whether switching ``from_mode`` -> ``to_mode`` changes wire fields."""
-        return self.reasoning_extra_body(from_mode) != self.reasoning_extra_body(to_mode)
-
-    def to_identity_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "thinking_protocol": self.thinking_protocol,
-            "supports_structured_output": self.supports_structured_output,
-        }
-
-
-DEFAULT_PROVIDER_PROFILE = ProviderProfile()
-
-
 def canonical_json(obj: Any) -> bytes:
     """Serialize ``obj`` deterministically with sorted keys and compact UTF-8 JSON."""
     return json.dumps(
@@ -318,18 +292,706 @@ def normalize_term_placeholders(text: str) -> str:
     return _TERM_PLACEHOLDER_RE.sub(_NORMALIZED_PLACEHOLDER, text)
 
 
+# Game terms whose surface directly overlaps everyday Chinese or English words
+# and therefore requires contextual disambiguation instead of blind locking.
+ORDINARY_WORD_OVERLAP_SURFACES: frozenset[str] = frozenset(
+    {
+        "encore",
+        "安可",
+        "echo",
+        "echoes",
+        "tuner",
+        "tuners",
+        "forte",
+        "intro",
+        "outro",
+        "liberation",
+        "resonance",
+    }
+)
+_AMBIGUOUS_REFERENCE_ORIGINS: frozenset[str] = frozenset(
+    {"scoped_skill_stem", "derived_soft_casing", "ambiguous_candidate"}
+)
+_AMBIGUOUS_REFERENCE_REASONS: frozenset[str] = frozenset(
+    {
+        "single_char_name_mention",
+        "ambiguous_alternative",
+        "soft_casing",
+        "local_skill_action",
+        "reference_only",
+        "ordinary_word_overlap",
+    }
+)
+_CLAUSE_MARKER_RE = re.compile(r"[，,；;：:（）()「」『』“”\"？?！!—]|--")
+_SENTENCE_END_RE = re.compile(r"[。！？.!?]+")
+
+
+@dataclass(frozen=True)
+class CandidateTermMetadata:
+    """Planning metadata for one non-locking contextual or ambiguous term candidate."""
+
+    source: str
+    zh: str
+    en: str
+    category: str
+    guidance_kind: Literal[
+        "contextual_reference",
+        "ambiguous_candidate",
+        "low_confidence_mention",
+    ]
+    disambiguation_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TermPlanningMetadata:
+    """Explicit separation between deterministic locks and model-judged candidates.
+
+    ``deterministic_locks`` are immutable placeholder substitutions restored
+    mechanically after model output. ``contextual_candidates`` (and the subset
+    ``ambiguous_candidates``) remain visible source text accompanied by
+    reference guidance so the model can judge whether each occurrence names an
+    official game concept or an ordinary word in context.
+    """
+
+    deterministic_locks: tuple[tuple[str, str, str], ...]
+    contextual_candidates: tuple[CandidateTermMetadata, ...]
+    ambiguous_candidates: tuple[CandidateTermMetadata, ...]
+    locked_surfaces: tuple[str, ...]
+    candidate_only_surfaces: tuple[str, ...]
+    lock_candidate_collisions: tuple[str, ...]
+
+    @property
+    def has_ambiguous_candidates(self) -> bool:
+        return bool(self.ambiguous_candidates)
+
+    @property
+    def disambiguation_required(self) -> bool:
+        return bool(self.ambiguous_candidates)
+
+    @property
+    def guidance_mode(
+        self,
+    ) -> Literal["none", "deterministic_locks_only", "contextual_candidates", "mixed"]:
+        has_locks = bool(self.deterministic_locks)
+        has_candidates = bool(self.contextual_candidates)
+        if has_locks and has_candidates:
+            return "mixed"
+        if has_candidates:
+            return "contextual_candidates"
+        if has_locks:
+            return "deterministic_locks_only"
+        return "none"
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        """Return non-sensitive summary counts (never raw source text)."""
+        return {
+            "lock_count": len(self.deterministic_locks),
+            "contextual_candidate_count": len(self.contextual_candidates),
+            "ambiguous_candidate_count": len(self.ambiguous_candidates),
+            "disambiguation_required": self.disambiguation_required,
+            "guidance_mode": self.guidance_mode,
+            "lock_candidate_collision_count": len(self.lock_candidate_collisions),
+        }
+
+
+def _reference_disambiguation_reasons(
+    ref: TermReference,
+    *,
+    competing_sources: frozenset[str],
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    source_cf = ref.source.casefold()
+    zh_cf = ref.zh.casefold()
+    en_cf = ref.en.casefold()
+    if (
+        source_cf in ORDINARY_WORD_OVERLAP_SURFACES
+        or zh_cf in ORDINARY_WORD_OVERLAP_SURFACES
+        or en_cf in ORDINARY_WORD_OVERLAP_SURFACES
+    ):
+        reasons.append("ordinary_word_overlap")
+    if source_cf in competing_sources:
+        reasons.append("competing_senses")
+    if (
+        ref.origin in _AMBIGUOUS_REFERENCE_ORIGINS
+        or ref.reason in _AMBIGUOUS_REFERENCE_REASONS
+        or is_occurrence_scoped_reference(ref)
+    ):
+        reasons.append("occurrence_scoped")
+    # Lowercase or non-exact casing of an English official name (e.g. "encore"
+    # or "rover" in running prose) strongly signals ordinary-word ambiguity.
+    if (
+        ref.en
+        and ref.source.isascii()
+        and ref.source.casefold() == ref.en.casefold()
+        and ref.source != ref.en
+    ):
+        reasons.append("case_mismatch")
+    return tuple(reasons)
+
+
+def analyze_term_planning(
+    locks: Sequence[tuple[str, str, str]],
+    references: Sequence[TermReference],
+    *,
+    to_chinese: bool,
+    ambiguous: Sequence[AmbiguousMention] = (),
+) -> TermPlanningMetadata:
+    """Inspect locks, references, and ambiguous mentions as distinct planning roles."""
+    coerced = tuple(coerce_term_reference(ref) for ref in references)
+    pairs_by_source: dict[str, set[tuple[str, str, str]]] = {}
+    for ref in coerced:
+        pairs_by_source.setdefault(ref.source.casefold(), set()).add(
+            (ref.zh, ref.en, ref.category)
+        )
+    competing_sources = frozenset(
+        src for src, pairs in pairs_by_source.items() if len(pairs) > 1
+    )
+
+    contextual: list[CandidateTermMetadata] = []
+    ambiguous_items: list[CandidateTermMetadata] = []
+    for ref in coerced:
+        reasons = _reference_disambiguation_reasons(
+            ref, competing_sources=competing_sources
+        )
+        kind: Literal[
+            "contextual_reference",
+            "ambiguous_candidate",
+            "low_confidence_mention",
+        ] = "ambiguous_candidate" if reasons else "contextual_reference"
+        item = CandidateTermMetadata(
+            source=ref.source,
+            zh=ref.zh,
+            en=ref.en,
+            category=ref.category,
+            guidance_kind=kind,
+            disambiguation_reasons=reasons,
+        )
+        contextual.append(item)
+        if reasons:
+            ambiguous_items.append(item)
+
+    for mention in ambiguous:
+        item = CandidateTermMetadata(
+            source=mention.source,
+            zh=mention.zh,
+            en=mention.en,
+            category=mention.category,
+            guidance_kind="low_confidence_mention",
+            disambiguation_reasons=("low_confidence_mention",),
+        )
+        contextual.append(item)
+        ambiguous_items.append(item)
+
+    lock_index = 2 if to_chinese else 1
+    locked_surfaces_map: dict[str, None] = {}
+    for lock in locks:
+        if len(lock) > lock_index and lock[lock_index]:
+            locked_surfaces_map.setdefault(lock[lock_index], None)
+    locked_surfaces = tuple(locked_surfaces_map)
+    locked_cf = {surface.casefold() for surface in locked_surfaces}
+
+    candidate_surfaces_map: dict[str, None] = {}
+    collisions_map: dict[str, None] = {}
+    for item in ambiguous_items:
+        candidate_surfaces_map.setdefault(item.source, None)
+        if item.source.casefold() in locked_cf:
+            collisions_map.setdefault(item.source, None)
+    for item in contextual:
+        if item.category in CONTEXTUAL_REFERENCE_CATEGORIES:
+            candidate_surfaces_map.setdefault(item.source, None)
+            if item.source.casefold() in locked_cf:
+                collisions_map.setdefault(item.source, None)
+
+    return TermPlanningMetadata(
+        deterministic_locks=tuple(locks),
+        contextual_candidates=tuple(contextual),
+        ambiguous_candidates=tuple(ambiguous_items),
+        locked_surfaces=locked_surfaces,
+        candidate_only_surfaces=tuple(candidate_surfaces_map),
+        lock_candidate_collisions=tuple(collisions_map),
+    )
+
+
+def _remap_occurrence_for_edits(
+    occ: TermOccurrence,
+    edits: Sequence[tuple[int, int, int]],
+) -> TermOccurrence:
+    if type(occ.model_start) is not int or type(occ.model_end) is not int:
+        return occ
+    start_shift = sum(delta for _s, edit_end, delta in edits if edit_end <= occ.model_start)
+    end_shift = sum(delta for _s, edit_end, delta in edits if edit_end <= occ.model_end)
+    if start_shift == 0 and end_shift == 0:
+        return occ
+    return TermOccurrence(
+        start=occ.start,
+        end=occ.end,
+        matched_text=occ.matched_text,
+        segment_index=occ.segment_index,
+        model_start=occ.model_start + start_shift,
+        model_end=occ.model_end + end_shift,
+    )
+
+
+def _remap_reference_for_edits(
+    ref: TermReference,
+    edits: Sequence[tuple[int, int, int]],
+) -> TermReference:
+    if not edits or not ref.occurrences:
+        return ref
+    remapped = tuple(_remap_occurrence_for_edits(occ, edits) for occ in ref.occurrences)
+    if remapped == ref.occurrences:
+        return ref
+    return TermReference(
+        source=ref.source,
+        zh=ref.zh,
+        en=ref.en,
+        category=ref.category,
+        occurrences=remapped,
+        origin=ref.origin,
+        reason=ref.reason,
+    )
+
+
+def _remap_ambiguous_for_edits(
+    mention: AmbiguousMention,
+    edits: Sequence[tuple[int, int, int]],
+) -> AmbiguousMention:
+    if not edits:
+        return mention
+    remapped = _remap_occurrence_for_edits(mention.occurrence, edits)
+    if remapped == mention.occurrence:
+        return mention
+    return AmbiguousMention(
+        source=mention.source,
+        zh=mention.zh,
+        en=mention.en,
+        category=mention.category,
+        occurrence=remapped,
+        evaluation=mention.evaluation,
+    )
+
+
+def demote_ambiguous_locks_with_mentions(
+    locked_text: str,
+    locks: Sequence[tuple[str, str, str]],
+    references: Sequence[TermReference],
+    *,
+    to_chinese: bool,
+    ambiguous: Sequence[AmbiguousMention] = (),
+) -> tuple[
+    str,
+    tuple[tuple[str, str, str], ...],
+    tuple[TermReference, ...],
+    tuple[AmbiguousMention, ...],
+]:
+    """Convert any ambiguous/ordinary-word lock back into a contextual candidate.
+
+    Replaces demoted placeholders in ``locked_text`` and remaps ``model_start`` /
+    ``model_end`` coordinates on every existing ``TermReference`` and
+    ``AmbiguousMention`` so scoped range validation stays exact.
+    """
+    coerced_refs = [coerce_term_reference(ref) for ref in references]
+    existing_keys = {ref.dedupe_key() for ref in coerced_refs}
+    candidate_surfaces_cf = {
+        ref.source.casefold() for ref in coerced_refs
+    } | {mention.source.casefold() for mention in ambiguous}
+
+    source_index = 2 if to_chinese else 1
+    kept_locks: list[tuple[str, str, str]] = []
+    replacements: list[tuple[int, int, str]] = []
+    demoted_refs: list[TermReference] = []
+
+    for lock in locks:
+        placeholder, zh, en = lock
+        surface = lock[source_index]
+        is_ambiguous_lock = (
+            surface.casefold() in ORDINARY_WORD_OVERLAP_SURFACES
+            or zh.casefold() in ORDINARY_WORD_OVERLAP_SURFACES
+            or en.casefold() in ORDINARY_WORD_OVERLAP_SURFACES
+            or surface.casefold() in candidate_surfaces_cf
+        )
+        if is_ambiguous_lock:
+            pos = locked_text.find(placeholder)
+            while pos != -1:
+                replacements.append((pos, pos + len(placeholder), surface))
+                pos = locked_text.find(placeholder, pos + len(placeholder))
+            demoted = TermReference(
+                source=surface,
+                zh=zh,
+                en=en,
+                category="resonator"
+                if surface.casefold() in {"encore", "安可"}
+                else "core_term",
+                origin="ambiguous_candidate",
+                reason="ordinary_word_overlap",
+            )
+            if demoted.dedupe_key() not in existing_keys:
+                existing_keys.add(demoted.dedupe_key())
+                demoted_refs.append(demoted)
+        else:
+            kept_locks.append(lock)
+
+    if not replacements:
+        return (
+            locked_text,
+            tuple(kept_locks),
+            tuple([*coerced_refs, *demoted_refs]),
+            tuple(ambiguous),
+        )
+
+    replacements.sort(key=lambda item: (item[0], item[1]))
+    pieces: list[str] = []
+    edits: list[tuple[int, int, int]] = []
+    cursor = 0
+    for start, end, surface in replacements:
+        if start < cursor:
+            continue
+        pieces.append(locked_text[cursor:start])
+        pieces.append(surface)
+        edits.append((start, end, len(surface) - (end - start)))
+        cursor = end
+    pieces.append(locked_text[cursor:])
+    new_text = "".join(pieces)
+
+    remapped_refs = [
+        _remap_reference_for_edits(ref, edits) for ref in coerced_refs
+    ]
+    remapped_refs.extend(demoted_refs)
+    remapped_ambiguous = tuple(
+        _remap_ambiguous_for_edits(mention, edits) for mention in ambiguous
+    )
+    return new_text, tuple(kept_locks), tuple(remapped_refs), remapped_ambiguous
+
+
+def demote_ambiguous_locks(
+    locked_text: str,
+    locks: Sequence[tuple[str, str, str]],
+    references: Sequence[TermReference],
+    *,
+    to_chinese: bool,
+    ambiguous: Sequence[AmbiguousMention] = (),
+) -> tuple[str, tuple[tuple[str, str, str], ...], tuple[TermReference, ...]]:
+    """Convert any ambiguous/ordinary-word lock back into a contextual candidate.
+
+    Ensures the planning layer never leaves an ordinary-word-overlapping or
+    candidate-colliding term trapped inside an immutable placeholder lock,
+    remapping occurrence coordinates on all surviving references.
+    """
+    new_text, kept_locks, remapped_refs, _remapped_ambiguous = (
+        demote_ambiguous_locks_with_mentions(
+            locked_text,
+            locks,
+            references,
+            to_chinese=to_chinese,
+            ambiguous=ambiguous,
+        )
+    )
+    return new_text, kept_locks, remapped_refs
+
+
+@dataclass(frozen=True)
+class ReasoningComplexitySignals:
+    """Structured semantic & structural signals driving dynamic ``auto`` effort."""
+
+    direction: Direction
+    char_count: int
+    paragraph_count: int
+    lock_count: int
+    reference_count: int
+    ambiguous_candidate_count: int
+    competing_sense_count: int
+    has_multi_segment_context: bool
+    context_signal_count: int
+    clause_marker_count: int
+    max_paragraph_chars: int
+    complexity_score: int
+    reasons: tuple[str, ...]
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        return {
+            "direction": self.direction,
+            "char_count": self.char_count,
+            "paragraph_count": self.paragraph_count,
+            "lock_count": self.lock_count,
+            "reference_count": self.reference_count,
+            "ambiguous_candidate_count": self.ambiguous_candidate_count,
+            "competing_sense_count": self.competing_sense_count,
+            "has_multi_segment_context": self.has_multi_segment_context,
+            "context_signal_count": self.context_signal_count,
+            "clause_marker_count": self.clause_marker_count,
+            "max_paragraph_chars": self.max_paragraph_chars,
+            "complexity_score": self.complexity_score,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True)
+class ReasoningDecision:
+    """Full explainable decision for one request's semantic reasoning effort."""
+
+    configured_mode: ConfiguredThinkingMode
+    requested_effort: ConcreteThinkingMode
+    ceiling_effort: ConcreteThinkingMode
+    signals: ReasoningComplexitySignals
+    reasons: tuple[str, ...]
+    capped_by_timeout_or_budget: bool = False
+    capped_by_ceiling: bool = False
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        return {
+            "configured_mode": self.configured_mode,
+            "requested_effort": self.requested_effort,
+            "ceiling_effort": self.ceiling_effort,
+            "reasons": list(self.reasons),
+            "capped_by_timeout_or_budget": self.capped_by_timeout_or_budget,
+            "capped_by_ceiling": self.capped_by_ceiling,
+            "signals": self.signals.to_metadata_dict(),
+        }
+
+
+def _active_context_signals(
+    context: TranslationContextProtocol | None,
+) -> tuple[int, tuple[str, ...]]:
+    if context is None:
+        return 0, ()
+    reasons: list[str] = []
+    if getattr(context, "before", None) is not None:
+        reasons.append("context_before")
+    precedents = tuple(getattr(context, "precedents", ()) or ())
+    if precedents:
+        reasons.append("context_precedents")
+    anchor = getattr(context, "document_anchor", None)
+    if anchor is not None:
+        topic, heading, entities = bounded_anchor_fields(anchor)
+        if topic or heading or entities:
+            reasons.append("context_document_anchor")
+    glossary = tuple(getattr(context, "user_glossary_references", ()) or ())
+    if glossary:
+        reasons.append("context_user_glossary")
+    return len(reasons), tuple(reasons)
+
+
+def extract_reasoning_complexity_signals(
+    prepared_text: str,
+    *,
+    to_chinese: bool,
+    lock_count: int,
+    references: Sequence[TermReference] = (),
+    ambiguous: Sequence[AmbiguousMention] = (),
+    context: TranslationContextProtocol | None = None,
+) -> ReasoningComplexitySignals:
+    """Compute bounded semantic complexity signals for ``auto`` reasoning routing."""
+    direction: Direction = "en->zh" if to_chinese else "zh->en"
+    para_counts = paragraph_line_counts(prepared_text)
+    paragraph_count = len(para_counts)
+    paragraphs = [
+        chunk.strip()
+        for chunk in re.split(r"\n[^\S\n]*\n", prepared_text)
+        if chunk.strip()
+    ]
+    max_paragraph_chars = max((len(chunk) for chunk in paragraphs), default=0)
+    clause_marker_count = len(_CLAUSE_MARKER_RE.findall(prepared_text))
+    sentence_count = len(_SENTENCE_END_RE.findall(prepared_text))
+
+    planning = analyze_term_planning(
+        (),
+        references,
+        to_chinese=to_chinese,
+        ambiguous=ambiguous,
+    )
+    ambiguous_candidate_count = len(planning.ambiguous_candidates)
+    competing_sense_count = sum(
+        1
+        for item in planning.ambiguous_candidates
+        if "competing_senses" in item.disambiguation_reasons
+    )
+
+    context_signal_count, context_reasons = _active_context_signals(context)
+    has_multi_segment_context = context_signal_count > 0
+
+    score = 0
+    reasons: list[str] = []
+
+    if ambiguous_candidate_count >= 1:
+        score += 2
+        reasons.append("ambiguous_candidates")
+        if ambiguous_candidate_count >= 2 or competing_sense_count >= 1:
+            score += 1
+            reasons.append("multi_ambiguous_candidates")
+
+    if context_reasons:
+        reasons.extend(context_reasons)
+        if "context_precedents" in context_reasons:
+            score += 2
+        if "context_before" in context_reasons:
+            score += 1
+        if "context_document_anchor" in context_reasons:
+            score += 1
+        if "context_user_glossary" in context_reasons:
+            score += 1
+
+    # Complex syntax / dense prose: multi-clause sentences or long dense
+    # paragraphs with rich punctuation/dialogue structure (not short repeating
+    # one-sentence lines).
+    if (
+        (max_paragraph_chars >= 180 and clause_marker_count >= 4)
+        or (clause_marker_count >= 6 and sentence_count >= 2)
+    ):
+        score += 2
+        reasons.append("complex_syntax")
+    if (
+        paragraph_count >= 3
+        and len(prepared_text) >= 450
+        and max_paragraph_chars >= 120
+        and clause_marker_count >= 4
+    ):
+        score += 1
+        reasons.append("long_complex_prose")
+
+    return ReasoningComplexitySignals(
+        direction=direction,
+        char_count=len(prepared_text),
+        paragraph_count=paragraph_count,
+        lock_count=lock_count,
+        reference_count=len(references),
+        ambiguous_candidate_count=ambiguous_candidate_count,
+        competing_sense_count=competing_sense_count,
+        has_multi_segment_context=has_multi_segment_context,
+        context_signal_count=context_signal_count,
+        clause_marker_count=clause_marker_count,
+        max_paragraph_chars=max_paragraph_chars,
+        complexity_score=score,
+        reasons=tuple(reasons),
+    )
+
+
+def select_auto_thinking_decision(
+    prepared_text: str,
+    *,
+    to_chinese: bool,
+    lock_count: int,
+    lock_limit: int = EN_ZH_AUTO_LOCK_LIMIT,
+    paragraph_limit: int = EN_ZH_AUTO_PARAGRAPH_LIMIT,
+    zh_en_scalar_limit: int = ZH_EN_AUTO_SCALAR_LIMIT,
+    references: Sequence[TermReference] = (),
+    ambiguous: Sequence[AmbiguousMention] = (),
+    context: TranslationContextProtocol | None = None,
+    ceiling: ConcreteThinkingMode = TRANSLATION_THINKING_AUTO_CEILING_DEFAULT,
+    timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+    high_min_timeout_seconds: float = AUTO_HIGH_MIN_TIMEOUT_SECONDS,
+    remaining_budget_seconds: float | None = None,
+) -> ReasoningDecision:
+    """Resolve ``auto`` reasoning effort from semantic complexity and budget guards."""
+    signals = extract_reasoning_complexity_signals(
+        prepared_text,
+        to_chinese=to_chinese,
+        lock_count=lock_count,
+        references=references,
+        ambiguous=ambiguous,
+        context=context,
+    )
+    decision_reasons: list[str] = list(signals.reasons)
+
+    # Hard latency / shape guards (measured timeout-prone shapes stay disabled).
+    if lock_count >= lock_limit:
+        decision_reasons.append("lock_density_guard")
+        return ReasoningDecision(
+            configured_mode=TRANSLATION_THINKING_AUTO,
+            requested_effort="disabled",
+            ceiling_effort=ceiling,
+            signals=signals,
+            reasons=tuple(decision_reasons),
+            capped_by_timeout_or_budget=True,
+        )
+    if signals.paragraph_count >= paragraph_limit:
+        decision_reasons.append("paragraph_limit_guard")
+        return ReasoningDecision(
+            configured_mode=TRANSLATION_THINKING_AUTO,
+            requested_effort="disabled",
+            ceiling_effort=ceiling,
+            signals=signals,
+            reasons=tuple(decision_reasons),
+            capped_by_timeout_or_budget=True,
+        )
+    if not to_chinese and signals.char_count > zh_en_scalar_limit:
+        decision_reasons.append("scalar_limit_guard")
+        return ReasoningDecision(
+            configured_mode=TRANSLATION_THINKING_AUTO,
+            requested_effort="disabled",
+            ceiling_effort=ceiling,
+            signals=signals,
+            reasons=tuple(decision_reasons),
+            capped_by_timeout_or_budget=True,
+        )
+
+    # Semantic complexity tiering: move beyond disabled/low when disambiguation,
+    # multi-segment context, or complex prose warrants deeper reasoning.
+    if signals.complexity_score >= 5:
+        target: ConcreteThinkingMode = "max"
+    elif signals.complexity_score >= 2:
+        target = "high"
+    else:
+        target = "low"
+
+    capped_by_timeout = False
+    effective_window = (
+        float(timeout_seconds)
+        if remaining_budget_seconds is None
+        else min(float(timeout_seconds), float(remaining_budget_seconds))
+    )
+    if effective_window < float(high_min_timeout_seconds) and target in (
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ):
+        target = "low"
+        capped_by_timeout = True
+        decision_reasons.append("timeout_budget_guard")
+
+    final_effort, capped_by_ceiling = clamp_effort_to_ceiling(target, ceiling)
+    if capped_by_ceiling:
+        decision_reasons.append("ceiling_clamped")
+
+    return ReasoningDecision(
+        configured_mode=TRANSLATION_THINKING_AUTO,
+        requested_effort=final_effort,
+        ceiling_effort=ceiling,
+        signals=signals,
+        reasons=tuple(decision_reasons),
+        capped_by_timeout_or_budget=capped_by_timeout,
+        capped_by_ceiling=capped_by_ceiling,
+    )
+
+
 def select_en_zh_auto_thinking(
     prepared_text: str,
     *,
     lock_count: int,
     lock_limit: int = EN_ZH_AUTO_LOCK_LIMIT,
     paragraph_limit: int = EN_ZH_AUTO_PARAGRAPH_LIMIT,
+    references: Sequence[TermReference] = (),
+    ambiguous: Sequence[AmbiguousMention] = (),
+    context: TranslationContextProtocol | None = None,
+    ceiling: ConcreteThinkingMode = TRANSLATION_THINKING_AUTO_CEILING_DEFAULT,
+    timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+    remaining_budget_seconds: float | None = None,
 ) -> ConcreteThinkingMode:
     """The concrete thinking mode an ``auto`` English-to-Chinese request runs under."""
-    para_count = len(paragraph_line_counts(prepared_text))
-    if lock_count >= lock_limit or para_count >= paragraph_limit:
-        return "disabled"
-    return "low"
+    return select_auto_thinking_decision(
+        prepared_text,
+        to_chinese=True,
+        lock_count=lock_count,
+        lock_limit=lock_limit,
+        paragraph_limit=paragraph_limit,
+        references=references,
+        ambiguous=ambiguous,
+        context=context,
+        ceiling=ceiling,
+        timeout_seconds=timeout_seconds,
+        remaining_budget_seconds=remaining_budget_seconds,
+    ).requested_effort
 
 
 def select_zh_en_auto_thinking(
@@ -339,22 +1001,28 @@ def select_zh_en_auto_thinking(
     lock_limit: int = ZH_EN_AUTO_LOCK_LIMIT,
     scalar_limit: int = ZH_EN_AUTO_SCALAR_LIMIT,
     paragraph_limit: int = ZH_EN_AUTO_PARAGRAPH_LIMIT,
+    references: Sequence[TermReference] = (),
+    ambiguous: Sequence[AmbiguousMention] = (),
+    context: TranslationContextProtocol | None = None,
+    ceiling: ConcreteThinkingMode = TRANSLATION_THINKING_AUTO_CEILING_DEFAULT,
+    timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+    remaining_budget_seconds: float | None = None,
 ) -> ConcreteThinkingMode:
-    """The concrete thinking mode an ``auto`` Chinese-to-English request runs under.
-
-    Mirrors :func:`select_en_zh_auto_thinking` for the direction where the
-    timeout is the risk: any shape long enough to reproduce slowly (many
-    scalars, many paragraphs, or a lock-dense prompt) is sent ``disabled``,
-    and only the shapes where disambiguation dominates keep ``low``.
-    """
-    para_count = len(paragraph_line_counts(prepared_text))
-    if (
-        lock_count >= lock_limit
-        or len(prepared_text) > scalar_limit
-        or para_count >= paragraph_limit
-    ):
-        return "disabled"
-    return "low"
+    """The concrete thinking mode an ``auto`` Chinese-to-English request runs under."""
+    return select_auto_thinking_decision(
+        prepared_text,
+        to_chinese=False,
+        lock_count=lock_count,
+        lock_limit=lock_limit,
+        paragraph_limit=paragraph_limit,
+        zh_en_scalar_limit=scalar_limit,
+        references=references,
+        ambiguous=ambiguous,
+        context=context,
+        ceiling=ceiling,
+        timeout_seconds=timeout_seconds,
+        remaining_budget_seconds=remaining_budget_seconds,
+    ).requested_effort
 
 
 def resolve_configured_thinking_mode(
@@ -364,44 +1032,46 @@ def resolve_configured_thinking_mode(
 ) -> ConfiguredThinkingMode:
     """Read and validate the configured thinking mode from environment variables."""
     active_logger = LOGGER if logger is None else logger
-    if to_chinese:
-        raw = os.getenv(TRANSLATION_THINKING_EN_ZH_ENV, "").strip()
-        mode = raw or TRANSLATION_THINKING_EN_ZH_DEFAULT
-        if mode == "disabled":
-            return "disabled"
-        if mode == "low":
-            return "low"
-        if mode == "high":
-            return "high"
-        if mode == "omit":
-            return "omit"
-        if mode == "auto":
-            return "auto"
-        active_logger.warning(
-            "unknown %s; using %s",
-            TRANSLATION_THINKING_EN_ZH_ENV,
-            TRANSLATION_THINKING_EN_ZH_DEFAULT,
-        )
-        return TRANSLATION_THINKING_EN_ZH_DEFAULT
-
-    raw = os.getenv(TRANSLATION_THINKING_ZH_EN_ENV, "").strip()
-    mode = raw or TRANSLATION_THINKING_ZH_EN_DEFAULT
-    if mode == "disabled":
-        return "disabled"
-    if mode == "low":
-        return "low"
-    if mode == "high":
-        return "high"
-    if mode == "omit":
-        return "omit"
-    if mode == "auto":
-        return "auto"
+    env_name = (
+        TRANSLATION_THINKING_EN_ZH_ENV if to_chinese else TRANSLATION_THINKING_ZH_EN_ENV
+    )
+    default_mode: ConfiguredThinkingMode = (
+        TRANSLATION_THINKING_EN_ZH_DEFAULT
+        if to_chinese
+        else TRANSLATION_THINKING_ZH_EN_DEFAULT
+    )
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default_mode
+    parsed = parse_configured_thinking_mode(raw)
+    if parsed is not None:
+        return parsed
     active_logger.warning(
         "unknown %s; using %s",
-        TRANSLATION_THINKING_ZH_EN_ENV,
-        TRANSLATION_THINKING_ZH_EN_DEFAULT,
+        env_name,
+        default_mode,
     )
-    return TRANSLATION_THINKING_ZH_EN_DEFAULT
+    return default_mode
+
+
+def resolve_auto_thinking_ceiling(
+    *,
+    logger: logging.Logger | None = None,
+) -> ConcreteThinkingMode:
+    """Read the configured maximum effort ceiling for ``auto`` reasoning routing."""
+    active_logger = LOGGER if logger is None else logger
+    raw = os.getenv(TRANSLATION_THINKING_AUTO_CEILING_ENV, "").strip()
+    if not raw:
+        return TRANSLATION_THINKING_AUTO_CEILING_DEFAULT
+    parsed = parse_concrete_thinking_mode(raw)
+    if parsed is not None and parsed != "omit":
+        return parsed
+    active_logger.warning(
+        "unknown %s; using %s",
+        TRANSLATION_THINKING_AUTO_CEILING_ENV,
+        TRANSLATION_THINKING_AUTO_CEILING_DEFAULT,
+    )
+    return TRANSLATION_THINKING_AUTO_CEILING_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -442,6 +1112,13 @@ class RequestPolicy:
     # and out of the policy identity entirely. "scoped_alternative" is for
     # offline tests and future experiments only; production never sets it.
     ambiguous_mention_exposure: AmbiguousMentionExposure = "off"
+    # Upper effort bound for dynamic ``auto`` routing. Default ``high`` lets
+    # ``auto`` escalate semantically complex/ambiguous segments without crossing
+    # into ``max`` unless an operator explicitly raises the ceiling.
+    auto_reasoning_ceiling: ConcreteThinkingMode = (
+        TRANSLATION_THINKING_AUTO_CEILING_DEFAULT
+    )
+    auto_high_min_timeout_seconds: float = AUTO_HIGH_MIN_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.ambiguous_mention_exposure not in AMBIGUOUS_MENTION_EXPOSURES:
@@ -449,6 +1126,13 @@ class RequestPolicy:
                 "ambiguous_mention_exposure must be one of "
                 f"{AMBIGUOUS_MENTION_EXPOSURES}, "
                 f"got {self.ambiguous_mention_exposure!r}"
+            )
+        if parse_concrete_thinking_mode(self.auto_reasoning_ceiling) is None or (
+            self.auto_reasoning_ceiling == "omit"
+        ):
+            raise ValueError(
+                "auto_reasoning_ceiling must be a concrete non-omit effort level, "
+                f"got {self.auto_reasoning_ceiling!r}"
             )
         if self.zh_en_auto_thinking and (
             self.configured_thinking_zh_en != TRANSLATION_THINKING_ZH_EN_DEFAULT
@@ -466,27 +1150,71 @@ class RequestPolicy:
             return TRANSLATION_THINKING_AUTO
         return self.configured_thinking_zh_en
 
-    def resolve_initial_thinking_mode(
-        self, *, to_chinese: bool, locked_text: str, lock_count: int
-    ) -> ConcreteThinkingMode:
-        if not to_chinese and self.zh_en_auto_thinking:
-            return select_zh_en_auto_thinking(
+    def plan_reasoning(
+        self,
+        *,
+        to_chinese: bool,
+        locked_text: str,
+        lock_count: int,
+        references: Sequence[TermReference] = (),
+        ambiguous: Sequence[AmbiguousMention] = (),
+        context: TranslationContextProtocol | None = None,
+        remaining_budget_seconds: float | None = None,
+    ) -> ReasoningDecision:
+        """Produce a structured reasoning decision for this request."""
+        configured = self.configured_mode(to_chinese=to_chinese)
+        if configured != TRANSLATION_THINKING_AUTO:
+            signals = extract_reasoning_complexity_signals(
                 locked_text,
+                to_chinese=to_chinese,
                 lock_count=lock_count,
-                lock_limit=self.auto_lock_limit,
-                scalar_limit=self.zh_en_auto_scalar_limit,
-                paragraph_limit=self.auto_paragraph_limit,
+                references=references,
+                ambiguous=ambiguous,
+                context=context,
             )
-        if not to_chinese:
-            return self.configured_thinking_zh_en
-        if self.configured_thinking_en_zh != TRANSLATION_THINKING_AUTO:
-            return self.configured_thinking_en_zh
-        return select_en_zh_auto_thinking(
+            return ReasoningDecision(
+                configured_mode=configured,
+                requested_effort=configured,
+                ceiling_effort=self.auto_reasoning_ceiling,
+                signals=signals,
+                reasons=("explicit_override",),
+            )
+        return select_auto_thinking_decision(
             locked_text,
+            to_chinese=to_chinese,
             lock_count=lock_count,
             lock_limit=self.auto_lock_limit,
             paragraph_limit=self.auto_paragraph_limit,
+            zh_en_scalar_limit=self.zh_en_auto_scalar_limit,
+            references=references,
+            ambiguous=ambiguous,
+            context=context,
+            ceiling=self.auto_reasoning_ceiling,
+            timeout_seconds=self.timeout_seconds,
+            high_min_timeout_seconds=self.auto_high_min_timeout_seconds,
+            remaining_budget_seconds=remaining_budget_seconds,
         )
+
+    def resolve_initial_thinking_mode(
+        self,
+        *,
+        to_chinese: bool,
+        locked_text: str,
+        lock_count: int,
+        references: Sequence[TermReference] = (),
+        ambiguous: Sequence[AmbiguousMention] = (),
+        context: TranslationContextProtocol | None = None,
+        remaining_budget_seconds: float | None = None,
+    ) -> ConcreteThinkingMode:
+        return self.plan_reasoning(
+            to_chinese=to_chinese,
+            locked_text=locked_text,
+            lock_count=lock_count,
+            references=references,
+            ambiguous=ambiguous,
+            context=context,
+            remaining_budget_seconds=remaining_budget_seconds,
+        ).requested_effort
 
     def allows_timeout_fallback(
         self,
@@ -499,6 +1227,7 @@ class RequestPolicy:
         return (
             configured == TRANSLATION_THINKING_AUTO
             and initial_thinking_mode in TRANSLATION_THINKING_REASONING_MODES
+            and provider_profile.has_explicit_disable_thinking()
             and provider_profile.distinguishes_thinking_modes(
                 initial_thinking_mode, "disabled"
             )
@@ -527,19 +1256,37 @@ class RequestPolicy:
         lock_count: int,
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
         prepared_scalars: int | None = None,
+        remaining_budget_seconds: float | None = None,
     ) -> ConcreteThinkingMode:
         if (
+            self.configured_mode(to_chinese=to_chinese)
+            != TRANSLATION_THINKING_AUTO
+        ):
+            return initial_thinking_mode
+        target_mode, _ = clamp_effort_to_ceiling("low", self.auto_reasoning_ceiling)
+        if (
             initial_thinking_mode == "disabled"
+            and target_mode != "disabled"
             and lock_count < self.auto_lock_limit
-            and self.configured_mode(to_chinese=to_chinese)
-            == TRANSLATION_THINKING_AUTO
-            and provider_profile.distinguishes_thinking_modes("disabled", "low")
+            and provider_profile.distinguishes_thinking_modes("disabled", target_mode)
             and self._repair_may_step_up(
                 to_chinese=to_chinese, prepared_scalars=prepared_scalars
             )
         ):
-            return "low"
-        return initial_thinking_mode
+            return target_mode
+        bounded_mode, _ = clamp_effort_to_ceiling(
+            initial_thinking_mode, self.auto_reasoning_ceiling
+        )
+        effective_window = (
+            float(self.timeout_seconds)
+            if remaining_budget_seconds is None
+            else min(float(self.timeout_seconds), float(remaining_budget_seconds))
+        )
+        if effective_window < float(
+            self.auto_high_min_timeout_seconds
+        ) and bounded_mode in ("medium", "high", "xhigh", "max", "ultra"):
+            bounded_mode, _ = clamp_effort_to_ceiling("low", self.auto_reasoning_ceiling)
+        return bounded_mode
 
     def _repair_may_step_up(
         self, *, to_chinese: bool, prepared_scalars: int | None
@@ -584,6 +1331,17 @@ class RequestPolicy:
         if self.ambiguous_mention_exposure != "off":
             # Absent while "off" so every existing policy hash is unchanged.
             payload["ambiguous_mention_exposure"] = self.ambiguous_mention_exposure
+        auto_active = (
+            (to_chinese is None and (self.zh_en_auto_thinking or self.configured_thinking_en_zh == TRANSLATION_THINKING_AUTO))
+            or (to_chinese is True and self.configured_thinking_en_zh == TRANSLATION_THINKING_AUTO)
+            or (to_chinese is False and self.zh_en_auto_thinking)
+        )
+        if auto_active and self.auto_reasoning_ceiling != TRANSLATION_THINKING_AUTO_CEILING_DEFAULT:
+            payload["auto_reasoning_ceiling"] = self.auto_reasoning_ceiling
+        if auto_active and float(self.auto_high_min_timeout_seconds) != AUTO_HIGH_MIN_TIMEOUT_SECONDS:
+            payload["auto_high_min_timeout_seconds"] = float(
+                self.auto_high_min_timeout_seconds
+            )
         return payload
 
     def _base_identity_dict(self, *, to_chinese: bool | None) -> dict[str, Any]:
@@ -685,12 +1443,14 @@ def resolve_request_policy_from_env(
             zh_en_mode = configured_zh_en
     if to_chinese is None or to_chinese:
         en_zh_mode = resolve_configured_thinking_mode(to_chinese=True, logger=logger)
+    ceiling = resolve_auto_thinking_ceiling(logger=logger)
     return RequestPolicy(
         configured_thinking_zh_en=zh_en_mode,
         zh_en_auto_thinking=zh_en_auto,
         configured_thinking_en_zh=en_zh_mode,
         timeout_seconds=max(0.1, float(timeout_seconds)),
         en_zh_protocol=en_zh_protocol,
+        auto_reasoning_ceiling=ceiling,
     )
 
 
@@ -715,6 +1475,12 @@ class OperationExecutionBudget:
     _cancelled: bool = field(default=False, init=False, repr=False, compare=False)
     _cancel_reason: str | None = field(default=None, init=False, repr=False, compare=False)
     _in_attempt_depth: int = field(default=0, init=False, repr=False, compare=False)
+    _cancel_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _cancel_callbacks: list[Callable[[], None]] = field(
+        default_factory=list, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.max_total_calls is not None and self.max_total_calls < 0:
@@ -752,10 +1518,38 @@ class OperationExecutionBudget:
         )
 
     def cancel(self, reason: str | None = None) -> None:
-        """Mark this operation cooperatively cancelled before subsequent calls."""
-        self._cancelled = True
-        if reason is not None and self._cancel_reason is None:
-            self._cancel_reason = reason
+        """Mark this operation cooperatively cancelled and notify active listeners."""
+        with self._cancel_lock:
+            self._cancelled = True
+            if reason is not None and self._cancel_reason is None:
+                self._cancel_reason = reason
+            callbacks = tuple(self._cancel_callbacks)
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                LOGGER.debug("cancel listener raised", exc_info=True)
+
+    def add_cancel_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register ``callback`` invoked on :meth:`cancel`; returns a remover."""
+        already_cancelled = False
+        with self._cancel_lock:
+            if self._cancelled:
+                already_cancelled = True
+            else:
+                self._cancel_callbacks.append(callback)
+        if already_cancelled:
+            callback()
+            return lambda: None
+
+        def remove() -> None:
+            with self._cancel_lock:
+                try:
+                    self._cancel_callbacks.remove(callback)
+                except ValueError:
+                    pass
+
+        return remove
 
     @property
     def is_cancelled(self) -> bool:
@@ -897,7 +1691,9 @@ class SegmentExecutionBudget:
             return False
         if self.operation_budget is not None:
             return (
-                self.operation_budget.can_use_corrective_call
+                not self.operation_budget.is_cancelled
+                and not self.operation_budget.deadline_expired()
+                and self.operation_budget.can_use_corrective_call
                 and self.operation_budget.can_start_call
             )
         return True
@@ -942,6 +1738,55 @@ class TranslationPlan:
     @property
     def has_random_locks(self) -> bool:
         return bool(self.locks) or ("__WUWA_TERM_" in self.locked_text)
+
+    def term_planning_metadata(self) -> TermPlanningMetadata:
+        """Return structured separation of deterministic locks vs model-judged candidates."""
+        return analyze_term_planning(
+            self.locks,
+            self.references,
+            to_chinese=self.to_chinese,
+            ambiguous=self.ambiguous,
+        )
+
+    @property
+    def has_ambiguous_candidates(self) -> bool:
+        return self.term_planning_metadata().has_ambiguous_candidates
+
+    @property
+    def ambiguous_candidate_count(self) -> int:
+        return len(self.term_planning_metadata().ambiguous_candidates)
+
+    def without_ambiguous_locks(self) -> TranslationPlan:
+        """Return a plan with any ambiguous/ordinary-word locks demoted to candidates."""
+        new_text, new_locks, new_refs, new_ambiguous = (
+            demote_ambiguous_locks_with_mentions(
+                self.locked_text,
+                self.locks,
+                self.references,
+                to_chinese=self.to_chinese,
+                ambiguous=self.ambiguous,
+            )
+        )
+        if (
+            new_locks == self.locks
+            and new_refs == self.references
+            and new_ambiguous == self.ambiguous
+        ):
+            return self
+        return TranslationPlan(
+            source_text=self.source_text,
+            prepared_text=self.prepared_text,
+            locked_text=new_text,
+            locks=new_locks,
+            references=new_refs,
+            to_chinese=self.to_chinese,
+            html_mode=self.html_mode,
+            context=self.context,
+            dictionary_identity=self.dictionary_identity,
+            matcher_revision=self.matcher_revision,
+            prompt_templates=self.prompt_templates,
+            ambiguous=new_ambiguous,
+        )
 
 
 def coerce_term_reference(
@@ -1298,6 +2143,87 @@ class TranslationRequestSpec:
     dictionary_identity: str | None = None
     matcher_revision: str = MATCHER_REVISION
     corrective_prompt_sha256: str = sha256_text(PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE)
+    provider_profile_name: str = DEFAULT_PROVIDER_PROFILE.name
+    requested_effort: ConcreteThinkingMode | None = None
+    effective_effort: str | None = None
+    effort_omitted: bool = False
+    effort_passthrough: bool = False
+    reasoning_decision: ReasoningDecision | None = None
+    term_planning: TermPlanningMetadata | None = None
+
+    @property
+    def resolved_requested_effort(self) -> ConcreteThinkingMode:
+        return (
+            self.thinking_mode
+            if self.requested_effort is None
+            else self.requested_effort
+        )
+
+    def call_metadata(
+        self, *, effective_timeout_seconds: float | None = None
+    ) -> llm_transport.LlmCallMetadata:
+        """Build non-sensitive transport metadata for ``llm_transport`` observers."""
+        timeout_val = (
+            self.timeout_seconds
+            if self.timeout_seconds is not None
+            else effective_timeout_seconds
+        )
+        return llm_transport.LlmCallMetadata(
+            requested_effort=self.resolved_requested_effort,
+            effective_effort=self.effective_effort,
+            provider_profile=self.provider_profile_name,
+            timeout_seconds=float(timeout_val) if timeout_val is not None else None,
+            effort_omitted=self.effort_omitted,
+            effort_passthrough=self.effort_passthrough,
+            attempt_kind=self.attempt_kind,
+            direction=self.direction,
+        )
+
+    def execution_metadata_dict(
+        self,
+        *,
+        effective_timeout_seconds: float | None = None,
+        cancelled: bool = False,
+        cancel_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Non-sensitive request planning/execution metadata for offline analysis."""
+        timeout_val = (
+            self.timeout_seconds
+            if self.timeout_seconds is not None
+            else effective_timeout_seconds
+        )
+        safe_cancel_reason = (
+            None
+            if cancel_reason is None
+            else (
+                cancel_reason
+                if cancel_reason in llm_transport.CONTROLLED_CANCEL_REASONS
+                else "custom"
+            )
+        )
+        return {
+            "direction": self.direction,
+            "attempt_kind": self.attempt_kind,
+            "configured_thinking_mode": self.configured_thinking_mode,
+            "requested_effort": self.resolved_requested_effort,
+            "effective_effort": redact_effective_effort(self.effective_effort),
+            "effort_omitted": self.effort_omitted,
+            "effort_passthrough": self.effort_passthrough,
+            "provider_profile": redact_provider_profile_name(self.provider_profile_name),
+            "timeout_seconds": float(timeout_val) if timeout_val is not None else None,
+            "cancelled": cancelled,
+            "cancel_reason": safe_cancel_reason,
+            "reasoning_decision": (
+                self.reasoning_decision.to_metadata_dict()
+                if self.reasoning_decision is not None
+                else None
+            ),
+            "term_planning": (
+                self.term_planning.to_metadata_dict()
+                if self.term_planning is not None
+                else None
+            ),
+        }
 
     @property
     def system_prompt(self) -> str:
@@ -1475,21 +2401,41 @@ def build_translation_request_spec(
         prompt_suffix=prompt_suffix,
         ambiguous_mention_exposure=policy.ambiguous_mention_exposure,
     )
-    thinking_mode = (
-        thinking_mode_override
-        if thinking_mode_override is not None
-        else policy.resolve_initial_thinking_mode(
+    term_planning = plan.term_planning_metadata()
+    if thinking_mode_override is not None:
+        signals = extract_reasoning_complexity_signals(
+            plan.locked_text,
+            to_chinese=plan.to_chinese,
+            lock_count=len(plan.locks),
+            references=plan.references,
+            ambiguous=plan.ambiguous,
+            context=plan.context,
+        )
+        reasoning_decision = ReasoningDecision(
+            configured_mode=policy.configured_mode(to_chinese=plan.to_chinese),
+            requested_effort=thinking_mode_override,
+            ceiling_effort=policy.auto_reasoning_ceiling,
+            signals=signals,
+            reasons=(f"override:{attempt_kind}",),
+        )
+        thinking_mode: ConcreteThinkingMode = thinking_mode_override
+    else:
+        reasoning_decision = policy.plan_reasoning(
             to_chinese=plan.to_chinese,
             locked_text=plan.locked_text,
             lock_count=len(plan.locks),
+            references=plan.references,
+            ambiguous=plan.ambiguous,
+            context=plan.context,
+            remaining_budget_seconds=timeout_override,
         )
-    )
-    extra_body = provider_profile.reasoning_extra_body(thinking_mode)
+        thinking_mode = reasoning_decision.requested_effort
+    effort_resolution = provider_profile.resolve_effort(thinking_mode)
     return TranslationRequestSpec(
         model=resolved_model,
         messages=messages,
         temperature=0,
-        extra_body=extra_body,
+        extra_body=effort_resolution.extra_body,
         timeout_seconds=timeout_override,
         direction=plan.direction,
         thinking_mode=thinking_mode,
@@ -1502,6 +2448,13 @@ def build_translation_request_spec(
         corrective_prompt_sha256=sha256_text(
             plan.prompt_templates.paragraph_repair_template
         ),
+        provider_profile_name=effort_resolution.provider_profile,
+        requested_effort=effort_resolution.requested_effort,
+        effective_effort=effort_resolution.effective_effort,
+        effort_omitted=effort_resolution.omitted,
+        effort_passthrough=effort_resolution.passthrough,
+        reasoning_decision=reasoning_decision,
+        term_planning=term_planning,
     )
 
 
@@ -1542,6 +2495,7 @@ def build_paragraph_repair_request_spec(
         lock_count=len(plan.locks),
         provider_profile=provider_profile,
         prepared_scalars=len(plan.locked_text),
+        remaining_budget_seconds=timeout_override,
     )
     prompt_suffix = plan.prompt_templates.format_paragraph_repair_instruction(
         paragraphs

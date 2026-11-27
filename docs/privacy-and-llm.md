@@ -118,32 +118,42 @@ Optional LLM environment variables:
   (`DEFAULT_TRANSLATE_TIMEOUT_SECONDS`; `10 s` for lookup/status).
 - `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`, range `1..64`; max
   in-flight LLM calls.
+- `WUWATERM_PROVIDER_PROFILE` and `WUWATERM_PROVIDER_CAPABILITIES_JSON`,
+  optional declarative provider capability profiles controlling how semantic
+  reasoning effort levels map onto outbound wire fields (defaulting to the
+  DeepSeek OpenAI-compatible profile: `minimal`/`low` -> `low`,
+  `medium`/`high`/`xhigh` -> `high`, `max`/`ultra` -> `max`, `omit` -> no
+  reasoning fields, `disabled` -> `thinking: {"type": "disabled"}`). Built-in
+  presets also include `openai_reasoning`, `neon_gateway`, and `omit_all`.
 - `WUWATERM_TRANSLATION_THINKING_ZH_EN` (requests translating Chinese into
-  English) and `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese),
-  default `disabled` into English and `omit` into Chinese; `disabled`, `low`,
-  `high`, `omit` and `auto` are accepted in both directions. `omit` sends neither
-  field, so the provider default applies, which on
-  DeepSeek is high-effort thinking and can outlast
-  `WUWATERM_LLM_TIMEOUT_SECONDS` on a long segment. `disabled` sends
-  `thinking: {"type": "disabled"}`. `low` and `high` turn thinking on at that
-  `reasoning_effort`. Measured into English: `disabled` removed the long-segment
-  timeouts, which occur only into English, and it is the default there. Into
-  Chinese `omit` is the default and names nothing, so an unconfigured
-  deployment sends exactly the request it always sent. `auto` is the opt-in that
-  picks one of the modes per request from the request's own shape: 25 or more
-  paragraphs or 4 or more locked official terms is sent `disabled`, anything
-  shorter as `low`. That split follows the measurement behind it — long or
-  lock-dense documents ran past the model timeout with thinking on and answered
-  in about 3 s with it off, while a 23-paragraph document answered in 20.7 s
-  under `low` — and a full held-out run scored it at or above every frozen gate,
-  including the long documents that used to time out. Into English `auto` is a
-  candidate under [ADR 0021](adr/0021-local-user-termbase.md), not an adopted
-  setting: it sends a segment longer than 900 scalars, or with 25 or more
-  paragraphs, or with 4 or more locked official terms, `disabled`, and anything
-  shorter `low`; the default there stays `disabled` until the H3 evaluation
-  shows the gain. Setting any explicit `omit`, `disabled`, `low` or `high`
-  replaces `auto` in that direction, so a deployment that opted in can pin one
-  mode without unsetting `auto`. Known
+  English), `WUWATERM_TRANSLATION_THINKING_EN_ZH` (English into Chinese), and
+  `WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT` (upper bound for `auto`,
+  default `high`), defaulting to `disabled` into English and `omit` into
+  Chinese; `disabled`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+  `ultra`, `omit`, and `auto` are accepted in both directions. `omit` sends
+  neither field, so the provider default applies, which on DeepSeek is
+  high-effort thinking and can outlast `WUWATERM_LLM_TIMEOUT_SECONDS` on a long
+  segment. `disabled` sends the active profile's disable payload (on DeepSeek,
+  `thinking: {"type": "disabled"}`). Explicit reasoning levels turn thinking on
+  at the active profile's mapped effort. Measured into English: `disabled`
+  removed the long-segment timeouts, which occur only into English, and it is
+  the default there. Into Chinese `omit` is the default and names nothing, so
+  an unconfigured deployment sends exactly the request it always sent. `auto`
+  is the opt-in that dynamically picks a mode per request from both shape/time
+  guards and semantic complexity signals: into Chinese, 25 or more paragraphs
+  or 4 or more locked official terms is sent `disabled`; into English (the
+  [ADR 0021](adr/0021-local-user-termbase.md) candidate, where the default
+  stays `disabled` until evaluation adopts it), a segment longer than 900
+  scalars, or with 25 or more paragraphs, or with 4 or more locked official
+  terms is sent `disabled`. Within those bounds, ordinary short segments run at
+  `low`, while segments carrying semantic complexity signals — ambiguous or
+  ordinary-word-overlapping term candidates, competing senses, multi-segment
+  context, or complex multi-clause prose — escalate up to
+  `WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT` (default `high`), capped back
+  to `low` when the post-slot remaining timeout window is tight. Setting any
+  explicit semantic level (`omit`, `disabled`, `minimal`, `low`, `medium`,
+  `high`, `xhigh`, `max`, or `ultra`) replaces `auto` in that direction, so a
+  deployment that opted in can pin one mode without unsetting `auto`. Known
   regression with `disabled` into English: a character-mechanic name that
   contains a one-character resonator name may be rendered with the resonator
   name; set `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous
@@ -178,10 +188,11 @@ errors retain their existing classification.
 
 A strict endpoint is served by the directions' defaults: `disabled` into English
 and `omit` into Chinese both send only the fields the endpoint accepts. Into
-Chinese `auto` is the opt-in that sends the reasoning fields (a short request as
-`low`, a long or lock-dense one as `disabled`), so a deployment that opts in
-there needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or a provider that
-supports them. The two corrective calls described under
+Chinese `auto` is the opt-in that sends the reasoning fields (an ordinary short
+request as `low`, a semantically complex or ambiguous one up to the configured
+`auto` ceiling, and a long or lock-dense one as `disabled`), so a deployment
+that opts in there needs `WUWATERM_TRANSLATION_THINKING_EN_ZH=omit` or a
+provider that supports them. The two corrective calls described under
 [translation strategy](#llm-configuration) — one paragraph-count repair and one
 fast fallback on an `auto` timeout — are the only retries in the translation
 path, each at most one attempt, and a request rejected by the provider is still

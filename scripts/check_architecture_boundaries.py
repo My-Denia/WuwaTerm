@@ -9,6 +9,8 @@ Intended layers (must stay aligned with docs/architecture.md):
                    single_char_context, skill_references, term_classification,
                    term_matching, term_preparation, termbase, text_spans
   domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
+                   provider_capabilities (declarative provider capability profiles
+                   and reasoning effort mappings),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
                    llm_transport (HTTP transport for chat completions),
@@ -129,7 +131,15 @@ DOMAIN_CORE = frozenset(
         "document_anchor",
     }
 )
-DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semantic_review"})
+DOMAIN_LLM = frozenset(
+    {
+        "sentence",
+        "provider_capabilities",
+        "translation_plan",
+        "llm_transport",
+        "semantic_review",
+    }
+)
 # Pure matching / text-structure modules inside DOMAIN_CORE that must remain
 # independent of storage (`db`), storage-coupled (`lookup`, `review`), and `sqlite3`.
 PURE_MATCHING = frozenset(

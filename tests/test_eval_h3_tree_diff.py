@@ -258,10 +258,13 @@ def test_injected_request_spec_thinking_diff_is_localized(
     # Inject a thinking-mode diff for zh->en in tree_b's translation_plan.py
     tplan_path = tree_b / "src" / "wuwaterm" / "translation_plan.py"
     original = tplan_path.read_text(encoding="utf-8")
-    old = "        if not to_chinese:\n            return self.configured_thinking_zh_en"
+    old = (
+        "                configured_mode=configured,\n"
+        "                requested_effort=configured,"
+    )
     new = (
-        "        if not to_chinese:\n"
-        '            return "low" if self.configured_thinking_zh_en == "disabled" else self.configured_thinking_zh_en'
+        "                configured_mode=configured,\n"
+        '                requested_effort="low" if (not to_chinese and configured == "disabled") else configured,'
     )
     assert old in original
     tplan_path.write_text(original.replace(old, new, 1), encoding="utf-8")

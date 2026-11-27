@@ -75,6 +75,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import re
 import sys
 import threading
 from collections import deque
@@ -116,16 +117,88 @@ _DIRECTIONS: Final[frozenset[str]] = frozenset(
 )
 
 _CONFIGURED_THINKING_MODES: Final[frozenset[str]] = frozenset(
-    {"disabled", "low", "high", "omit", "auto"}
+    {
+        "disabled",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+        "auto",
+    }
 )
 _CONCRETE_THINKING_MODES: Final[frozenset[str]] = frozenset(
-    {"disabled", "low", "high", "omit"}
+    {
+        "disabled",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+    }
 )
 _LLM_OUTCOMES: Final[frozenset[str]] = frozenset(
-    {"ok", "http_error", "timeout", "connect", "request", "invalid_api_response"}
+    {
+        "ok",
+        "http_error",
+        "timeout",
+        "connect",
+        "request",
+        "invalid_api_response",
+        "cancelled",
+    }
 )
+_BUILTIN_PROVIDER_PROFILES: Final[frozenset[str]] = frozenset(
+    {
+        "openai_compatible_deepseek",
+        "deepseek",
+        "openai_reasoning",
+        "openai",
+        "neon_gateway",
+        "neon",
+        "omit_all",
+    }
+)
+_KNOWN_WIRE_EFFORTS: Final[frozenset[str]] = frozenset(
+    {
+        "disabled",
+        "none",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+    }
+)
+_CUSTOM_FINGERPRINT_RE: Final = re.compile(r"^custom:[0-9a-f]{8}$")
 
 UNKNOWN_VALUE: Final = "-"
+
+
+def _safe_effort_token(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    if value in _KNOWN_WIRE_EFFORTS or value == "custom" or _CUSTOM_FINGERPRINT_RE.fullmatch(value):
+        return value
+    return "custom"
+
+
+def _safe_profile_token(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    if value in _BUILTIN_PROVIDER_PROFILES or value == "custom" or _CUSTOM_FINGERPRINT_RE.fullmatch(value):
+        return value
+    return "custom"
 
 
 def direction_from_target(target: str | None) -> str:
@@ -164,6 +237,10 @@ class RequestTrace:
         "_stop_stage",
         "_configured_thinking",
         "_initial_thinking_mode",
+        "_requested_effort",
+        "_effective_effort",
+        "_provider_profile",
+        "_cancelled",
         "_timeout_fallback_attempts",
         "_timeout_fallback_succeeded",
         "_paragraph_regroup_applied",
@@ -189,6 +266,10 @@ class RequestTrace:
         self._stop_stage: str | None = None
         self._configured_thinking = UNKNOWN_VALUE
         self._initial_thinking_mode = UNKNOWN_VALUE
+        self._requested_effort = UNKNOWN_VALUE
+        self._effective_effort = UNKNOWN_VALUE
+        self._provider_profile = UNKNOWN_VALUE
+        self._cancelled = False
         self._timeout_fallback_attempts = 0
         self._timeout_fallback_succeeded = 0
         self._paragraph_regroup_applied = 0
@@ -257,6 +338,22 @@ class RequestTrace:
     @property
     def initial_thinking_mode(self) -> str:
         return self._initial_thinking_mode
+
+    @property
+    def requested_effort(self) -> str:
+        return self._requested_effort
+
+    @property
+    def effective_effort(self) -> str:
+        return self._effective_effort
+
+    @property
+    def provider_profile(self) -> str:
+        return self._provider_profile
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
 
     @property
     def timeout_fallback_attempts(self) -> int:
@@ -387,6 +484,29 @@ class RequestTrace:
             self._configured_thinking = configured
         if type(initial) is str and initial in _CONCRETE_THINKING_MODES:
             self._initial_thinking_mode = initial
+            self._requested_effort = initial
+
+    def _note_effort_resolution(
+        self,
+        *,
+        requested_effort: str | None = None,
+        effective_effort: str | None = None,
+        provider_profile: str | None = None,
+    ) -> None:
+        if requested_effort is not None:
+            if type(requested_effort) is str and requested_effort in _CONCRETE_THINKING_MODES:
+                self._requested_effort = requested_effort
+        if effective_effort is not None:
+            token = _safe_effort_token(effective_effort)
+            if token is not None:
+                self._effective_effort = token
+        if provider_profile is not None:
+            token = _safe_profile_token(provider_profile)
+            if token is not None:
+                self._provider_profile = token
+
+    def _note_cancelled(self) -> None:
+        self._cancelled = True
 
     def _note_timeout_fallback(self, *, succeeded: bool) -> None:
         self._timeout_fallback_attempts += 1
@@ -607,6 +727,29 @@ def note_thinking(configured: str, initial: str) -> None:
     trace = _active.get()
     if trace is not None:
         trace._note_thinking(configured, initial)
+
+
+def note_effort_resolution(
+    *,
+    requested_effort: str | None = None,
+    effective_effort: str | None = None,
+    provider_profile: str | None = None,
+) -> None:
+    """Record resolved reasoning effort and provider profile for the active request."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_effort_resolution(
+            requested_effort=requested_effort,
+            effective_effort=effective_effort,
+            provider_profile=provider_profile,
+        )
+
+
+def note_cancelled() -> None:
+    """Mark the active request trace as observing explicit or task cancellation."""
+    trace = _active.get()
+    if trace is not None:
+        trace._note_cancelled()
 
 
 def note_timeout_fallback(*, succeeded: bool) -> None:
