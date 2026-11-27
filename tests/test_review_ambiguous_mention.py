@@ -775,6 +775,7 @@ def test_capabilities_always_list_ambiguous_mention(tmp_path, sample_db, monkeyp
         monkeypatch.delenv(name, raising=False)
     assert service_capabilities() == (
         REVIEW_FEATURE_AMBIGUOUS_MENTION,
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
         "structure-check-v1",
     )
@@ -784,6 +785,7 @@ def test_capabilities_always_list_ambiguous_mention(tmp_path, sample_db, monkeyp
     assert response.status_code == 200, response.text
     assert response.json()["capabilities"] == [
         "ambiguous-mention-v1",
+        "dictionary-fallback-v1",
         "dictionary-identity-v1",
         "structure-check-v1",
     ]

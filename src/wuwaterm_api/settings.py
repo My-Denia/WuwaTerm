@@ -139,6 +139,9 @@ DEFAULT_RATE_LIMIT_PER_MINUTE = 30
 DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_MAX_BODY_BYTES = 64 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
+DEFAULT_LONG_TEXT_INPUT_LIMIT = 4096
+MIN_LONG_TEXT_INPUT_LIMIT = 2000
+MAX_LONG_TEXT_INPUT_LIMIT = 16384
 # Verifying a presented credential costs a deliberate ~16 MiB scrypt
 # derivation, and it happens BEFORE any per-device limit can apply. Bound how
 # many of those can run at once so an unauthenticated caller cannot turn the
@@ -305,6 +308,7 @@ class _ServeNumericRaw:
     max_body_bytes: str = ""
     request_timeout_seconds: str = ""
     auth_max_concurrency: str = ""
+    long_text_input_limit: str = ""
 
 
 @dataclass(frozen=True)
@@ -324,6 +328,7 @@ class ApiSettings:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
+    long_text_input_limit: int = DEFAULT_LONG_TEXT_INPUT_LIMIT
     # Every operator command constructs ApiSettings, so these serve-only raw
     # values cannot be validated until `_serve`. Keep them immutable and out of
     # repr/equality: raw environment input must not leak or change value
@@ -381,6 +386,9 @@ class ApiSettings:
             ).strip(),
             auth_max_concurrency=(
                 os.getenv("WUWATERM_API_AUTH_MAX_CONCURRENCY") or ""
+            ).strip(),
+            long_text_input_limit=(
+                os.getenv("WUWATERM_API_LONG_TEXT_INPUT_LIMIT") or ""
             ).strip(),
         )
         return cls(
@@ -444,6 +452,12 @@ class ApiSettings:
                 minimum=1,
                 maximum=64,
             ),
+            long_text_input_limit=parse_int(
+                numeric_raw.long_text_input_limit,
+                DEFAULT_LONG_TEXT_INPUT_LIMIT,
+                minimum=MIN_LONG_TEXT_INPUT_LIMIT,
+                maximum=MAX_LONG_TEXT_INPUT_LIMIT,
+            ),
             _serve_numeric_raw=numeric_raw,
             # Carried raw for the same reason as `bind`, and validated in the
             # same place: from_env() runs for EVERY subcommand, so a typo in a
@@ -503,6 +517,12 @@ def validate_serve_numeric_settings(settings: ApiSettings) -> None:
         ("WUWATERM_API_RATE_LIMIT_PER_MINUTE", raw.rate_limit_per_minute, 1, 10000),
         ("WUWATERM_API_MAX_BODY_BYTES", raw.max_body_bytes, 64, 1024 * 1024),
         ("WUWATERM_API_AUTH_MAX_CONCURRENCY", raw.auth_max_concurrency, 1, 64),
+        (
+            "WUWATERM_API_LONG_TEXT_INPUT_LIMIT",
+            raw.long_text_input_limit,
+            MIN_LONG_TEXT_INPUT_LIMIT,
+            MAX_LONG_TEXT_INPUT_LIMIT,
+        ),
     ):
         _validate_int(name, value, minimum=minimum, maximum=maximum)
     for name, value, min_val, max_val in (

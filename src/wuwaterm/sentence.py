@@ -1022,6 +1022,7 @@ class SentenceTranslator:
         protected: ProtectedText,
         *,
         to_chinese: bool = False,
+        context: TranslationContextProtocol | None = None,
         before_llm_call: LlmCallGuard | None = None,
         execution_budget: OperationExecutionBudget | None = None,
     ) -> ProtectedText:
@@ -1045,6 +1046,7 @@ class SentenceTranslator:
             html_mode=True,
             to_chinese=to_chinese,
             references=locked.references,
+            context=context,
             before_llm_call=before_llm_call,
             execution_budget=op_budget,
         )

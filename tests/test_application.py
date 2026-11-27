@@ -1142,3 +1142,193 @@ def test_plural_unlocked_direction_keeps_dictionary_miss(monkeypatch, sample_db)
     locked_text, locks = calls[0]
     assert locks == ()
     assert outcome.dictionary_miss is True
+
+
+def test_service_capabilities_and_dictionary_fallback(monkeypatch, sample_db):
+    from wuwaterm.application import (
+        CAPABILITY_DICTIONARY_FALLBACK,
+        CAPABILITY_DICTIONARY_IDENTITY,
+        CAPABILITY_HYBRID_RAG,
+        CAPABILITY_KNOWLEDGE_RETRIEVAL,
+        CAPABILITY_LONG_TEXT_TRANSLATION,
+        CAPABILITY_PROTECTED_TRANSLATION,
+        CAPABILITY_STRUCTURE_CHECK,
+        CAPABILITY_UNIFIED_SNAPSHOT,
+        KIND_DICTIONARY_FALLBACK,
+        ProtectedStructure,
+        ProtectedTranslationJob,
+        service_capabilities,
+        translate_protected_request_async,
+    )
+
+    for name in (
+        "WUWATERM_OPENAI_BASE_URL",
+        "WUWATERM_OPENAI_API_KEY",
+        "WUWATERM_OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "WUWATERM_SEMANTIC_REVIEW_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    caps_no_llm = service_capabilities()
+    assert CAPABILITY_DICTIONARY_FALLBACK in caps_no_llm
+    assert CAPABILITY_DICTIONARY_IDENTITY in caps_no_llm
+    assert CAPABILITY_STRUCTURE_CHECK in caps_no_llm
+    assert CAPABILITY_PROTECTED_TRANSLATION not in caps_no_llm
+    assert CAPABILITY_LONG_TEXT_TRANSLATION not in caps_no_llm
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps_no_llm
+    assert CAPABILITY_HYBRID_RAG not in caps_no_llm
+    assert CAPABILITY_UNIFIED_SNAPSHOT not in caps_no_llm
+    assert all(re.fullmatch(r"^[a-z0-9][a-z0-9.-]{0,63}$", c) for c in caps_no_llm)
+
+    service, translator = build_pair(sample_db)
+    default_out = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="今天使用了声骸"),
+        )
+    )
+    assert default_out.kind == KIND_LLM
+
+    fallback_out = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="今天使用了声骸"),
+            allow_dictionary_fallback=True,
+        )
+    )
+    assert fallback_out.kind == KIND_DICTIONARY_FALLBACK
+    assert "Echo" in fallback_out.text
+
+    protected_no_llm = asyncio.run(
+        translate_protected_request_async(
+            service,
+            translator,
+            ProtectedTranslationJob(
+                visible_segments=("", "今天使用了声骸", ""),
+                structures=(ProtectedStructure(""), ProtectedStructure("")),
+                fallback_text="今天使用了声骸",
+                fallback_to_plain=True,
+            ),
+        )
+    )
+    assert protected_no_llm.kind == KIND_ERROR
+    assert protected_no_llm.error_code == ERROR_LLM_UNAVAILABLE
+    assert protected_no_llm.protected_used is False
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    caps_with_llm = service_capabilities()
+    assert CAPABILITY_PROTECTED_TRANSLATION in caps_with_llm
+    assert CAPABILITY_LONG_TEXT_TRANSLATION in caps_with_llm
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps_with_llm
+    assert CAPABILITY_HYBRID_RAG not in caps_with_llm
+
+
+def test_translate_protected_request_async_handles_success_and_fallback(
+    monkeypatch, sample_db
+):
+    from wuwaterm.application import (
+        ProtectedStructure,
+        ProtectedTranslationJob,
+        translate_protected_request_async,
+    )
+
+    service, _ = build_pair(sample_db)
+    answers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        user_content = payload["messages"][1]["content"]
+        if answers:
+            content = answers.pop(0)
+        else:
+            content = user_content
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    translator = SentenceTranslator(
+        sample_db,
+        llm_transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        # Success preserves segments and visible_context prevents false locking.
+        ok = asyncio.run(
+            translate_protected_request_async(
+                service,
+                translator,
+                ProtectedTranslationJob(
+                    visible_segments=("", "椿", " joins."),
+                    structures=(
+                        ProtectedStructure("", "香"),
+                        ProtectedStructure(""),
+                    ),
+                ),
+            )
+        )
+        assert ok.kind == KIND_LLM
+        assert ok.protected_used is True
+        assert ok.translated_segments == ("", "椿", " joins.")
+        assert ok.text == "香椿 joins."
+
+        # Placeholder corruption without fallback fails closed.
+        answers.append("corrupted without placeholders")
+        strict_fail = asyncio.run(
+            translate_protected_request_async(
+                service,
+                translator,
+                ProtectedTranslationJob(
+                    visible_segments=("", "声骸", " test."),
+                    structures=(ProtectedStructure(""), ProtectedStructure("")),
+                    fallback_text="声骸 test.",
+                    fallback_to_plain=False,
+                ),
+            )
+        )
+        assert strict_fail.kind == KIND_ERROR
+        assert strict_fail.error_code == ERROR_LLM_UNAVAILABLE
+        assert strict_fail.protected_used is False
+
+        # Placeholder corruption with fallback_to_plain=True retries plain once.
+        answers.extend(["corrupted without placeholders", "Plain fallback result."])
+        recovered = asyncio.run(
+            translate_protected_request_async(
+                service,
+                translator,
+                ProtectedTranslationJob(
+                    visible_segments=("", "测试句子", "。"),
+                    structures=(ProtectedStructure(""), ProtectedStructure("")),
+                    fallback_text="测试句子。",
+                    fallback_to_plain=True,
+                ),
+            )
+        )
+        assert recovered.kind == KIND_LLM
+        assert recovered.protected_used is False
+        assert recovered.translated_segments == ()
+        assert recovered.text == "Plain fallback result."
+
+        # Exceeding LLM_INPUT_CHAR_LIMIT returns ERROR_INPUT_TOO_LONG without LLM call.
+        too_long = asyncio.run(
+            translate_protected_request_async(
+                service,
+                translator,
+                ProtectedTranslationJob(
+                    visible_segments=("中" * (LLM_INPUT_CHAR_LIMIT + 1),),
+                    structures=(),
+                ),
+            )
+        )
+        assert too_long.kind == KIND_ERROR
+        assert too_long.error_code == ERROR_INPUT_TOO_LONG
+    finally:
+        asyncio.run(translator.aclose())

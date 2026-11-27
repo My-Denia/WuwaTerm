@@ -43,6 +43,8 @@ from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from wuwaterm.application import (
+    CAPABILITY_HYBRID_RAG,
+    CAPABILITY_KNOWLEDGE_RETRIEVAL,
     ERROR_FORBIDDEN,
     ERROR_INPUT_TOO_LONG,
     ERROR_LLM_UNAVAILABLE,
@@ -53,6 +55,9 @@ from wuwaterm.application import (
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
     KIND_LLM,
+    KNOWLEDGE_RETRIEVAL_MODES,
+    PROTECTED_MAX_STRUCTURES,
+    PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS,
     REVIEW_DENSE_MAX_FINDINGS,
     REVIEW_FEATURE_AMBIGUOUS_MENTION,
     REVIEW_MAX_FINDINGS,
@@ -85,6 +90,8 @@ from wuwaterm.application import (
     LLMFailureDiagnostic,
     LlmCallBudget,
     Precedent,
+    ProtectedStructure,
+    ProtectedTranslationJob,
     SemanticReviewJob,
     TranslationContext,
     LlmCallGuard,
@@ -105,6 +112,7 @@ from wuwaterm.application import (
     semantic_review_async,
     service_capabilities,
     service_metadata,
+    translate_protected_request_async,
     translate_request_async,
 )
 from wuwaterm.logging_utils import redact_id
@@ -164,6 +172,47 @@ REVIEW_FEATURES = frozenset(
 )
 
 
+PROTOCOL_VERSION_HEADER = "X-WuwaTerm-Protocol-Version"
+PROTOCOL_VERSION = "1"
+META_FEATURES_HEADER = "X-WuwaTerm-Meta-Features"
+META_FEATURE_CAPABILITIES = "capabilities-v1"
+META_FEATURES = frozenset({META_FEATURE_CAPABILITIES})
+
+
+def _parse_feature_header(
+    request: Request,
+    header_name: str,
+    allowed: frozenset[str],
+    *,
+    label: str,
+) -> frozenset[str]:
+    values = request.headers.getlist(header_name)
+    if not values:
+        return frozenset()
+    tokens: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            token = part.strip()
+            if not token:
+                raise ApiError(
+                    ERROR_INVALID_REQUEST, f"{label} feature list has an empty entry"
+                )
+            tokens.append(token)
+    if len(set(tokens)) != len(tokens):
+        raise ApiError(ERROR_INVALID_REQUEST, f"{label} feature is repeated")
+    unknown = set(tokens) - allowed
+    if unknown:
+        raise ApiError(ERROR_INVALID_REQUEST, f"{label} feature is not supported")
+    return frozenset(tokens)
+
+
+def _meta_features(request: Request) -> frozenset[str]:
+    """Parse the caller's meta feature header, failing closed."""
+    return _parse_feature_header(
+        request, META_FEATURES_HEADER, META_FEATURES, label="meta"
+    )
+
+
 def _review_features(request: Request, review_version: str) -> frozenset[str]:
     """Parse the caller's review feature header, failing closed.
 
@@ -179,30 +228,18 @@ def _review_features(request: Request, review_version: str) -> frozenset[str]:
     `ambiguous-mention-v1` without `reason-v1` is refused too: its findings are
     told apart from other `not_evaluated` findings only by their reason.
     """
-    values = request.headers.getlist(REVIEW_FEATURES_HEADER)
-    if not values:
+    if not request.headers.getlist(REVIEW_FEATURES_HEADER):
         return frozenset()
     if review_version != "review-v2":
         raise ApiError(ERROR_INVALID_REQUEST, "review features require review-v2")
-    tokens: list[str] = []
-    for value in values:
-        for part in value.split(","):
-            token = part.strip()
-            if not token:
-                raise ApiError(
-                    ERROR_INVALID_REQUEST, "review feature list has an empty entry"
-                )
-            tokens.append(token)
-    if len(set(tokens)) != len(tokens):
-        raise ApiError(ERROR_INVALID_REQUEST, "review feature is repeated")
-    unknown = set(tokens) - REVIEW_FEATURES
-    if unknown:
-        raise ApiError(ERROR_INVALID_REQUEST, "review feature is not supported")
+    tokens = _parse_feature_header(
+        request, REVIEW_FEATURES_HEADER, REVIEW_FEATURES, label="review"
+    )
     if REVIEW_FEATURE_AMBIGUOUS_MENTION in tokens and REVIEW_FEATURE_REASON not in tokens:
         raise ApiError(
             ERROR_INVALID_REQUEST, "ambiguous-mention-v1 requires reason-v1"
         )
-    return frozenset(tokens)
+    return tokens
 
 
 def _status_response_headers(request: Request) -> dict[str, str]:
@@ -320,13 +357,96 @@ def service_version() -> str:
 # --------------------------------------------------------------------------
 
 
-class TranslationRequestBody(BaseModel):
-    text: str = Field(
+class ProtectedStructureRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    visible_context: str = Field(
+        default="",
+        max_length=PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS,
         description=(
-            "Source text to translate. Plain text only. Clients should send "
-            "at most 2,000 characters. The server applies its authoritative "
-            "limit after text preparation, so a normalized superset may be "
-            "accepted; callers must not depend on that permissiveness."
+            "Optional plain-text visible contribution of the opaque structure "
+            "(for example a decoded entity), never raw markup."
+        ),
+    )
+
+
+class ProtectedTextRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    visible_segments: list[str] = Field(
+        min_length=1,
+        max_length=PROTECTED_MAX_STRUCTURES + 1,
+        description=(
+            "Alternating plain-text visible segments around opaque structures; "
+            "must contain len(structures) + 1 entries."
+        ),
+    )
+    structures: list[ProtectedStructureRequestBody] = Field(
+        default_factory=list,
+        max_length=PROTECTED_MAX_STRUCTURES,
+        description="Opaque structural boundaries between visible segments.",
+    )
+    fallback_to_plain: bool = Field(
+        default=False,
+        description=(
+            "When true and text is supplied, allow one plain-text retry inside "
+            "the same operation budget if the model breaks structural placeholders."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_protected_shape(self) -> "ProtectedTextRequestBody":
+        if len(self.visible_segments) != len(self.structures) + 1:
+            raise ValueError("one more visible segment than structures is required")
+        if any(_has_isolated_surrogate(seg) for seg in self.visible_segments) or any(
+            _has_isolated_surrogate(item.visible_context) for item in self.structures
+        ):
+            raise ValueError("protected payload contains an isolated surrogate")
+        return self
+
+
+class ProtectedStructureCompatBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    original: str = Field(
+        default="",
+        description="Ignored opaque client token; never logged or forwarded to models.",
+    )
+    visible_context: str = Field(
+        default="",
+        max_length=PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS,
+    )
+
+
+class ProtectedTextCompatRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    visible_segments: list[str] = Field(
+        min_length=1,
+        max_length=PROTECTED_MAX_STRUCTURES + 1,
+    )
+    structures: list[ProtectedStructureCompatBody] = Field(
+        default_factory=list,
+        max_length=PROTECTED_MAX_STRUCTURES,
+    )
+    fallback_to_plain: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def validate_protected_shape(self) -> "ProtectedTextCompatRequestBody":
+        if len(self.visible_segments) != len(self.structures) + 1:
+            raise ValueError("one more visible segment than structures is required")
+        if any(_has_isolated_surrogate(seg) for seg in self.visible_segments) or any(
+            _has_isolated_surrogate(item.visible_context) for item in self.structures
+        ):
+            raise ValueError("protected payload contains an isolated surrogate")
+        return self
+
+
+class TranslationRequestBody(BaseModel):
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Source text to translate. Plain text only. Required unless "
+            "`protected` is provided. Clients should send at most 2,000 "
+            "characters unless `allow_long_text` is true. The server applies its "
+            "authoritative limit after text preparation, so a normalized superset "
+            "may be accepted; callers must not depend on that permissiveness."
         ),
     )
     to: Literal["en", "zh"] | None = Field(
@@ -345,13 +465,77 @@ class TranslationRequestBody(BaseModel):
             "context rules to this request; the response shape is unchanged."
         ),
     )
+    protected: ProtectedTextRequestBody | None = Field(
+        default=None,
+        description=(
+            "protected-translation-v1, opt-in. When set, the response adds "
+            "`translated_segments` and `protected_used`."
+        ),
+    )
+    protected_text: ProtectedTextCompatRequestBody | None = Field(
+        default=None,
+        description=(
+            "Compatibility alias for protected-translation-v1 returning "
+            "`visible_segments` and `protected_used`."
+        ),
+    )
+    allow_long_text: bool = Field(
+        default=False,
+        description=(
+            "long-text-translation-v1, opt-in. Raises the plain-text input "
+            "limit to the server's configured long-text ceiling."
+        ),
+    )
+    fallback: Literal["error", "dictionary"] | None = Field(
+        default=None,
+        description=(
+            "dictionary-fallback-v1, opt-in. Defaults to `error`; set to "
+            "`dictionary` to receive term-locked substitution (`kind: "
+            "dictionary_fallback`) when no LLM is configured."
+        ),
+    )
+    dictionary_fallback: bool | None = Field(
+        default=None,
+        description="Boolean compatibility alias for `fallback='dictionary'`.",
+    )
+
+    @model_validator(mode="after")
+    def validate_request_combinations(self) -> "TranslationRequestBody":
+        if self.text is not None and _has_isolated_surrogate(self.text):
+            raise ValueError("text contains an isolated surrogate")
+        if self.protected is not None and self.protected_text is not None:
+            raise ValueError("protected and protected_text are mutually exclusive")
+        protected_payload = (
+            self.protected if self.protected is not None else self.protected_text
+        )
+        if protected_payload is None and self.text is None:
+            raise ValueError("text is required for plain-text translation")
+        if protected_payload is not None and self.allow_long_text:
+            raise ValueError("allow_long_text cannot be combined with protected translation")
+        if self.fallback is not None and self.dictionary_fallback is not None:
+            if (self.fallback == "dictionary") != self.dictionary_fallback:
+                raise ValueError("fallback and dictionary_fallback conflict")
+        use_dictionary_fallback = (
+            self.fallback == "dictionary" or self.dictionary_fallback is True
+        )
+        if protected_payload is not None and use_dictionary_fallback:
+            raise ValueError("dictionary fallback is not supported for protected translation")
+        if (
+            protected_payload is not None
+            and protected_payload.fallback_to_plain
+            and (self.text is None or not self.text.strip())
+        ):
+            raise ValueError("fallback_to_plain requires non-blank text")
+        return self
 
 
 class TranslationResponseBody(BaseModel):
-    kind: Literal["noop", "exact", "fuzzy", "llm"] = Field(
+    kind: Literal["noop", "exact", "fuzzy", "llm", "dictionary_fallback"] = Field(
         description=(
             "Which stage answered: noop (nothing translatable), exact "
-            "(official dictionary hit), fuzzy (trusted pinyin hit) or llm."
+            "(official dictionary hit), fuzzy (trusted pinyin hit), llm, or "
+            "dictionary_fallback (opt-in only when dictionary fallback is "
+            "requested and no model is configured)."
         )
     )
     text: str = Field(description="Translated text.")
@@ -363,6 +547,18 @@ class TranslationResponseBody(BaseModel):
         )
     )
     request_id: str
+    translated_segments: list[str] | None = Field(
+        default=None,
+        description="Present only when the request opted into `protected`.",
+    )
+    visible_segments: list[str] | None = Field(
+        default=None,
+        description="Present only when the request opted into `protected_text`.",
+    )
+    protected_used: bool | None = Field(
+        default=None,
+        description="Present only when the request opted into protected translation.",
+    )
 
 
 class TermMatchBody(BaseModel):
@@ -607,10 +803,16 @@ class ReviewResponseBody(BaseModel):
 
 CapabilityName = Literal[
     "ambiguous-mention-v1",
+    "dictionary-fallback-v1",
     "dictionary-identity-v1",
+    "hybrid-rag-v1",
+    "knowledge-retrieval-v1",
+    "long-text-translation-v1",
+    "protected-translation-v1",
     "semantic-review-v1",
     "structure-check-v1",
     "translation-context-v1",
+    "unified-snapshot-v1",
 ]
 SemanticCategory = Literal[SEMANTIC_CATEGORIES]  # type: ignore[valid-type]
 SemanticConfidence = Literal[SEMANTIC_CONFIDENCES]  # type: ignore[valid-type]
@@ -705,6 +907,13 @@ class TranslationContextBody(BaseModel):
         max_length=SEMANTIC_MAX_PRECEDENTS,
         description="Human choices made elsewhere in the same manuscript.",
     )
+    retrieval_mode: Literal[KNOWLEDGE_RETRIEVAL_MODES] = Field(  # type: ignore[valid-type]
+        default="off",
+        description=(
+            "Reserved domain knowledge retrieval mode (`off`, `lexical`, or "
+            "`hybrid`). Non-`off` values require the corresponding server capability."
+        ),
+    )
 
     @model_validator(mode="after")
     def reject_isolated_surrogates(self) -> "TranslationContextBody":
@@ -741,7 +950,11 @@ def _translation_context(body: TranslationContextBody | None) -> TranslationCont
         if body.before is None
         else ContextBefore(source=body.before.source, target=body.before.target)
     )
-    return TranslationContext(before=before, precedents=_precedents(body.precedents))
+    return TranslationContext(
+        before=before,
+        precedents=_precedents(body.precedents),
+        retrieval_mode=body.retrieval_mode,
+    )
 
 
 class SemanticReviewRequestBody(BaseModel):
@@ -1968,6 +2181,12 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     text_schema = document["components"]["schemas"]["TranslationRequestBody"][
         "properties"
     ]["text"]
+    if "anyOf" in text_schema:
+        variants = text_schema.pop("anyOf", [])
+        non_null = [variant for variant in variants if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            text_schema.update(non_null[0])
+        text_schema.pop("default", None)
     review_properties = document["components"]["schemas"]["ReviewRequestBody"][
         "properties"
     ]
@@ -2295,15 +2514,100 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         body: TranslationRequestBody,
         device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
-    ) -> TranslationResponseBody:
-        """Translate plain text through the shared dictionary-first pipeline."""
+    ) -> JSONResponse:
+        """Translate plain text or protected visible segments through the shared pipeline."""
         state = request.app.state
         forced_to_chinese = None if body.to is None else body.to == "zh"
+        if body.context is not None and body.context.retrieval_mode != "off":
+            caps = service_capabilities()
+            if (
+                body.context.retrieval_mode == "lexical"
+                and CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps
+            ):
+                raise ApiError(
+                    ERROR_INVALID_REQUEST,
+                    f"{CAPABILITY_KNOWLEDGE_RETRIEVAL} capability is not enabled",
+                )
+            if (
+                body.context.retrieval_mode == "hybrid"
+                and (
+                    CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps
+                    or CAPABILITY_HYBRID_RAG not in caps
+                )
+            ):
+                raise ApiError(
+                    ERROR_INVALID_REQUEST,
+                    f"{CAPABILITY_HYBRID_RAG} capability is not enabled",
+                )
+
         # Before the expensive model call: a device revoked since admission
         # must not spend an LLM budget slot or a model round trip.
         await _require_active_device(request, device)
 
         set_stage(STAGE_PREPARE_TERMS)
+        if body.protected is not None or body.protected_text is not None:
+            is_compat = body.protected_text is not None
+            protected_payload = (
+                body.protected_text if body.protected_text is not None else body.protected
+            )
+            assert protected_payload is not None
+            structures = tuple(
+                ProtectedStructure(original="", visible_context=item.visible_context)
+                for item in protected_payload.structures
+            )
+            protected_outcome = await translate_protected_request_async(
+                state.term_service,
+                state.translator,
+                ProtectedTranslationJob(
+                    visible_segments=tuple(protected_payload.visible_segments),
+                    structures=structures,
+                    forced_to_chinese=forced_to_chinese,
+                    context=_translation_context(body.context),
+                    fallback_text=body.text,
+                    fallback_to_plain=protected_payload.fallback_to_plain,
+                ),
+                before_llm_call=_device_llm_guard(request, device),
+                offload=asyncio.to_thread,
+            )
+            if protected_outcome.kind == KIND_ERROR:
+                await _abort_if_request_deadline_expired(protected_outcome)
+            set_stage(STAGE_POSTPROCESS)
+            LOGGER.info(
+                "translation device=%s kind=%s direction=%s context=%s protected=%s request_id=%s",
+                redact_id(device.device_id),
+                protected_outcome.kind,
+                protected_outcome.direction,
+                "off" if body.context is None else "on",
+                "on" if protected_outcome.protected_used else "fallback",
+                _request_id(request),
+            )
+            if protected_outcome.kind == KIND_ERROR:
+                _log_llm_failure_diagnostic(request, protected_outcome)
+                raise ApiError(protected_outcome.error_code or ERROR_INTERNAL)
+            await _require_active_device(request, device, serve_on_store_error=True)
+            payload: dict[str, Any] = {
+                "kind": protected_outcome.kind,
+                "text": protected_outcome.text,
+                "direction": protected_outcome.direction,
+                "dictionary_miss": protected_outcome.dictionary_miss,
+                "request_id": _request_id(request),
+                "protected_used": protected_outcome.protected_used,
+            }
+            if is_compat:
+                payload["visible_segments"] = list(protected_outcome.translated_segments)
+            else:
+                payload["translated_segments"] = list(protected_outcome.translated_segments)
+            return JSONResponse(content=payload)
+
+        assert body.text is not None
+        use_dictionary_fallback = (
+            body.fallback == "dictionary" or body.dictionary_fallback is True
+        )
+        input_limit = (
+            state.settings.long_text_input_limit
+            if body.allow_long_text
+            else LLM_INPUT_CHAR_LIMIT
+        )
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
@@ -2312,12 +2616,14 @@ def _register_routes(app: FastAPI) -> None:
                 forced_to_chinese=forced_to_chinese,
                 context=_translation_context(body.context),
             ),
+            input_limit=input_limit,
             before_llm_call=_device_llm_guard(request, device),
             # The dictionary stage opens SQLite and can score every term row.
             # This process serves many requests on one loop, so that work runs
             # on a worker thread instead of blocking every other request (and
             # the request time budget) while it runs.
             offload=asyncio.to_thread,
+            allow_dictionary_fallback=use_dictionary_fallback,
         )
         if outcome.kind == KIND_ERROR:
             await _abort_if_request_deadline_expired(outcome)
@@ -2349,12 +2655,14 @@ def _register_routes(app: FastAPI) -> None:
         # work is already paid for here, so a transient store read error serves
         # the completed translation (a definitive revocation still 401s).
         await _require_active_device(request, device, serve_on_store_error=True)
-        return TranslationResponseBody(
-            kind=kind,
-            text=outcome.text,
-            direction=outcome.direction,
-            dictionary_miss=outcome.dictionary_miss,
-            request_id=_request_id(request),
+        return JSONResponse(
+            content={
+                "kind": kind,
+                "text": outcome.text,
+                "direction": outcome.direction,
+                "dictionary_miss": outcome.dictionary_miss,
+                "request_id": _request_id(request),
+            }
         )
 
     @app.get(
@@ -2408,22 +2716,34 @@ def _register_routes(app: FastAPI) -> None:
     async def read_meta(
         request: Request,
         device: Annotated[Device, Depends(require_scope(SCOPE_META))],
-    ) -> MetaResponseBody:
+    ) -> JSONResponse:
         """Service and data provenance. No paths, no secrets, no chat ids."""
+        features = _meta_features(request)
         meta = await asyncio.to_thread(service_metadata, request.app.state.term_service)
-        return MetaResponseBody(
-            service_version=service_version(),
-            api_version=API_VERSION,
-            schema_version=meta.schema_version,
-            source_profile=meta.source_profile,
-            source_commit=meta.source_commit,
-            source_game_version=meta.source_game_version,
-            source_resource_version=meta.source_resource_version,
-            source_changelist=meta.source_changelist,
-            term_count=meta.term_count,
-            llm_configured=llm_configured(),
-            request_id=_request_id(request),
-        )
+        payload: dict[str, Any] = {
+            "service_version": service_version(),
+            "api_version": API_VERSION,
+            "schema_version": meta.schema_version,
+            "source_profile": meta.source_profile,
+            "source_commit": meta.source_commit,
+            "source_game_version": meta.source_game_version,
+            "source_resource_version": meta.source_resource_version,
+            "source_changelist": meta.source_changelist,
+            "term_count": meta.term_count,
+            "llm_configured": llm_configured(),
+            "request_id": _request_id(request),
+        }
+        headers: dict[str, str] = {PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION}
+        if META_FEATURE_CAPABILITIES in features:
+            payload["protocol_version"] = int(PROTOCOL_VERSION)
+            payload["capabilities"] = list(service_capabilities())
+            payload["limits"] = {
+                "translation_max_chars": LLM_INPUT_CHAR_LIMIT,
+                "long_text_max_chars": request.app.state.settings.long_text_input_limit,
+                "protected_max_structures": PROTECTED_MAX_STRUCTURES,
+            }
+            headers[META_FEATURES_HEADER] = ",".join(sorted(features))
+        return JSONResponse(content=payload, headers=headers)
 
     @app.get(
         f"{prefix}/dictionary",
@@ -2555,7 +2875,7 @@ def _register_routes(app: FastAPI) -> None:
     async def read_capabilities(
         request: Request,
         device: Annotated[Device, Depends(capabilities_device)],
-    ) -> CapabilitiesResponseBody:
+    ) -> JSONResponse:
         """Optional capabilities this server can serve right now.
 
         Needs the meta scope and does not spend the business allowance; probes
@@ -2563,10 +2883,13 @@ def _register_routes(app: FastAPI) -> None:
         this path answers 404, which a client treats as no optional
         capabilities. `/v1/meta` is unchanged.
         """
-        return CapabilitiesResponseBody(
-            api_version=API_VERSION,
-            capabilities=list(service_capabilities()),
-            request_id=_request_id(request),
+        return JSONResponse(
+            content={
+                "api_version": API_VERSION,
+                "capabilities": list(service_capabilities()),
+                "request_id": _request_id(request),
+            },
+            headers={PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION},
         )
 
     @app.post(
