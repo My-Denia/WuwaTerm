@@ -2153,7 +2153,7 @@ def _verify_runtime_config(runtime_config: dict[str, Any], bundle: dict[str, Any
         if not isinstance(user, str) or not _USER_RE.fullmatch(user):
             _fail("runtime config User is invalid: " + str(user))
     if bundle["product"] == "wuwaterm-api":
-        if runtime_config.get("Entrypoint") != ["/entrypoint.sh"] or runtime_config.get("Cmd") != ["bot"]:
+        if runtime_config.get("Entrypoint") != ["/entrypoint.sh"] or runtime_config.get("Cmd") not in (["api"], ["bot"]):
             _fail("invalid runtime config Entrypoint or Cmd for wuwaterm-api")
     elif bundle["product"] == "wuwaterm-telegram":
         expected_tg = (["wuwaterm-telegram"], ["--db", "/app/data/terms.db"])

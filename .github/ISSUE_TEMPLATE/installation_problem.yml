@@ -114,7 +114,7 @@ body:
       description: The commands, as you ran them, with secrets replaced by placeholders.
       placeholder: |
         1. uv venv .venv
-        2. uv sync --locked --extra dev --extra telegram
+        2. uv sync --locked --extra api --extra dev
         3. python scripts/validate.py
       render: shell
     validations:

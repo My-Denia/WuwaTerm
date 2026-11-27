@@ -101,37 +101,31 @@ two temporary links it builds beside `current` and `telegram/data` are renamed
 into place rather than followed, so a run that stopped between building one and
 renaming it reuses it instead of creating a link inside the release or data
 directory it already points at. The first update afterwards must be a full one
-(it recreates bot and API, a pause of a few seconds): `--runtime-only` refuses
+(it recreates the API container, a pause of a few seconds): `--runtime-only` refuses
 while a container still mounts the old paths. Source-capsule recovery with
 `scripts/legacy_recovery.py` expects a checkout that holds its own state, so it
 does not apply to a release.
 
-Both serving services read that one file through Compose `env_file`; the
+`wuwaterm-api` reads that `.env` file through Compose `env_file`; the
 builder has no `env_file` at all, and `.env` is ignored and excluded from the
-image build context. What reaches each serving container is then narrowed by
-its own `environment:` block. `wuwaterm-api` has `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET` and the
-bot's state paths blanked, because none of them are its business. It does
-receive the model credentials — `WUWATERM_OPENAI_API_KEY` and the other
-`WUWATERM_OPENAI_*` settings — and that sharing is deliberate: both surfaces
-translate through the same upstream account, and a second key would carry the
-same power while doubling what has to be rotated. So the isolation boundary is
-specific, not total: the Telegram identity, the owner identity and the log
-redaction key stay with the bot; the model credential is shared.
+image build context. What reaches the API container is narrowed by its own
+`environment:` block: `wuwaterm-api` blanks legacy `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET`, and the
+legacy bot state paths so leftover keys in an upgraded `.env` never enter the
+API process. It receives the model credentials (`WUWATERM_OPENAI_API_KEY` and
+the other `WUWATERM_OPENAI_*` settings). Standalone Telegram bots live in
+[My-Denia/WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) with
+their own container and environment isolation.
 
-The Compose file has two image roles across three services:
+The Compose file has two image roles across two services:
 
-- `wuwaterm` builds the `runtime` target and runs the Telegram bot. It mounts
-  `data/` at `/app/data` read-only and `state/` at `/app/state` writable.
-- `wuwaterm-api` runs the SAME runtime image with `command: ["api"]`. It mounts
-  the same `data/` read-only and its own `state-api/` at `/app/state-api`
-  writable, so the two serving processes never share writable state. That
-  directory is a SIBLING of `state/`, not a child: the bot mounts the whole of
-  `state/` read-write, so a child directory would have given the bot process
-  read-write access to the credential store. The API container also gets the
-  bot's credentials blanked, because they are not its business. It binds
-  loopback only, and that bind is fixed in the Compose file rather than read
-  from `.env`: with host networking, an environment knob would turn a public
+- `wuwaterm-api` builds the `runtime` target and runs `command: ["api"]` (the
+  image default). It mounts `data/` at `/app/data` read-only and its own
+  `state-api/` at `/app/state-api` writable, keeping the credential store as a
+  sibling of any legacy or standalone Telegram `state/` directory rather than a
+  child. It also blanks legacy bot credentials from `.env` as defense in depth.
+  It binds loopback only, and that bind is fixed in the Compose file rather than
+  read from `.env`: with host networking, an environment knob would turn a public
   exposure into a one-line edit. It also sets `mem_reservation: 96m` and
   `oom_score_adj: -500`. The reservation is a soft container-level request
   (cgroup v2 `memory.low`), not a cap; it only protects the working set during
@@ -142,12 +136,13 @@ The Compose file has two image roles across three services:
   these fields has both recorded, and updates keep and replay them from the
   recorded recipe. A deployment adopted earlier has a record without them; see
   [API resource settings on an adopted deployment](#api-resource-settings-on-an-adopted-deployment).
-- `wuwaterm-builder` builds the `builder` target. It has the data-build
-  toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
-  and `verify-db`.
+- `wuwaterm-builder` builds the `builder` target (under `profiles: ["builder"]`).
+  It has the data-build toolchain, mounts `data/` writable, and runs
+  `refresh-data`, `build-db`, and `verify-db`.
 
-The runtime image refuses every command except `bot`, `api` and `device`
-(exit 64 otherwise), and still ships without the data-build toolchain.
+The runtime image accepts `api` and `device`, refuses `bot` (retired after
+`v0.16.0`) and data-builder commands (exit 64), and ships without the
+data-build toolchain.
 
 This Compose file does not know about `state-web/`. A Web workbench added by
 `deploy/setup.sh --with-web` runs as its own container with its own state under

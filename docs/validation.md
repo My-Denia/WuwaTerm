@@ -276,7 +276,6 @@ The server test suite is unsupported on a native Windows host. The following com
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -U pip
-.venv\Scripts\python -m pip install -e ".[dev,telegram]"
-$env:TELEGRAM_BOT_TOKEN="..."
+.venv\Scripts\python -m pip install -e ".[api,dev]"
 $env:WUWATERM_DB_PATH="data\terms.db"
 ```

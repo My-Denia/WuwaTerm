@@ -101,7 +101,7 @@ def _project_containers(projects: list[str]) -> dict[str, tuple[dict[str, Any], 
     if type(entries) is not list:
         _fail("Docker container inventory is invalid")
     installed: dict[str, tuple[dict[str, Any], str, str]] = {}
-    services = {"wuwaterm-api": "api", "wuwaterm": "telegram", "wuwaterm-telegram": "telegram"}
+    services = {"wuwaterm-api": "api", "wuwaterm-telegram": "telegram"}
     for entry in entries:
         if type(entry) is not dict or entry.get("Labels") is not None and type(entry.get("Labels")) is not dict:
             _fail("Docker container inventory is invalid")
@@ -112,8 +112,22 @@ def _project_containers(projects: list[str]) -> dict[str, tuple[dict[str, Any], 
         service = labels.get("com.docker.compose.service")
         if service == "wuwaterm-builder":
             continue
+        if labels.get("com.docker.compose.oneoff") == "True":
+            _fail("Compose project contains an unknown or duplicate service")
+        if service == "wuwaterm":
+            if entry.get("State") != "running":
+                sys.stderr.write(
+                    "component_adoption: skipping stopped legacy 'wuwaterm' container "
+                    "(remove it manually with `docker rm wuwaterm-bot`)\n"
+                )
+                continue
+            _fail(
+                "legacy inline Telegram bot container (service 'wuwaterm') is still running; "
+                "stop and remove it (`docker stop wuwaterm-bot && docker rm wuwaterm-bot`) "
+                "and migrate to standalone My-Denia/WuwaTerm-Telegram (or roll back to v0.16.0) before adopting"
+            )
         component = services.get(service)
-        if component is None or component in installed or labels.get("com.docker.compose.oneoff") == "True":
+        if component is None or component in installed:
             _fail("Compose project contains an unknown or duplicate service")
         identifier = _match(entry.get("Id"), _HEX64, "container ID")
         installed[component] = (observe._inspect(identifier), project, service)

@@ -282,15 +282,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - name: Install source dependencies
-        env:
-          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
-        run: |
-          if [ "$TELEGRAM_MODE" = optional ]; then
-            python -m pip install -e ".[dev,telegram]"
-          else
-            python -m pip install -e ".[dev]"
-          fi
+      - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -m cross_component tests/test_windows_contract.py
         env:
           WUWATERM_WINDOWS_ROOT: ${{ github.workspace }}/windows

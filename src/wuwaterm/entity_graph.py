@@ -2,8 +2,8 @@
 
 Loads ``kb_relations`` and active participating nodes/aliases from
 ``knowledge.db`` into compact interned CSR (Compressed Sparse Row) arrays so
-resident memory stays well below 2 MiB on full WutheringData scale (and under
-the 3 MiB hard budget). This module sits in ``DOMAIN_CORE`` (not
+resident memory stays under the 3 MiB hard budget (about 2.1 MiB tracemalloc on
+full WutheringData scale). This module sits in ``DOMAIN_CORE`` (not
 ``PURE_MATCHING``) because it can open ``knowledge.db`` read-only via SQLite.
 
 Invariants:

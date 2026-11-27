@@ -1,9 +1,12 @@
 # Architecture
 
-Maintainer entry for the **current** system: Telegram command routes, an HTTP
-API and its in-process web layer use the shared application pipeline;
-linked-channel posts retain specialized channel orchestration. A desktop
-client and a separately hosted anonymous public beta Site consume the API.
+Maintainer entry for the **current** system: Core provides the protocol-neutral
+application pipeline and its HTTP API adapter (`wuwaterm-api`), plus offline
+dictionary/knowledge-base builders. Independent products consume Core:
+[WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) (standalone
+Telegram Bot wheel), [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows)
+(desktop client), and [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)
+(standalone Web workbench and anonymous public beta Site).
 Claims map to source, tests, deploy scripts, and Compose topology. This is not an
 aspirational redesign.
 
@@ -13,26 +16,25 @@ Operational detail lives in sibling guides. Decision rationale lives in
 ## System context
 
 ```
-Telegram users / groups / linked discussion groups        owner's PC and browser
-                  |                                      |
-                  | Bot API (long polling)               | https, cert verified
-                  v                                      v
-+-----------------------------------+  +---------------------------------+
-| wuwaterm-bot (Compose service)    |  | reverse proxy already serving   |
-|  presentation: bot.py, channel.py |  | the operator's existing sites   |
-+-----------------+-----------------+  +-----------------+---------------+
-                  | command routes                       | 127.0.0.1 (loopback)
-                  |                                      v
-                  |                    +---------------------------------+
-                  |                    | wuwaterm-api (Compose service)  |
-                  |                    |  presentation: wuwaterm_api/    |
-                  |                    |  + web/ sub-app, OFF by default |
-                  |                    +-----------------+---------------+
-                  |                                      |
-                  v                                      v
+Desktop client / WuwaTerm-Web / standalone WuwaTerm-Telegram (optional external consumers)
+                                       |
+                                       | https, cert verified (or local core wheel)
+                                       v
+                     +---------------------------------+
+                     | reverse proxy already serving   |
+                     | the operator's existing sites   |
+                     +-----------------+---------------+
+                                       | 127.0.0.1 (loopback)
+                                       v
+                     +---------------------------------+
+                     | wuwaterm-api (Compose service)  |
+                     |  presentation: wuwaterm_api/    |
+                     +-----------------+---------------+
+                                       |
+                                       v
       +----------------------------------------------------------------+
       |  application layer   src/wuwaterm/application.py               |
-      |  command/API/web dictionary-first pipeline, protocol-neutral   |
+      |  API / CLI / library dictionary-first pipeline, protocol-neutral|
       +-----------------------------+----------------------------------+
                                     |
                   +-----------------+--------------------+
@@ -47,15 +49,15 @@ Telegram users / groups / linked discussion groups        owner's PC and browser
       +----------------------------------------------------------------+
 ```
 
-Three presentation adapters, one application layer, two consumers:
+One in-repo presentation adapter (`wuwaterm_api`), one protocol-neutral
+application layer, and three independent external products:
 
 | Surface | What it is | Where |
 |---------|------------|-------|
-| Telegram bot | Presentation adapter: commands, chat authorization, chat wording, markup | `src/wuwaterm/bot.py`, `channel.py` |
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
-| Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
+| Telegram bot (standalone) | Independent presentation product consuming Core's protocol-neutral pipeline and `ProtectedText` (legacy inline `bot.py`/`channel.py` retired from Core after `v0.16.0`) | [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) |
 | Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) |
-| Public beta Site | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that anonymously exposes same-origin `/api/*` and proxies `/v1` with a server-side device token | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) |
+| Web workbench & Public beta Site | **Not** an in-process sub-app — standalone Web workbench and Hosted / Cloudflare Worker BFF consuming `/v1` with a device token (legacy in-process `src/wuwaterm_api/web/` retired from Core after `v0.16.0`) | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) |
 
 Desktop source moved to the independent Windows product after its v0.3.0
 release. The original desktop design made dictionary versus model cost and
@@ -70,51 +72,33 @@ API produced, and every rule the API applies is applied whether the caller is
 that client or `curl`. See [ADR 0009](adr/0009-http-api-adapter.md) and
 [ADR 0011](adr/0011-pc-client-stack.md).
 
-The private web layer is inside the service, and inside the API's own process:
-it is mounted as a sub-application at `/wuwaterm-web`, and only when
-`WUWATERM_API_WEB_ENABLED` is set — the default is off
-(`src/wuwaterm_api/settings.py`, `DEFAULT_WEB_ENABLED = False`), and with the
-switch off there is no route, no middleware and no sub-application. It is
-owner-private: the reverse proxy authenticates the request and injects the edge
-marker `X-Wuwaterm-Edge`, and the layer refuses anything arriving without that
-marker, so reaching the loopback port directly gets nothing. It appears in no
-published contract — the mount and the bare-mount guard are plain routes, not
-API routes, so `docs/api/openapi.json` lists exactly the paths it listed before
-the layer existed. Details in [web-presentation-layer.md](web-presentation-layer.md);
-the decision, its cost and what it does not cover are in
-[ADR 0014](adr/0014-private-web-presentation-layer.md).
+The legacy in-process private web layer (`src/wuwaterm_api/web/`, previously
+mounted at `/wuwaterm-web` behind `WUWATERM_API_WEB_ENABLED`) has been retired
+from WuwaTerm Core after release `v0.16.0`. Leaving `WUWATERM_API_WEB_ENABLED`
+unset, empty, or falsy (`0`, `false`, `no`, `off`) is silently ignored for
+existing `.env` compatibility, while any truthy or unrecognised value fails
+closed on `wuwaterm-api serve` and `create_app()` with migration guidance
+pointing to [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) (and
+rollback release `v0.16.0`). See [web-presentation-layer.md](web-presentation-layer.md)
+and historical [ADR 0014](adr/0014-private-web-presentation-layer.md).
 
-How that layer reaches the pipeline is worth being exact about, because it is
-the opposite of how the desktop client does: **not over HTTP**. It imports
-`translate_request_async` and `lookup_exact_terms` from `wuwaterm.application`
-and calls them in process, and `create_web_app` hands it the parent's `State`
-OBJECT — the same rate limiter, the same model-call budget, the same credential
-pool instance, not copies (`src/wuwaterm_api/web/app.py`). So it is a second
-caller of the application layer rather than a second consumer of the published
-contract, and the API's aggregate budgets are unchanged by it. It is not an
-exemption either: a browser request is still resolved to a device principal and
-still passes the same scope check, per-device rate limit and revocation
-re-checks the `/v1` routes apply.
-
-The public beta Site is the other consumer, and it is the opposite of the
-in-process web layer in every way that matters for trust: it runs outside
-this Compose topology, holds `WUWATERM_SITE_DEVICE_TOKEN` on the Worker, and
-has **no visitor account or authentication in application code**. It currently
-serves anonymous visitors from the public URL documented in [sites.md](sites.md),
-under one site-wide first-come quota pool. Details, environment, and the
-operator checklist are in [sites.md](sites.md). Do not add Sites setup to
-[web-presentation-layer.md](web-presentation-layer.md).
+The public beta Site and standalone Web workbench live in
+[WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web): they run outside the
+Core API process and call `/v1` over HTTP using a provisioned Core device
+credential. The public beta Site holds `WUWATERM_SITE_DEVICE_TOKEN` on the
+Worker and has **no visitor account or authentication in application code**. It
+currently serves anonymous visitors from the public URL documented in
+[sites.md](sites.md), under one site-wide first-come quota pool. Details,
+environment, and the operator checklist are in [sites.md](sites.md). Do not add
+Sites setup to [web-presentation-layer.md](web-presentation-layer.md).
 
 ### Users and actors
 
 | Actor | Role | Evidence |
 |-------|------|----------|
-| Owner (`OWNER_USER_ID`) | Private `/tr`, `/grant` / `/revoke`, `/public`, `/status` | `bot.py` `_is_owner`, `grant_command`, `public_command` |
-| Group admins | `/tr` when chat is allowlisted (unless public mode) | `bot.py` `_is_authorized_group_sender`, `ChatSettings` |
-| Group members | `/tr` only when public mode is on for that chat | `settings.py` public map; `docs/telegram-behavior.md` |
-| Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
+| Telegram users / admins / linked channels | Served by standalone [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) consuming Core's library and `ProtectedText` (legacy inline Core bot retired after `v0.16.0`) | [docs/telegram-behavior.md](telegram-behavior.md) |
 | API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
-| Owner at a browser | The private web layer's two views (lookup, sentence translation), only when it is switched on and only through the proxy | `src/wuwaterm_api/web/app.py`, [ADR 0014](adr/0014-private-web-presentation-layer.md) |
+| Owner at a browser | Standalone Web workbench calling `/v1` with a device credential (legacy in-process `/wuwaterm-web` retired after `v0.16.0`) | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), [docs/web-presentation-layer.md](web-presentation-layer.md) |
 | Anonymous public beta visitor | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), [sites.md](sites.md) |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
@@ -122,11 +106,9 @@ operator checklist are in [sites.md](sites.md). Do not add Sites setup to
 
 | System | Direction | Purpose |
 |--------|-----------|---------|
-| Telegram Bot API | Outbound long polling + send/edit/delete | Chat presentation only |
 | OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation with dictionary terms as contextual references |
-| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | One intended caller of the published `/v1` contract |
-| Sites Worker | **Inbound** to `/v1` over HTTPS from the Hosted runtime, using `WUWATERM_SITE_DEVICE_TOKEN` | The other published-contract caller; the browser never talks to `/v1` |
-| Owner's browser | **Inbound** over HTTPS to `/wuwaterm-web` through the same ingress, when that layer is switched on | Renders the private web layer's pages; it never calls `/v1` |
+| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | Published `/v1` contract caller ([WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows)) |
+| Standalone Web workbench / Sites Worker | **Inbound** to `/v1` over HTTPS using a Core device token | Published `/v1` contract caller ([WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)); browsers never talk directly to `/v1` on the public beta Site |
 | GitHub game-data repos | Builder sparse checkout only | Source for `terms.db` (`data_source.py`, `constants.py` pins) |
 | Local Docker Compose host | Runtime (two serving containers) + optional builder jobs | Supported single-host topology |
 
@@ -301,12 +283,15 @@ knowledge_builder (offline KB build)   scripts/verify_knowledge_db.py
   `-> knowledge_db (read-only KB) <----'
         |-> entity_graph (read-only 1-hop graph)
         `-> domain_knowledge (pure matching, lock_eligible=False)
+scripts/build_knowledge_vectors.py
+  `-> retrieval_vector (optional dense vector backend, fail-closed)
+        `-> domain_knowledge (pure matching, lock_eligible=False)
 ```
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
+| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `retrieval_vector`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `retrieval_vector`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `provider_capabilities`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -323,8 +308,12 @@ from mandatory placeholder locks: `domain_knowledge` sits in `PURE_MATCHING`
 joint span-coverage and single-character CJK gating, and budget caps;
 `knowledge_db` sits in `DOMAIN_CORE` (forbidden to `PURE_MATCHING`) as the
 read-only SQLite companion schema and Lexical RAG reader bound fail-closed to
-`terms_db_revision`; `knowledge_builder` sits in `BUILDER` for offline
-extraction and atomic database generation.
+`terms_db_revision`; `retrieval_vector` sits in `DOMAIN_CORE` (also forbidden to
+`PURE_MATCHING`) as the optional pluggable vector backend and deterministic RRF
+fuser, defaulting to zero third-party ML dependencies (INT8 memmap over stdlib
+`mmap` when `numpy` is absent) and degrading fail-closed to pure Lexical RAG on
+missing/mismatched `knowledge_db_sha256` or `terms_db_revision`; `knowledge_builder`
+sits in `BUILDER` for offline extraction and atomic database generation.
 
 Strict parsers for the builder's versioned free-text lock exclusion
 metadata live in `exclusion_metadata` — standard-library modules plus
@@ -414,16 +403,13 @@ entry, any declared tool missing from `scripts/` or
 exception), and any dynamic dependency on higher-layer modules such as
 `component_handoff_finish`.
 
-The application layer holds the shared command/API/web pipeline (prepare →
+The application layer holds the shared API/CLI/library pipeline (prepare →
 direction → exact hit → trusted fuzzy hit → length gate → chunked
 LLM call with contextual term references) and knows nothing about Telegram or HTTP. Its adapter-shaped steps
-are injected by the caller: Telegram commands inject a markup translator and
-UTF-16-aware splitter; the API injects neither, which is why its answers are
-plain text by construction. Those callers receive a `TranslationOutcome` and
-own their wording. Linked-channel posts deliberately do not consume that
-outcome: `channel.py` owns channel admission, freshness, edits, delivery and
-its exact-first path while sharing protocol-neutral term and sentence
-primitives. This is a contract distinction, not a request to merge the flows.
+are injected by the caller: external chat adapters (such as standalone `WuwaTerm-Telegram`) can inject a markup translator and
+UTF-16-aware splitter; the HTTP API injects neither, which is why its answers are
+plain text by construction. Callers receive a `TranslationOutcome` and
+own their wording.
 
 Adapters can construct `ProtectedText` and `ProtectedStructure` through
 `application` and call the translator's `translate_protected` or
@@ -431,36 +417,27 @@ Adapters can construct `ProtectedText` and `ProtectedStructure` through
 context; Core uses that context for term boundaries, keeps dictionary terms as
 contextual references within each visible segment, validates structural
 placeholders and returns translated segments with their original structures. The adapter owns parsing and output validation.
-Telegram decodes entity context itself and rejects newly generated HTML before
-reassembling and validating the original structure. A guarded markup hook must
+A guarded markup hook must
 forward `before_llm_call` to the translator; the guard runs after acquiring the
 shared model slot. Unguarded legacy hooks remain supported.
 
 Observed edges (static imports among shipped modules):
 
-- `bot` → `channel` (handler registration + flood retry); `channel` → `bot`
-  only under `TYPE_CHECKING` for `BotConfig` (no runtime cycle).
-- `bot` → `application` (shared pipeline + rate limiter); `application` imports
-  no presentation module and no Telegram SDK, enforced by the boundary guard.
 - `wuwaterm_api` → `wuwaterm.application` (pipeline, translator factory,
-  lookup entry points, error codes) from `app.py`, `errors.py`, `web/app.py`
-  and `web/render.py`; `wuwaterm.logging_utils` (`redact_id`) from `app.py`;
+  lookup entry points, error codes) from `app.py` and `errors.py`;
+  `wuwaterm.logging_utils` (`redact_id`) from `app.py`;
   `wuwaterm.request_trace` (start/reset the per-request stage trace, render its
   fields) from `app.py`; and `wuwaterm.translation_policy`
-  (`LLM_INPUT_CHAR_LIMIT`) from `web/app.py`, which imports the shared input
-  ceiling rather than restating it. Those four modules are the whole of what the
-  package imports from `wuwaterm` today; the guard permits one more (`models`)
-  and nothing beyond the five.
+  (`LLM_INPUT_CHAR_LIMIT`) from `app.py`. The boundary guard permits those four
+  modules plus `models`, and nothing beyond the five.
 - `sentence` → `request_trace` (open the model-slot stage and record the
   direction), so the slot wait and the POST are timed by the layer that runs
   them; `llm_transport` → `request_trace` for the POST stage. Both edges are
-  no-ops when no HTTP request is being traced, which is the case for the bot,
-  the channel adapter and the CLI.
+  no-ops when no HTTP request is being traced (such as offline CLI runs or
+  external library callers).
 - `sentence` → `translation_plan` → `term_preparation`, `text_spans`, `cjk_span`, `semantic_review_contract`, `llm_transport`;
 - `sentence` → `lookup`, `normalize`, `protected_text`, `term_matching`,
-  `term_preparation`, `httpx`; only its old `translate_html`,
-  `translate_html_async`, and `_restore_html` methods lazily import their
-  matching Telegram compatibility functions.
+  `term_preparation`, `httpx` (with zero presentation or Telegram SDK imports).
 - `term_preparation` → `term_matching`, `cjk_span`, `protected_text`,
   `single_char_context`, `skill_references`; `review` → `single_char_context`
   (only for the opt-in `review-v2` feature `ambiguous-mention-v1`);
@@ -473,8 +450,8 @@ Observed edges (static imports among shipped modules):
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`,
   `term_classification`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
-- Runtime image refuses `build-db` and excludes builder tooling, while
-  serving BOTH surfaces from the same image
+- Runtime image refuses `bot` and `build-db` and excludes builder tooling,
+  serving `api` and `device` commands only
   (`tests/test_runtime_imports.py`, CI `deploy-boundary` job).
 
 Automated enforcement: `scripts/check_architecture_boundaries.py`,
@@ -484,35 +461,13 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 
 | Coupling | Status | Notes |
 |----------|--------|-------|
-| Large `bot.py` (config, auth, rate limit, translate orchestration, migration, polling) | Accepted concentration | Documented; not mass-split in this formalization |
-| `translate_query*` in `bot.py` are thin wrappers over `application` | Resolved | The pipeline itself lives in `application.py`; `bot.py` only adds Telegram wording, HTML parse mode and the UTF-16 splitter |
-| `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
+| Legacy inline `bot.py` / `channel.py` | Retired | Removed from Core after `v0.16.0`; chat presentation lives in standalone `WuwaTerm-Telegram` |
 | `sentence` → `telegram_html` | Resolved | Legacy HTML forwarding bridges and `telegram_html.py` retired from Core; `sentence.py` has zero presentation dependencies |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
-| `segmentation`/`translation_plan`/`sentence` imported pure text helpers from `review` | Resolved | Pure Unicode-scalar span helpers (`WHITESPACE`, `sentence_ranges`, `sentence_ranges_v2`, `review_sentence_ranges_v2`, `segment_core`, `paragraph_ranges`) live in stdlib-only `text_spans`; Rule #11 forbids `db`, `lookup`, `review`, and `sqlite3` across all pure matching/text modules (checked transitively by `tests/test_architecture_boundaries.py`), while `review` re-exports compatible public/private aliases |
-| Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |
+| `segmentation`/`translation_plan`/`sentence` imported pure text helpers from `review` | Resolved | Pure Unicode-scalar span helpers (`WHITESPACE`, `sentence_ranges`, `sentence_ranges_v2`, `review_sentence_ranges_v2`, `segment_core`, `paragraph_ranges`) live in stdlib-only `text_spans`; Rule #11 forbids `db`, `entity_graph`, `knowledge_db`, `lookup`, `retrieval_vector`, `review`, and `sqlite3` across all pure matching/text modules (checked transitively by `tests/test_architecture_boundaries.py`), while `review` re-exports compatible public/private aliases |
+| Core API and external consumers share one upstream LLM credential | Deliberate | When standalone `WuwaTerm-Telegram` or `WuwaTerm-Web` runs alongside `wuwaterm-api`, each container keeps its own state/identity isolation while upstream model keys remain operator-managed |
 
 ## Request flows
-
-### Command `/tr` (and `/term`, `/sentence` / `/sent`)
-
-Evidence: `bot.py` `create_application`, `_translation_command`,
-`translate_request_async` / `translate_query_async`; tests under `tests/test_bot.py`.
-
-1. `run_bot` → `create_application` → `app.run_polling()` ([ADR 0003](adr/0003-long-polling-not-webhook.md)).
-2. `CommandHandler` for `tr`/`term` or `sentence`/`sent` → `_translation_command`.
-3. **Auth**: owner private chat, or group admin (or public mode) + allowlist
-   (`_translation_actor_or_reject`, `ChatSettings`).
-4. **Rate limit**: per-chat `PerChatRateLimiter`.
-5. Parse args / optional `--to` / replied text; invalid `--to` → usage, **no LLM**.
-6. `prepare_text` → `lookup_exact`:
-   - exact hit → official string, **no LLM**;
-   - short ASCII fuzzy dictionary short-circuit → **no LLM** (`_fuzzy_dictionary_answer`).
-7. Length gate (`translation_policy` / config limits).
-8. `SentenceTranslator`: select DB terms → optional LLM with contextual references
-   (or, with no model, deterministic local substitution) → restore remaining
-   structural/name placeholders.
-9. `reply_to_user` (HTML with plain fallback; flood retry via channel helper).
 
 ### `POST /v1/translations`
 
@@ -532,24 +487,22 @@ Evidence: `src/wuwaterm_api/app.py` `create_translation`,
    with contextual term references, with the dictionary stage offloaded to a
    worker thread.
 7. With no model configured, this surface refuses (`llm_unavailable`) rather
-   than returning source text as though it had been translated — the chat
-   fallback would be misleading over HTTP.
+   than returning source text as though it had been translated — deterministic
+   local substitution would be misleading over HTTP.
 8. Re-check the device again before returning; the work is already paid for
    here, so a transient store error serves the answer while a definitive
    revocation still refuses.
 9. Render `kind`, `text`, `direction`, `dictionary_miss`, `request_id` — plain
    text, no markup.
 
-### Linked-channel auto-translation
+### Telegram commands and linked-channel auto-translation (Retired from Core)
 
-Evidence: `channel.py` `channel_post_handler` and registration in `bot.py`.
-
-1. Update matches `filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL`.
-2. Age / size / CJK-Latin thresholds; kill switch `WUWATERM_CHANNEL_AUTOTRANSLATE`.
-3. Auth: discussion group must still satisfy allowlist gate.
-4. `ChannelRuntime.reserve` (process-local admission / budget).
-5. Claim original in `ChannelReplyIndex` (file-backed).
-6. Translate: exact DB / term selection / LLM with re-gates before send.
+Telegram command handling (`/tr`, `/term`, `/sentence`) and linked-channel
+auto-translation are no longer implemented in WuwaTerm Core (removed after
+`v0.16.0`); they live in standalone
+[My-Denia/WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) on
+top of Core's protocol-neutral `application` and `ProtectedText` interfaces. See
+[docs/telegram-behavior.md](telegram-behavior.md).
 7. Deliver reply or edit existing chunks with `send_with_flood_retry`.
 8. Telemetry outcomes via channel runtime counters.
 

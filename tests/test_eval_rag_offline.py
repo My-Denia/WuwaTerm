@@ -173,3 +173,67 @@ def test_eval_rag_offline_cli_synthetic_and_explicit_db_paths(tmp_path: Path):
         check=False,
     )
     assert missing_proc.returncode == 2
+
+
+def test_synthetic_hybrid_eval_with_fake_encoder_passes_strict_gates(
+    tmp_path: Path,
+) -> None:
+    report = eval_rag_offline.run_synthetic_eval(
+        iterations=2,
+        retrieval_mode="hybrid",
+    )
+    assert report["schema_version"] == eval_rag_offline.SCHEMA_VERSION
+    assert report["mode"] == "synthetic"
+    assert report["retrieval_mode"] == "hybrid"
+    assert report["gates_passed"] is True
+    assert report["ordinary_word_false_lock"]["false_lock_rate"] == 0.0
+    assert report["ordinary_word_false_lock"]["false_injection_rate"] == 0.0
+    assert report["lock_isolation_integrity"]["all_lock_eligible_false"] is True
+    assert report["lock_isolation_integrity"]["zero_lock_span_conflicts"] is True
+    assert report["memory_mib"]["vector_index_file_size_mib"] > 0.0
+    assert report["vector_index"]["index_size_bytes"] > 0
+    assert report["vector_index"]["metadata"]["quantization"] == "int8"
+
+    md = eval_rag_offline.format_markdown_report(report)
+    assert "Vector index artifact (memmap)" in md
+    assert "mode=hybrid" in md
+
+    json_out = tmp_path / "hybrid_eval.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--synthetic",
+            "--mode",
+            "hybrid",
+            "--fake-encoder",
+            "--iterations",
+            "2",
+            "--strict",
+            "--format",
+            "json",
+            "--json-out",
+            str(json_out),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    cli_report = json.loads(proc.stdout)
+    assert cli_report["retrieval_mode"] == "hybrid"
+    assert cli_report["gates_passed"] is True
+    assert cli_report["ordinary_word_false_lock"]["false_lock_rate"] == 0.0
+    assert cli_report["ordinary_word_false_lock"]["false_injection_rate"] == 0.0
+    assert cli_report == json.loads(json_out.read_text(encoding="utf-8"))
+
+    # Hybrid without --fake-encoder or --onnx-model fails cleanly with code 2.
+    bad_proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--synthetic", "--mode", "hybrid"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert bad_proc.returncode == 2
