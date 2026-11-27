@@ -497,31 +497,77 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _maybe_recover_hot_journal(path: Path, exc: sqlite3.OperationalError) -> bool:
+    """Recover a crashed DELETE-mode hot rollback journal via a one-shot ``?mode=rw`` open.
+
+    Only activates when a ``?mode=ro`` read failed with a readonly error, no
+    ``-wal`` file exists, and a non-empty ``<db>-journal`` file is present.
+    Read-only files/directories and WAL databases are never modified; if
+    recovery cannot open read-write, returns ``False`` so the caller re-raises
+    the original error.
+    """
+    if "readonly" not in str(exc).lower():
+        return False
+    resolved = path.resolve(strict=False)
+    wal_resolved = Path(f"{resolved}-wal")
+    wal_direct = Path(f"{path}-wal")
+    if wal_resolved.exists() or (wal_direct != wal_resolved and wal_direct.exists()):
+        return False
+    journal_stat = _optional_stat_tuple(Path(f"{resolved}-journal"))
+    if journal_stat is None or journal_stat[2] <= 0:
+        return False
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=rw",
+            uri=True,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def _read_validation_probe(
     path: Path,
 ) -> tuple[tuple[tuple[str, str], ...], int, int]:
     """Read metadata provenance and terms (count, max(id)) in one ``?mode=ro`` snapshot."""
-    conn = _connect_readonly(path)
-    try:
-        conn.execute("BEGIN DEFERRED")
+    for attempt in range(2):
+        conn = _connect_readonly(path)
         try:
-            metadata_rows = conn.execute(
-                "SELECT key, value FROM metadata ORDER BY key"
-            ).fetchall()
-            stats_row = conn.execute(
-                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM terms"
-            ).fetchone()
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            conn.execute("BEGIN DEFERRED")
+            try:
+                metadata_rows = conn.execute(
+                    "SELECT key, value FROM metadata ORDER BY key"
+                ).fetchall()
+                stats_row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM terms"
+                ).fetchone()
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        except sqlite3.OperationalError as exc:
+            conn.close()
+            if attempt == 0 and _maybe_recover_hot_journal(path, exc):
+                continue
             raise
-    finally:
-        conn.close()
-    provenance = tuple((row["key"], row["value"]) for row in metadata_rows)
-    count = int(stats_row[0]) if stats_row is not None else 0
-    max_id = int(stats_row[1]) if stats_row is not None else 0
-    return provenance, count, max_id
+        else:
+            conn.close()
+            provenance = tuple((row["key"], row["value"]) for row in metadata_rows)
+            count = int(stats_row[0]) if stats_row is not None else 0
+            max_id = int(stats_row[1]) if stats_row is not None else 0
+            return provenance, count, max_id
+    raise AssertionError("unreachable")
 
 
 class TermService:
@@ -678,12 +724,22 @@ class TermService:
     def _read_snapshot_ephemeral(
         self, path: Path, stamp: tuple[object, ...]
     ) -> DictionarySnapshot:
-        conn = _connect_readonly(path)
-        try:
-            snapshot, _mode, _dv, _probe = self._read_snapshot_on_conn(conn, stamp)
-            return snapshot
-        finally:
-            conn.close()
+        for attempt in range(2):
+            conn = _connect_readonly(path)
+            try:
+                snapshot, _mode, _dv, _probe = self._read_snapshot_on_conn(conn, stamp)
+                return snapshot
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                if attempt == 0 and _maybe_recover_hot_journal(path, exc):
+                    continue
+                raise
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+        raise AssertionError("unreachable")
 
     def snapshot(self) -> DictionarySnapshot:
         """Return the current immutable :class:`DictionarySnapshot`.
@@ -698,7 +754,8 @@ class TermService:
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
-            for _attempt in range(2):
+            recovered_hot_journal = False
+            for _attempt in range(3):
                 path = self.db_path.resolve(strict=False)
                 try:
                     main_stat = _stat_tuple(path)
@@ -765,21 +822,56 @@ class TermService:
                     else _connect_readonly(path)
                 )
                 keep_conn = False
+                retry_after_recovery = False
                 try:
                     stamp_seed: tuple[object, ...] = (str(path), main_stat)
                     try:
                         snapshot, journal_mode, dv, _probe = (
                             self._read_snapshot_on_conn(candidate_conn, stamp_seed)
                         )
-                    except sqlite3.Error:
-                        if not reused_conn:
+                    except sqlite3.Error as exc:
+                        if reused_conn:
+                            self._close_version_conn()
+                            reused_conn = False
+                            candidate_conn = _connect_readonly(path)
+                            try:
+                                snapshot, journal_mode, dv, _probe = (
+                                    self._read_snapshot_on_conn(
+                                        candidate_conn, stamp_seed
+                                    )
+                                )
+                            except sqlite3.OperationalError as retry_exc:
+                                try:
+                                    candidate_conn.close()
+                                except sqlite3.Error:
+                                    pass
+                                if (
+                                    not recovered_hot_journal
+                                    and _maybe_recover_hot_journal(path, retry_exc)
+                                ):
+                                    recovered_hot_journal = True
+                                    retry_after_recovery = True
+                                else:
+                                    raise
+                        elif isinstance(exc, sqlite3.OperationalError):
+                            try:
+                                candidate_conn.close()
+                            except sqlite3.Error:
+                                pass
+                            if (
+                                not recovered_hot_journal
+                                and _maybe_recover_hot_journal(path, exc)
+                            ):
+                                recovered_hot_journal = True
+                                retry_after_recovery = True
+                            else:
+                                raise
+                        else:
                             raise
-                        self._close_version_conn()
-                        reused_conn = False
-                        candidate_conn = _connect_readonly(path)
-                        snapshot, journal_mode, dv, _probe = (
-                            self._read_snapshot_on_conn(candidate_conn, stamp_seed)
-                        )
+
+                    if retry_after_recovery:
+                        continue
+                    assert snapshot is not None
 
                     main_stat_after = _stat_tuple(path)
                     (
@@ -925,18 +1017,29 @@ class TermService:
         # indexed query (short-lived ?mode=ro connection), preserving exact
         # tie-breaking across both ANALYZE and non-ANALYZE query plans.
         norm = normalize_text(query)
-        conn = _connect_readonly(self.db_path)
-        try:
-            rows = conn.execute(
-                """
-                SELECT * FROM terms
-                WHERE zh_norm = ? OR en_norm = ?
-                ORDER BY priority, length(zh), category, source_file, source_id
-                """,
-                (norm, norm),
-            ).fetchall()
-        finally:
-            conn.close()
+        rows: list[sqlite3.Row] = []
+        for attempt in range(2):
+            conn = _connect_readonly(self.db_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM terms
+                    WHERE zh_norm = ? OR en_norm = ?
+                    ORDER BY priority, length(zh), category, source_file, source_id
+                    """,
+                    (norm, norm),
+                ).fetchall()
+                break
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                if attempt == 0 and _maybe_recover_hot_journal(self.db_path, exc):
+                    continue
+                raise
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
         candidates: list[LookupCandidate] = []
         seen: set[tuple[str, str, str]] = set()
         for row in rows:

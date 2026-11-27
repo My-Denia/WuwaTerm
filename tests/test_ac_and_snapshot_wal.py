@@ -1738,3 +1738,99 @@ def test_missing_db_closes_and_releases_version_conn_on_pre_and_post_stat_failur
     with pytest.raises(sqlite3.ProgrammingError):
         opened_conns[0].execute("SELECT 1")
     assert open_fds_referencing(db_post.name) == []
+
+
+def test_hot_rollback_journal_recovers_on_snapshot_and_exact_lookup_while_ro_stays_ro(
+    tmp_path: Path, sample_db: Path
+):
+    """DELETE-mode hot -journal auto-recovers on snapshot()/lookup_exact() while 0444 DB stays ?mode=ro."""
+    crash_script = (
+        "import os, sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], isolation_level=None); "
+        "c.execute('PRAGMA journal_mode = DELETE'); "
+        "c.execute('PRAGMA cache_size = 1'); "
+        "c.execute('BEGIN IMMEDIATE'); "
+        "c.execute(\"UPDATE terms SET en = 'CorruptedUncommitted', en_norm = 'corrupteduncommitted' WHERE zh = '声骸'\"); "
+        "c.execute(\"UPDATE metadata SET value = 'crashed-commit' WHERE key = 'source_commit'\"); "
+        "c.execute('CREATE TABLE dirty_spill(pad TEXT)'); "
+        "c.executemany('INSERT INTO dirty_spill VALUES (?)', [('z' * 3000,) for _ in range(32)]); "
+        "os._exit(1)"
+    )
+
+    def leave_hot_journal(target: Path) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", crash_script, str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 1
+        journal = Path(f"{target}-journal")
+        assert journal.exists() and journal.stat().st_size > 0
+
+    # 1. Cold TermService.snapshot() recovers hot -journal and returns original intact data.
+    db_snap = tmp_path / "hot-journal-snap.db"
+    shutil.copy2(sample_db, db_snap)
+    expected_svc = TermService(sample_db)
+    expected_commit = expected_svc.metadata().get("source_commit")
+    expected_rev = expected_svc.dictionary_identity().revision
+    expected_svc.close()
+
+    leave_hot_journal(db_snap)
+    svc_snap = TermService(db_snap)
+    try:
+        snap = svc_snap.snapshot()
+        assert snap.metadata.get("source_commit") == expected_commit
+        assert snap.dictionary_identity.revision == expected_rev
+        assert any(e.zh == "声骸" and e.en == "Echo" for e in snap.entries)
+        assert not Path(f"{db_snap}-journal").exists()
+    finally:
+        svc_snap.close()
+
+    # 2. Cold TermService.lookup_exact() recovers hot -journal and returns original term.
+    db_exact = tmp_path / "hot-journal-exact.db"
+    shutil.copy2(sample_db, db_exact)
+    leave_hot_journal(db_exact)
+
+    svc_exact = TermService(db_exact)
+    try:
+        res = svc_exact.lookup_exact("声骸")
+        assert res.exact is True and res.best is not None
+        assert res.best.entry.en == "Echo"
+        assert svc_exact.dictionary_identity().revision == expected_rev
+        assert not Path(f"{db_exact}-journal").exists()
+    finally:
+        svc_exact.close()
+
+    # 3. Warmed TermService (with open _version_conn) also recovers after a subsequent crash.
+    db_warm = tmp_path / "hot-journal-warm.db"
+    shutil.copy2(sample_db, db_warm)
+    svc_warm = TermService(db_warm)
+    try:
+        _ = svc_warm.snapshot()
+        assert svc_warm._version_conn is not None
+        leave_hot_journal(db_warm)
+        snap_after = svc_warm.snapshot()
+        assert snap_after.dictionary_identity.revision == expected_rev
+        assert snap_after.metadata.get("source_commit") == expected_commit
+        assert not Path(f"{db_warm}-journal").exists()
+    finally:
+        svc_warm.close()
+
+    # 4. Normal read-only (0444 file in 0555 dir) DB continues reading purely via ?mode=ro.
+    ro_dir = tmp_path / "ro-hot-check"
+    ro_dir.mkdir()
+    ro_db = ro_dir / "readonly.db"
+    shutil.copy2(sample_db, ro_db)
+    os.chmod(ro_db, 0o444)
+    os.chmod(ro_dir, 0o555)
+    try:
+        ro_svc = TermService(ro_db)
+        try:
+            assert ro_svc.lookup_exact("声骸").best is not None
+            assert ro_svc.dictionary_identity().revision == expected_rev
+        finally:
+            ro_svc.close()
+    finally:
+        os.chmod(ro_dir, 0o755)
+        os.chmod(ro_db, 0o644)
