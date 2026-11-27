@@ -1,0 +1,972 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from scripts.verify_knowledge_db import (
+    VerificationError,
+    main as verify_kb_main,
+    verify_knowledge_database,
+)
+from wuwaterm.data_source import SourceProvenance
+from wuwaterm.db import connect, initialize
+from wuwaterm.domain_knowledge import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_SCALARS,
+    DomainKnowledgeCandidate,
+    candidate_scalar_length,
+    is_single_cjk_char,
+    select_domain_knowledge_candidates,
+)
+from wuwaterm.knowledge_builder import (
+    KnowledgeBuildError,
+    build_knowledge_database,
+    build_knowledge_database_atomic,
+    clean_kb_text,
+    extract_knowledge_records,
+    extract_te_anchors,
+    is_dirty_text,
+)
+from wuwaterm.knowledge_db import (
+    KB_SCHEMA_VERSION,
+    KnowledgeBaseError,
+    KnowledgeBaseReader,
+    KnowledgeBaseRevisionMismatchError,
+    compute_terms_db_revision,
+)
+from wuwaterm.lookup import TermService
+
+
+def _provenance() -> SourceProvenance:
+    return SourceProvenance(
+        profile="arikatsu",
+        repo_url="https://example.invalid/wutheringdata.git",
+        commit="deadbeef1234567890",
+        game_version="3.7.0",
+        resource_version="3.7.8",
+        changelist="8975829",
+    )
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _build_synthetic_terms_db(path: Path) -> str:
+    with closing(connect(path)) as conn:
+        initialize(conn)
+        conn.execute(
+            "INSERT INTO terms(category, source_file, source_id, text_key, zh, en, "
+            "zh_norm, en_norm, pinyin, pinyin_abbrev, priority) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "resonator",
+                "BinData/role/roleinfo.json",
+                "1603",
+                "RoleInfo_1603_Name",
+                "椿",
+                "Camellya",
+                "椿",
+                "camellya",
+                "chun",
+                "c",
+                10,
+            ),
+        )
+        conn.commit()
+    return compute_terms_db_revision(path)
+
+
+def _build_synthetic_wutheringdata(root: Path) -> Path:
+    bin_root = root / "BinData"
+
+    _write_json(
+        bin_root / "Term" / "termconfig.json",
+        [
+            {"Id": 0, "Term": "无效零号术语", "Placeholder": []},
+            {"Id": 850086, "Term": "夜归", "Placeholder": []},
+            {"Id": 850099, "Term": "共鸣回路", "Placeholder": []},
+            {"Id": 850100, "Term": "dnt/内部测试词条", "Placeholder": []},
+        ],
+    )
+    _write_json(
+        bin_root / "element_info" / "elementinfo.json",
+        [
+            {"Id": 0, "Name": "ElementInfo_0_Name", "Describe": ""},
+            {"Id": 1, "Name": "ElementInfo_1_Name", "Describe": "ElementInfo_1_Describe"},
+            {"Id": 6, "Name": "ElementInfo_6_Name", "Describe": "ElementInfo_6_Describe"},
+        ],
+    )
+    _write_json(
+        bin_root / "influence" / "influence.json",
+        [
+            {"Id": 0, "Title": "", "Introduction": ""},
+            {"Id": 1, "Title": "", "Introduction": ""},
+        ],
+    )
+    _write_json(
+        bin_root / "influence" / "country.json",
+        [
+            {"Id": 0, "Influences": [], "Title": "Country_0_Title", "Desc": ""},
+            {
+                "Id": 1,
+                "Influences": [0, 1],
+                "Title": "Country_1_Title",
+                "Desc": "Country_1_Desc",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "area" / "area.json",
+        [
+            {"AreaId": 0, "CountryId": 0, "Title": "Area_0_Title", "Father": 0},
+            {"AreaId": 35, "CountryId": 1, "Title": "Area_35_Title", "Father": 0},
+            {"AreaId": 3, "CountryId": 1, "Title": "Area_3_Title", "Father": 35},
+        ],
+    )
+    _write_json(
+        bin_root / "role" / "roletag.json",
+        [
+            {"Id": 3, "TagName": "RoleTag3", "TagDesc": "RoleTag3_TagDesc"},
+        ],
+    )
+    _write_json(
+        bin_root / "weapon" / "weaponconf.json",
+        [
+            {
+                "ItemId": 21020011,
+                "WeaponName": "WeaponConf_21020011_WeaponName",
+                "ResonId": 21020011,
+                "Desc": "WeaponConf_21020011_Desc",
+                "BgDescription": "WeaponConf_21020011_BgDescription",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "weapon" / "weaponreson.json",
+        [
+            {"Id": 1, "ResonId": 21020011, "Level": 1, "Name": "WeaponReson_1_Name"},
+            {"Id": 2, "ResonId": 21020011, "Level": 2, "Name": "WeaponReson_1_Name"},
+        ],
+    )
+    _write_json(
+        bin_root / "role" / "roleinfo.json",
+        [
+            {
+                "Id": 0,
+                "Name": "RoleInfo_0_Name",
+                "NickName": "",
+                "Introduction": "",
+                "Tag": [],
+                "ElementId": 0,
+                "PartyId": 0,
+                "InitWeaponItemId": 0,
+            },
+            {
+                "Id": 1402,
+                "Name": "RoleInfo_1402_Name",
+                "NickName": "RoleInfo_1402_NickName",
+                "Introduction": "FavorRoleInfo_1402_Info",
+                "Tag": [3],
+                "ElementId": 1,
+                "PartyId": 1,
+                "InitWeaponItemId": 21020011,
+            },
+            {
+                "Id": 1603,
+                "Name": "RoleInfo_1603_Name",
+                "NickName": "RoleInfo_1603_NickName",
+                "Introduction": "FavorRoleInfo_1603_Info",
+                "Tag": [3],
+                "ElementId": 6,
+                "PartyId": 1,
+                "InitWeaponItemId": 21020011,
+            },
+            {
+                "Id": 1699,
+                "Name": "RoleInfo_1699_Name",
+                "NickName": "RoleInfo_1699_NickName",
+                "Introduction": "",
+                "Tag": [],
+                "ElementId": 6,
+                "PartyId": 0,
+                "InitWeaponItemId": 0,
+            },
+            {
+                "Id": 9999,
+                "Name": "RoleInfo_9999_Dirty",
+                "NickName": "",
+                "Introduction": "",
+                "Tag": [],
+                "ElementId": 0,
+                "PartyId": 0,
+                "InitWeaponItemId": 0,
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "resonate_chain" / "resonantchain.json",
+        [
+            {
+                "Id": 1,
+                "GroupId": 1402,
+                "NodeName": "ResonantChain_1_NodeName",
+                "AttributesDescription": "ResonantChain_1_AttributesDescription",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "skill" / "skill.json",
+        [
+            {
+                "Id": 1000101,
+                "SkillGroupId": 1402,
+                "SkillName": "Skill_1000101_SkillName",
+                "SkillLevelGroupId": 1000101,
+                "SkillDescribe": "Skill_1000101_SkillDescribe",
+                "SkillResume": "Skill_1000101_SkillResume",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "skill" / "skilldescription.json",
+        [
+            {
+                "Id": 900003,
+                "SkillLevelGroupId": 1000101,
+                "AttributeName": "SkillDescription_900003_AttributeName",
+                "Description": "SkillDescription_900003_Description",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "phantom" / "phantomfetter.json",
+        [
+            {
+                "Id": 1,
+                "Name": "PhantomFetter_1_Name",
+                "EffectDescription": "PhantomFetter_1_EffectDescription",
+                "SimplyEffectDesc": "PhantomFetter_1_SimplyEffectDesc",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "phantom" / "phantomskill.json",
+        [
+            {
+                "Id": 1,
+                "PhantomSkillId": 200001,
+                "DescriptionEx": "PhantomSkill_200001_DescriptionEx",
+                "SimplyDescription": "PhantomSkill_200001_SimplyDescription",
+            },
+        ],
+    )
+    _write_json(
+        bin_root / "monster_Info" / "monsterinfo.json",
+        [
+            {
+                "Id": 310000010,
+                "Name": "MonsterInfo_310000010_Name",
+                "ElementIdArray": [1],
+                "DiscoveredDes": "MonsterInfo_310000010_DiscoveredDes",
+                "UndiscoveredDes": "MonsterInfo_310000010_UndiscoveredDes",
+                "PerchId": [3],
+            },
+        ],
+    )
+
+    zh_entries = {
+        "Term850086_Title": "夜归",
+        "Term850086_Desc": "<color=Highlight>夜归军</color>守卫今州边疆。",
+        "Term850099_Title": "共鸣回路",
+        "Term850099_Desc": "释放<color=Highlight>共鸣回路</color>触发特殊机制。",
+        "Term850100_Title": "dnt/不要入库",
+        "ElementInfo_0_Name": "零号元素",
+        "ElementInfo_1_Name": "冷凝",
+        "ElementInfo_1_Describe": "存在异常，如有疑问请联系官方客服",
+        "ElementInfo_6_Name": "湮灭",
+        "ElementInfo_6_Describe": "能够湮灭物质频率的属性。",
+        "Influence_1_Title": "先行公约",
+        "Influence_1_Introduction": "先行公约是科学与探索组织。",
+        "Country_0_Title": "零号国家",
+        "Country_1_Title": "瑝珑",
+        "Country_1_Desc": "历史悠久的东方国度。",
+        "Area_0_Title": "零号区域",
+        "Area_35_Title": "瑝珑中枢",
+        "Area_3_Title": "今州城",
+        "RoleTag3": "协奏效率",
+        "RoleTag3_TagDesc": "快速积累协奏能量。",
+        "WeaponConf_21020011_WeaponName": "千古洑流",
+        "WeaponConf_21020011_Desc": "提升共鸣效率。",
+        "WeaponConf_21020011_BgDescription": "古老的迅刀。",
+        "WeaponReson_1_Name": "流光洄溯",
+        "RoleInfo_0_Name": "零号角色",
+        "RoleInfo_1402_Name": "秧秧",
+        "RoleInfo_1402_NickName": "风声羽息",
+        "FavorRoleInfo_1402_Info": "<te href=850086>夜归军团</te>下设临时调查员，秧秧。",
+        "RoleInfo_1603_Name": "椿",
+        "RoleInfo_1603_NickName": "存在异常，如有疑问请联系官方客服",
+        "FavorRoleInfo_1603_Info": "红椿绽放于<te href=850099>共鸣核心</te>之中。",
+        "RoleInfo_1699_Name": "心",
+        "RoleInfo_1699_NickName": "敬请期待",
+        "RoleInfo_9999_Dirty": "测试文本_待删除",
+        "ResonantChain_1_NodeName": "青蓝澄澈的初风",
+        "ResonantChain_1_AttributesDescription": "施放技能后提升<color=Highlight>冷凝</color>抗性。",
+        "Skill_1000101_SkillName": "微风轻羽",
+        "Skill_1000101_SkillDescribe": "造成连续斩击伤害。",
+        "Skill_1000101_SkillResume": "基础攻击。",
+        "SkillDescription_900003_AttributeName": "第一段伤害",
+        "SkillDescription_900003_Description": "触发<te href=850099>回路联动</te>。",
+        "PhantomFetter_1_Name": "凝夜白霜",
+        "PhantomFetter_1_EffectDescription": "冷凝伤害提升10%。",
+        "PhantomFetter_1_SimplyEffectDesc": "提升冷凝伤害。",
+        "PhantomSkill_200001_DescriptionEx": "召唤<color=#c49e55>寒霜残象</color>发起突袭。",
+        "PhantomSkill_200001_SimplyDescription": "寒霜残象突袭",
+        "MonsterInfo_310000010_Name": "啸叫种残象",
+        "MonsterInfo_310000010_DiscoveredDes": "盘踞于今州城外围的残象。",
+        "MonsterInfo_310000010_UndiscoveredDes": "未知残象记录。",
+        "Standalone_Te_Text": "关于<te href=850086>夜归先锋</te>的记载。",
+        "Dirty_Test1_Key": "Test1-placeholder",
+    }
+    en_entries = {
+        "Term850086_Title": "Midnight Rangers",
+        "Term850086_Desc": "<color=Highlight>Midnight Rangers</color> guard Jinzhou.",
+        "Term850099_Title": "Forte Circuit",
+        "Term850099_Desc": "Release <color=Highlight>Forte Circuit</color> for special effects.",
+        "Term850100_Title": "dnt/InternalOnly",
+        "ElementInfo_0_Name": "Zero Element",
+        "ElementInfo_1_Name": "Glacio",
+        "ElementInfo_1_Describe": "The ability to cool and freeze.",
+        "ElementInfo_6_Name": "Havoc",
+        "ElementInfo_6_Describe": "Annihilates frequencies.",
+        "Influence_1_Title": "Pioneer Association",
+        "Influence_1_Introduction": "Scientific and exploration organization.",
+        "Country_0_Title": "Zero Country",
+        "Country_1_Title": "Huanglong",
+        "Country_1_Desc": "An ancient eastern nation.",
+        "Area_0_Title": "Zero Area",
+        "Area_35_Title": "Huanglong Central",
+        "Area_3_Title": "Jinzhou",
+        "RoleTag3": "Concerto Efficiency",
+        "RoleTag3_TagDesc": "Rapidly builds Concerto Energy.",
+        "WeaponConf_21020011_WeaponName": "Emerald of Genesis",
+        "WeaponConf_21020011_Desc": "Increases Energy Regen.",
+        "WeaponConf_21020011_BgDescription": "An ancient sword.",
+        "WeaponReson_1_Name": "Stormy Resolution",
+        "RoleInfo_0_Name": "Zero Resonator",
+        "RoleInfo_1402_Name": "Yangyang",
+        "RoleInfo_1402_NickName": "Breath of Winds",
+        "FavorRoleInfo_1402_Info": "Outrider of the <te href=850086>Midnight Vanguard</te>.",
+        "RoleInfo_1603_Name": "Camellya",
+        "RoleInfo_1603_NickName": "Camellya",
+        "FavorRoleInfo_1603_Info": "Blooms inside <te href=850099>Forte Core</te>.",
+        "RoleInfo_1699_Name": "Hsin",
+        "RoleInfo_1699_NickName": "TBA",
+        "RoleInfo_9999_Dirty": "Test1-DirtyName",
+        "ResonantChain_1_NodeName": "Sapphire Skies",
+        "ResonantChain_1_AttributesDescription": "Increases <color=Highlight>Glacio</color> RES.",
+        "Skill_1000101_SkillName": "Feather as Blade",
+        "Skill_1000101_SkillDescribe": "Performs consecutive slashes.",
+        "Skill_1000101_SkillResume": "Basic attack.",
+        "SkillDescription_900003_AttributeName": "Stage 1 DMG",
+        "SkillDescription_900003_Description": "Triggers <te href=850099>Circuit Link</te>.",
+        "PhantomFetter_1_Name": "Freezing Frost",
+        "PhantomFetter_1_EffectDescription": "Glacio DMG +10%.",
+        "PhantomFetter_1_SimplyEffectDesc": "Increases Glacio DMG.",
+        "PhantomSkill_200001_DescriptionEx": "Summons <color=#c49e55>Frost Remnant</color> to strike.",
+        "PhantomSkill_200001_SimplyDescription": "Frost Remnant Strike",
+        "MonsterInfo_310000010_Name": "Howler Remnant",
+        "MonsterInfo_310000010_DiscoveredDes": "Roams outside Jinzhou.",
+        "MonsterInfo_310000010_UndiscoveredDes": "Unknown remnant record.",
+        "Standalone_Te_Text": "Chronicle of <te href=850086>Rangers Vanguard</te>.",
+        "Dirty_Test1_Key": "Test1-placeholder",
+    }
+
+    _write_json(
+        root / "Textmaps" / "zh-Hans" / "multi_text" / "MultiText.json",
+        [{"Id": k, "Content": v} for k, v in zh_entries.items()],
+    )
+    _write_json(
+        root / "Textmaps" / "en" / "multi_text" / "MultiText.json",
+        [{"Id": k, "Content": v} for k, v in en_entries.items()],
+    )
+    return root
+
+
+def test_terms_db_revision_matches_lookup_identity(tmp_path: Path):
+    terms_db = tmp_path / "terms.db"
+    computed = _build_synthetic_terms_db(terms_db)
+    identity = TermService(terms_db).dictionary_identity()
+    assert computed == identity.revision
+
+
+def test_kb_aliases_lock_eligible_check_constraint_and_candidate_isolation(tmp_path: Path):
+    # (a) Runtime isolation on DomainKnowledgeCandidate
+    with pytest.raises(ValueError, match="lock_eligible must always be False"):
+        DomainKnowledgeCandidate(
+            entity_id="resonator:1603",
+            source_surface="椿",
+            zh="椿",
+            en="Camellya",
+            entity_type="resonator",
+            trust_tier="official_authoritative",
+            retrieval_channel="short_ngram",
+            score=1.0,
+            lock_eligible=True,  # type: ignore[arg-type]
+        )
+
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    revision = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+
+    # (a) SQLite hard CHECK(lock_eligible = 0) refuses both INSERT and UPDATE
+    with closing(sqlite3.connect(kb_path)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO kb_aliases(
+                  entity_id, alias_surface, alias_norm, lang, alias_kind,
+                  trust_tier, lock_eligible
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "resonator:1402",
+                    "非法锁词",
+                    "非法锁词",
+                    "zh",
+                    "manual",
+                    "official_authoritative",
+                    1,
+                ),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE kb_aliases SET lock_eligible = 1")
+
+    # Reader is opened strictly read-only and refuses any write attempt
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=revision) as reader:
+        assert reader.metadata["kb_schema_version"] == KB_SCHEMA_VERSION
+        assert reader.entity_count() > 0
+        with pytest.raises(sqlite3.OperationalError):
+            reader._conn.execute("DELETE FROM kb_aliases")
+
+
+def test_dirty_data_filtering_and_markup_cleaning(tmp_path: Path):
+    # (b) Unit checks on dirty filter & markup cleaner
+    assert is_dirty_text("dnt/内部测试")
+    assert is_dirty_text("存在异常，如有疑问请联系官方客服")
+    assert is_dirty_text("敬请期待")
+    assert is_dirty_text("Coming soon TBA")
+    assert is_dirty_text("测试文本_01")
+    assert is_dirty_text("Test1-something")
+    assert clean_kb_text("<color=Highlight>夜归军</color>") == "夜归军"
+    assert clean_kb_text("<te href=850086>夜归</te>守卫") == "夜归守卫"
+    assert clean_kb_text("dnt/should_drop") == ""
+
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+
+    with closing(sqlite3.connect(kb_path)) as conn:
+        all_texts: list[str] = []
+        for query in (
+            "SELECT entity_id, zh, en, context_gloss FROM kb_entities",
+            "SELECT alias_surface FROM kb_aliases",
+            "SELECT zh_text, en_text FROM kb_contexts",
+            "SELECT surface, zh, en, context_gloss FROM kb_fts_trigram",
+            "SELECT ngram, surface FROM kb_short_ngrams",
+        ):
+            for row in conn.execute(query):
+                all_texts.extend(str(col) for col in row)
+
+        forbidden_markers = (
+            "dnt/",
+            "存在异常，如有疑问请联系官方客服",
+            "敬请期待",
+            "测试文本",
+            "Test1-",
+            "<color=",
+            "<te ",
+            "</te>",
+            "</color>",
+        )
+        for text in all_texts:
+            for marker in forbidden_markers:
+                assert marker not in text, f"dirty marker {marker!r} leaked into {text!r}"
+
+        # Id == 0 rows must never be persisted
+        ids = {
+            str(row[0])
+            for row in conn.execute("SELECT entity_id FROM kb_entities")
+        }
+        assert not any(entity_id.endswith(":0") for entity_id in ids), ids
+        # Element 1 (冷凝) stays even though its zh description was customer-service error
+        assert "element:1" in ids
+        # Dirty entity 9999 and dirty term 850100 are completely excluded
+        assert "resonator:9999" not in ids
+        assert "term:850100" not in ids
+
+
+def test_terms_db_revision_tampering_fails_closed(tmp_path: Path):
+    # (c) Tampered terms_db_revision must fail-closed on both reader and verifier
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    revision = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database_atomic(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+
+    # Valid revision passes verification
+    counts, metadata = verify_knowledge_database(kb_path, terms_db_path=terms_db)
+    assert counts["resonator"] == 3
+    assert metadata["terms_db_revision"] == revision
+
+    # Wrong expected revision fails closed
+    with pytest.raises(KnowledgeBaseRevisionMismatchError):
+        KnowledgeBaseReader(kb_path, expected_terms_db_revision="0" * 64)
+
+    # Tampering metadata inside knowledge.db fails both reader and verify_knowledge_db
+    with closing(sqlite3.connect(kb_path)) as conn:
+        conn.execute(
+            "UPDATE kb_metadata SET value = ? WHERE key = 'terms_db_revision'",
+            ("tampered-revision-sha256",),
+        )
+        conn.commit()
+
+    with pytest.raises(KnowledgeBaseRevisionMismatchError):
+        KnowledgeBaseReader(kb_path, expected_terms_db_revision=revision)
+
+    with pytest.raises(VerificationError, match="terms_db_revision mismatch"):
+        verify_knowledge_database(kb_path, terms_db_path=terms_db)
+
+
+def test_short_ngram_recall_and_zero_false_injection_for_ordinary_words(tmp_path: Path):
+    # (d) 1-2 char short terms recalled via kb_short_ngrams; 香椿/臭椿/心情 strictly 0.0%
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    revision = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=revision) as reader:
+        # 2-char short term: 冷凝 -> Glacio
+        glacio_hits = reader.query("冷凝伤害提升")
+        assert any(c.zh == "冷凝" and c.en == "Glacio" for c in glacio_hits), glacio_hits
+        assert all(c.lock_eligible is False for c in glacio_hits)
+
+        # 1-char short term in valid resonator context: 椿 -> Camellya
+        camellya_hits = reader.query("欢迎椿来到队伍")
+        assert any(
+            c.zh == "椿" and c.en == "Camellya" and c.lock_eligible is False
+            for c in camellya_hits
+        ), camellya_hits
+
+        # 1-char short term in honorific context: 心大人 -> Hsin
+        hsin_hits = reader.query("心大人请指示")
+        assert any(
+            c.zh == "心" and c.en == "Hsin" and c.lock_eligible is False
+            for c in hsin_hits
+        ), hsin_hits
+
+        # Ordinary words containing 椿/心: strictly 0.0% false injection / false lock
+        for ordinary_sentence in (
+            "今天晚餐吃了香椿炒蛋",
+            "院子里的臭椿长高了",
+            "她今天的心情非常愉快",
+            "香椿",
+            "臭椿",
+            "心情",
+            "红椿·蕾",
+        ):
+            hits = reader.query(ordinary_sentence)
+            assert not any(c.zh in {"椿", "心"} for c in hits), (
+                ordinary_sentence,
+                hits,
+            )
+
+
+def test_fts5_trigram_recall_and_te_anchor_aliases_and_relations(tmp_path: Path):
+    # (e) FTS5 trigram >=3 scalar substring / superstring / alias recall
+    # (f) <te href=TermId> official anchors generate kb_aliases & kb_relations
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    revision = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    stats = build_knowledge_database(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+    assert stats.entities >= 12
+    assert stats.aliases > 0
+    assert stats.relations > 0
+    assert stats.short_ngrams > 0
+    assert stats.fts_rows > 0
+
+    with closing(sqlite3.connect(kb_path)) as conn:
+        te_aliases = {
+            (str(r[0]), str(r[1]), str(r[2]), int(r[3]))
+            for r in conn.execute(
+                "SELECT entity_id, alias_surface, lang, lock_eligible "
+                "FROM kb_aliases WHERE alias_kind = 'te_anchor'"
+            )
+        }
+        assert ("term:850086", "夜归军团", "zh", 0) in te_aliases
+        assert ("term:850086", "Midnight Vanguard", "en", 0) in te_aliases
+        assert ("term:850086", "夜归先锋", "zh", 0) in te_aliases
+        assert ("term:850099", "共鸣核心", "zh", 0) in te_aliases
+        assert ("term:850099", "Forte Core", "en", 0) in te_aliases
+
+        te_relations = {
+            (str(r[0]), str(r[1]), str(r[2]))
+            for r in conn.execute(
+                "SELECT src_entity_id, relation_type, dst_entity_id "
+                "FROM kb_relations WHERE relation_type = 'mentions_term'"
+            )
+        }
+        assert ("resonator:1402", "mentions_term", "term:850086") in te_relations
+        assert ("resonator:1603", "mentions_term", "term:850099") in te_relations
+        assert ("skill:1000101", "mentions_term", "term:850099") in te_relations
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=revision) as reader:
+        # >=3 scalar substring query via FTS5 trigram against nickname alias "风声羽息"
+        sub_hits = reader.query("风声羽")
+        assert any(
+            c.entity_id == "resonator:1402"
+            and c.zh == "秧秧"
+            and c.en == "Yangyang"
+            and c.retrieval_channel == "fts5_trigram"
+            and c.lock_eligible is False
+            for c in sub_hits
+        ), sub_hits
+
+        # >=3 scalar English case-insensitive substring via FTS5 trigram
+        en_hits = reader.query("midnight vanguard")
+        assert any(
+            c.entity_id == "term:850086"
+            and c.zh == "夜归"
+            and c.en == "Midnight Rangers"
+            and c.lock_eligible is False
+            for c in en_hits
+        ), en_hits
+
+        # >=3 scalar superstring sentence matching <te> alias "夜归军团"
+        super_hits = reader.query("这支队伍隶属于夜归军团的前锋")
+        assert any(
+            c.entity_id == "term:850086" and c.lock_eligible is False
+            for c in super_hits
+        ), super_hits
+
+        # 1-hop graph neighbors ready for P2 consumption
+        neighbors = reader.neighbors("resonator:1402")
+        rel_triples = {
+            (rel.src_entity_id, rel.relation_type, rel.dst_entity_id)
+            for rel in neighbors
+        }
+        assert ("resonator:1402", "has_element", "element:1") in rel_triples
+        assert ("resonator:1402", "mentions_term", "term:850086") in rel_triples
+        assert ("skill:1000101", "skill_of", "resonator:1402") in rel_triples
+
+
+def test_pure_selection_gate_conflicts_and_budgets():
+    assert is_single_cjk_char("椿")
+    assert not is_single_cjk_char("冷凝")
+    assert not is_single_cjk_char("A")
+
+    candidates = [
+        DomainKnowledgeCandidate(
+            entity_id="resonator:1603",
+            source_surface="椿",
+            zh="椿",
+            en="Camellya",
+            entity_type="resonator",
+            trust_tier="official_authoritative",
+            retrieval_channel="short_ngram",
+            score=0.95,
+            context_gloss="红椿共鸣者",
+        ),
+        DomainKnowledgeCandidate(
+            entity_id="element:1",
+            source_surface="冷凝",
+            zh="冷凝",
+            en="Glacio",
+            entity_type="element",
+            trust_tier="official_authoritative",
+            retrieval_channel="short_ngram",
+            score=0.90,
+            context_gloss="寒冰属性" * 20,
+        ),
+        DomainKnowledgeCandidate(
+            entity_id="term:850086",
+            source_surface="夜归",
+            zh="夜归",
+            en="Midnight Rangers",
+            entity_type="term",
+            trust_tier="official_authoritative",
+            retrieval_channel="lexical_alias",
+            score=0.88,
+            context_gloss="守卫今州的军队",
+        ),
+    ]
+
+    # Locked/reference conflict drops 冷凝 and 夜归
+    filtered = select_domain_knowledge_candidates(
+        "欢迎椿使用冷凝技能加入夜归",
+        candidates,
+        locked_surfaces=("冷凝",),
+        reference_surfaces=("Midnight Rangers",),
+    )
+    assert [c.entity_id for c in filtered] == ["resonator:1603"]
+
+    # Span-covered conflict drops 冷凝 when only covered by locked superstring 冷凝伤害
+    span_filtered = select_domain_knowledge_candidates(
+        "提升冷凝伤害效果",
+        candidates,
+        locked_surfaces=("冷凝伤害",),
+    )
+    assert not any(c.entity_id == "element:1" for c in span_filtered)
+
+    # Budget truncation: default max_candidates=8 and max_scalars=400
+    many = [
+        DomainKnowledgeCandidate(
+            entity_id=f"term:{i}",
+            source_surface=f"术语{i:02d}",
+            zh=f"术语{i:02d}",
+            en=f"Term {i:02d}",
+            entity_type="term",
+            trust_tier="official_authoritative",
+            retrieval_channel="fts5_trigram",
+            score=1.0 - i * 0.01,
+            context_gloss="说明文字" * 25,
+        )
+        for i in range(15)
+    ]
+    bounded = select_domain_knowledge_candidates("术语00 术语01 术语02", many)
+    assert len(bounded) <= DEFAULT_MAX_CANDIDATES
+    assert sum(candidate_scalar_length(c) for c in bounded) <= DEFAULT_MAX_SCALARS
+    assert all(c.lock_eligible is False for c in bounded)
+
+    # Tight scalar budget trims gloss without exceeding budget
+    tight = select_domain_knowledge_candidates("冷凝测试", [candidates[1]], max_scalars=20)
+    assert len(tight) == 1
+    assert candidate_scalar_length(tight[0]) <= 20
+
+
+def test_verify_knowledge_db_cli_and_failure_modes(tmp_path: Path):
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    revision = _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+
+    build_knowledge_database(
+        data_dir,
+        kb_path,
+        terms_db_path=terms_db,
+        source_provenance=_provenance(),
+    )
+
+    assert verify_kb_main([str(kb_path), "--terms-db", str(terms_db)]) == 0
+    assert (
+        verify_kb_main(
+            [str(kb_path), "--expected-terms-db-revision", revision]
+        )
+        == 0
+    )
+
+    # Extra unexpected table fails exact table-set check
+    bad_table_db = tmp_path / "extra_table.db"
+    bad_table_db.write_bytes(kb_path.read_bytes())
+    with closing(sqlite3.connect(bad_table_db)) as conn:
+        conn.execute("CREATE TABLE rogue_table (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    with pytest.raises(VerificationError, match="table set mismatch"):
+        verify_knowledge_database(bad_table_db, terms_db_path=terms_db)
+    assert verify_kb_main([str(bad_table_db), "--terms-db", str(terms_db)]) == 1
+
+    # Missing revision arg fails builder cleanly
+    with pytest.raises(KnowledgeBuildError):
+        build_knowledge_database(data_dir, tmp_path / "fail.db")
+
+    # Invalid empty revision fails reader cleanly
+    with pytest.raises(KnowledgeBaseError):
+        KnowledgeBaseReader(kb_path, expected_terms_db_revision="  ")
+
+    # Extraction helpers smoke checks
+    assert extract_te_anchors("<te href=850086>夜归</te>") == [("850086", "夜归")]
+    assert extract_te_anchors("<te href=0>零</te>") == []
+    entities, aliases, contexts, relations = extract_knowledge_records(data_dir)
+    assert entities and aliases and contexts and relations
+
+
+def test_edge_validation_and_error_paths(tmp_path: Path):
+    # DomainKnowledgeCandidate validation errors
+    with pytest.raises(ValueError, match="non-empty"):
+        DomainKnowledgeCandidate(
+            entity_id="",
+            source_surface="椿",
+            zh="椿",
+            en="Camellya",
+            entity_type="resonator",
+            trust_tier="official_authoritative",
+            retrieval_channel="short_ngram",
+            score=1.0,
+        )
+    with pytest.raises(ValueError, match="trust_tier"):
+        DomainKnowledgeCandidate(
+            entity_id="resonator:1",
+            source_surface="椿",
+            zh="椿",
+            en="Camellya",
+            entity_type="resonator",
+            trust_tier="untrusted",  # type: ignore[arg-type]
+            retrieval_channel="short_ngram",
+            score=1.0,
+        )
+    with pytest.raises(ValueError, match="retrieval_channel"):
+        DomainKnowledgeCandidate(
+            entity_id="resonator:1",
+            source_surface="椿",
+            zh="椿",
+            en="Camellya",
+            entity_type="resonator",
+            trust_tier="official_authoritative",
+            retrieval_channel="magic",  # type: ignore[arg-type]
+            score=1.0,
+        )
+
+    # Empty text / zero budget / duplicate pair / oversized core
+    c1 = DomainKnowledgeCandidate(
+        entity_id="term:1",
+        source_surface="冷凝",
+        zh="冷凝",
+        en="Glacio",
+        entity_type="element",
+        trust_tier="official_derived",
+        retrieval_channel="short_ngram",
+        score=0.9,
+    )
+    c_dup_pair = DomainKnowledgeCandidate(
+        entity_id="term:2",
+        source_surface="冷凝",
+        zh="冷凝",
+        en="Glacio",
+        entity_type="element",
+        trust_tier="community_curated",
+        retrieval_channel="lexical_alias",
+        score=0.8,
+    )
+    assert select_domain_knowledge_candidates("", [c1]) == ()
+    assert select_domain_knowledge_candidates("冷凝", [c1], max_candidates=0) == ()
+    assert select_domain_knowledge_candidates("冷凝", [c1], max_scalars=3) == ()
+    deduped = select_domain_knowledge_candidates("冷凝", [c1, c_dup_pair])
+    assert [c.entity_id for c in deduped] == ["term:1"]
+
+    # Missing files & bad schema version fail closed
+    with pytest.raises(KnowledgeBaseError):
+        compute_terms_db_revision(tmp_path / "missing_terms.db")
+    with pytest.raises(KnowledgeBaseError):
+        KnowledgeBaseReader(
+            tmp_path / "missing_kb.db", expected_terms_db_revision="rev1"
+        )
+
+    bad_schema_db = tmp_path / "bad_schema.db"
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    rev = _build_synthetic_terms_db(terms_db)
+    build_knowledge_database(
+        data_dir,
+        bad_schema_db,
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+    with KnowledgeBaseReader(bad_schema_db, expected_terms_db_revision=rev) as reader:
+        assert reader.query("   ") == ()
+        # Exercise short Latin token & 3-word English phrase probe paths
+        assert isinstance(reader.query("HP Emerald of Genesis"), tuple)
+
+    with closing(sqlite3.connect(bad_schema_db)) as conn:
+        conn.execute(
+            "UPDATE kb_metadata SET value = '999' WHERE key = 'kb_schema_version'"
+        )
+        conn.commit()
+    with pytest.raises(KnowledgeBaseError, match="kb_schema_version"):
+        KnowledgeBaseReader(bad_schema_db, expected_terms_db_revision=rev)
+
+    # Atomic build cleans up temporary file on failure
+    missing_data = tmp_path / "no_bindata"
+    missing_data.mkdir()
+    target_db = tmp_path / "atomic_fail.db"
+    with pytest.raises(KnowledgeBuildError, match="missing BinData"):
+        build_knowledge_database_atomic(
+            missing_data,
+            target_db,
+            terms_db_revision=rev,
+            source_provenance=_provenance(),
+        )
+    assert not target_db.exists()
+    assert not list(tmp_path.glob(".atomic_fail.db.*.tmp"))
+
+    # Legacy TextMap format + empty entities fail closed
+    legacy_dir = tmp_path / "legacy_data"
+    (legacy_dir / "BinData" / "area").mkdir(parents=True)
+    _write_json(
+        legacy_dir / "BinData" / "area" / "area.json",
+        [{"AreaId": 7, "CountryId": 0, "Title": "Area_7_Title", "Father": 0}],
+    )
+    _write_json(
+        legacy_dir / "TextMap" / "zh-Hans" / "MultiText.json",
+        {"Area_7_Title": "云陵谷"},
+    )
+    _write_json(
+        legacy_dir / "TextMap" / "en" / "MultiText.json",
+        {"Area_7_Title": "Gorges of Spirits"},
+    )
+    stats = build_knowledge_database(
+        legacy_dir,
+        tmp_path / "legacy_kb.db",
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+    assert stats.entities == 1
+
+    # Missing MultiText fails cleanly
+    no_textmap = tmp_path / "no_textmap"
+    (no_textmap / "BinData").mkdir(parents=True)
+    with pytest.raises(KnowledgeBuildError, match="missing MultiText"):
+        extract_knowledge_records(no_textmap)
+

@@ -3,7 +3,8 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     attribution_candidates, lookup, normalize, models, review,
+  domain core:     attribution_candidates, domain_knowledge, knowledge_db,
+                   lookup, normalize, models, review,
                    cjk_span, document_anchor, protected_text, english_plural,
                    segmentation, semantic_review_contract, single_char_context,
                    skill_references, term_classification, term_matching,
@@ -22,7 +23,7 @@ Intended layers (must stay aligned with docs/architecture.md):
   local state:     settings, channel_reply_index, channel_reply_schema,
                    channel_runtime, logging_utils, request_trace
   storage:         db  (lazy build_pinyin only inside write helpers)
-  builder:         builder, data_source, build_pinyin
+  builder:         builder, data_source, build_pinyin, knowledge_builder
   bootstrap:       cli  (may wire runtime and builder entrypoints)
 
 Rules enforced here (all against real src/wuwaterm package modules, including
@@ -108,6 +109,8 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
 DOMAIN_CORE = frozenset(
     {
         "attribution_candidates",
+        "domain_knowledge",
+        "knowledge_db",
         "lookup",
         "normalize",
         "models",
@@ -130,10 +133,11 @@ DOMAIN_CORE = frozenset(
 )
 DOMAIN_LLM = frozenset({"sentence", "translation_plan", "llm_transport", "semantic_review"})
 # Pure matching / text-structure modules inside DOMAIN_CORE that must remain
-# independent of storage (`db`), storage-coupled (`lookup`, `review`), and `sqlite3`.
+# independent of storage (`db`), storage-coupled (`lookup`, `review`, `knowledge_db`), and `sqlite3`.
 PURE_MATCHING = frozenset(
     {
         "attribution_candidates",
+        "domain_knowledge",
         "term_matching",
         "term_preparation",
         "cjk_span",
@@ -150,7 +154,7 @@ PURE_MATCHING = frozenset(
     }
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.
-PURE_MATCHING_FORBIDDEN_STORAGE = frozenset({"db", "lookup", "review"})
+PURE_MATCHING_FORBIDDEN_STORAGE = frozenset({"db", "knowledge_db", "lookup", "review"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
 # orchestration while sharing lower-level term and sentence primitives. This
@@ -172,7 +176,7 @@ LOCAL_STATE = frozenset(
     }
 )
 STORAGE = frozenset({"db"})
-BUILDER = frozenset({"builder", "data_source", "build_pinyin"})
+BUILDER = frozenset({"builder", "data_source", "build_pinyin", "knowledge_builder"})
 BOOTSTRAP = frozenset({"cli"})
 
 # Modules that must never depend on Telegram presentation or the Bot SDK.

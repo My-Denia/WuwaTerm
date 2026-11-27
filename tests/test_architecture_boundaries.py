@@ -736,6 +736,7 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
         "attribution_candidates",
         "cjk_span",
         "document_anchor",
+        "domain_knowledge",
         "english_plural",
         "protected_text",
         "segmentation",
