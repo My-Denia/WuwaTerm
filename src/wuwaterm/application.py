@@ -828,6 +828,7 @@ def build_term_service(db_path: str | Path) -> TermService:
 def build_translator(
     db_path: str | Path,
     *,
+    service: TermService | None = None,
     timeout: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
     en_zh_protocol: bool = False,
@@ -845,6 +846,7 @@ def build_translator(
     )
     return SentenceTranslator(
         db_path,
+        service=service,
         llm_timeout_seconds=timeout,
         llm_max_concurrency=max_concurrency,
         en_zh_protocol=en_zh_protocol,

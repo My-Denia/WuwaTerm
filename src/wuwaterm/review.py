@@ -2025,7 +2025,11 @@ def _review_pair_v2(
 
     snapshot = service.review_snapshot()
     entries = snapshot.entries
-    dictionary_revision = _dictionary_revision(entries)
+    dictionary_revision = (
+        snapshot.revision
+        if snapshot.revision is not None
+        else _dictionary_revision(entries)
+    )
     dictionary = ReviewDictionary(
         schema_version=snapshot.metadata.get("schema_version"),
         source_commit=snapshot.metadata.get("source_commit"),

@@ -2060,11 +2060,16 @@ def create_app(
                 if closer is not None:
                     await closer()
             finally:
-                # Drop anything still queued and join the workers that already
-                # started, off the loop so the shutdown does not block it.
-                await asyncio.to_thread(
-                    app.state.auth_pool.shutdown, True, cancel_futures=True
-                )
+                term_closer = getattr(app.state.term_service, "close", None)
+                try:
+                    if term_closer is not None:
+                        term_closer()
+                finally:
+                    # Drop anything still queued and join the workers that already
+                    # started, off the loop so the shutdown does not block it.
+                    await asyncio.to_thread(
+                        app.state.auth_pool.shutdown, True, cancel_futures=True
+                    )
 
     app = FastAPI(
         title="wuwaterm API",
@@ -2084,6 +2089,7 @@ def create_app(
     app.state.term_service = term_service or build_term_service(resolved.db_path)
     app.state.translator = translator or build_translator(
         resolved.db_path,
+        service=app.state.term_service,
         timeout=resolved.llm_timeout_seconds,
         max_concurrency=resolved.llm_max_concurrency,
         en_zh_protocol=True,

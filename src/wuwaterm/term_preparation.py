@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -29,6 +29,7 @@ from .skill_references import SkillReference, skill_occurrences
 from .term_matching import (
     ReferenceCandidates,
     TermSpan,
+    TermSpanMatcher,
     has_latin_word_boundaries,
     is_cjk_character,
     reference_span_admitted,
@@ -613,12 +614,13 @@ def _paragraphs_with_official_terms(
     para_spans: Sequence[tuple[int, int]],
     *,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     allow_plural_inflection: bool,
     nfkc_spelling_sources: frozenset[str],
     preselected: Sequence[TermSpan] | None = None,
     preselected_offset: int = 0,
+    matcher: TermSpanMatcher | None = None,
 ) -> frozenset[int]:
     """Return paragraph indices containing >=1 non-derived official dictionary hit.
 
@@ -638,6 +640,7 @@ def _paragraphs_with_official_terms(
                 0,
                 allow_plural_inflection=allow_plural_inflection,
                 nfkc_spelling_sources=nfkc_spelling_sources,
+                matcher=matcher,
             )
             if reference_span_admitted(span, context_text, 0)
         ]
@@ -665,7 +668,7 @@ def _paragraphs_with_official_terms(
 
 
 def _span_category(
-    source: str, official: tuple[str, str], categories: dict[str, str]
+    source: str, official: tuple[str, str], categories: Mapping[str, str]
 ) -> str:
     zh, en = official
     return categories.get(source) or categories.get(en) or categories.get(zh) or ""
@@ -675,11 +678,12 @@ def _context_entities(
     context_text: str,
     *,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     allow_plural_inflection: bool,
     nfkc_spelling_sources: frozenset[str],
     preselected: Sequence[TermSpan] | None = None,
+    matcher: TermSpanMatcher | None = None,
 ) -> tuple[ContextEntity, ...]:
     """Admitted, non-derived official entities in the visible request text.
 
@@ -701,6 +705,7 @@ def _context_entities(
                 0,
                 allow_plural_inflection=allow_plural_inflection,
                 nfkc_spelling_sources=nfkc_spelling_sources,
+                matcher=matcher,
             )
             if reference_span_admitted(span, context_text, 0)
         ]
@@ -744,7 +749,7 @@ def _context_entities(
 
 
 def _has_ambiguous_single_char_candidate(
-    context_text: str, lockable: Lockable, categories: dict[str, str]
+    context_text: str, lockable: Lockable, categories: Mapping[str, str]
 ) -> bool:
     for source, _official in lockable:
         if len(source) != 1 or not is_cjk_character(source):
@@ -767,11 +772,12 @@ def _ambiguous_context_index(
     para_spans: Sequence[tuple[int, int]],
     *,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     allow_plural_inflection: bool,
     nfkc_spelling_sources: frozenset[str],
     preselected: Sequence[TermSpan] | None = None,
+    matcher: TermSpanMatcher | None = None,
 ) -> RequestContextIndex:
     return RequestContextIndex(
         context_text,
@@ -784,13 +790,14 @@ def _ambiguous_context_index(
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=nfkc_spelling_sources,
             preselected=preselected,
+            matcher=matcher,
         ),
     )
 
 
 def _span_decision(
     span: TermSpan,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     to_chinese: bool | None,
     *,
@@ -876,7 +883,7 @@ def _collect_additional_name_references(
     context_text: str,
     context_offset: int,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     selected: list[TermSpan],
     replacements: list[tuple[int, int]],
     references: list[TermReference],
@@ -935,7 +942,7 @@ def _collect_ambiguous_mentions(
     context_text: str,
     context_offset: int,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     selected: list[TermSpan],
     replacements: list[tuple[int, int]],
     context_index: Callable[[], RequestContextIndex],
@@ -1065,7 +1072,7 @@ def _collect_scoped_skill_references(
     context_text: str,
     context_offset: int,
     selected: list[TermSpan],
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     replacements: list[tuple[int, int]],
     skill_refs: tuple[SkillReference, ...],
     references: list[TermReference],
@@ -1308,7 +1315,7 @@ def prepare_term_segment(
     lockable: Lockable,
     context_text: str,
     context_offset: int,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     to_chinese: bool | None,
     allow_plural_inflection: bool,
@@ -1325,6 +1332,9 @@ def prepare_term_segment(
     skill_refs: tuple[SkillReference, ...] = (),
     defer_mixed_single_char_locking: bool = False,
     ambiguous_context_index: RequestContextIndex | None = None,
+    matcher: TermSpanMatcher | None = None,
+    extended_lockable: Lockable | None = None,
+    extended_matcher_factory: Callable[[], TermSpanMatcher] | None = None,
 ) -> PreparedTerms:
     """Prepare one visible segment; offsets refer to its full visible context.
 
@@ -1349,6 +1359,7 @@ def prepare_term_segment(
         context_offset,
         allow_plural_inflection=allow_plural_inflection,
         nfkc_spelling_sources=nfkc_spelling_sources,
+        matcher=matcher,
     )
     if to_chinese is not None:
         selected = [
@@ -1397,6 +1408,7 @@ def prepare_term_segment(
                 ),
                 preselected=selected if context_text == text else None,
                 preselected_offset=context_offset,
+                matcher=matcher,
             )
 
     if (
@@ -1405,20 +1417,31 @@ def prepare_term_segment(
         and official_paragraphs
         and any(source in text for source in soft_sources)
     ):
-        extended_lockable = lockable + tuple(
-            (source, (choices[0][0], choices[0][1]))
-            for source, choices in candidates.items()
-            if source in soft_sources and choices
+        active_extended_lockable = (
+            extended_lockable
+            if extended_lockable is not None
+            else lockable
+            + tuple(
+                (source, (choices[0][0], choices[0][1]))
+                for source, choices in candidates.items()
+                if source in soft_sources and choices
+            )
+        )
+        active_extended_matcher = (
+            extended_matcher_factory()
+            if extended_matcher_factory is not None
+            else None
         )
         selected = [
             span
             for span in select_term_spans(
                 text,
-                extended_lockable,
+                active_extended_lockable,
                 context_text,
                 context_offset,
                 allow_plural_inflection=allow_plural_inflection,
                 nfkc_spelling_sources=nfkc_spelling_sources,
+                matcher=active_extended_matcher,
             )
             if reference_span_admitted(span, context_text, context_offset)
             and (
@@ -1563,6 +1586,7 @@ def prepare_term_segment(
                             if context_text == text and context_offset == 0
                             else None
                         ),
+                        matcher=matcher,
                     )
                 )
             return index_cache[0]
@@ -1605,14 +1629,18 @@ def prepare_protected_terms(
     protected: ProtectedText,
     *,
     lockable: Lockable,
-    categories: dict[str, str],
+    categories: Mapping[str, str],
     reference_only: frozenset[str],
     to_chinese: bool | None,
     allow_plural_inflection: bool,
     placeholder_prefix: str,
     reference_candidates: ReferenceCandidates | None = None,
+    soft_sources: frozenset[str] | None = None,
     context_gated_reference_only: frozenset[str] = frozenset(),
     skill_refs: tuple[SkillReference, ...] = (),
+    matcher: TermSpanMatcher | None = None,
+    extended_lockable: Lockable | None = None,
+    extended_matcher_factory: Callable[[], TermSpanMatcher] | None = None,
 ) -> PreparedTerms:
     """Merge segment results in source order with one placeholder namespace."""
     segments = protected.visible_segments
@@ -1630,14 +1658,17 @@ def prepare_protected_terms(
     context_text = "".join(context_parts)
 
     candidates = reference_candidates if (to_chinese is not None and reference_candidates) else {}
-    soft_sources: frozenset[str] = frozenset()
+    resolved_soft_sources: frozenset[str] = frozenset()
     para_spans: tuple[tuple[int, int], ...] | None = None
     official_paragraphs: frozenset[int] | None = None
     if to_chinese is not None and (candidates or context_gated_reference_only):
-        primary_sources = {source for source, _official in lockable}
-        soft_sources = frozenset(candidates.keys() - primary_sources) if candidates else frozenset()
+        if soft_sources is not None:
+            resolved_soft_sources = soft_sources
+        elif candidates:
+            primary_sources = {source for source, _official in lockable}
+            resolved_soft_sources = frozenset(candidates.keys() - primary_sources)
         if (
-            (soft_sources and any(source in context_text for source in soft_sources))
+            (resolved_soft_sources and any(source in context_text for source in resolved_soft_sources))
             or (
                 context_gated_reference_only
                 and any(source in context_text for source in context_gated_reference_only)
@@ -1652,6 +1683,7 @@ def prepare_protected_terms(
                 reference_only=reference_only,
                 allow_plural_inflection=allow_plural_inflection,
                 nfkc_spelling_sources=frozenset(),
+                matcher=matcher,
             )
 
     ambiguous_index: RequestContextIndex | None = None
@@ -1666,6 +1698,7 @@ def prepare_protected_terms(
             reference_only=reference_only,
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=frozenset(),
+            matcher=matcher,
         )
 
     locked_segments: list[str] = []
@@ -1691,13 +1724,16 @@ def prepare_protected_terms(
             placeholder_offset=len(locks),
             segment_index=segment_index,
             reference_candidates=candidates,
-            soft_sources=soft_sources,
+            soft_sources=resolved_soft_sources,
             context_gated_reference_only=context_gated_reference_only,
             official_context_paragraphs=official_paragraphs,
             paragraph_spans=para_spans,
             skill_refs=skill_refs,
             defer_mixed_single_char_locking=True,
             ambiguous_context_index=ambiguous_index,
+            matcher=matcher,
+            extended_lockable=extended_lockable,
+            extended_matcher_factory=extended_matcher_factory,
         )
         locked_segments.append(prepared.locked_text)
         locks.extend(prepared.locks)

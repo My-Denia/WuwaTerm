@@ -5,14 +5,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
+import sys
 import tempfile
+import threading
 import unicodedata
 from collections import defaultdict
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+if sys.platform != "win32":
+    import fcntl
+else:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
 
 from .constants import (
     AREA_TITLE_KEY_RE,
@@ -888,6 +896,177 @@ def build_database(
     return len(records)
 
 
+_PUBLISH_THREAD_LOCKS_GUARD = threading.Lock()
+_PUBLISH_THREAD_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _publish_thread_lock(lock_path: Path) -> threading.Lock:
+    with _PUBLISH_THREAD_LOCKS_GUARD:
+        lock = _PUBLISH_THREAD_LOCKS.get(lock_path)
+        if lock is None:
+            lock = threading.Lock()
+            _PUBLISH_THREAD_LOCKS[lock_path] = lock
+        return lock
+
+
+@contextmanager
+def _publish_lock(target: Path) -> Iterator[None]:
+    """Serialize database publication on a dedicated sidecar lock file.
+
+    Uses an independent inode (``.<target>.publish.lock``) so acquiring or
+    releasing the lock never touches ``target``'s inode or POSIX ``fcntl``
+    locks held by other SQLite connections in the same process.
+    """
+    lock_path = target.with_name(f".{target.name}.publish.lock")
+    thread_lock = _publish_thread_lock(lock_path.resolve(strict=False))
+    with thread_lock:
+        if fcntl is None:  # pragma: no cover - Windows fallback
+            yield
+            return
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of the parent directory after ``os.replace``."""
+    if sys.platform == "win32":  # pragma: no cover - Windows fallback
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _clear_sidecars_fail_closed(
+    target: Path, wal_path: Path, shm_path: Path
+) -> None:
+    """Reject non-empty WAL sidecars and unlink only empty leftover sidecars."""
+    if wal_path.exists():
+        try:
+            if wal_path.stat().st_size > 0:
+                raise BuildError(
+                    f"refusing to replace database {target}: non-empty WAL sidecar remains"
+                )
+            wal_path.unlink()
+        except OSError as exc:
+            raise BuildError(
+                f"refusing to replace database {target}: could not clear {wal_path.name}: {exc}"
+            ) from exc
+    if shm_path.exists():
+        try:
+            shm_path.unlink()
+        except OSError as exc:
+            raise BuildError(
+                f"refusing to replace database {target}: could not clear {shm_path.name}: {exc}"
+            ) from exc
+
+
+def _prepare_and_replace_target(tmp_path: Path, target: Path) -> None:
+    """Drain WAL, hold exclusive SQLite + publish locks across ``os.replace``, and fsync.
+
+    Never opens ``target`` with raw ``open()`` / ``os.open()`` so closing a raw
+    file descriptor can never drop POSIX ``fcntl`` locks held by another
+    in-process SQLite connection on ``target``'s inode.
+    """
+    wal_path = Path(f"{target}-wal")
+    shm_path = Path(f"{target}-shm")
+    with _publish_lock(target):
+        if not target.exists():
+            _clear_sidecars_fail_closed(target, wal_path, shm_path)
+            os.replace(tmp_path, target)
+            _fsync_dir(target.parent)
+            return
+
+        resolved_uri = f"{target.resolve(strict=False).as_uri()}?mode=rw"
+        try:
+            conn = sqlite3.connect(
+                resolved_uri,
+                uri=True,
+                timeout=0.0,
+                isolation_level=None,
+            )
+        except sqlite3.Error as exc:
+            raise BuildError(
+                f"refusing to replace database {target}: could not open existing target: {exc}"
+            ) from exc
+
+        try:
+            is_sqlite_target = False
+            try:
+                conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+                conn.execute("BEGIN EXCLUSIVE")
+                conn.execute("COMMIT")
+                mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+                is_wal = mode_row is not None and str(mode_row[0]).lower() == "wal"
+                if is_wal:
+                    ckpt = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if ckpt is None:
+                        raise BuildError(
+                            f"refusing to replace WAL database {target}: checkpoint returned no status"
+                        )
+                    busy, log_frames, checkpointed = (
+                        int(ckpt[0]),
+                        int(ckpt[1]),
+                        int(ckpt[2]),
+                    )
+                    if busy != 0 or log_frames < 0 or checkpointed < log_frames:
+                        raise BuildError(
+                            f"refusing to replace active WAL database {target}: "
+                            f"wal_checkpoint(TRUNCATE) incomplete "
+                            f"(busy={busy}, log={log_frames}, checkpointed={checkpointed})"
+                        )
+                    mode_after = conn.execute("PRAGMA journal_mode = DELETE").fetchone()
+                    if mode_after is None or str(mode_after[0]).lower() != "delete":
+                        raise BuildError(
+                            f"refusing to replace active WAL database {target}: "
+                            f"could not exit WAL mode cleanly (mode={mode_after})"
+                        )
+                is_sqlite_target = True
+            except sqlite3.OperationalError as exc:
+                raise BuildError(
+                    f"refusing to replace active database {target}: {exc}"
+                ) from exc
+            except sqlite3.DatabaseError as exc:
+                if wal_path.exists() or shm_path.exists():
+                    raise BuildError(
+                        f"refusing to replace database {target}: {exc}"
+                    ) from exc
+                # Non-SQLite placeholder file with no WAL/SHM sidecars: allow replace.
+
+            _clear_sidecars_fail_closed(target, wal_path, shm_path)
+            if is_sqlite_target:
+                # Switch this connection's per-connection journal mode to MEMORY
+                # before os.replace (without altering the on-disk header or releasing
+                # locking_mode=EXCLUSIVE), so conn.close() after os.replace never
+                # unlinks a new <target>-journal created by a writer on the replaced DB.
+                try:
+                    conn.execute("PRAGMA journal_mode = MEMORY")
+                except sqlite3.Error as exc:
+                    raise BuildError(
+                        f"refusing to replace database {target}: could not isolate journal mode: {exc}"
+                    ) from exc
+            os.replace(tmp_path, target)
+            _fsync_dir(target.parent)
+        finally:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            conn.close()
+
+
 def build_database_atomic(
     data_dir: str | Path,
     db_path: str | Path,
@@ -903,7 +1082,7 @@ def build_database_atomic(
     tmp_path = Path(tmp)
     try:
         count = build_database(data_dir, tmp_path, profile_name=profile_name)
-        os.replace(tmp_path, target)
+        _prepare_and_replace_target(tmp_path, target)
         return count
     except Exception:
         try:
