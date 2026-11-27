@@ -19,6 +19,7 @@ Reports 6 deterministic metrics in JSON and Markdown:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import resource
 import sqlite3
@@ -225,6 +226,14 @@ SYNTHETIC_POSITIVE_CASES: tuple[PositiveCase, ...] = (
         ("千古洑流", "Emerald of Genesis"),
         short_term=False,
     ),
+    PositiveCase(
+        "pos_en_capitalized_encore",
+        "resonator",
+        "Encore and Aalto report to the Black Shores.",
+        True,
+        ("安可", "Encore"),
+        short_term=False,
+    ),
 )
 
 SYNTHETIC_GRAPH_CASES: tuple[GraphDisambiguationCase, ...] = (
@@ -351,6 +360,33 @@ def _build_synthetic_fixture(root: Path) -> tuple[Path, Path]:
             "Hsin",
         ),
         EntitySpec(
+            "resonator:1203",
+            "resonator",
+            "BinData/role/roleinfo.json",
+            "1203",
+            "安可",
+            "Encore",
+            context_gloss="黑海岸成员安可 | Encore of the Black Shores",
+        ),
+        EntitySpec(
+            "term:850082",
+            "term",
+            "BinData/Term/termconfig.json",
+            "850082",
+            "声骸",
+            "Echo",
+            context_gloss="残象留下的声骸频率 | Echo left by a Tacet Discord",
+        ),
+        EntitySpec(
+            "item:tuner",
+            "item",
+            "BinData/item/iteminfo.json",
+            "500001",
+            "调谐器",
+            "Tuner",
+            context_gloss="用于声骸副词条调谐的材料 | Material used to tune Echoes",
+        ),
+        EntitySpec(
             "influence:black_shores",
             "influence",
             "BinData/influence/influence.json",
@@ -444,6 +480,9 @@ def _build_synthetic_fixture(root: Path) -> tuple[Path, Path]:
     aliases = [
         AliasSpec("term:850086", "夜归军团", "zh", "te_anchor", "official_derived"),
         AliasSpec("term:850086", "夜归先锋", "zh", "te_anchor", "official_derived"),
+        AliasSpec("resonator:1203", "Encore", "en", "nickname", "official_derived"),
+        AliasSpec("term:850082", "Echo", "en", "te_anchor", "official_derived"),
+        AliasSpec("item:tuner", "Tuner", "en", "te_anchor", "official_derived"),
     ]
     relations = [
         RelationSpec(
@@ -452,6 +491,20 @@ def _build_synthetic_fixture(root: Path) -> tuple[Path, Path]:
             "influence:black_shores",
             "BinData/role/roleinfo.json",
             "PartyId:10",
+        ),
+        RelationSpec(
+            "resonator:1203",
+            "belongs_to_influence",
+            "influence:black_shores",
+            "BinData/role/roleinfo.json",
+            "PartyId:10",
+        ),
+        RelationSpec(
+            "term:850082",
+            "references_term",
+            "item:tuner",
+            "BinData/Term/termconfig.json",
+            "Term:850082",
         ),
         RelationSpec(
             "resonator:1603",
@@ -666,8 +719,10 @@ def evaluate_offline_rag(
         kb_reader = KnowledgeBaseReader(
             knowledge_db_path, expected_terms_db_revision=expected_revision
         )
+        gc.collect()
         graph_snap_before = tracemalloc.take_snapshot()
         graph = kb_reader.entity_graph
+        gc.collect()
         graph_snap_after = tracemalloc.take_snapshot()
         _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     finally:
@@ -1150,9 +1205,10 @@ def format_markdown_report(report: dict[str, Any]) -> str:
         (
             f"| 5. KB & 1-hop graph memory | 0.00 MiB | "
             f"RSS delta {mem['kb_and_graph_rss_delta_mib']:.3f} MiB "
-            f"(graph tracemalloc {mem['graph_tracemalloc_mib']:.4f} MiB) | "
+            f"(graph tracemalloc {mem['graph_tracemalloc_mib']:.4f} MiB, "
+            f"< {mem['graph_memory_limit_mib']:.1f} MiB limit) | "
             f"nodes={mem['graph_node_count']}, edges={mem['graph_edge_count']}, "
-            f"file={mem['kb_file_size_mib']:.3f} MiB (< {mem['graph_memory_limit_mib']:.1f} MiB limit) |"
+            f"file={mem['kb_file_size_mib']:.3f} MiB |"
         ),
         (
             f"| 6. 1-hop graph disambiguation | N/A | "

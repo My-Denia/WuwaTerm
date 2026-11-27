@@ -517,3 +517,187 @@ def test_sentence_translator_optional_kb_mount_and_safe_degradation(
             asyncio.run(mismatch_tr.aclose())
     assert any("terms_db_revision mismatch" in rec.message for rec in caplog.records)
     assert all(str(bad_kb) not in rec.message for rec in caplog.records)
+
+
+def test_lowercase_ordinary_english_words_blocked_in_retrieval_graph_and_render_gate(
+    tmp_path: Path,
+):
+    terms_path = tmp_path / "terms.db"
+    with closing(connect(terms_path)) as conn:
+        initialize(conn)
+        conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (("schema_version", "2"), ("source_commit", "test-commit")),
+        )
+        insert_records(
+            conn,
+            [
+                TermRecord("location", "fixture", "10", "Area_10", "黑海岸", "Black Shores"),
+            ],
+        )
+        conn.commit()
+    rev = compute_terms_db_revision(terms_path)
+    kb_path = tmp_path / "knowledge.db"
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                "resonator:1203",
+                "resonator",
+                "BinData/role/roleinfo.json",
+                "1203",
+                "安可",
+                "Encore",
+                context_gloss="黑海岸成员安可 | Encore of the Black Shores",
+            ),
+            EntitySpec(
+                "term:850082",
+                "term",
+                "BinData/Term/termconfig.json",
+                "850082",
+                "声骸",
+                "Echo",
+                context_gloss="残象声骸 | Echo frequency",
+            ),
+            EntitySpec(
+                "item:500001",
+                "item",
+                "BinData/item/iteminfo.json",
+                "500001",
+                "调谐器",
+                "Tuner",
+                context_gloss="调谐声骸副词条 | Tunes Echo sub-stats",
+            ),
+            EntitySpec(
+                "influence:10",
+                "influence",
+                "BinData/influence/influence.json",
+                "10",
+                "黑海岸",
+                "Black Shores",
+            ),
+            EntitySpec(
+                "skill:120301",
+                "skill",
+                "BinData/skill/skill.json",
+                "120301",
+                "咩咩大暴走",
+                "Cosmos Rave",
+            ),
+        ],
+        aliases=[
+            AliasSpec("resonator:1203", "Encore", "en", "nickname", "official_derived"),
+            AliasSpec("term:850082", "Echo", "en", "te_anchor", "official_derived"),
+            AliasSpec("item:500001", "Tuner", "en", "te_anchor", "official_derived"),
+        ],
+        contexts=[],
+        relations=[
+            RelationSpec(
+                "resonator:1203",
+                "belongs_to_influence",
+                "influence:10",
+                "BinData/role/roleinfo.json",
+                "PartyId:10",
+            ),
+            RelationSpec(
+                "resonator:1203",
+                "has_skill",
+                "skill:120301",
+                "BinData/skill/skill.json",
+                "SkillId:120301",
+            ),
+            RelationSpec(
+                "term:850082",
+                "references_term",
+                "item:500001",
+                "BinData/Term/termconfig.json",
+                "Term:850082",
+            ),
+        ],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # 1. Lowercase ordinary English sentences: zero injection & zero 1-hop triggers.
+        for sentence in (
+            "The audience applauded loudly and asked for an encore.",
+            "We heard a faint echo across the quiet mountain valley.",
+            "He borrowed a clip-on guitar tuner before rehearsal.",
+        ):
+            cands, graph_out = reader.query_with_diagnostics(sentence, use_graph=True)
+            assert cands == (), (sentence, cands)
+            assert graph_out.triggered_count == 0, (sentence, graph_out)
+            assert graph_out.anchor_entity_ids == frozenset(), (sentence, graph_out)
+
+        # 2. Capitalized positive game context recalls Encore normally.
+        pos_cands, _pos_graph = reader.query_with_diagnostics(
+            "Encore and Aalto report to the Black Shores.",
+            locked_surfaces=("Black Shores",),
+            use_graph=True,
+        )
+        assert any(c.entity_id == "resonator:1203" for c in pos_cands), pos_cands
+        assert all(c.lock_eligible is False for c in pos_cands)
+
+    # 3. End-to-end SentenceTranslator plan_translation stays clean on lowercase encore.
+    translator = SentenceTranslator(terms_path, knowledge_db_path=kb_path)
+    try:
+        _exact, neg_plan = translator.plan_translation(
+            "The audience applauded loudly and asked for an encore.",
+            to_chinese=True,
+        )
+        assert neg_plan is not None
+        assert neg_plan.domain_knowledge_candidates == ()
+        neg_msgs = build_translation_messages(neg_plan)
+        assert DOMAIN_KNOWLEDGE_HEADER not in neg_msgs[0]["content"]
+    finally:
+        translator.close_knowledge_reader()
+
+    # 4. Secondary render gate blocks forged low-confidence lowercase encore candidates.
+    forged_lower = DomainKnowledgeCandidate(
+        entity_id="resonator:1203",
+        source_surface="encore",
+        zh="安可",
+        en="Encore",
+        entity_type="resonator",
+        trust_tier="official_derived",
+        retrieval_channel="lexical_alias",
+        score=0.5,
+        context_gloss="黑海岸成员安可",
+        lock_eligible=False,
+    )
+    forged_title = DomainKnowledgeCandidate(
+        entity_id="resonator:1203",
+        source_surface="Encore",
+        zh="安可",
+        en="Encore",
+        entity_type="resonator",
+        trust_tier="official_derived",
+        retrieval_channel="lexical_alias",
+        score=0.5,
+        context_gloss="黑海岸成员安可",
+        lock_eligible=False,
+    )
+    text = "The audience asked for an encore."
+    plan_forged = TranslationPlan(
+        source_text=text,
+        prepared_text=text,
+        locked_text=text,
+        locks=(),
+        references=(),
+        to_chinese=True,
+        context=TranslationContext(
+            domain_knowledge_candidates=(forged_lower, forged_title)
+        ),
+    )
+    sys_prompt = build_translation_messages(plan_forged)[0]["content"]
+    assert DOMAIN_KNOWLEDGE_HEADER not in sys_prompt
+    assert "黑海岸成员安可" not in sys_prompt
+    assert prepare_prompt_domain_knowledge_candidates("", [forged_lower]) == ()
+    assert (
+        DOMAIN_KNOWLEDGE_HEADER
+        not in render_context_instruction(
+            TranslationContext(domain_knowledge_candidates=(forged_lower,)),
+            to_chinese=True,
+        )
+    )

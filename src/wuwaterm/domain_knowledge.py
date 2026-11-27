@@ -55,6 +55,24 @@ RETRIEVAL_CHANNELS: frozenset[str] = frozenset(
 DEFAULT_MAX_CANDIDATES = 8
 DEFAULT_MAX_SCALARS = 400
 
+_SINGLE_LATIN_WORD_RE = re.compile(r"^[A-Za-z][A-Za-z'-]*$")
+ORDINARY_ENGLISH_OVERLAP_WORDS: frozenset[str] = frozenset(
+    {
+        "encore",
+        "echo",
+        "echoes",
+        "tuner",
+        "tuners",
+        "forte",
+        "intro",
+        "outro",
+        "liberation",
+        "resonance",
+        "rover",
+        "core",
+    }
+)
+
 
 @dataclass(frozen=True)
 class DomainKnowledgeCandidate:
@@ -112,6 +130,94 @@ class DomainKnowledgeCandidate:
 def is_single_cjk_char(surface: str) -> bool:
     """Return True when ``surface`` is exactly one CJK unified ideograph."""
     return len(surface) == 1 and "\u3400" <= surface <= "\u9fff"
+
+
+def is_single_latin_word(surface: str) -> bool:
+    """Return True when ``surface`` is a single ASCII/Latin word token."""
+    return bool(_SINGLE_LATIN_WORD_RE.fullmatch(surface.strip()))
+
+
+def is_rejected_lowercase_single_latin_candidate(
+    text: str,
+    candidate: DomainKnowledgeCandidate,
+    *,
+    uncovered_spans: Collection[tuple[int, int]] = (),
+    index: NormalizedTextIndex | None = None,
+    occupied: list[tuple[int, int]] | None = None,
+) -> bool:
+    """Reject single-word Latin candidates matched only as ordinary lowercase words.
+
+    Prevents everyday lowercase English words (e.g. ``encore``, ``echo``,
+    ``tuner``, or any lowercase word whose official game name is capitalized)
+    from leaking into soft RAG retrieval or prompt rendering, while allowing
+    capitalized proper-noun uses (e.g. ``Encore``, ``Glacio``) and multi-word
+    phrases.
+    """
+    surf = candidate.source_surface.strip()
+    en = candidate.en.strip()
+    surf_is_single_latin = is_single_latin_word(surf)
+    en_is_single_latin = is_single_latin_word(en)
+    if not surf_is_single_latin and not en_is_single_latin:
+        return False
+
+    surf_cf = surf.casefold()
+    en_cf = en.casefold()
+    is_overlap_word = (
+        surf_cf in ORDINARY_ENGLISH_OVERLAP_WORDS
+        or en_cf in ORDINARY_ENGLISH_OVERLAP_WORDS
+    )
+    canonical_has_upper = any(ch.isupper() for ch in surf) or any(
+        ch.isupper() for ch in en
+    )
+    # Without source text (e.g. direct render_context_instruction call), reject
+    # any lowercase single Latin surface that is an ordinary-overlap word or
+    # differs in casing from a capitalized official name.
+    if not text:
+        return bool(
+            surf_is_single_latin
+            and surf.islower()
+            and (is_overlap_word or canonical_has_upper)
+        )
+
+    if not surf_is_single_latin:
+        # Candidate matched a non-single-Latin surface (e.g. Chinese surface or
+        # multi-word alias) for an entity whose English name happens to be one word.
+        return False
+
+    if not (is_overlap_word or canonical_has_upper):
+        return False
+
+    if uncovered_spans:
+        check_spans = list(uncovered_spans)
+    else:
+        norm_idx = build_normalized_index(text) if index is None else index
+        occ_list = [] if occupied is None else occupied
+        check_spans = [
+            span
+            for span in find_normalized_spans(norm_idx, surf)
+            if not _is_span_covered(span, occ_list)
+        ]
+
+    if check_spans:
+        # Require at least one uncovered matched span to carry an uppercase
+        # letter (matching proper-noun / title-cased game terminology).
+        return not any(
+            any(ch.isupper() for ch in text[start:end]) for start, end in check_spans
+        )
+
+    # No direct surface span matched in text (e.g. gloss-only FTS5 hit for a
+    # single-word Latin entity): reject unless the surface appears with
+    # uppercase somewhere uncovered in text.
+    norm_idx = build_normalized_index(text) if index is None else index
+    occ_list = [] if occupied is None else occupied
+    direct_spans = [
+        span
+        for span in find_normalized_spans(norm_idx, surf)
+        if not _is_span_covered(span, occ_list)
+    ]
+    return not any(
+        any(ch.isupper() for ch in text[start:end]) for start, end in direct_spans
+    )
 
 
 def candidate_scalar_length(candidate: DomainKnowledgeCandidate) -> int:
@@ -379,6 +485,14 @@ def select_domain_knowledge_candidates(
                     text, norm_index, candidate.zh, occupied
                 ):
                     continue
+            if is_rejected_lowercase_single_latin_candidate(
+                text,
+                candidate,
+                uncovered_spans=uncovered_spans,
+                index=norm_index,
+                occupied=occupied,
+            ):
+                continue
         else:
             surface_occs = find_normalized_spans(norm_index, candidate.source_surface)
             uncovered_surface_occs = [
@@ -410,6 +524,14 @@ def select_domain_knowledge_candidates(
                     text, norm_index, candidate.zh, occupied
                 ):
                     continue
+            if is_rejected_lowercase_single_latin_candidate(
+                text,
+                candidate,
+                uncovered_spans=uncovered_surface_occs,
+                index=norm_index,
+                occupied=occupied,
+            ):
+                continue
 
         pair_key = (zh_norm, en_norm)
         if pair_key in seen_pairs:
@@ -500,6 +622,8 @@ def prepare_prompt_domain_knowledge_candidates(
         if len(selected) >= max_candidates or used_scalars >= max_scalars:
             break
         if candidate.entity_id in seen_entities:
+            continue
+        if is_rejected_lowercase_single_latin_candidate("", candidate):
             continue
         surface_norm = normalize_text(candidate.source_surface)
         zh_norm = normalize_text(candidate.zh)

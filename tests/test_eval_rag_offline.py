@@ -47,6 +47,8 @@ def test_synthetic_offline_rag_eval_meets_all_six_deterministic_metrics():
         "neg_chouchun",
         "neg_xinqing",
         "neg_encore",
+        "neg_tuner",
+        "neg_echo",
     ):
         assert required_neg in by_id
         assert by_id[required_neg]["false_lock"] is False
@@ -60,6 +62,8 @@ def test_synthetic_offline_rag_eval_meets_all_six_deterministic_metrics():
     assert rec["short_term_recall"]["rag_rate"] > rec["short_term_recall"]["baseline_rate"]
     assert rec["graph_disambiguation"]["positive_passed"] is True
     assert rec["graph_disambiguation"]["negative_passed"] is True
+    pos_by_id = {c["case_id"]: c for c in rec["cases"]}
+    assert pos_by_id["pos_en_capitalized_encore"]["rag_hit"] is True
 
     # 3. Lock-isolation integrity: 100% lock_eligible == False, zero span conflicts,
     # and byte-identical default OperationIdentity.
@@ -93,6 +97,8 @@ def test_synthetic_offline_rag_eval_meets_all_six_deterministic_metrics():
     assert "Ordinary-word false-lock rate" in md
     assert "Lock-isolation integrity" in md
     assert "Query latency P50 / P95" in md
+    assert "< 3.0 MiB limit)" in md
+    assert "MiB (< 3.0 MiB limit)" not in md
 
 
 def test_eval_rag_offline_cli_synthetic_and_explicit_db_paths(tmp_path: Path):
