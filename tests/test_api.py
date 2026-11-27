@@ -38,7 +38,7 @@ from wuwaterm_api.auth import (
     parse_token,
 )
 from wuwaterm_api.errors import MESSAGE_BY_CODE, STATUS_BY_CODE
-from wuwaterm_api.settings import ApiConfigError, ApiSettings
+from wuwaterm_api.settings import ApiConfigError, ApiSettings, DEFAULT_LONG_TEXT_INPUT_LIMIT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1596,7 +1596,18 @@ def test_openapi_documents_conservative_client_limits():
         if parameter["name"] == "q"
     )
 
-    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert text_schema["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    translation_schema = document["components"]["schemas"]["TranslationRequestBody"]
+    assert translation_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert translation_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert translation_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     review_properties = document["components"]["schemas"]["ReviewRequestBody"][
         "properties"
@@ -1661,7 +1672,18 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
         "properties"
     ]["text"]
     query_schema = result["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"]
-    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert text_schema["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    translation_schema = document["components"]["schemas"]["TranslationRequestBody"]
+    assert translation_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert translation_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert translation_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
     assert text_schema["json_schema_extra"] == {"x-preserved": "body"}
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     assert query_schema["json_schema_extra"] == {"x-preserved": "query"}
@@ -1708,7 +1730,7 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
     assert second is document
     assert document["components"]["schemas"]["TranslationRequestBody"][
         "properties"
-    ]["text"]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    ]["text"]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
     assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"][
         "maxLength"
     ] == TERM_QUERY_MAX_LENGTH
@@ -1753,7 +1775,7 @@ def test_openapi_schema_cache_uses_postprocessed_document(tmp_path, sample_db):
     assert first is app.openapi_schema
     assert first["components"]["schemas"]["TranslationRequestBody"]["properties"][
         "text"
-    ]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    ]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
     assert next(
         parameter["schema"]["maxLength"]
         for parameter in first["paths"]["/v1/terms"]["get"]["parameters"]
@@ -4995,3 +5017,35 @@ def test_protected_translation_without_llm_spares_budget_and_transport(
     assert response.json()["error"]["code"] == "llm_unavailable"
     assert transport_calls == 0
     assert app.state.llm_budget.in_window() == 0
+
+
+def test_openapi_translation_request_schema_expresses_default_and_long_text_limits(
+    tmp_path, sample_db
+):
+    default_app, _ = build_client_app(tmp_path / "default", sample_db)
+    default_schema = default_app.openapi()["components"]["schemas"][
+        "TranslationRequestBody"
+    ]
+    assert default_schema["properties"]["text"]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    assert default_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert default_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert default_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
+
+    custom_app, _ = build_client_app(
+        tmp_path / "custom", sample_db, long_text_input_limit=6000
+    )
+    custom_schema = custom_app.openapi()["components"]["schemas"][
+        "TranslationRequestBody"
+    ]
+    assert custom_schema["properties"]["text"]["maxLength"] == 6000
+    assert custom_schema["then"] == {"properties": {"text": {"maxLength": 6000}}}
+    assert custom_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }

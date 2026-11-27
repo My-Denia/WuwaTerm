@@ -1799,6 +1799,23 @@
         "type": "object"
       },
       "TranslationRequestBody": {
+        "else": {
+          "properties": {
+            "text": {
+              "maxLength": 2000
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "allow_long_text": {
+              "const": true
+            }
+          },
+          "required": [
+            "allow_long_text"
+          ]
+        },
         "properties": {
           "allow_long_text": {
             "default": false,
@@ -1869,7 +1886,7 @@
           },
           "text": {
             "description": "Source text to translate. Plain text only. Required unless `protected` is provided. Clients should send at most 2,000 characters unless `allow_long_text` is true. The server applies its authoritative limit after text preparation, so a normalized superset may be accepted; callers must not depend on that permissiveness.",
-            "maxLength": 2000,
+            "maxLength": 4096,
             "title": "Text",
             "type": "string"
           },
@@ -1888,6 +1905,13 @@
             ],
             "description": "Force the target language. Omit or send null to auto-detect from the source text.",
             "title": "To"
+          }
+        },
+        "then": {
+          "properties": {
+            "text": {
+              "maxLength": 4096
+            }
           }
         },
         "title": "TranslationRequestBody",

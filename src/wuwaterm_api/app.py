@@ -140,6 +140,7 @@ from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 from . import API_VERSION, TERM_QUERY_MAX_LENGTH
 from .auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, Device, DeviceStore
 from .errors import MESSAGE_BY_CODE, ApiError, error_body
+from .settings import DEFAULT_LONG_TEXT_INPUT_LIMIT
 
 # Framework-raised routing failures mapped onto the published vocabulary.
 _ROUTING_ERROR_CODES = {
@@ -2176,11 +2177,14 @@ registration endpoint: tokens are created out of band and can be revoked.
 """
 
 
-def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
+def _apply_openapi_client_limits(
+    document: dict[str, Any],
+    *,
+    long_text_input_limit: int = DEFAULT_LONG_TEXT_INPUT_LIMIT,
+) -> dict[str, Any]:
     """Publish schema-only limits after either Pydantic generation path."""
-    text_schema = document["components"]["schemas"]["TranslationRequestBody"][
-        "properties"
-    ]["text"]
+    translation_schema = document["components"]["schemas"]["TranslationRequestBody"]
+    text_schema = translation_schema["properties"]["text"]
     if "anyOf" in text_schema:
         variants = text_schema.pop("anyOf", [])
         non_null = [variant for variant in variants if variant.get("type") != "null"]
@@ -2209,7 +2213,7 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
         raise KeyError("OpenAPI terms query parameter q is missing") from exc
 
     for schema, limit in (
-        (text_schema, LLM_INPUT_CHAR_LIMIT),
+        (text_schema, long_text_input_limit),
         (query_schema, TERM_QUERY_MAX_LENGTH),
         (review_properties["source"], REVIEW_MAX_SIDE_SCALARS),
         (review_properties["target"], REVIEW_MAX_SIDE_SCALARS),
@@ -2224,6 +2228,16 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
             else:
                 schema.pop("json_schema_extra")
         schema["maxLength"] = limit
+    translation_schema["if"] = {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    translation_schema["then"] = {
+        "properties": {"text": {"maxLength": long_text_input_limit}}
+    }
+    translation_schema["else"] = {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
     return document
 
 
@@ -2232,7 +2246,10 @@ def _install_openapi_client_limits(app: FastAPI) -> None:
 
     def openapi() -> dict[str, Any]:
         if app.openapi_schema is None:
-            app.openapi_schema = _apply_openapi_client_limits(render_openapi())
+            app.openapi_schema = _apply_openapi_client_limits(
+                render_openapi(),
+                long_text_input_limit=app.state.settings.long_text_input_limit,
+            )
         return app.openapi_schema
 
     app.openapi = openapi  # type: ignore[method-assign]
