@@ -38,7 +38,7 @@ from wuwaterm_api.auth import (
     parse_token,
 )
 from wuwaterm_api.errors import MESSAGE_BY_CODE, STATUS_BY_CODE
-from wuwaterm_api.settings import ApiConfigError, ApiSettings
+from wuwaterm_api.settings import ApiConfigError, ApiSettings, DEFAULT_LONG_TEXT_INPUT_LIMIT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1596,7 +1596,18 @@ def test_openapi_documents_conservative_client_limits():
         if parameter["name"] == "q"
     )
 
-    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert text_schema["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    translation_schema = document["components"]["schemas"]["TranslationRequestBody"]
+    assert translation_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert translation_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert translation_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     review_properties = document["components"]["schemas"]["ReviewRequestBody"][
         "properties"
@@ -1661,7 +1672,18 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
         "properties"
     ]["text"]
     query_schema = result["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"]
-    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert text_schema["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    translation_schema = document["components"]["schemas"]["TranslationRequestBody"]
+    assert translation_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert translation_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert translation_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
     assert text_schema["json_schema_extra"] == {"x-preserved": "body"}
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     assert query_schema["json_schema_extra"] == {"x-preserved": "query"}
@@ -1708,7 +1730,7 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
     assert second is document
     assert document["components"]["schemas"]["TranslationRequestBody"][
         "properties"
-    ]["text"]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    ]["text"]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
     assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"][
         "maxLength"
     ] == TERM_QUERY_MAX_LENGTH
@@ -1753,7 +1775,7 @@ def test_openapi_schema_cache_uses_postprocessed_document(tmp_path, sample_db):
     assert first is app.openapi_schema
     assert first["components"]["schemas"]["TranslationRequestBody"]["properties"][
         "text"
-    ]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    ]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
     assert next(
         parameter["schema"]["maxLength"]
         for parameter in first["paths"]["/v1/terms"]["get"]["parameters"]
@@ -1833,6 +1855,14 @@ API_NUMERIC_SETTING_CASES = (
         ("1", 1),
         ("64", 64),
         ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "65"),
+    ),
+    (
+        "WUWATERM_API_LONG_TEXT_INPUT_LIMIT",
+        "long_text_input_limit",
+        4096,
+        ("2000", 2000),
+        ("16384", 16384),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "1999", "16385"),
     ),
 )
 
@@ -4533,3 +4563,489 @@ def test_review_dense_page_stays_within_the_json_ceiling(tmp_path, sample_db):
     body = response.json()
     assert len(body["findings"]) <= 128
     assert body["truncated"] is True
+
+
+# --------------------------------------------------------------------------
+# Track B-PR1: Stable service contract & opt-in capability negotiation
+# --------------------------------------------------------------------------
+
+_META_EXACT_11_KEYS = {
+    "service_version",
+    "api_version",
+    "schema_version",
+    "source_profile",
+    "source_commit",
+    "source_game_version",
+    "source_resource_version",
+    "source_changelist",
+    "term_count",
+    "llm_configured",
+    "request_id",
+}
+_TRANSLATION_EXACT_5_KEYS = {
+    "kind",
+    "text",
+    "direction",
+    "dictionary_miss",
+    "request_id",
+}
+
+
+def _transport_app(tmp_path, sample_db, monkeypatch, handler, **overrides):
+    from wuwaterm.sentence import SentenceTranslator
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key-do-not-log")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    overrides.setdefault("max_body_bytes", 64 * 1024)
+    settings = build_settings(tmp_path, sample_db, **overrides)
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    translator = SentenceTranslator(
+        sample_db,
+        en_zh_protocol=True,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    app = create_app(settings, device_store=store, translator=translator)
+    return app, store
+
+
+def test_meta_and_capabilities_headers_and_opt_in_negotiation(
+    monkeypatch, tmp_path, sample_db
+):
+    disable_llm(monkeypatch)
+    app, store = build_client_app(tmp_path, sample_db, long_text_input_limit=6000)
+    _, meta_token = issue_device(store, "meta client", [SCOPE_META])
+
+    # Default /v1/meta keeps exact 11 keys + protocol header.
+    default_meta = run(call(app, "GET", "/v1/meta", headers=bearer(meta_token)))
+    assert default_meta.status_code == 200, default_meta.text
+    assert default_meta.headers["X-WuwaTerm-Protocol-Version"] == "1"
+    assert "X-WuwaTerm-Meta-Features" not in default_meta.headers
+    assert set(default_meta.json()) == _META_EXACT_11_KEYS
+
+    # /v1/capabilities carries protocol header and strictly valid kebab-case tokens.
+    caps_resp = run(call(app, "GET", "/v1/capabilities", headers=bearer(meta_token)))
+    assert caps_resp.status_code == 200, caps_resp.text
+    assert caps_resp.headers["X-WuwaTerm-Protocol-Version"] == "1"
+    caps_body = caps_resp.json()
+    assert set(caps_body) == {"api_version", "capabilities", "request_id"}
+    assert len(caps_body["capabilities"]) <= 32
+    assert all(
+        re.fullmatch(r"^[a-z0-9][a-z0-9.-]{0,63}$", item)
+        for item in caps_body["capabilities"]
+    )
+    assert "dictionary-fallback-v1" in caps_body["capabilities"]
+    assert "protected-translation-v1" not in caps_body["capabilities"]
+    assert "long-text-translation-v1" not in caps_body["capabilities"]
+    assert "knowledge-retrieval-v1" not in caps_body["capabilities"]
+    assert "hybrid-rag-v1" not in caps_body["capabilities"]
+
+    # Opt-in X-WuwaTerm-Meta-Features: capabilities-v1 appends protocol_version, capabilities, limits.
+    optin_meta = run(
+        call(
+            app,
+            "GET",
+            "/v1/meta",
+            headers={**bearer(meta_token), "X-WuwaTerm-Meta-Features": "capabilities-v1"},
+        )
+    )
+    assert optin_meta.status_code == 200, optin_meta.text
+    assert optin_meta.headers["X-WuwaTerm-Protocol-Version"] == "1"
+    assert optin_meta.headers["X-WuwaTerm-Meta-Features"] == "capabilities-v1"
+    optin_body = optin_meta.json()
+    assert set(optin_body) == _META_EXACT_11_KEYS | {
+        "protocol_version",
+        "capabilities",
+        "limits",
+    }
+    assert optin_body["protocol_version"] == 1
+    assert optin_body["capabilities"] == caps_body["capabilities"]
+    assert optin_body["limits"] == {
+        "translation_max_chars": LLM_INPUT_CHAR_LIMIT,
+        "long_text_max_chars": 6000,
+        "protected_max_structures": 256,
+    }
+
+
+@pytest.mark.parametrize(
+    "header_values",
+    [
+        [""],
+        ["   "],
+        ["capabilities-v1,"],
+        ["unknown-feature"],
+        ["capabilities-v1", "capabilities-v1"],
+        ["capabilities-v1,capabilities-v1"],
+    ],
+)
+def test_meta_features_header_fails_closed_on_invalid_values(
+    tmp_path, sample_db, header_values
+):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, meta_token = issue_device(store, "meta client", [SCOPE_META])
+    headers = [("Authorization", f"Bearer {meta_token}")]
+    for value in header_values:
+        headers.append(("X-WuwaTerm-Meta-Features", value))
+
+    response = run(call(app, "GET", "/v1/meta", headers=headers))
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_translations_dictionary_fallback_opt_in_and_default_compatibility(
+    monkeypatch, tmp_path, sample_db
+):
+    disable_llm(monkeypatch)
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "telegram client")
+
+    # Default request without LLM still refuses with 503.
+    default_refused = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "今天使用声骸"},
+            headers=bearer(token),
+        )
+    )
+    assert default_refused.status_code == 503
+    assert default_refused.json()["error"]["code"] == "llm_unavailable"
+
+    # Opt-in fallback="dictionary" and Telegram's dictionary_fallback=true both return exact 5 keys.
+    for extra in ({"fallback": "dictionary"}, {"dictionary_fallback": True}):
+        resp = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "今天使用声骸", **extra},
+                headers=bearer(token),
+            )
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert set(body) == _TRANSLATION_EXACT_5_KEYS
+        assert body["kind"] == "dictionary_fallback"
+        assert "Echo" in body["text"]
+
+    # Explicit fallback="error" still fails with 503.
+    explicit_err = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "今天使用声骸", "fallback": "error"},
+            headers=bearer(token),
+        )
+    )
+    assert explicit_err.status_code == 503
+    assert explicit_err.json()["error"]["code"] == "llm_unavailable"
+
+
+def test_translations_protected_and_compat_modes_preserve_default_5_keys(
+    monkeypatch, tmp_path, sample_db
+):
+    seen_user_prompts: list[str] = []
+    forced_responses: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        user_msg = payload["messages"][1]["content"]
+        seen_user_prompts.append(user_msg)
+        content = forced_responses.pop(0) if forced_responses else user_msg
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    app, store = _transport_app(tmp_path, sample_db, monkeypatch, handler)
+    _, token = issue_device(store, "telegram client")
+
+    # 1. Default plain translation still returns exact 5 keys (zero extra keys).
+    plain_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "需要翻译的一句话"},
+            headers=bearer(token),
+        )
+    )
+    assert plain_resp.status_code == 200, plain_resp.text
+    assert set(plain_resp.json()) == _TRANSLATION_EXACT_5_KEYS
+
+    # 2. Blueprint `protected` mode returns `translated_segments` + `protected_used=True`.
+    prot_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "to": "en",
+                "protected": {
+                    "visible_segments": ["", "椿", " joins."],
+                    "structures": [{"visible_context": "香"}, {"visible_context": ""}],
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert prot_resp.status_code == 200, prot_resp.text
+    prot_body = prot_resp.json()
+    assert set(prot_body) == _TRANSLATION_EXACT_5_KEYS | {
+        "translated_segments",
+        "protected_used",
+    }
+    assert prot_body["protected_used"] is True
+    assert prot_body["translated_segments"] == ["", "椿", " joins."]
+
+    # 3. Telegram `protected_text` compat mode accepts and strips `original`, returns `visible_segments`.
+    compat_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "text": "今汐来了。",
+                "to": "en",
+                "protected_text": {
+                    "visible_segments": ["", "今汐", "来了。"],
+                    "structures": [
+                        {"original": "<b>SECRET_HTML_TAG</b>", "visible_context": ""},
+                        {"original": "</b>", "visible_context": ""},
+                    ],
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert compat_resp.status_code == 200, compat_resp.text
+    compat_body = compat_resp.json()
+    assert set(compat_body) == _TRANSLATION_EXACT_5_KEYS | {
+        "visible_segments",
+        "protected_used",
+    }
+    assert compat_body["protected_used"] is True
+    assert len(compat_body["visible_segments"]) == 3
+    assert all("SECRET_HTML_TAG" not in p for p in seen_user_prompts)
+
+    # 4. Integrity failure: fallback_to_plain=False -> 503; fallback_to_plain=True -> plain retry.
+    forced_responses.append("broken output missing placeholder")
+    fail_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "text": "测试句子。",
+                "protected": {
+                    "visible_segments": ["", "测试句子", "。"],
+                    "structures": [{"visible_context": ""}, {"visible_context": ""}],
+                    "fallback_to_plain": False,
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert fail_resp.status_code == 503
+    assert fail_resp.json()["error"]["code"] == "llm_unavailable"
+
+    forced_responses.extend(["broken output missing placeholder", "Recovered plain text."])
+    recover_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "text": "测试句子。",
+                "protected": {
+                    "visible_segments": ["", "测试句子", "。"],
+                    "structures": [{"visible_context": ""}, {"visible_context": ""}],
+                    "fallback_to_plain": True,
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert recover_resp.status_code == 200, recover_resp.text
+    recover_body = recover_resp.json()
+    assert recover_body["protected_used"] is False
+    assert recover_body["translated_segments"] == []
+    assert recover_body["text"] == "Recovered plain text."
+
+
+def test_translations_long_text_opt_in_and_fail_closed_validation(
+    monkeypatch, tmp_path, sample_db
+):
+    model_calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        model_calls.append(payload)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": f"seg-{len(model_calls)}"}}]},
+        )
+
+    app, store = _transport_app(
+        tmp_path,
+        sample_db,
+        monkeypatch,
+        handler,
+        long_text_input_limit=3000,
+    )
+    _, token = issue_device(store, "telegram client")
+
+    long_2500 = ("第一段测试文本。" * 160) + "\n\n" + ("第二段测试文本。" * 160)
+    assert 2000 < len(long_2500) <= 3000
+
+    # Without allow_long_text, > 2000 still fails with 422 input_too_long.
+    rejected_default = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": long_2500},
+            headers=bearer(token),
+        )
+    )
+    assert rejected_default.status_code == 422
+    assert rejected_default.json()["error"]["code"] == "input_too_long"
+    assert model_calls == []
+
+    # With allow_long_text=True, segments cleanly and keeps exact 5 keys.
+    accepted_long = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": long_2500, "allow_long_text": True},
+            headers=bearer(token),
+        )
+    )
+    assert accepted_long.status_code == 200, accepted_long.text
+    assert set(accepted_long.json()) == _TRANSLATION_EXACT_5_KEYS
+    assert len(model_calls) == 2
+    assert "Context rules" in model_calls[1]["messages"][0]["content"]
+
+    # Exceeding configured long_text_input_limit (3000) still fails with 422.
+    over_long_cap = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "中" * 3001, "allow_long_text": True},
+            headers=bearer(token),
+        )
+    )
+    assert over_long_cap.status_code == 422
+    assert over_long_cap.json()["error"]["code"] == "input_too_long"
+
+    # Fail-closed 400 invalid_request cases.
+    bad_requests = [
+        {"text": "测试", "allow_long_text": True, "protected": {"visible_segments": ["a"], "structures": []}},
+        {"text": "测试", "fallback": "error", "dictionary_fallback": True},
+        {"text": "测试", "fallback": "dictionary", "protected": {"visible_segments": ["a"], "structures": []}},
+        {"protected": {"visible_segments": ["a", "b"], "structures": []}},
+        {"protected": {"visible_segments": ["a"], "structures": [], "fallback_to_plain": True}},
+        {
+            "text": "测试",
+            "protected": {"visible_segments": ["a"], "structures": []},
+            "protected_text": {"visible_segments": ["a"], "structures": []},
+        },
+        {"text": "测试", "context": {"retrieval_mode": "lexical"}},
+        {"text": "测试", "context": {"retrieval_mode": "hybrid"}},
+    ]
+    for bad_body in bad_requests:
+        resp = run(
+            call(app, "POST", "/v1/translations", json=bad_body, headers=bearer(token))
+        )
+        assert resp.status_code == 400, (bad_body, resp.text)
+        assert resp.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("half_configured", [False, True])
+def test_protected_translation_without_llm_spares_budget_and_transport(
+    monkeypatch, tmp_path, sample_db, half_configured
+):
+    from wuwaterm.application import llm_configured
+    from wuwaterm.sentence import SentenceTranslator
+
+    disable_llm(monkeypatch)
+    if half_configured:
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    assert llm_configured() is False
+
+    transport_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(500)
+
+    settings = build_settings(
+        tmp_path, sample_db, llm_calls_per_minute=1, max_body_bytes=64 * 1024
+    )
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    translator = SentenceTranslator(
+        sample_db,
+        en_zh_protocol=True,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    app = create_app(settings, device_store=store, translator=translator)
+    _, token = issue_device(store, "telegram client")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={
+                "to": "en",
+                "protected": {
+                    "visible_segments": ["", "今天使用声骸", ""],
+                    "structures": [{"visible_context": ""}, {"visible_context": ""}],
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"
+    assert transport_calls == 0
+    assert app.state.llm_budget.in_window() == 0
+
+
+def test_openapi_translation_request_schema_expresses_default_and_long_text_limits(
+    tmp_path, sample_db
+):
+    default_app, _ = build_client_app(tmp_path / "default", sample_db)
+    default_schema = default_app.openapi()["components"]["schemas"][
+        "TranslationRequestBody"
+    ]
+    assert default_schema["properties"]["text"]["maxLength"] == DEFAULT_LONG_TEXT_INPUT_LIMIT
+    assert default_schema["if"] == {
+        "properties": {"allow_long_text": {"const": True}},
+        "required": ["allow_long_text"],
+    }
+    assert default_schema["then"] == {
+        "properties": {"text": {"maxLength": DEFAULT_LONG_TEXT_INPUT_LIMIT}}
+    }
+    assert default_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
+
+    custom_app, _ = build_client_app(
+        tmp_path / "custom", sample_db, long_text_input_limit=6000
+    )
+    custom_schema = custom_app.openapi()["components"]["schemas"][
+        "TranslationRequestBody"
+    ]
+    assert custom_schema["properties"]["text"]["maxLength"] == 6000
+    assert custom_schema["then"] == {"properties": {"text": {"maxLength": 6000}}}
+    assert custom_schema["else"] == {
+        "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
+    }
