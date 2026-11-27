@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "wuwaterm-text-kernel",
+    "wuwaterm-text-kernel-py",
+    "wuwaterm-text-kernel-wasm",
+]
+default-members = [
+    "wuwaterm-text-kernel",
+    "wuwaterm-text-kernel-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false

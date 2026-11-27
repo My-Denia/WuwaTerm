@@ -35,6 +35,9 @@ desktop client guide and a few design and audit records are in Chinese.
   command, and what makes a pull request easy to accept.
 - [Architecture](architecture.md): modules, request flows, trust boundaries and
   the single-instance topology.
+- [Shared Rust Text Kernel](rust-text-kernel.md): optional multi-target Rust
+  workspace (`crates/`) for Core (PyO3) and Web (WASM), plus the non-breaking
+  `wuwaterm.native_kernel` Python adapter.
 - [Architecture Decision Records](adr/README.md): why the system is shaped the
   way it is.
 - [Validation](validation.md): what `python scripts/validate.py` runs, the
