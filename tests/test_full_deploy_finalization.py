@@ -22,19 +22,17 @@ from test_full_deploy_recovery import (
 pytest_plugins = ["test_full_deploy_recovery"]
 
 
-@pytest.mark.parametrize("surface", ["bot", "api"])
-def test_shell_rollback_refuses_drifted_tag_before_start(full_harness, surface):
+def test_shell_rollback_refuses_drifted_tag_before_start(full_harness):
     root, env, _old_hash, _new_hash, old_bytes, _new_bytes, _backup = full_harness
-    # Drift the already-recorded tag after the replacement services start,
+    # Drift the already-recorded tag after the replacement service starts,
     # before the ordinary start-failure enters the real EXIT rollback trap.
     wrapper = root.parent / "bin" / "python3"
     script = wrapper.read_text(encoding="utf-8")
     needle = "  *'full_update.py phase started'*)\n"
     assert script.count(needle) == 1
-    pattern = "rollback-[0-9]*" if surface == "bot" else "rollback-api-*"
     script = script.replace(
         needle,
-        needle + f'    for f in "$FAKE_DEPLOY_ROOT"/tag-wuwaterm-runtime:{pattern}; do\n'
+        needle + '    for f in "$FAKE_DEPLOY_ROOT"/tag-wuwaterm-runtime:rollback-api-*; do\n'
         '      [ -e "$f" ] || continue\n'
         f'      printf "%s\\n" "{UNKNOWN_IMAGE}" > "$f"\n'
         '    done\n',
@@ -46,10 +44,9 @@ def test_shell_rollback_refuses_drifted_tag_before_start(full_harness, surface):
 
     assert result.returncode == 97, result.stderr
     record = json.loads((root / JOURNAL_RELPATH).read_text(encoding="utf-8"))
-    key = "rollback_image_ref" if surface == "bot" else "rollback_api_image_ref"
-    drifted = record[key]
-    assert (root / f"{surface}-image").read_text().strip() == NEW_IMAGE
-    assert (root / f"{surface}-running").read_text().strip() == "false"
+    drifted = record["rollback_api_image_ref"]
+    assert (root / "api-image").read_text().strip() == NEW_IMAGE
+    assert (root / "api-running").read_text().strip() == "false"
     assert not any(line.startswith(drifted + "|") and " up -d " in line
                    for line in _docker_log(root)), "drifted tag must not execute"
     assert (root / "data" / "terms.db").read_bytes() == old_bytes
@@ -71,9 +68,8 @@ def test_explicit_recovery_refuses_bad_bytes_before_stopping(full_harness, fault
     assert result.returncode == 1, result.stdout
     assert (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == expected
-    for surface in ("bot", "api"):
-        assert (root / f"{surface}-running").read_text().strip() == "true"
-        assert (root / f"{surface}-image").read_text().strip() == NEW_IMAGE
+    assert (root / "api-running").read_text().strip() == "true"
+    assert (root / "api-image").read_text().strip() == NEW_IMAGE
     assert not any(" stop " in line or " up -d " in line
                    for line in _docker_log(root))
 

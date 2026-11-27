@@ -12,7 +12,6 @@ import pytest
 from scripts.deployment_manifest import build_manifest, write_manifest
 from test_full_deploy_recovery import (
     API_ROLLBACK_REF,
-    BOT_ROLLBACK_REF,
     JOURNAL_RELPATH,
     NEW_COMMIT,
     NEW_IMAGE,
@@ -53,8 +52,8 @@ def _same_source(harness):
         db_path=root / "data" / "terms.db", db_display_path="data/terms.db",
         backup_path="legacy", deployment_utc=OLD_DEPLOYED,
     ))
-    for surface in ("bot", "api"):
-        _surface(root, surface, image=OLD_IMAGE, ref=CANONICAL_REF, running=True)
+    _surface(root, "bot", image=OLD_IMAGE, ref=CANONICAL_REF, running=False)
+    _surface(root, "api", image=OLD_IMAGE, ref=CANONICAL_REF, running=True)
     return root, env, old_hash, old_bytes, backup
 
 
@@ -64,7 +63,7 @@ def _shared_record(harness):
         root, phase="armed", source_commit=OLD_COMMIT,
         old_db_sha=old_hash, db_backup=backup, new_db_sha=old_hash,
         candidate_rel=f"data/candidates/terms.{TXN}.db",
-        bot_ref=CANONICAL_REF, api_ref=CANONICAL_REF,
+        bot_id=None, bot_ref=None, bot_running=False, api_ref=CANONICAL_REF,
     )
     journal["target_image_id"] = OLD_IMAGE
     journal["target_image_digest"] = OLD_IMAGE
@@ -127,9 +126,9 @@ def test_same_source_sigkill_after_stop_and_real_promotion_recovers(full_harness
         assert "rolled back" in result.stderr
         assert not (root / JOURNAL_RELPATH).exists()
         assert (root / "data" / "terms.db").read_bytes() == old_bytes
-        for surface in ("bot", "api"):
-            assert (root / f"{surface}-running").read_text().strip() == "true"
-            assert (root / f"{surface}-image").read_text().strip() == OLD_IMAGE
+        assert (root / "api-running").read_text().strip() == "true"
+        assert (root / "api-image").read_text().strip() == OLD_IMAGE
+        assert (root / "bot-running").read_text().strip() == "false"
         assert _run_recover(root, env).returncode == 0
     finally:
         if process.poll() is None:
@@ -154,15 +153,17 @@ def test_shared_pointer_complete_new_binding_confirms_without_restore(full_harne
     assert (root / "data" / "terms.db").stat().st_ino == inode
 
 
-@pytest.mark.parametrize("observed", ["stopped", "missing", "partial", "rollback-refs"])
+@pytest.mark.parametrize("observed", ["stopped", "missing", "rollback-refs"])
 def test_shared_pointer_known_incomplete_binding_restores_old(full_harness, observed):
     root, env, old_bytes = _shared_record(full_harness)
-    for surface in ("bot", "api"):
-        _surface(root, surface, image=OLD_IMAGE,
-                 ref=(BOT_ROLLBACK_REF if surface == "bot" else API_ROLLBACK_REF)
-                 if observed == "rollback-refs" else CANONICAL_REF,
-                 running=observed == "rollback-refs" or (observed == "partial" and surface == "api"),
-                 present=not (observed == "missing" and surface == "bot"))
+    _surface(
+        root,
+        "api",
+        image=OLD_IMAGE,
+        ref=API_ROLLBACK_REF if observed == "rollback-refs" else CANONICAL_REF,
+        running=observed == "rollback-refs",
+        present=observed != "missing",
+    )
 
     result = _run_recover(root, env)
 
@@ -170,9 +171,8 @@ def test_shared_pointer_known_incomplete_binding_restores_old(full_harness, obse
     assert "rolled back" in result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == old_bytes
-    for surface in ("bot", "api"):
-        assert (root / f"{surface}-running").read_text().strip() == "true"
-        assert (root / f"{surface}-image").read_text().strip() == OLD_IMAGE
+    assert (root / "api-running").read_text().strip() == "true"
+    assert (root / "api-image").read_text().strip() == OLD_IMAGE
 
 
 @pytest.mark.parametrize("fault", ["foreign-image", "unknown-db", "inspect-error"])
@@ -180,7 +180,7 @@ def test_shared_pointer_unknown_or_unobservable_refuses_without_mutation(full_ha
     root, env, old_bytes = _shared_record(full_harness)
     expected = old_bytes
     if fault == "foreign-image":
-        _surface(root, "bot", image=UNKNOWN_IMAGE, ref="unrelated-runtime:unrelated", running=True)
+        _surface(root, "api", image=UNKNOWN_IMAGE, ref="unrelated-runtime:unrelated", running=True)
     elif fault == "unknown-db":
         expected = b"unrecognized live bytes"
         (root / "data" / "terms.db").write_bytes(expected)
@@ -200,7 +200,7 @@ def test_shared_pointer_unknown_or_unobservable_refuses_without_mutation(full_ha
     assert (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == expected
     assert not _mutations(root)
-    assert (root / "bot-running").read_text().strip() == "true"
+    assert (root / "api-running").read_text().strip() == "true"
 
 
 def test_shared_pointer_recovery_reenters_after_restore_command_failure(full_harness):

@@ -9,7 +9,6 @@ from scripts.deployment_manifest import build_manifest, write_manifest
 from test_full_deploy_recovery import (
     API_ALT_IMAGE,
     API_ROLLBACK_REF,
-    BOT_ROLLBACK_REF,
     JOURNAL_RELPATH,
     NEW_COMMIT,
     NEW_IMAGE,
@@ -30,21 +29,20 @@ from test_full_deploy_recovery import (
 pytest_plugins = ["test_full_deploy_recovery"]
 
 
-def _reality(harness, *, old_bot="stopped", observed="target"):
+def _reality(harness, *, old_api="stopped", observed="target"):
     root, env, old_hash, new_hash, old_bytes, new_bytes, backup = harness
     _plant(root, _journal(
         root, phase="started", old_db_sha=old_hash, db_backup=backup,
         new_db_sha=new_hash, candidate_rel=f"data/candidates/terms.{TXN}.db",
-        bot_id=None if old_bot == "absent" else OLD_IMAGE,
-        bot_ref=None if old_bot == "absent" else OLD_REF,
-        bot_running=old_bot == "running",
+        api_id=None if old_api == "absent" else OLD_IMAGE,
+        api_ref=None if old_api == "absent" else OLD_REF,
+        api_running=old_api == "running",
     ))
     _set_db(root, new_bytes)
-    _surface(root, "api", image=NEW_IMAGE,
-             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
-    _surface(root, "bot", image=OLD_IMAGE if observed == "original" else NEW_IMAGE,
+    _surface(root, "api", image=OLD_IMAGE if observed == "original" else NEW_IMAGE,
              ref=OLD_REF if observed == "original" else f"wuwaterm-runtime:{NEW_COMMIT}",
              running=observed == "running", present=observed != "missing")
+    _surface(root, "bot", image=OLD_IMAGE, ref=OLD_REF, running=False)
     return root, env, old_bytes
 
 
@@ -57,45 +55,44 @@ def test_recorded_stopped_object_restores_presence_image_and_ref(full_harness, o
     assert result.returncode == 0, result.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == old_bytes
-    assert (root / "bot-present").exists()
-    assert (root / "bot-running").read_text().strip() == "false"
-    assert (root / "bot-image").read_text().strip() == OLD_IMAGE
-    assert (root / "bot-ref").read_text().strip() == (
-        OLD_REF if observed == "original" else BOT_ROLLBACK_REF
+    assert (root / "api-present").exists()
+    assert (root / "api-running").read_text().strip() == "false"
+    assert (root / "api-image").read_text().strip() == OLD_IMAGE
+    assert (root / "api-ref").read_text().strip() == (
+        OLD_REF if observed == "original" else API_ROLLBACK_REF
     )
     log = _docker_log(root)
-    assert not any(" up -d " in line and "wuwaterm-api" not in line for line in log)
+    assert not any(" up -d " in line for line in log)
     if observed != "original":
-        assert any(" create " in line and line.endswith(" wuwaterm") for line in log)
+        assert any(" create " in line and line.endswith(" wuwaterm-api") for line in log)
 
 
 @pytest.mark.parametrize("running", [False, True])
 def test_recorded_absent_object_removes_only_known_stopped_replacement(full_harness, running):
     root, env, old_bytes = _reality(
-        full_harness, old_bot="absent", observed="running" if running else "target"
+        full_harness, old_api="absent", observed="running" if running else "target"
     )
 
     result = _run_recover(root, env)
 
     assert result.returncode == 0, result.stderr
-    assert not (root / "bot-present").exists()
+    assert not (root / "api-present").exists()
     assert not (root / JOURNAL_RELPATH).exists()
     assert (root / "data" / "terms.db").read_bytes() == old_bytes
     # docker.log records "image-reference|arguments", not the binary name.
     commands = [line.split("|", 1)[1] for line in _docker_log(root)]
     removals = [command for command in commands if command.startswith("rm ")]
-    assert removals == ["rm wuwaterm-bot"]
+    assert removals == ["rm wuwaterm-api"]
     assert not any("--force" in command or "--volumes" in command for command in removals)
 
 
 @pytest.mark.parametrize("residue", ["stopped-target", "missing-stopped", "absent-target"])
 def test_old_binding_verifier_does_not_certify_nonrunning_wrong_objects(full_harness, residue):
     root, env, old_bytes = _reality(
-        full_harness, old_bot="absent" if residue == "absent-target" else "stopped",
+        full_harness, old_api="absent" if residue == "absent-target" else "stopped",
         observed="missing" if residue == "missing-stopped" else "target",
     )
     _set_db(root, old_bytes)
-    _surface(root, "api", image=OLD_IMAGE, ref=API_ROLLBACK_REF, running=True)
     result = subprocess.run(
         ["sh", "-c", "exec 9>>.deployments/.deployment.lock; flock -n 9 || exit 75; "
          "exec python3 scripts/full_update.py rollback-clear"],
@@ -126,12 +123,12 @@ def test_manifest_is_verified_against_its_own_recorded_image(full_harness, owner
     _plant(root, _journal(
         root, phase="started", old_db_sha=old_hash, db_backup=backup,
         new_db_sha=new_hash, candidate_rel=f"data/candidates/terms.{TXN}.db",
+        bot_id=OLD_IMAGE, bot_ref=OLD_REF, bot_running=False,
         api_id=API_ALT_IMAGE,
     ))
     _set_db(root, new_bytes)
-    for surface in ("bot", "api"):
-        _surface(root, surface, image=NEW_IMAGE,
-                 ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
+    _surface(root, "api", image=NEW_IMAGE,
+             ref=f"wuwaterm-runtime:{NEW_COMMIT}", running=True)
 
     result = _run_recover(root, env)
 
@@ -144,14 +141,13 @@ def test_manifest_is_verified_against_its_own_recorded_image(full_harness, owner
         assert result.returncode == 0, result.stderr
         assert not (root / JOURNAL_RELPATH).exists()
         assert (root / "data" / "terms.db").read_bytes() == old_bytes
-        assert (root / "bot-image").read_text().strip() == OLD_IMAGE
         assert (root / "api-image").read_text().strip() == API_ALT_IMAGE
 
 
 @pytest.mark.parametrize("operation", ["create", "rm"])
 def test_object_repair_reenters_after_partial_command_failure(full_harness, operation):
     root, env, old_bytes = _reality(
-        full_harness, old_bot="absent" if operation == "rm" else "stopped"
+        full_harness, old_api="absent" if operation == "rm" else "stopped"
     )
     env["FULL_FAIL_OBJECT_REPAIR_ONCE"] = operation
 
@@ -164,8 +160,8 @@ def test_object_repair_reenters_after_partial_command_failure(full_harness, oper
     assert second.returncode == 0, second.stderr
     assert not (root / JOURNAL_RELPATH).exists()
     if operation == "rm":
-        assert not (root / "bot-present").exists()
+        assert not (root / "api-present").exists()
     else:
-        assert (root / "bot-present").exists()
-        assert (root / "bot-running").read_text().strip() == "false"
-        assert (root / "bot-image").read_text().strip() == OLD_IMAGE
+        assert (root / "api-present").exists()
+        assert (root / "api-running").read_text().strip() == "false"
+        assert (root / "api-image").read_text().strip() == OLD_IMAGE

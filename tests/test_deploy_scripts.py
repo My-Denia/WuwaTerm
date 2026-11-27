@@ -81,13 +81,13 @@ def test_vps_update_freezes_legacy_state_only_after_database_is_ready():
     build = text.index("wuwaterm-builder build-db --atomic")
     verify = text.index("wuwaterm-builder verify-db")
     transaction = text.index("# Candidate DB and immutable image")
-    stop = text.index("stop wuwaterm", transaction)
+    stop = text.index("stop wuwaterm-api", transaction)
     migrate = text.index("for state_file in chat_settings.json channel_replies.json")
     start = text.index("compose up -d --no-build", transaction)
 
     assert builder < refresh < build < verify < stop < migrate < start
     assert "rollback_on_failure" in text
-    assert "rollback_image_ref" in text
+    assert "rollback_api_image_ref" in text
 
 
 def test_vps_update_durably_promotes_and_restores_database_and_pointer():
@@ -970,11 +970,11 @@ def _make_deploy_harness(tmp_path):
     (root / "api-ref").write_text("wuwaterm-runtime:old\n", encoding="ascii")
     (root / "bot-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     (root / "api-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
-    # Default host state: both Core surfaces were up when the deployment
-    # started, and the standalone Telegram product is not installed. A test
-    # that wants a stopped or retired surface rewrites these.
+    # Default host state: wuwaterm-api is serving and legacy wuwaterm-bot is
+    # stopped (the post-migration host layout). Tests that want a running
+    # legacy bot explicitly rewrite bot-running to true.
     (root / "api-running").write_text("true\n", encoding="ascii")
-    (root / "bot-running").write_text("true\n", encoding="ascii")
+    (root / "bot-running").write_text("false\n", encoding="ascii")
     (root / "telegram-running").write_text("false\n", encoding="ascii")
     (root / "telegram-ref").write_text("wuwaterm-telegram:old\n", encoding="ascii")
 
@@ -1327,65 +1327,40 @@ def test_env_example_covers_the_api_surface():
     assert "per process" in text
 
 
-def test_vps_update_manages_both_surfaces_together():
-    """Both containers share the database, so both stop, but each starts only
-    if this deployment found it running."""
+def test_vps_update_manages_api_surface_without_legacy_bot_service():
+    """The updater builds, stops, starts and verifies wuwaterm-api only."""
     text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
 
-    # Down before the shared read-only database is replaced. Stopping is not
-    # conditional: neither surface may serve while its database is replaced.
-    assert "compose stop wuwaterm wuwaterm-api" in text
-    # Up per surface, from the same validated image, and only where the
-    # deployment found a running surface; the retired one is re-created
-    # without being started.
-    assert 'if [ "$target_bot_running" = "true" ]; then' in text
+    assert "compose build wuwaterm-api" in text
+    assert "compose build wuwaterm\n" not in text
+    assert "compose stop wuwaterm-api" in text
+    assert "compose stop wuwaterm wuwaterm-api" not in text
+    assert "compose up -d --no-build --force-recreate wuwaterm\n" not in text
+    assert "--force-recreate --pull never wuwaterm\n" not in text
     assert 'if [ "$target_api_running" = "true" ]; then' in text
-    assert "--force-recreate --pull never wuwaterm" in text
     assert "--force-recreate --pull never wuwaterm-api" in text
-    # Smoked in-container over loopback, so nothing has to be exposed, and
-    # against readiness rather than liveness: /healthz answers even when the
-    # terminology database is missing or mounted at the wrong path.
     assert "compose exec -T wuwaterm-api" in text
     assert "/readyz" in text
-    # compose up returns before the server binds its socket, so a single shot
-    # would fail the deployment on a connection refusal that only meant
-    # "not yet". The smoke waits, and says why it gave up.
     assert "api readiness never reported ok" in text
     assert "deadline = time.monotonic()" in text
-    # Read back per surface, each against what this deployment expected: a
-    # running surface must carry the validated image id, a stopped one must be
-    # stopped on it, and an absent one must stay absent.
-    assert 'bot_surface_state="$(surface_state wuwaterm-bot "$bot_expected")"' in text
     assert 'api_surface_state="$(surface_state wuwaterm-api "$api_expected")"' in text
     assert "does not carry the validated image" in text
     assert 'case "$ss_expected:$ss_running" in' in text
-    # Rollback restores the api surface only when the host was RUNNING it.
-    # Existence is not the test: a container left stopped by an earlier failed
-    # upgrade, or stopped deliberately, still answers `docker inspect`, and
-    # starting it here would put a surface up that was down before.
     assert "old_api_running=" in text
     assert "{{.State.Running}}" in text
     assert 'if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then' in text
     assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
-    # Rollback takes both surfaces down before it touches the database, so no
-    # replacement container can serve new code against a database that is being
-    # rolled back underneath it. Only the restart is conditional.
     assert "replacement containers could not be stopped before rollback" in text
     rollback_body = text.split("rollback_on_failure() {", 1)[1]
-    stop_at = rollback_body.index("compose stop wuwaterm wuwaterm-api")
+    stop_at = rollback_body.index("compose stop wuwaterm-api")
     restore_at = rollback_body.index("python3 scripts/full_update.py restore-db")
     assert stop_at < restore_at
 
 
 def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
-    """A present-but-stopped API must not be started by a rollback.
-
-    The first upgrade of a host can fail after the replacement API starts,
-    which leaves the container present and stopped. On the NEXT deployment
-    `docker inspect` reports an image for it, so existence alone would make a
-    rollback start a surface the host was not serving.
-    """
+    """A present-but-stopped API on a first install is restored stopped on rollback."""
     root, env, _old_hash, _new_hash = deploy_harness
+    (root / ".deploy_commit").unlink()
     (root / "api-running").write_text("false\n", encoding="ascii")
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
@@ -1398,21 +1373,20 @@ def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
         for line in docker_lines
         if "up -d --no-build --force-recreate" in line and "rollback-" in line
     ]
-    assert rollback_ups, docker_lines
-    # The bot comes back; the api does not.
-    assert not any("wuwaterm-api" in line for line in rollback_ups), rollback_ups
+    assert not rollback_ups, rollback_ups
+    rollback_creates = [
+        line
+        for line in docker_lines
+        if "create --no-build --force-recreate --pull never wuwaterm-api" in line
+        and "rollback-api-" in line
+    ]
+    assert rollback_creates, docker_lines
 
 
-def test_vps_update_stops_both_surfaces_before_restoring_the_database(
+def test_vps_update_stops_api_surface_before_restoring_the_database(
     deploy_harness,
 ):
-    """A replacement container must not serve while the database rolls back.
-
-    The deployment starts both surfaces from the new image before the smoke
-    runs. If that smoke fails, the database goes back to its previous content
-    underneath containers that are still running new code, which is exactly the
-    mixed binding the transactional updater exists to prevent.
-    """
+    """A replacement container must not serve while the database rolls back."""
     root, env, _old_hash, _new_hash = deploy_harness
     env["WUWATERM_FAIL_STEP"] = "smoke"
 
@@ -1428,11 +1402,10 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     stops_before_restore = [
         index
         for index, line in enumerate(actions[:restore_at])
-        if "stop wuwaterm wuwaterm-api" in line
+        if "stop wuwaterm-api" in line
     ]
     # Two: the planned stop before promotion, and the rollback's own stop.
     assert len(stops_before_restore) == 2, actions[: restore_at + 1]
-    # Nothing is started between that stop and the restored database.
     between = actions[stops_before_restore[-1] : restore_at]
     assert not [line for line in between if "up -d" in line], between
 
@@ -1491,42 +1464,23 @@ def test_vps_update_restores_an_api_only_host(deploy_harness):
     assert all("rollback-api-" in line for line in rollback_ups), rollback_ups
 
 
-def test_vps_update_keeps_a_rollback_image_per_surface():
-    """Two containers can be on two different images after a hand recovery.
-
-    Restoring both from one tag would move a surface onto an image it was
-    never running.
-    """
+def test_vps_update_keeps_rollback_image_for_api_surface():
+    """The API rollback tag is tagged, checked before restart, and verified via rollback-clear."""
     text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
 
-    assert 'rollback_image_ref="wuwaterm-runtime:rollback-$deployment_id"' in text
     assert (
         'rollback_api_image_ref="wuwaterm-runtime:rollback-api-$deployment_id"' in text
     )
-    assert 'docker image tag "$old_image_id" "$rollback_image_ref"' in text
     assert 'docker image tag "$old_api_image_id" "$rollback_api_image_ref"' in text
-    bot_restart = text.index('compose up -d --no-build --force-recreate wuwaterm;')
     api_restart = text.index('compose up -d --no-build --force-recreate wuwaterm-api;')
-    assert 'WUWATERM_RUNTIME_IMAGE="$rollback_image_ref"' in text[:bot_restart]
-    assert (
-        'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"'
-        in text[bot_restart:api_restart]
-    )
-    # Per-surface restoration and complete-binding certification are distinct:
-    # the shared observed verifier uses the manifest's own image, never an
-    # arbitrary first restarted surface as a competing verification key.
-    assert '[ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]' in text
+    assert 'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"' in text[:api_restart]
     assert '[ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]' in text
     assert 'python3 scripts/full_update.py rollback-clear' in text
     assert 'verify_image_id=' not in text
 
 
-def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
-    """The rule is the same for both surfaces: restore what was running.
-
-    A combined stop that fails on one container still records the transition,
-    so the rollback must not read "we stopped it" as "it was up".
-    """
+def test_vps_update_does_not_touch_stopped_legacy_bot_on_rollback(deploy_harness):
+    """A stopped legacy wuwaterm-bot container is left untouched on upgrade and rollback."""
     root, env, _old_hash, _new_hash = deploy_harness
     (root / "bot-running").write_text("false\n", encoding="ascii")
     env["WUWATERM_FAIL_STEP"] = "smoke"
@@ -1534,13 +1488,18 @@ def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
     result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
+    assert "docker rm wuwaterm-bot" in result.stderr
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
     rollback_ups = [
         line
-        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        for line in docker_lines
         if "up -d --no-build --force-recreate" in line and "rollback-" in line
     ]
     assert rollback_ups, "the api was running and should have come back"
     assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
+    assert not any(
+        line.split("|", 1)[1].endswith(" wuwaterm") for line in docker_lines if "|" in line
+    ), docker_lines
 
 
 def test_vps_update_reports_a_failed_stop_before_the_database_moves(
@@ -1609,32 +1568,33 @@ def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
     assert not rollback_ups, rollback_ups
 
 
-def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
+def test_vps_update_upgrades_api_and_leaves_stopped_legacy_bot_untouched(deploy_harness):
     root, env, _old_hash, _new_hash = deploy_harness
 
     result = _run_vps_update(root, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "docker rm wuwaterm-bot" in result.stderr
     docker_log = (root / "docker.log").read_text(encoding="utf-8")
-    # One combined stop: no surface serves while the shared database moves.
-    stop_lines = [
-        line for line in docker_log.splitlines() if "stop wuwaterm" in line
-    ]
-    assert stop_lines
-    assert all("wuwaterm-api" in line for line in stop_lines), stop_lines
-    # Each surface was running, so each one comes back on its own start.
-    up_commands = [
+    commands = [
         line.split("|", 1)[1]
         for line in docker_log.splitlines()
-        if "up -d" in line
+        if "|" in line
     ]
-    assert sorted(command.rsplit(" ", 1)[-1] for command in up_commands) == [
-        "wuwaterm",
+    assert any("build wuwaterm-api" in command for command in commands), commands
+    assert not any(command.endswith(" wuwaterm") for command in commands), commands
+    stop_lines = [line for line in commands if "stop wuwaterm-api" in line]
+    assert stop_lines, commands
+    up_commands = [line for line in commands if "up -d" in line]
+    assert [command.rsplit(" ", 1)[-1] for command in up_commands] == [
         "wuwaterm-api",
     ], up_commands
     assert "exec -T wuwaterm-api" in docker_log
-    assert "deployment bot surface: running" in result.stdout
     assert "deployment api surface: running" in result.stdout
+    assert "deployment legacy bot: stopped" in result.stdout
+    # The stopped legacy wuwaterm-bot container was never recreated on the new image.
+    assert (root / "bot-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    assert (root / "bot-running").read_text(encoding="ascii").strip() == "false"
 
 
 def test_api_state_directory_is_not_inside_the_bot_state_tree():
@@ -1965,19 +1925,19 @@ def test_vps_update_refuses_clearly_without_python311(tmp_path: Path) -> None:
     ]
 
 
-def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
-    """The standalone product and the in-Core bot must never both run.
-
-    Two pollers on one bot token answer every update twice, so the deployment
-    refuses before it touches the database, the pointer or any service.
-    """
+@pytest.mark.parametrize("with_standalone", [False, True])
+def test_vps_update_refuses_running_legacy_bot_in_preflight(deploy_harness, with_standalone):
+    """Any running legacy wuwaterm-bot fails closed with migration guidance."""
     root, env, old_hash, _new_hash = deploy_harness
-    (root / "telegram-running").write_text("true\n", encoding="ascii")
+    (root / "bot-running").write_text("true\n", encoding="ascii")
+    if with_standalone:
+        (root / "telegram-running").write_text("true\n", encoding="ascii")
 
     result = _run_vps_update(root, env)
 
     assert result.returncode == 1
-    assert "stop legacy wuwaterm-bot first" in result.stderr
+    assert "legacy wuwaterm-bot container is running" in result.stderr
+    assert "WuwaTerm-Telegram" in result.stderr
     assert (
         hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
         == old_hash
@@ -1991,7 +1951,8 @@ def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
     assert not [
         command
         for command in commands
-        if " stop " in command
+        if " build " in command
+        or " stop " in command
         or " up -d " in command
         or " create " in command
         or command.startswith("rm ")
@@ -1999,72 +1960,10 @@ def test_vps_update_refuses_two_telegram_pollers(deploy_harness):
     assert not (root / ".deployments" / ".full-transaction.json").exists()
 
 
-def test_vps_update_refuses_a_poller_named_after_its_compose_project(deploy_harness):
-    """A Telegram release without an explicit container_name still serves.
-
-    `docker compose up` names that container after its project
-    (`deploy-wuwaterm-telegram-1`, Compose service label
-    `com.docker.compose.service=wuwaterm-telegram`), so a guard that asked only
-    for `wuwaterm-telegram` found no product at all on those hosts and started
-    the in-Core bot beside the working poller.
-    """
-    root, env, old_hash, _new_hash = deploy_harness
-    (root / "telegram-auto-present").write_text("1\n", encoding="ascii")
-    (root / "telegram-auto-running").write_text("true\n", encoding="ascii")
-    (root / "telegram-label-ids").write_text(
-        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
-    )
-
-    result = _run_vps_update(root, env)
-
-    assert result.returncode == 1
-    assert "stop legacy wuwaterm-bot first" in result.stderr
-    assert (
-        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
-        == old_hash
-    )
-    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-    commands = [
-        line.split("|", 1)[1]
-        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
-        if "|" in line
-    ]
-    # The guard ran before any surface or data command, and it found the
-    # product through the Compose service label rather than the fixed name.
-    assert [
-        command
-        for command in commands
-        if command.startswith(
-            "ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram"
-        )
-    ], commands
-    assert not [
-        command
-        for command in commands
-        if " stop " in command
-        or " up -d " in command
-        or " create " in command
-        or command.startswith("rm ")
-    ], commands
-
-
-def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
-    deploy_harness,
-):
-    """With no recorded pointer, a labelled product decides the bot's fate.
-
-    The first `full` deployment of a host that already runs the standalone
-    product has no `.deploy_commit` to read the surfaces from. The product's
-    Compose label is what stops it from starting a second poller there.
-    """
+def test_vps_update_first_install_starts_only_api(deploy_harness):
+    """With no recorded pointer, first deployment starts wuwaterm-api only."""
     root, env, _old_hash, _new_hash = deploy_harness
     (root / ".deploy_commit").unlink()
-    (root / "telegram-auto-present").write_text("1\n", encoding="ascii")
-    (root / "telegram-auto-running").write_text("true\n", encoding="ascii")
-    (root / "telegram-label-ids").write_text(
-        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
-    )
-    # No in-Core bot container on this host: `docker inspect` proves absence.
     env["FAKE_NO_BOT_CONTAINER"] = "1"
 
     result = _run_vps_update(root, env)
@@ -2078,12 +1977,7 @@ def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
     assert not [
         command
         for command in commands
-        if " up -d " in command and command.endswith(" wuwaterm")
-    ], commands
-    assert not [
-        command
-        for command in commands
-        if " create " in command and command.endswith(" wuwaterm")
+        if command.endswith(" wuwaterm")
     ], commands
     assert [
         command
@@ -2094,8 +1988,7 @@ def test_vps_update_first_install_starts_no_bot_beside_a_labelled_poller(
 
 
 def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harness):
-    """A pointer proves a deployment served here. If nothing serves now, the
-    rollback would have nothing to restore, so the update refuses."""
+    """A pointer proves a deployment served here. If wuwaterm-api is stopped, refuse."""
     root, env, old_hash, _new_hash = deploy_harness
     (root / "bot-running").write_text("false\n", encoding="ascii")
     (root / "api-running").write_text("false\n", encoding="ascii")
@@ -2103,7 +1996,7 @@ def test_vps_update_refuses_a_recorded_host_with_no_serving_surface(deploy_harne
     result = _run_vps_update(root, env)
 
     assert result.returncode == 1
-    assert "neither wuwaterm-bot nor wuwaterm-api is running" in result.stderr
+    assert "wuwaterm-api is not running" in result.stderr
     assert (
         hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
         == old_hash
@@ -2122,59 +2015,8 @@ def test_full_update_prepare_refuses_a_recorded_host_with_no_serving_surface():
     text = (ROOT / "scripts" / "full_update.py").read_text(encoding="utf-8")
 
     assert 'raise FullUpdateError("no_serving_surface")' in text
+    assert 'raise FullUpdateError("legacy_bot_running")' in text
     guard = text.index('raise FullUpdateError("no_serving_surface")')
     armed = text.index("_write_journal_atomic(journal)", guard)
     assert guard < armed
-
-
-@pytest.mark.parametrize("first_install", [False, True])
-def test_vps_update_refuses_when_labelled_poller_inspect_errors(
-    deploy_harness, first_install
-):
-    """A daemon error inspecting a labelled poller must fail closed, not read as stopped."""
-    root, env, old_hash, _new_hash = deploy_harness
-    if first_install:
-        (root / ".deploy_commit").unlink()
-        env["FAKE_NO_BOT_CONTAINER"] = "1"
-    (root / "telegram-label-ids").write_text(
-        "deploy-wuwaterm-telegram-1\n", encoding="ascii"
-    )
-    env["FAKE_TELEGRAM_AUTO_INSPECT_ERROR"] = "1"
-
-    result = _run_vps_update(root, env)
-
-    assert result.returncode == 1
-    assert (
-        "deploy-wuwaterm-telegram-1 running state could not be confirmed"
-        in result.stderr
-    )
-    assert (
-        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
-        == old_hash
-    )
-    if first_install:
-        assert not (root / ".deploy_commit").exists()
-    else:
-        assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
-    commands = [
-        line.split("|", 1)[1]
-        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
-        if "|" in line
-    ]
-    assert (
-        len(
-            [
-                c
-                for c in commands
-                if c == "inspect --format {{.State.Running}} deploy-wuwaterm-telegram-1"
-            ]
-        )
-        == 3
-    ), commands
-    assert not [
-        c
-        for c in commands
-        if " build " in c or " stop " in c or " up -d " in c or " create " in c
-    ], commands
-    assert not (root / ".deployments" / ".full-transaction.json").exists()
 
