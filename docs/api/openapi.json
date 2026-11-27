@@ -44,7 +44,7 @@
             "type": "string"
           },
           "revision": {
-            "description": "Deterministic 64-character lowercase hex SHA-256 digest of the served dictionary entries, matching POST /v1/reviews dictionary.revision.",
+            "description": "Deterministic 64-character lowercase hex SHA-256 digest of the served dictionary entries, matching POST /v1/reviews review-v2 dictionary.revision for the same dictionary state (review-v1 omits revision).",
             "pattern": "^[0-9a-f]{64}$",
             "title": "Revision",
             "type": "string"

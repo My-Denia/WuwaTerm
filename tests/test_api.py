@@ -1137,7 +1137,7 @@ def test_meta_versions_stay_null_when_the_database_did_not_record_them(
             "UPDATE metadata SET value = 'arikatsu' WHERE key = 'source_profile'"
         )
 
-    app, store = build_client_app(tmp_path, bare, auth_max_concurrency=8)
+    app, store = build_client_app(tmp_path, bare)
     _, token = issue_device(store, "owner desktop")
     disable_llm(monkeypatch)
 

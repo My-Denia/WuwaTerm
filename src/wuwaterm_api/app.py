@@ -400,7 +400,8 @@ class DictionaryIdentityResponseBody(BaseModel):
         description=(
             "Deterministic 64-character lowercase hex SHA-256 digest of the "
             "served dictionary entries, matching POST /v1/reviews "
-            "dictionary.revision."
+            "review-v2 dictionary.revision for the same dictionary state "
+            "(review-v1 omits revision)."
         ),
     )
     schema_version: str | None

@@ -308,8 +308,10 @@ read-only `GET /v1/dictionary` (scoped to `SCOPE_META`) and advertises
 
 - `GET /v1/dictionary` returns `revision` (the 64-character lowercase hex
   SHA-256 computed by the same deterministic `wuwaterm-review-dictionary-v1`
-  algorithm as `POST /v1/reviews`'s `dictionary.revision`), `schema_version`,
-  `source_commit`, `source_game_version`, `term_count`, and `request_id`.
+  algorithm as `POST /v1/reviews` `review-v2` `dictionary.revision` for the
+  same dictionary state; default `review-v1` omits `revision`),
+  `schema_version`, `source_commit`, `source_game_version`, `term_count`, and
+  `request_id`.
 - Any change to dictionary entries alters `revision` even when `schema_version`,
   `source_commit`, and `term_count` remain unchanged.
 - `/v1/meta` and `/v1/reviews` response shapes remain unchanged; clients talking
