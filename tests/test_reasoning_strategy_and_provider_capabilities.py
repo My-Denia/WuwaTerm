@@ -1864,3 +1864,66 @@ def test_frozen_eval_semantic_stays_on_default_profile_while_runtime_entries_hon
         assert api_app.state.translator._provider_profile == NEON_GATEWAY_PROVIDER_PROFILE
     finally:
         asyncio.run(api_app.state.translator.aclose())
+
+
+def test_max_reasoning_effort_disabled_preserves_requested_effort() -> None:
+    """Clamping an active effort down to disabled preserves requested_effort metadata."""
+    deepseek_capped = provider_profile_from_config(
+        {
+            "base_profile": "deepseek",
+            "name": "deepseek_capped_disabled",
+            "max_reasoning_effort": "disabled",
+        }
+    )
+    res = deepseek_capped.resolve_effort("high")
+    assert res.requested_effort == "high"
+    assert res.effective_effort == "disabled"
+    assert res.omitted is False
+    assert res.passthrough is False
+    assert res.extra_body == {"thinking": {"type": "disabled"}}
+
+    plan = TranslationPlan(
+        source_text="你好世界。",
+        prepared_text="你好世界。",
+        locked_text="你好世界。",
+        locks=(),
+        references=(),
+        to_chinese=False,
+    )
+    spec = build_translation_request_spec(
+        plan,
+        policy=RequestPolicy(configured_thinking_zh_en="high"),
+        provider_profile=deepseek_capped,
+        model=TEST_MODEL,
+    )
+    assert spec.requested_effort == "high"
+    assert spec.effective_effort == "disabled"
+    assert spec.extra_body == {"thinking": {"type": "disabled"}}
+
+    neon_capped = provider_profile_from_config(
+        {
+            "base_profile": "neon_gateway",
+            "name": "neon_capped_disabled",
+            "max_reasoning_effort": "disabled",
+        }
+    )
+    neon_res = neon_capped.resolve_effort("high")
+    assert neon_res.requested_effort == "high"
+    assert neon_res.effective_effort == "none"
+    assert neon_res.omitted is False
+    assert neon_res.passthrough is False
+    assert neon_res.extra_body == {"reasoning_effort": "none"}
+
+    no_disable_capped = provider_profile_from_config(
+        {
+            "base_profile": "openai_reasoning",
+            "name": "openai_capped_disabled",
+            "max_reasoning_effort": "disabled",
+        }
+    )
+    no_disable_res = no_disable_capped.resolve_effort("high")
+    assert no_disable_res.requested_effort == "high"
+    assert no_disable_res.effective_effort is None
+    assert no_disable_res.omitted is True
+    assert no_disable_res.passthrough is False
+    assert no_disable_res.extra_body == {}

@@ -494,10 +494,16 @@ class ProviderProfile:
         clamped_mode: ConcreteThinkingMode = mode
         if self.max_reasoning_effort is not None:
             clamped_mode, _ = clamp_effort_to_ceiling(mode, self.max_reasoning_effort)
-            if clamped_mode == "disabled":
-                return self.resolve_effort("disabled")
-            if clamped_mode == "omit":
-                return self.resolve_effort("omit")
+            if clamped_mode in ("disabled", "omit"):
+                clamped = self.resolve_effort(clamped_mode)
+                return EffortResolution(
+                    requested_effort=mode,
+                    effective_effort=clamped.effective_effort,
+                    omitted=clamped.omitted,
+                    passthrough=False,
+                    provider_profile=clamped.provider_profile,
+                    extra_body=clamped.extra_body,
+                )
 
         mapping = self.effective_effort_mapping()
         mapped = mapping.get(clamped_mode)
