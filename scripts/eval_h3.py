@@ -481,6 +481,18 @@ class CostConfig:
         )
 
 
+def validate_expected_model(model: str) -> str:
+    """Validate ``--expected-model`` as a non-empty single-line model ID."""
+    if (
+        not isinstance(model, str)
+        or not model
+        or model != model.strip()
+        or any(ch in ("\r", "\n", "\v", "\f", "\x85", "\u2028", "\u2029", "\x00") for ch in model)
+    ):
+        raise Refused("--expected-model must be a non-empty single-line model ID")
+    return model
+
+
 def validate_proxy_url(proxy: str | None, *, live: bool) -> str | None:
     """Validate an explicit ``--proxy`` URL; never echoes credentials or URL in errors."""
     if proxy is None:
@@ -561,12 +573,15 @@ def binding_set(
     overrides: Mapping[str, Any],
     frozen_inputs: Mapping[str, str],
     pilot_manifest_sha256: str | None = None,
+    expected_model: str = PINNED_MODEL,
 ) -> dict[str, Any]:
+    pinned_model = validate_expected_model(expected_model)
     data: dict[str, Any] = {
         "pinned_tag_commit": PINNED_TAG_COMMIT,
         "src_tree": src_tree,
         "terms_db_sha256": terms_db_sha256,
         "matcher_revision": matcher_revision,
+        "pinned_model": pinned_model,
         "frozen_files_sha256": frozen_file_hashes(),
         "raw_prompts_sha256": {d: sha256_text(p) for d, p in RAW_SYSTEM_PROMPTS.items()},
         "raw_baseline_modes": dict(RAW_BASELINE_MODES),
@@ -1541,6 +1556,7 @@ class RunConfig:
     proxy: str | None = None
     pilot_manifest_sha256: str | None = None
     full_manifest_sha256: str | None = None
+    expected_model: str = PINNED_MODEL
 
 
 @dataclass
@@ -1927,6 +1943,7 @@ def prepare(cfg: RunConfig) -> tuple[Core, dict[str, Any]]:
         raise Refused(f"arm {cfg.arm} does not run in stage {cfg.stage}")
     if cfg.max_calls < 1:
         raise Refused("--max-calls must be at least 1")
+    expected_model = validate_expected_model(cfg.expected_model)
     overrides: dict[str, Any] = {}
     if cfg.expected_src_tree != PINNED_SRC_TREE:
         overrides["src_tree"] = cfg.expected_src_tree
@@ -1950,6 +1967,7 @@ def prepare(cfg: RunConfig) -> tuple[Core, dict[str, Any]]:
         overrides=overrides,
         frozen_inputs=cfg.frozen_inputs,
         pilot_manifest_sha256=cfg.pilot_manifest_sha256,
+        expected_model=expected_model,
     )
     return core, bindings
 
@@ -2020,8 +2038,8 @@ def execute_run(cfg: RunConfig) -> tuple[int, dict[str, Any]]:
         if cfg.live:
             if not core.llm_transport.llm_configured():
                 raise Refused("no model gateway configured (environment or --env-file)")
-            if model != PINNED_MODEL:
-                raise Refused(f"live runs use the pinned model {PINNED_MODEL}")
+            if model != cfg.expected_model:
+                raise Refused(f"live runs use the pinned model {cfg.expected_model}")
         return _execute(cfg, core, bindings, docs, model, preconditions=preconditions)
 
 
@@ -2208,8 +2226,10 @@ def preflight(
     work_dir: Path,
     frozen_inputs: Mapping[str, str],
     frozen_paths: Mapping[str, Path] | None = None,
+    expected_model: str = PINNED_MODEL,
 ) -> dict[str, Any]:
     """A full dry run of every stage; returns the exact POST itemization."""
+    pinned_model = validate_expected_model(expected_model)
     plan: list[tuple[str, Manifest]] = []
     pilot_sha = pilot_manifest.sha256 if pilot_manifest is not None else None
     if pilot_manifest is not None:
@@ -2228,6 +2248,7 @@ def preflight(
                 approval=None, expected_src_tree=expected_src_tree,
                 expected_terms_sha256=expected_terms_sha256, scenario=[], frozen_inputs=dict(frozen_inputs),
                 frozen_paths=paths_map, pilot_manifest_sha256=pilot_sha,
+                expected_model=pinned_model,
             )
             code, summary = execute_run(cfg)
             row: dict[str, Any] = {"stage": stage, "arm": arm, "status": summary["status"],
@@ -2285,6 +2306,7 @@ def preflight(
     return {
         "schema": PREFLIGHT_SCHEMA,
         "dry_run": True,
+        "expected_model": pinned_model,
         "token_estimator": "one per CJK scalar plus one per 4 other scalars (offline estimate)",
         "manifest_sha256": manifest.sha256,
         "pilot_manifest_sha256": pilot_manifest.sha256 if pilot_manifest else None,
@@ -2339,6 +2361,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--terms-db", required=True, metavar="TERMS.db")
     parser.add_argument("--expected-src-tree", default=PINNED_SRC_TREE, help="dry runs only")
     parser.add_argument("--expected-terms-sha256", default=PINNED_TERMS_DB_SHA256, help="dry runs only")
+    parser.add_argument(
+        "--expected-model",
+        default=PINNED_MODEL,
+        metavar="MODEL",
+        help=f"pinned model ID bound into bindings, approval token and ledger (default: {PINNED_MODEL})",
+    )
     parser.add_argument("--freeze", action="append", default=[], metavar="FILE",
                         help="a frozen input (sample, name/community annotations, clearances, h3-acceptance-v1, h3-judges-v1)")
     parser.add_argument("--acceptance-receipt", metavar="RECEIPT.json",
@@ -2503,6 +2531,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     full_manifest_sha256 = (
         load_manifest(Path(args.full_manifest)).sha256 if args.full_manifest else None
     )
+    expected_model = validate_expected_model(args.expected_model)
     cfg = RunConfig(
         stage=args.stage,
         arm=args.arm,
@@ -2524,6 +2553,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         proxy=proxy,
         pilot_manifest_sha256=pilot_manifest_sha256,
         full_manifest_sha256=full_manifest_sha256,
+        expected_model=expected_model,
     )
     code, summary = execute_run(cfg)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -2548,12 +2578,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         acceptance_receipt=args.acceptance_receipt,
         judges=args.judges,
     )
+    expected_model = validate_expected_model(args.expected_model)
     try:
         report = preflight(
             manifest=manifest, pilot_manifest=pilot, bound_tree=Path(args.bound_tree).resolve(),
             terms_db=Path(args.terms_db).resolve(), expected_src_tree=args.expected_src_tree,
             expected_terms_sha256=args.expected_terms_sha256, work_dir=work,
             frozen_inputs=freeze_hashes, frozen_paths=freeze_paths,
+            expected_model=expected_model,
         )
     finally:
         if cleanup is not None:
