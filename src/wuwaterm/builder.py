@@ -1002,6 +1002,7 @@ def _prepare_and_replace_target(tmp_path: Path, target: Path) -> None:
             ) from exc
 
         try:
+            is_sqlite_target = False
             try:
                 conn.execute("PRAGMA locking_mode = EXCLUSIVE")
                 conn.execute("BEGIN EXCLUSIVE")
@@ -1031,6 +1032,7 @@ def _prepare_and_replace_target(tmp_path: Path, target: Path) -> None:
                             f"refusing to replace active WAL database {target}: "
                             f"could not exit WAL mode cleanly (mode={mode_after})"
                         )
+                is_sqlite_target = True
             except sqlite3.OperationalError as exc:
                 raise BuildError(
                     f"refusing to replace active database {target}: {exc}"
@@ -1043,6 +1045,17 @@ def _prepare_and_replace_target(tmp_path: Path, target: Path) -> None:
                 # Non-SQLite placeholder file with no WAL/SHM sidecars: allow replace.
 
             _clear_sidecars_fail_closed(target, wal_path, shm_path)
+            if is_sqlite_target:
+                # Switch this connection's per-connection journal mode to MEMORY
+                # before os.replace (without altering the on-disk header or releasing
+                # locking_mode=EXCLUSIVE), so conn.close() after os.replace never
+                # unlinks a new <target>-journal created by a writer on the replaced DB.
+                try:
+                    conn.execute("PRAGMA journal_mode = MEMORY")
+                except sqlite3.Error as exc:
+                    raise BuildError(
+                        f"refusing to replace database {target}: could not isolate journal mode: {exc}"
+                    ) from exc
             os.replace(tmp_path, target)
             _fsync_dir(target.parent)
         finally:

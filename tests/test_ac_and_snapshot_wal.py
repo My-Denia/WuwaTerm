@@ -1595,3 +1595,146 @@ def test_idle_term_service_in_delete_mode_does_not_block_atomic_replace_exclusiv
         assert svc_b.dictionary_identity().source_commit == "atomic-replacement-commit"
     finally:
         svc_b.close()
+
+
+def test_build_database_atomic_close_never_unlinks_new_db_rollback_journal(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """Switching old conn to journal_mode=MEMORY before os.replace protects a new DB's -journal."""
+    _install_fake_atomic_builder(monkeypatch)
+    target = tmp_path / "journal-isolated.db"
+    shutil.copy2(sample_db, target)
+
+    from wuwaterm import builder as builder_mod
+
+    real_fsync_dir = builder_mod._fsync_dir
+    journal_path = Path(f"{target}-journal")
+    journal_created_before_close = False
+
+    # Crash a writer subprocess right after os.replace (before old_conn.close()) so
+    # a real hot rollback -journal sits on disk when old_conn.close() runs.
+    crash_writer_script = (
+        "import os, sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], isolation_level=None); "
+        "c.execute('PRAGMA journal_mode = DELETE'); "
+        "c.execute('PRAGMA cache_size = 1'); "
+        "c.execute('BEGIN IMMEDIATE'); "
+        "c.execute(\"UPDATE terms SET en = 'UncommittedCrash' WHERE zh = '原子新词'\"); "
+        "c.execute('CREATE TABLE crash_spill(pad TEXT)'); "
+        "c.executemany('INSERT INTO crash_spill VALUES (?)', [('x' * 3000,) for _ in range(32)]); "
+        "os._exit(0)"
+    )
+
+    def intercepted_fsync_dir(directory: Path) -> None:
+        nonlocal journal_created_before_close
+        real_fsync_dir(directory)
+        if directory == target.parent and target.exists():
+            proc = subprocess.run(
+                [sys.executable, "-c", crash_writer_script, str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert journal_path.exists() and journal_path.stat().st_size > 0
+            journal_created_before_close = True
+
+    monkeypatch.setattr(builder_mod, "_fsync_dir", intercepted_fsync_dir)
+
+    assert build_database_atomic(tmp_path, target) == 1
+    assert journal_created_before_close is True
+    # Old connection's close() must NEVER have deleted the new DB's hot -journal!
+    assert journal_path.exists() and journal_path.stat().st_size > 0
+
+    # Reopening the replaced DB replays the intact hot -journal and cleanly rolls back.
+    verify_conn = sqlite3.connect(target)
+    try:
+        assert verify_conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert verify_conn.execute("SELECT zh, en FROM terms").fetchall() == [
+            ("原子新词", "Atomic Replacement")
+        ]
+        tables = {
+            row[0]
+            for row in verify_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "crash_spill" not in tables
+    finally:
+        verify_conn.close()
+
+
+def test_missing_db_closes_and_releases_version_conn_on_pre_and_post_stat_failure(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """When the DB file disappears before pre-stat or post-stat, TermService leaks no handle/fd."""
+    from wuwaterm import lookup as lookup_mod
+
+    def open_fds_referencing(filename: str) -> list[str]:
+        proc_fd = Path("/proc/self/fd")
+        if not proc_fd.is_dir():
+            return []
+        matches: list[str] = []
+        for entry in proc_fd.iterdir():
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                continue
+            if filename in target:
+                matches.append(target)
+        return matches
+
+    # 1. Main DB deleted after warming cache, before pre-stat().
+    db_pre = tmp_path / "vanish-pre.db"
+    shutil.copy2(sample_db, db_pre)
+    svc_pre = TermService(db_pre)
+    snap_pre = svc_pre.snapshot()
+    assert svc_pre._snapshot_cache is snap_pre
+    assert svc_pre._version_conn is not None
+
+    db_pre.unlink()
+    with pytest.raises(FileNotFoundError):
+        svc_pre.snapshot()
+    assert svc_pre._version_conn is None
+    assert svc_pre._snapshot_cache is None
+    assert open_fds_referencing(db_pre.name) == []
+
+    # 2. Main DB deleted after cold read completes, right before post-stat().
+    db_post = tmp_path / "vanish-post.db"
+    shutil.copy2(sample_db, db_post)
+    resolved_post = db_post.resolve(strict=False)
+
+    real_connect_ro = lookup_mod._connect_readonly
+    opened_conns: list[sqlite3.Connection] = []
+
+    def tracking_connect_ro(path: Path) -> sqlite3.Connection:
+        conn = real_connect_ro(path)
+        if path.resolve(strict=False) == resolved_post:
+            opened_conns.append(conn)
+        return conn
+
+    real_stat_tuple = lookup_mod._stat_tuple
+    post_stat_calls = 0
+
+    def vanish_on_post_stat(path: Path) -> tuple[int, int, int, int, int]:
+        nonlocal post_stat_calls
+        if path == resolved_post:
+            post_stat_calls += 1
+            if post_stat_calls == 2 and db_post.exists():
+                db_post.unlink()
+        return real_stat_tuple(path)
+
+    monkeypatch.setattr(lookup_mod, "_connect_readonly", tracking_connect_ro)
+    monkeypatch.setattr(lookup_mod, "_stat_tuple", vanish_on_post_stat)
+
+    svc_post = TermService(db_post)
+    with pytest.raises(FileNotFoundError):
+        svc_post.snapshot()
+
+    assert post_stat_calls == 2
+    assert len(opened_conns) == 1
+    assert svc_post._version_conn is None
+    assert svc_post._snapshot_cache is None
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_conns[0].execute("SELECT 1")
+    assert open_fds_referencing(db_post.name) == []

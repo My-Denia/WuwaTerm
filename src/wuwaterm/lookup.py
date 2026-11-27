@@ -596,7 +596,13 @@ class TermService:
         """Storage identity for cache validation, matching provenance + WAL awareness."""
         with self._lock:
             path = self.db_path.resolve(strict=False)
-            main_stat = _stat_tuple(path)
+            try:
+                main_stat = _stat_tuple(path)
+            except OSError:
+                self._close_version_conn()
+                self._snapshot_cache = None
+                self._snapshot_stamp = None
+                raise
             wal_stat, shm_stat, wal_direct_stat, shm_direct_stat, has_wal_or_shm = (
                 self._sidecar_stats(path)
             )
@@ -694,7 +700,13 @@ class TermService:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
                 path = self.db_path.resolve(strict=False)
-                main_stat = _stat_tuple(path)
+                try:
+                    main_stat = _stat_tuple(path)
+                except OSError:
+                    self._close_version_conn()
+                    self._snapshot_cache = None
+                    self._snapshot_stamp = None
+                    raise
                 (
                     wal_stat,
                     shm_stat,
@@ -747,92 +759,100 @@ class TermService:
                     self._version_conn is not None
                     and self._version_inode == inode
                 )
-                conn = (
+                candidate_conn = (
                     self._version_conn
                     if reused_conn and self._version_conn is not None
                     else _connect_readonly(path)
                 )
-                stamp_seed: tuple[object, ...] = (str(path), main_stat)
+                keep_conn = False
                 try:
-                    snapshot, journal_mode, dv, _probe = self._read_snapshot_on_conn(
-                        conn, stamp_seed
-                    )
-                except sqlite3.Error:
-                    if reused_conn:
-                        self._close_version_conn()
-                        conn = _connect_readonly(path)
-                        reused_conn = False
-                        try:
-                            snapshot, journal_mode, dv, _probe = (
-                                self._read_snapshot_on_conn(conn, stamp_seed)
-                            )
-                        except BaseException:
-                            conn.close()
-                            raise
-                    else:
-                        conn.close()
-                        raise
-                except BaseException:
-                    if reused_conn:
-                        self._close_version_conn()
-                    else:
-                        conn.close()
-                    raise
-
-                main_stat_after = _stat_tuple(path)
-                (
-                    _wal_a,
-                    _shm_a,
-                    _wal_da,
-                    _shm_da,
-                    has_wal_or_shm_after,
-                ) = self._sidecar_stats(path)
-
-                if (
-                    journal_mode == "delete"
-                    and not has_wal_or_shm_after
-                    and not _is_coarse_timestamp(main_stat_after)
-                    and main_stat_after == main_stat
-                ):
+                    stamp_seed: tuple[object, ...] = (str(path), main_stat)
                     try:
-                        dv_after_row = conn.execute(
-                            "PRAGMA data_version"
-                        ).fetchone()
-                        dv_after = (
-                            int(dv_after_row[0]) if dv_after_row is not None else -1
+                        snapshot, journal_mode, dv, _probe = (
+                            self._read_snapshot_on_conn(candidate_conn, stamp_seed)
                         )
                     except sqlite3.Error:
-                        if reused_conn:
+                        if not reused_conn:
+                            raise
+                        self._close_version_conn()
+                        reused_conn = False
+                        candidate_conn = _connect_readonly(path)
+                        snapshot, journal_mode, dv, _probe = (
+                            self._read_snapshot_on_conn(candidate_conn, stamp_seed)
+                        )
+
+                    main_stat_after = _stat_tuple(path)
+                    (
+                        _wal_a,
+                        _shm_a,
+                        _wal_da,
+                        _shm_da,
+                        has_wal_or_shm_after,
+                    ) = self._sidecar_stats(path)
+
+                    if (
+                        journal_mode == "delete"
+                        and not has_wal_or_shm_after
+                        and not _is_coarse_timestamp(main_stat_after)
+                        and main_stat_after == main_stat
+                    ):
+                        try:
+                            dv_after_row = candidate_conn.execute(
+                                "PRAGMA data_version"
+                            ).fetchone()
+                            dv_after = (
+                                int(dv_after_row[0])
+                                if dv_after_row is not None
+                                else -1
+                            )
+                        except sqlite3.Error:
+                            continue
+                        if dv_after == dv:
+                            if (
+                                not reused_conn
+                                and self._version_conn is not candidate_conn
+                            ):
+                                self._close_version_conn()
+                            self._version_conn = candidate_conn
+                            self._version_inode = inode
+                            self._version_main_stat = main_stat_after
+                            self._version_data_version = dv
+                            self._snapshot_stamp = (
+                                str(path),
+                                main_stat_after,
+                                "delete",
+                                dv,
+                            )
+                            self._snapshot_cache = snapshot
+                            keep_conn = True
+                            return snapshot
+                        continue
+
+                    # Non-DELETE mode (e.g. WAL) or sidecars appeared: never retain
+                    # handle and never cache so WAL stays 100% fresh across checkpoints.
+                    self._snapshot_cache = None
+                    self._snapshot_stamp = None
+                    if (
+                        journal_mode != "delete"
+                        or has_wal_or_shm_after
+                        or _is_coarse_timestamp(main_stat_after)
+                    ):
+                        return snapshot
+                except BaseException:
+                    self._snapshot_cache = None
+                    self._snapshot_stamp = None
+                    if not reused_conn:
+                        self._close_version_conn()
+                    raise
+                finally:
+                    if not keep_conn:
+                        if reused_conn and self._version_conn is candidate_conn:
                             self._close_version_conn()
                         else:
-                            conn.close()
-                        continue
-                    if dv_after == dv:
-                        self._version_conn = conn
-                        self._version_inode = inode
-                        self._version_main_stat = main_stat_after
-                        self._version_data_version = dv
-                        self._snapshot_stamp = (str(path), main_stat_after, "delete", dv)
-                        self._snapshot_cache = snapshot
-                        return snapshot
-                    if not reused_conn:
-                        conn.close()
-                    continue
-
-                # Non-DELETE mode (e.g. WAL) or sidecars appeared: NEVER retain handle
-                # and never cache so WAL mode stays 100% fresh even across checkpoints.
-                if reused_conn:
-                    self._close_version_conn()
-                else:
-                    conn.close()
-                self._snapshot_cache = None
-                self._snapshot_stamp = None
-                if (
-                    journal_mode != "delete"
-                    or has_wal_or_shm_after
-                    or _is_coarse_timestamp(main_stat_after)
-                ):
-                    return snapshot
+                            try:
+                                candidate_conn.close()
+                            except sqlite3.Error:
+                                pass
 
             assert snapshot is not None
             return snapshot
