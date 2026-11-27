@@ -5,17 +5,19 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.15.0 - 2026-11-27
+
 ### Installer
 
 - `deploy/setup.sh` defaults the installer to Web `v0.5.1`, the release
-  `contracts/products.json` now records. The Telegram default stays `v0.6.0`
-  (pinning Core `v0.13.0`).
+  `contracts/products.json` now records (#346). The Telegram default stays
+  `v0.6.0` (pinning Core `v0.13.0`).
 
 ### Contract Pins
 
 - The Core CI client pins move to Web `v0.5.1` (`13faa392`) and Windows
-  `v0.7.1` (`1ada119a`). Neither patch release moved its own cross-repository
-  pins: Web `0.5.1` still names Core `v0.14.0` (`27375301`) in
+  `v0.7.1` (`1ada119a`) (#346). Neither patch release moved its own
+  cross-repository pins: Web `0.5.1` still names Core `v0.14.0` (`27375301`) in
   `contracts/backend-ref.txt`, and Windows `0.7.1` still names Core `v0.14.0`
   and Web `v0.5.0` in `contracts/sources.json`, so
   `contracts/products.json` `ci_pins.web_tests_core` stays on `2737530`.
@@ -24,12 +26,120 @@ does not distribute generated game data or generated SQLite databases.
 
 - `contracts/products.json`, `docs/products.md` and `docs/release-checklist.md`
   record the published Core `v0.14.1`, Web `v0.5.1` and Windows `v0.7.1`
-  releases with their assets, SHA-256 values and workflow runs. The Core `r15`
-  `--runtime-only` production deployment is recorded too: `.deploy_commit`
+  releases with their assets, SHA-256 values and workflow runs (#346). The Core
+  `r15` `--runtime-only` production deployment is recorded too: `.deploy_commit`
   `1949f8d`, an unchanged `terms.db` (`9ddee819…`), `RestartCount` 0 and the
   retained `r14` rollback point. `README.md`, `README.zh-CN.md`,
   `docs/self-hosting.md`, `docs/support-matrix.md` and `SECURITY.md` state the
   same three versions.
+
+### Review & Terms
+
+- Move the deterministic Layer 2 number-attribution candidate reader into
+  `src/wuwaterm/attribution_candidates.py` (`attribution-candidates-v1`, MY-490 /
+  MY-228, #344), with `scripts/eval_structure_checks.py` importing it instead of
+  keeping a copy. The reader is pure and bounded (`MAX_SIDE_SCALARS = 2000`
+  scalars per side, `MIN_SHARED_SLOTS = 2`, at most `MAX_SLOTS = 8` differing
+  slots with `MAX_VALUES_PER_SLOT = 4` values each). Measured offline with no
+  model call: 21 / 21 swap recall on synthetic pairs, 0 candidates on the 16
+  natural-reorder and 17 clean-multi-stat cases, and 2.37 ms slowest
+  adversarial input.
+- Gate the semantic-review attribution hint behind
+  `WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS` (default off; truthy only on `1`,
+  `true` or `yes`, #344). When enabled and a pair produces a candidate,
+  `build_messages` in `src/wuwaterm/semantic_review.py` attaches
+  `numeric_attribution_candidates_note` (`ATTRIBUTION_HINT_WORDING`) and
+  `numeric_attribution_candidates` as read-only surface evidence; when off,
+  `build_messages` emits byte-identical messages (pinned by a SHA-256 test). No
+  API response field, wire contract, rule id or finding category changes.
+- Add [ADR 0023](docs/adr/0023-local-translation-memory.md)
+  (`wuwaterm-tm-v1` local sentence translation memory format, provenance and
+  staleness rules, #344) and
+  [ADR 0024](docs/adr/0024-diagnose-then-repair-targeted-review.md)
+  (five-stage diagnose-then-repair layered review with six pre-registered
+  acceptance metrics, #344), and sync ADR 0023 (`MY-491`, #347) with the
+  shipped Windows SQLite MVP and Web in-memory import/export contract:
+  two-sided `context_exact` neighbour hash bounds (`prev_source_hash !== null ||
+  next_source_hash !== null`, 2,000-scalar neighbour cap), three-state
+  freshness (`verified_fresh`, `known_stale`, `provenance_unknown`), and
+  restricting automatic batch/incremental skip to `context_exact` +
+  `verified_fresh` entries only.
+
+### Translation Engine
+
+- Add opt-in, default-off Core engine candidates from ADR 0021 (`MY-18`,
+  `MY-380`, #345); no `/v1` API field is added and requests without these
+  context members or flags keep byte-identical prompts and `OperationIdentity`
+  payloads:
+  - **C1 (`src/wuwaterm/termbase.py`)**: parse and validate `wuwaterm-termbase-v1`
+    (`schema_version = 1`, up to 2,000 entries and 1 MiB / 1,048,576 bytes,
+    per-field scalar bounds, RFC 3339 UTC timestamps with `\A`/`\Z` matching and
+    nesting-depth guard), failing closed on unknown or duplicate keys,
+    non-finite numbers, isolated surrogates, NUL bytes and prototype-pollution
+    keys without echoing payload content. `match_user_glossary` matches a
+    segment in first-occurrence order (capped at `MAX_USER_GLOSSARY_REFERENCES =
+    16`), and `select_prompt_references` drops any entry colliding (via
+    `strip().casefold()`) with official `reference.source`, `reference.target` or
+    non-empty `occurrence.matched_text` surfaces so official pairs always win.
+    Matched entries render via `TranslationContext.user_glossary_references` as
+    non-binding preference lines, never as `TermReference` or
+    `__WUWA_TERM_...__` placeholders and never reaching admission or
+    `/v1/reviews`.
+  - **C3 (`src/wuwaterm/document_anchor.py`)**: add `DocumentAnchor` (topic,
+    section heading, up to 8 entities, 280 scalars total) with clamping in
+    `bounded_anchor_fields` (stripping whitespace-only topic/heading fields) and
+    pure `extract_document_anchor(segments, current_index)` scanning within
+    `ANCHOR_SEGMENT_WINDOW = 8`. Renders on `TranslationContext.document_anchor`
+    only when explicitly set and enters no admission or sense-lock decision.
+  - **C4 (`src/wuwaterm/translation_plan.py`, `src/wuwaterm/sentence.py`)**:
+    accept `WUWATERM_TRANSLATION_THINKING_ZH_EN=auto` behind
+    `RequestPolicy.zh_en_auto_thinking` (default `False`;
+    `TRANSLATION_THINKING_ZH_EN_DEFAULT` stays `disabled`).
+    `select_zh_en_auto_thinking` selects `disabled` at 4 or more locks, 25 or
+    more paragraphs or more than 900 prepared scalars and `low` otherwise,
+    sharing the single corrective call (`_retry_without_thinking` timeout fallback
+    or paragraph-count repair) and recording `auto_lock_limit` and
+    `auto_paragraph_limit` in `OperationIdentity` when `auto` is active.
+- Fix `SentenceTranslator` paragraph-count repair in `src/wuwaterm/sentence.py`
+  (`MY-380`, #347) to pass `prepared_scalars=len(locked.locked_text)` into
+  `select_repair_thinking_mode`, preventing long `zh->en` `auto` segments (> 900
+  scalars) from stepping up to `low` during paragraph repair while allowing
+  short multi-paragraph segments (<= 900 scalars, < 4 locks) to step up.
+
+### Evaluation & Research
+
+- Add H3 Protocol Revision (d) support in `scripts/eval_h3.py` and
+  `docs/eval/h3-and-raw-baseline-protocol.md` (`MY-517`, #348): add
+  `--expected-model MODEL` (default `deepseek-flash`, validated as a non-empty
+  single-line model ID) to `run` and `preflight`, hash `pinned_model` into
+  `bindings`, `--owner-approval-token` and `h3-ledger.json`, and enforce
+  `bindings.tools_sha256` verification in `_validate_acceptance_receipt` so an
+  `h3-acceptance-v1` receipt whose `scripts/eval_h3.py` (or other frozen tool)
+  SHA-256 differs from the running tool is rejected fail-closed. Records owner
+  authorization (2026-11-27) for the H3 same-model three-arm blind run using
+  `--expected-model gemini-4-neon` while keeping the `v0.14.0` Core tree under
+  test, `terms.db` and frozen corpus unchanged.
+
+### Upgrade & Compatibility
+
+- All experimental and candidate flags remain opt-in and **off by default**:
+  `WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS` is off,
+  `WUWATERM_TRANSLATION_THINKING_ZH_EN` stays `disabled` (and
+  `WUWATERM_TRANSLATION_THINKING_EN_ZH` stays `omit`), and unset
+  `TranslationContext.document_anchor` / `user_glossary_references` render
+  nothing, so unconfigured deployments preserve byte-identical prompts,
+  `OperationIdentity` payloads and `/v1/reviews` / `/v1/structure-checks`
+  responses.
+- The HTTP contract does not change: `docs/api/openapi.json` differs from
+  `v0.14.1` only in `info.version` (`0.15.0`).
+- Dictionary builder logic, SQLite schema (`2`), pinned game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`), `terms.db` contents and matcher
+  `wuwaterm-cjk-matcher-v11` are unchanged from `v0.14.1`, so existing `v0.14.0`
+  and `v0.14.1` deployments keep their `terms.db` and upgrade with
+  `deploy/vps-update.sh --runtime-only`.
+- `contracts/products.json` keeps its current snapshot (Core `v0.14.1`, Web
+  `v0.5.1`, Windows `v0.7.1`) until Core `0.15.0`, Web `0.6.0` and Windows
+  `0.8.0` are published.
 
 ## 0.14.1 - 2026-11-26
 
