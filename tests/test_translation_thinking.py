@@ -19,8 +19,10 @@ import pytest
 
 from tests.test_api_semantic_review import FakeModel, configure_llm
 from wuwaterm import llm_transport
+from wuwaterm.application import TranslationContext
 from wuwaterm.sentence import (
     TRANSLATION_THINKING_EN_ZH_DEFAULT,
+    SentenceTranslator,
     _call_llm_async,
     select_en_zh_auto_thinking,
 )
@@ -300,3 +302,64 @@ def test_auto_into_english_is_opt_in_and_unset_still_sends_disabled(monkeypatch,
 @pytest.mark.parametrize("var", [ZH_EN, EN_ZH])
 def test_a_blank_mode_is_that_directions_default(monkeypatch, var):
     assert _post(monkeypatch, var == EN_ZH, {var: "  "}) == _post(monkeypatch, var == EN_ZH)
+
+
+def test_zh_en_auto_paragraph_repair_passes_prepared_scalars(monkeypatch, sample_db):
+    """Short `zh->en` `auto` segments may step up on repair; long ones stay `disabled`."""
+    import json
+
+    configure_llm(monkeypatch, semantic_enabled=False)
+    monkeypatch.setenv(ZH_EN, "auto")
+    monkeypatch.delenv(EN_ZH, raising=False)
+
+    def run_repair(source_text: str, answers: list[str]) -> list[dict]:
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            seen.append({
+                key: body[key]
+                for key in ("thinking", "reasoning_effort")
+                if key in body
+            })
+            reply = answers[min(len(seen) - 1, len(answers) - 1)]
+            return httpx.Response(200, json={"choices": [{"message": {"content": reply}}]})
+
+        translator = SentenceTranslator(
+            sample_db, llm_transport=httpx.MockTransport(handler)
+        )
+
+        async def _go():
+            try:
+                return await translator.translate_async(
+                    source_text,
+                    to_chinese=False,
+                    propagate_errors=True,
+                    context=TranslationContext(),
+                )
+            finally:
+                await translator.aclose()
+
+        asyncio.run(_go())
+        return seen
+
+    # Short segment: 25 short paragraphs (<= 900 scalars, 0 locks). Initial call is
+    # disabled by paragraph count; paragraph repair receives prepared_scalars <= 900
+    # and steps up to `low`.
+    short_source = "\n\n".join(f"第{i}段。" for i in range(25))
+    short_merged = "\n\n".join(f"Paragraph {i}." for i in range(24))
+    short_repaired = "\n\n".join(f"Paragraph {i}." for i in range(25))
+    assert run_repair(short_source, [short_merged, short_repaired]) == [
+        DISABLED,
+        LOW,
+    ]
+
+    # Long segment: 2 paragraphs exceeding 900 scalars (0 locks). Initial call is
+    # disabled by scalar limit; paragraph repair keeps `disabled`.
+    long_source = f"{'甲' * 460}\n\n{'乙' * 460}"
+    long_merged = "First and second merged."
+    long_repaired = "First paragraph.\n\nSecond paragraph."
+    assert run_repair(long_source, [long_merged, long_repaired]) == [
+        DISABLED,
+        DISABLED,
+    ]
