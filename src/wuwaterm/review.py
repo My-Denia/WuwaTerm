@@ -33,7 +33,7 @@ from .exclusion_metadata import (
     parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions,
 )
-from .lookup import TermService, derived_reference_only_sources
+from .lookup import TermService, derived_reference_only_sources, dictionary_revision
 from .models import TermEntry
 from .single_char_context import (
     ContextEntity,
@@ -390,23 +390,7 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _dictionary_revision(entries: Sequence[TermEntry]) -> str:
-    rows = sorted(
-        (
-            entry.category,
-            entry.source_file,
-            entry.source_id,
-            entry.text_key,
-            entry.zh,
-            entry.en,
-            entry.pinyin,
-            entry.pinyin_abbrev,
-        )
-        for entry in entries
-    )
-    return hashlib.sha256(
-        _canonical_json(("wuwaterm-review-dictionary-v1", rows))
-    ).hexdigest()
+_dictionary_revision = dictionary_revision
 
 
 def _candidate_id(

@@ -13,6 +13,7 @@
             "items": {
               "enum": [
                 "ambiguous-mention-v1",
+                "dictionary-identity-v1",
                 "semantic-review-v1",
                 "structure-check-v1",
                 "translation-context-v1"
@@ -33,6 +34,69 @@
           "request_id"
         ],
         "title": "CapabilitiesResponseBody",
+        "type": "object"
+      },
+      "DictionaryIdentityResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Deterministic 64-character lowercase hex SHA-256 digest of the served dictionary entries, matching POST /v1/reviews review-v2 dictionary.revision for the same dictionary state (review-v1 omits revision).",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Revision",
+            "type": "string"
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          },
+          "source_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Commit"
+          },
+          "source_game_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Game Version"
+          },
+          "term_count": {
+            "minimum": 0.0,
+            "title": "Term Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "schema_version",
+          "source_commit",
+          "source_game_version",
+          "term_count",
+          "request_id"
+        ],
+        "title": "DictionaryIdentityResponseBody",
         "type": "object"
       },
       "ErrorDetailBody": {
@@ -2142,6 +2206,123 @@
         "summary": "Read Capabilities",
         "tags": [
           "service"
+        ]
+      }
+    },
+    "/v1/dictionary": {
+      "get": {
+        "description": "Authoritative cryptographic dictionary identity and matching provenance.",
+        "operationId": "read_dictionary_v1_dictionary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DictionaryIdentityResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Dictionary",
+        "tags": [
+          "dictionary"
         ]
       }
     },

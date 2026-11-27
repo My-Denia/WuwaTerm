@@ -8,10 +8,15 @@ mode) is covered by tests/test_bot.py.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import inspect
 import json
 import logging
+import re
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -29,6 +34,7 @@ from wuwaterm.application import (
     KIND_LLM,
     KIND_NOOP,
     TRANSLATION_ERROR_CODES,
+    DictionaryIdentity,
     MarkupTranslation,
     ServiceMetadata,
     SlidingWindowRateLimiter,
@@ -36,11 +42,13 @@ from wuwaterm.application import (
     TranslationOutcome,
     build_term_service,
     build_translator,
+    dictionary_identity,
     error_code_for_llm_reason,
     input_too_long_message,
     lookup_exact_terms,
     lookup_terms,
     probe_database,
+    review_pair,
     service_metadata,
     split_plain_text,
     translate_request,
@@ -856,6 +864,112 @@ def test_service_metadata_exposes_no_paths_or_secrets(sample_db):
     rendered = repr(meta)
     assert str(sample_db) not in rendered
     assert "terms.db" not in rendered
+
+
+def test_dictionary_identity_matches_review_revision_and_exposes_no_paths_or_secrets(
+    sample_db,
+):
+    service = build_term_service(sample_db)
+
+    identity = dictionary_identity(service)
+    meta = service_metadata(service)
+    report = review_pair(service, "今汐", "Jinhsi", "en", review_version="review-v2")
+
+    assert isinstance(identity, DictionaryIdentity)
+    assert re.fullmatch(r"[0-9a-f]{64}", identity.revision)
+    assert identity.revision == report.dictionary.revision
+    assert identity.schema_version == meta.schema_version
+    assert identity.source_commit == meta.source_commit
+    assert identity.source_game_version == meta.source_game_version
+    assert identity.term_count == meta.term_count > 0
+    rendered = repr(identity)
+    assert str(sample_db) not in rendered
+    assert "terms.db" not in rendered
+
+
+def test_dictionary_identity_recomputes_when_term_content_changes_with_same_metadata_and_count(
+    tmp_path: Path, sample_db
+):
+    mutated = tmp_path / "mutated.db"
+    mutated.write_bytes(sample_db.read_bytes())
+    service = build_term_service(mutated)
+
+    before = dictionary_identity(service)
+    with connect(mutated) as conn:
+        row = conn.execute("SELECT id, en FROM terms ORDER BY id LIMIT 1").fetchone()
+        assert row is not None
+        updated_en = ("X" if row["en"][0] != "X" else "Y") + row["en"][1:]
+        conn.execute("UPDATE terms SET en = ? WHERE id = ?", (updated_en, row["id"]))
+        conn.commit()
+
+    after = dictionary_identity(service)
+    report = review_pair(service, "今汐", "Jinhsi", "en", review_version="review-v2")
+
+    assert after.schema_version == before.schema_version
+    assert after.source_commit == before.source_commit
+    assert after.term_count == before.term_count
+    assert after.revision != before.revision
+    assert after.revision == report.dictionary.revision
+
+
+def test_dictionary_identity_supports_concurrent_reads_and_preserves_in_process_read_locks(
+    tmp_path: Path, sample_db
+):
+    locked_db = tmp_path / "locked.db"
+    locked_db.write_bytes(sample_db.read_bytes())
+    service = build_term_service(locked_db)
+    expected = dictionary_identity(service)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: dictionary_identity(service), range(16)))
+
+    assert results == [expected] * 16
+
+    reader = connect(locked_db)
+    writer = sqlite3.connect(locked_db, timeout=0.0)
+    probe_script = (
+        "import sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], timeout=0.0); "
+        "c.execute('BEGIN EXCLUSIVE')"
+    )
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT COUNT(*) FROM terms").fetchone()[0] > 0
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.execute("BEGIN EXCLUSIVE")
+        before_probe = subprocess.run(
+            [sys.executable, "-c", probe_script, str(locked_db)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert before_probe.returncode != 0
+        assert "locked" in before_probe.stderr
+
+        # Must not open/close the raw DB file descriptor and drop reader's POSIX fcntl lock.
+        assert service.dictionary_identity() == expected
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            writer.execute("BEGIN EXCLUSIVE")
+        after_probe = subprocess.run(
+            [sys.executable, "-c", probe_script, str(locked_db)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert after_probe.returncode != 0
+        assert "locked" in after_probe.stderr
+    finally:
+        reader.close()
+        writer.close()
+
+    after_release = sqlite3.connect(locked_db, timeout=0.0)
+    try:
+        after_release.execute("BEGIN EXCLUSIVE")
+        after_release.rollback()
+    finally:
+        after_release.close()
 
 
 def test_probe_database_reports_unreadable_database(tmp_path: Path, sample_db):

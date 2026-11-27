@@ -292,9 +292,31 @@ For an edited guide or announcement:
   dictionary behaviour (ADR 0006).
 - **No new API resource in this ADR.** If a future `/v1/translations` request
   gains a memory field, that is a separate contract change with its own
-  schema, limits and privacy review.
+  schema, limits and privacy review. (Note: `GET /v1/dictionary` and capability
+  `dictionary-identity-v1` were added separately under `MY-491` as a read-only
+  dictionary identity endpoint so clients do not have to guess dictionary
+  freshness from `/v1/meta`; see below.)
 - **Not a backup mechanism.** The memory is derived, user-local data; losing it
   costs re-translation, not the manuscript.
+
+## Authoritative dictionary identity (`GET /v1/dictionary` and `dictionary-identity-v1`)
+
+To let clients verify `terms_db_revision` directly without relying on `/v1/meta`
+provenance tuples (`(schema_version, source_commit, term_count)`), Core exposes
+read-only `GET /v1/dictionary` (scoped to `SCOPE_META`) and advertises
+`"dictionary-identity-v1"` in `GET /v1/capabilities`.
+
+- `GET /v1/dictionary` returns `revision` (the 64-character lowercase hex
+  SHA-256 computed by the same deterministic `wuwaterm-review-dictionary-v1`
+  algorithm as `POST /v1/reviews` `review-v2` `dictionary.revision` for the
+  same dictionary state; default `review-v1` omits `revision`),
+  `schema_version`, `source_commit`, `source_game_version`, `term_count`, and
+  `request_id`.
+- Any change to dictionary entries alters `revision` even when `schema_version`,
+  `source_commit`, and `term_count` remain unchanged.
+- `/v1/meta` and `/v1/reviews` response shapes remain unchanged; clients talking
+  to older servers that do not advertise `dictionary-identity-v1` continue to
+  fall back to `/v1/meta` for provenance.
 
 ## Gates before implementation is accepted
 

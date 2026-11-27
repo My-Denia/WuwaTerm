@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -43,6 +46,44 @@ class ReviewSnapshot:
     @property
     def term_count(self) -> int:
         return len(self.entries)
+
+
+@dataclass(frozen=True)
+class DictionaryIdentity:
+    """Authoritative cryptographic dictionary identity and matching provenance.
+
+    Deliberately excludes filesystem paths, credentials and chat identifiers.
+    """
+
+    revision: str
+    schema_version: str | None
+    source_commit: str | None
+    source_game_version: str | None
+    term_count: int
+
+
+def dictionary_revision(entries: Sequence[TermEntry]) -> str:
+    """Return the deterministic SHA-256 identity of the dictionary entries."""
+    rows = sorted(
+        (
+            entry.category,
+            entry.source_file,
+            entry.source_id,
+            entry.text_key,
+            entry.zh,
+            entry.en,
+            entry.pinyin,
+            entry.pinyin_abbrev,
+        )
+        for entry in entries
+    )
+    payload = json.dumps(
+        ("wuwaterm-review-dictionary-v1", rows),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -164,6 +205,17 @@ class TermService:
         return ReviewSnapshot(
             metadata={row["key"]: row["value"] for row in metadata_rows},
             entries=tuple(row_to_entry(row) for row in term_rows),
+        )
+
+    def dictionary_identity(self) -> DictionaryIdentity:
+        """Return the cryptographic dictionary identity from one SQLite snapshot."""
+        snapshot = self.review_snapshot()
+        return DictionaryIdentity(
+            revision=dictionary_revision(snapshot.entries),
+            schema_version=snapshot.metadata.get("schema_version"),
+            source_commit=snapshot.metadata.get("source_commit"),
+            source_game_version=snapshot.metadata.get("source_game_version"),
+            term_count=snapshot.term_count,
         )
 
     def _exact(self, query: str) -> list[LookupCandidate]:
