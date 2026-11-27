@@ -26,6 +26,8 @@ type SegmentTuple = (usize, usize, usize, usize, bool);
 type RegionTuple = (usize, usize, usize, usize);
 type SegmentPairTuple = (usize, &'static str, bool, RegionTuple, RegionTuple);
 
+const DEFAULT_SEGMENT_LIMIT_ISIZE: isize = SEGMENT_LIMIT as isize;
+
 fn extract_single_char(ch: &str) -> PyResult<char> {
     let mut chars = ch.chars();
     match (chars.next(), chars.next()) {
@@ -209,7 +211,7 @@ fn review_sentence_ranges_v2(text: &str) -> Vec<(usize, usize)> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (text, limit = SEGMENT_LIMIT))]
+#[pyo3(signature = (text, limit = DEFAULT_SEGMENT_LIMIT_ISIZE))]
 fn segment_text(py: Python<'_>, text: &str, limit: isize) -> PyResult<Vec<SegmentTuple>> {
     if limit <= 0 {
         return Err(PyValueError::new_err("limit must be positive"));
@@ -223,7 +225,7 @@ fn segment_text(py: Python<'_>, text: &str, limit: isize) -> PyResult<Vec<Segmen
 }
 
 #[pyfunction]
-#[pyo3(signature = (source, target, limit = SEGMENT_LIMIT, alignments = None))]
+#[pyo3(signature = (source, target, limit = DEFAULT_SEGMENT_LIMIT_ISIZE, alignments = None))]
 fn pair_segments(
     py: Python<'_>,
     source: &str,
