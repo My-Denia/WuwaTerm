@@ -1,6 +1,6 @@
 # ADR 0023: Local sentence translation memory (`wuwaterm-tm-v1`) and incremental re-translation
 
-- Status: **Partially implemented (Windows SQLite MVP and Web explicit in-memory import/export merged; three-state freshness, trusted-reuse boundary, and incremental skip in progress under `MY-491`; self-hosted server persistence not implemented)**
+- Status: **Partially implemented (Windows SQLite TM, Public Web in-memory `wuwaterm-tm-v1` import/export, three-state freshness, trusted-reuse boundary, incremental skip, Core `GET /v1/dictionary`, and self-hosted Web SQLite TM (`state-web/data/tm.sqlite3`) merged on `main`; self-hosted Web SQLite TM awaits next self-hosted release)**
 - Date: 2026-11-26 (synced with shipped `wuwaterm-tm-v1` schema and three-state freshness on 2026-11-27)
 - Related: `MY-491`, `MY-490`,
   [ADR 0004](0004-sqlite-terminology-data.md),
@@ -64,8 +64,7 @@ provenance-checked, and never a shared service.
    certified as `context_exact` — whose freshness is `verified_fresh` may enter
    batch / incremental skip (reuse without a model call). Strict two-sided
    comparison (downgrading to `exact` when either neighbour is omitted or
-   changed) is being landed in the Windows and Web `MY-491` remediation
-   branches and is not yet merged on `main`. Every other match — `exact`,
+   changed) is merged on `main` across Windows and Web. Every other match — `exact`,
    `numeric_variant`, `normalized_exact`, `known_stale`, and
    `provenance_unknown` — is a read-only reference only and is never
    auto-applied or skipped silently.
@@ -77,7 +76,10 @@ provenance-checked, and never a shared service.
    (`%APPDATA%/WuwaTerm/tm.sqlite3`); the public Web keeps zero automatic
    storage (`localStorage`, `sessionStorage`, and `IndexedDB` stay empty) and
    only offers explicit `wuwaterm-tm-v1` JSON import/export held in React page
-   memory. Self-hosted server persistence is not yet implemented.
+   memory. Self-hosted Web persistence is served by its same-origin backend
+   SQLite store (`state-web/data/tm.sqlite3`, separate from Core `terms.db`),
+   merged on `WuwaTerm-Web` `main` (PR #81, `129f6a3`, awaiting the next
+   self-hosted release).
 6. **Incremental re-translation is the point.** Editing a document sends the
    edited segments and their boundary neighbours to the model; the untouched
    interior that qualifies as `context_exact` + `verified_fresh` can be served
@@ -157,9 +159,11 @@ Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_t
   `(direction, source_hash, COALESCE(prev_source_hash, ''), COALESCE(next_source_hash, ''), target_text)`,
   plus `tm_entries_norm` (`(direction, source_norm)`) and `tm_entries_masked`
   (`(direction, source_masked)`).
-- Self-hosted (not implemented): when added, will use the instance's local data
-  directory with the same schema and `.env` / `data/` deploy rules; user memory
-  stays separate from shared dictionary data.
+- Self-hosted Web (merged on `WuwaTerm-Web` `main` in PR #81 / `129f6a3`; awaiting
+  next self-hosted release): served by the self-hosted Web same-origin backend
+  at `state-web/data/tm.sqlite3` (in the self-hosted Web data directory) with
+  the same schema and `.env` / `data/` deploy rules; user memory stays separate
+  from Core `terms.db` and shared dictionary data.
 - The memory is not part of `terms.db` and is never written into it: official
   data stays reproducible from pinned TextMaps
   ([ADR 0004](0004-sqlite-terminology-data.md),
@@ -172,14 +176,15 @@ Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_t
   matching ADR 0021 and [Privacy and LLM](../privacy-and-llm.md).
 - Explicit import and export of `wuwaterm-tm-v1` JSON are the only persistence
   paths; the contract caps capacity at `10,000` entries and `8 MiB` UTF-8 across
-  import, merge, confirmation, and export. On `main`, the initial Web `MY-491`
-  implementation already enforces `10,000` entries and `8 MiB` on import,
-  confirmation, and export; merge-time `8 MiB` enforcement and three-state
-  freshness alignment are being landed in the Web remediation branch and are not
-  yet merged to `main`.
-- Imported entries stay in page memory only; nothing is written to the server,
-  uploaded to any API, or embedded into `.wuwaterm` manuscripts, and closing or
-  refreshing the tab clears them.
+  import, merge, confirmation, and export, alongside three-state freshness
+  alignment (`verified_fresh`, `known_stale`, `provenance_unknown`), strict
+  two-sided `context_exact`, and incremental skip.
+- Unreused imported entries stay in React page memory only — nothing is written
+  to the server, uploaded to any API, or embedded into `.wuwaterm` manuscripts,
+  and closing or refreshing the tab clears them. Once a user reuses an entry in
+  the current manuscript, the target text placed into the manuscript
+  participates in Layer 1 structure checks and adjacent-segment translation
+  context under the normal manuscript flow.
 
 ## Matching, three-state freshness, and reuse boundary
 
@@ -195,8 +200,8 @@ Match kinds (ranked `0..3`, ties broken by `use_count` desc, then parsed
 
 Deleting or changing either neighbour (`prev_source` or `next_source`) downgrades
 `context_exact` to `exact`. Strict two-sided comparison and disqualifying
-neighbours over `2,000` scalars from `context_exact` are implemented across both
-the Windows and Web `MY-491` remediation branches (not yet merged on `main`).
+neighbours over `2,000` scalars from `context_exact` are merged on `main`
+across both Windows and Web.
 
 Three-state freshness (`freshness`), evaluated with a single cross-client
 precedence rule:

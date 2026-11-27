@@ -5,17 +5,19 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.16.0 - 2026-11-27
+
 ### Installer
 
 - `deploy/setup.sh` defaults the installer to Web `v0.6.0` and Telegram
   `v0.6.1` (still pinning Core `v0.13.0`), the releases
-  `contracts/products.json` now records.
+  `contracts/products.json` now records (#350).
 
 ### Contract Pins
 
 - The Core CI client pins move to Web `v0.6.0` (`eed5d30e`) and Windows
-  `v0.8.0` (`97c659e2`). Neither release moved its own cross-repository pins:
-  Web `0.6.0` still names Core `v0.14.0` (`27375301`) in
+  `v0.8.0` (`97c659e2`) (#350). Neither release moved its own cross-repository
+  pins: Web `0.6.0` still names Core `v0.14.0` (`27375301`) in
   `contracts/backend-ref.txt`, and Windows `0.8.0` still names Core `v0.14.0`
   and Web `v0.5.0` (`6cd0a7c5`) in `contracts/sources.json`, so
   `contracts/products.json` `ci_pins.web_tests_core` stays on `2737530`.
@@ -25,12 +27,58 @@ does not distribute generated game data or generated SQLite databases.
 - `contracts/products.json`, `docs/products.md` and `docs/release-checklist.md`
   record the published Core `v0.15.0`, Web `v0.6.0`, Windows `v0.8.0` and
   Telegram `v0.6.1` releases with their assets, SHA-256 values and workflow
-  runs. The production VPS `wuwaterm-telegram` upgrade from `v0.6.0`
+  runs (#350). The production VPS `wuwaterm-telegram` upgrade from `v0.6.0`
   (`c4f6a81`) to `v0.6.1` (`f1fe528`, Core `0.13.0`) is recorded alongside the
   still-running `wuwaterm-api` `r15` (`v0.14.1`, `1949f8d`; Core `v0.15.0` is
   published and not yet deployed to VPS). `README.md`, `README.zh-CN.md`,
   `docs/self-hosting.md`, `docs/support-matrix.md` and `SECURITY.md` state the
   same versions.
+
+### API
+
+- Add read-only `GET /v1/dictionary` (`DictionaryIdentityResponseBody`, scoped
+  to `SCOPE_META`) and advertise `"dictionary-identity-v1"` in
+  `GET /v1/capabilities` (`MY-491`, #351). `src/wuwaterm/lookup.py` shares
+  `dictionary_revision` (`"wuwaterm-review-dictionary-v1"` SHA-256) with
+  `src/wuwaterm/review.py` and reads `DictionaryIdentity` (`revision`,
+  `schema_version`, `source_commit`, `source_game_version`, `term_count`) from
+  one SQLite snapshot via `TermService.dictionary_identity()` and
+  `application.dictionary_identity()`, so clients can verify `terms_db_revision`
+  without relying on `/v1/meta` tuples alone.
+
+### Documentation
+
+- Document `GET /v1/dictionary` and `"dictionary-identity-v1"` in
+  [ADR 0023](docs/adr/0023-local-translation-memory.md) (`MY-491`, #351).
+- Sync [ADR 0023](docs/adr/0023-local-translation-memory.md) status and
+  boundaries: remove outdated in-progress / unmerged remediation wording now
+  that Windows SQLite TM, three-state freshness, strict two-sided
+  `context_exact`, incremental skip and Public Web explicit in-memory
+  `wuwaterm-tm-v1` import/export are merged on `main`, clarify the Public Web
+  privacy boundary (unreused imported entries stay in page memory only and
+  never upload to any API; reused target text placed into the manuscript
+  participates in Layer 1 structure checks and adjacent-segment translation
+  context), and record that self-hosted Web SQLite TM
+  (`state-web/data/tm.sqlite3`) and batch/incremental reuse are merged on
+  `WuwaTerm-Web` `main` (PR #81, `129f6a3`, awaiting the next self-hosted
+  release).
+
+### Upgrade & Compatibility
+
+- `GET /v1/dictionary` and `"dictionary-identity-v1"` are strictly additive:
+  `/v1/meta` and `/v1/reviews` response shapes are unchanged, `docs/api/openapi.json`
+  updates `info.version` to `0.16.0` alongside the `/v1/dictionary` schema and
+  capability entry, and clients targeting older servers without
+  `"dictionary-identity-v1"` continue to fall back to `/v1/meta`.
+- Experimental and candidate flags remain off / `disabled` / `omit` by default.
+- SQLite schema (`2`), pinned upstream game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`), `terms.db` contents, matcher
+  `wuwaterm-cjk-matcher-v11` and thinking defaults are unchanged, so existing
+  `v0.14.x` and `v0.15.0` deployments can keep their `terms.db` and upgrade
+  with `deploy/vps-update.sh --runtime-only`.
+- `contracts/products.json` keeps its current snapshot (Core `v0.15.0`, Web
+  `v0.6.0`, Windows `v0.8.0`, Telegram `v0.6.1`) until Core `0.16.0` is
+  published.
 
 ## 0.15.0 - 2026-11-27
 
