@@ -7,6 +7,7 @@ never silently turn into mandatory placeholder term locks.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
@@ -113,14 +114,31 @@ class _NormalizedTextIndex:
     orig_spans: tuple[tuple[int, int], ...]
 
 
+_LATIN_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")
+_CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
+
+
 def _build_normalized_index(text: str) -> _NormalizedTextIndex:
+    """Normalize ``text`` by combining-character clusters using NFKC + casefold.
+
+    Grouping base characters with trailing combining marks ensures NFD inputs
+    (e.g. ``Cafe\\u0301 Forge``) produce the same normalized string and span
+    mapping as NFC inputs (``Café Forge``).
+    """
     norm_chars: list[str] = []
     orig_spans: list[tuple[int, int]] = []
-    for idx, ch in enumerate(text):
-        piece = SPACE_RE.sub("", unicodedata.normalize("NFKC", ch).casefold())
+    idx = 0
+    length = len(text)
+    while idx < length:
+        end = idx + 1
+        while end < length and unicodedata.combining(text[end]) != 0:
+            end += 1
+        cluster = text[idx:end]
+        piece = SPACE_RE.sub("", unicodedata.normalize("NFKC", cluster).casefold())
         for norm_ch in piece:
             norm_chars.append(norm_ch)
-            orig_spans.append((idx, idx + 1))
+            orig_spans.append((idx, end))
+        idx = end
     return _NormalizedTextIndex(
         norm_text="".join(norm_chars),
         orig_spans=tuple(orig_spans),
@@ -159,6 +177,54 @@ def _occupied_spans(
 def _is_span_covered(span: tuple[int, int], occupied: list[tuple[int, int]]) -> bool:
     start, end = span
     return any(occ_start <= start and end <= occ_end for occ_start, occ_end in occupied)
+
+
+def _is_entire_index_covered(
+    index: _NormalizedTextIndex, occupied: list[tuple[int, int]]
+) -> bool:
+    if not index.orig_spans or not occupied:
+        return False
+    return all(_is_span_covered(span, occupied) for span in index.orig_spans)
+
+
+def _candidate_partial_match_spans(
+    index: _NormalizedTextIndex,
+    candidate: DomainKnowledgeCandidate,
+) -> list[tuple[int, int]]:
+    """Return spans in ``index`` where substrings/tokens of ``candidate`` hit.
+
+    Used when a candidate's full ``source_surface`` is longer than the matched
+    fragment in ``text`` (e.g. FTS trigram substring query ``Ice`` matching
+    ``Ice Blade``, or ``风声羽`` matching ``风声羽息``).
+    """
+    spans: list[tuple[int, int]] = []
+    seen_needles: set[str] = set()
+    fields = (candidate.source_surface, candidate.zh, candidate.en)
+
+    if index.norm_text:
+        for field in fields:
+            field_norm = normalize_text(field)
+            if field_norm and index.norm_text in field_norm:
+                spans.append((index.orig_spans[0][0], index.orig_spans[-1][1]))
+                break
+
+    for field in fields:
+        for token in _LATIN_WORD_RE.findall(field):
+            tok_norm = normalize_text(token)
+            if len(tok_norm) >= 2 and tok_norm not in seen_needles:
+                seen_needles.add(tok_norm)
+                spans.extend(_find_normalized_occurrences(index, token))
+        for run in _CJK_RUN_RE.findall(field):
+            if len(run) >= 3:
+                for pos in range(0, len(run) - 2):
+                    tri = run[pos : pos + 3]
+                    if tri not in seen_needles:
+                        seen_needles.add(tri)
+                        spans.extend(_find_normalized_occurrences(index, tri))
+            elif len(run) == 2 and run not in seen_needles:
+                seen_needles.add(run)
+                spans.extend(_find_normalized_occurrences(index, run))
+    return spans
 
 
 def _has_uncovered_non_ordinary_single_cjk(
@@ -255,6 +321,14 @@ def select_domain_knowledge_candidates(
         ]
         if surface_occs and not uncovered_surface_occs:
             continue
+        if not surface_occs and occupied:
+            if _is_entire_index_covered(norm_index, occupied):
+                continue
+            partial_spans = _candidate_partial_match_spans(norm_index, candidate)
+            if partial_spans and all(
+                _is_span_covered(span, occupied) for span in partial_spans
+            ):
+                continue
 
         if is_single_cjk_char(candidate.source_surface):
             if not _has_uncovered_non_ordinary_single_cjk(

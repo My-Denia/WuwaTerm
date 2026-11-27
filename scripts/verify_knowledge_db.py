@@ -150,21 +150,42 @@ def _index_queryability_errors(conn: sqlite3.Connection) -> list[str]:
         if str(row["trust_tier"]) not in TRUST_TIERS:
             errors.append(f"invalid trust_tier in kb_entities: {row['trust_tier']!r}")
 
-    bad_ngram_len = conn.execute(
-        "SELECT COUNT(*) AS count FROM kb_short_ngrams WHERE ngram_len NOT IN (1, 2)"
-    ).fetchone()
-    if bad_ngram_len is not None and int(bad_ngram_len["count"]) != 0:
-        errors.append("kb_short_ngrams contains rows with ngram_len not in (1, 2)")
+    bad_ngram_rows: list[tuple[str, int]] = []
+    actual_short: set[tuple[str, str, str]] = set()
+    for row in conn.execute(
+        "SELECT ngram, ngram_len, entity_id, surface FROM kb_short_ngrams"
+    ):
+        ngram = str(row["ngram"])
+        ngram_len = int(row["ngram_len"])
+        if ngram_len not in (1, 2) or ngram_len != len(ngram):
+            bad_ngram_rows.append((ngram, ngram_len))
+        actual_short.add((ngram, str(row["entity_id"]), str(row["surface"])))
+    if bad_ngram_rows:
+        sample_ngram, sample_len = bad_ngram_rows[0]
+        errors.append(
+            f"kb_short_ngrams has {len(bad_ngram_rows)} row(s) with invalid "
+            f"ngram_len (first {sample_ngram!r} has ngram_len={sample_len}, "
+            f"expected {len(sample_ngram)})"
+        )
 
     expected_short, expected_fts = _expected_index_entries(conn)
-    actual_short = {
-        (str(row["ngram"]), str(row["entity_id"]), str(row["surface"]))
-        for row in conn.execute("SELECT ngram, entity_id, surface FROM kb_short_ngrams")
-    }
-    actual_fts = {
-        (str(row["entity_id"]), str(row["surface"]))
-        for row in conn.execute("SELECT entity_id, surface FROM kb_fts_trigram")
-    }
+    actual_fts: set[tuple[str, str]] = set()
+    fts_probe_candidates: list[tuple[str, str]] = []
+    for row in conn.execute(
+        "SELECT entity_id, surface, zh, en, context_gloss FROM kb_fts_trigram"
+    ):
+        eid = str(row["entity_id"])
+        surface = str(row["surface"])
+        actual_fts.add((eid, surface))
+        # SQLite FTS5 trigram indexes raw codepoint trigrams without NFKC
+        # expansion, so only stored fields with >= 3 raw codepoints are
+        # directly queryable as trigram probes (e.g. single-codepoint "Ⅲ"
+        # expands to "iii" under NFKC but produces no raw FTS5 trigram).
+        for field_value in (surface, str(row["zh"]), str(row["en"]), str(row["context_gloss"])):
+            cleaned_field = field_value.strip()
+            if len(cleaned_field) >= 3:
+                fts_probe_candidates.append((eid, cleaned_field))
+                break
 
     missing_short = expected_short - actual_short
     extra_short = actual_short - expected_short
@@ -191,29 +212,35 @@ def _index_queryability_errors(conn: sqlite3.Connection) -> list[str]:
         )
 
     if expected_fts and not missing_fts:
-        probe_eid, probe_surface = min(
-            (item for item in expected_fts if len(item[1].strip()) >= 3),
-            default=min(expected_fts),
-        )
-        probe = probe_surface.strip()[:3].replace('"', '""')
-        try:
-            hits = {
-                str(row["entity_id"])
-                for row in conn.execute(
-                    "SELECT entity_id FROM kb_fts_trigram "
-                    "WHERE kb_fts_trigram MATCH ?",
-                    (f'"{probe}"',),
-                )
-            }
-        except sqlite3.Error as exc:
-            errors.append(f"kb_fts_trigram query failed: {exc}")
+        if fts_probe_candidates:
+            probe_eid, probe_text = min(fts_probe_candidates)
+            probe = probe_text[:3].replace('"', '""')
+            try:
+                hits = {
+                    str(row["entity_id"])
+                    for row in conn.execute(
+                        "SELECT entity_id FROM kb_fts_trigram "
+                        "WHERE kb_fts_trigram MATCH ?",
+                        (f'"{probe}"',),
+                    )
+                }
+            except sqlite3.Error as exc:
+                errors.append(f"kb_fts_trigram query failed: {exc}")
+            else:
+                if probe_eid not in hits:
+                    errors.append(
+                        f"kb_fts_trigram did not recall {probe_eid!r} for indexed probe {probe!r}"
+                    )
         else:
-            if probe_eid not in hits:
-                errors.append(
-                    f"kb_fts_trigram did not recall {probe_eid!r} for indexed probe {probe!r}"
-                )
+            try:
+                conn.execute(
+                    "SELECT entity_id FROM kb_fts_trigram "
+                    "WHERE kb_fts_trigram MATCH '\"abc\"' LIMIT 1"
+                ).fetchall()
+            except sqlite3.Error as exc:
+                errors.append(f"kb_fts_trigram query failed: {exc}")
 
-    if expected_short and not missing_short:
+    if expected_short and not missing_short and not bad_ngram_rows:
         probe_ngram, probe_eid, _probe_surface = min(expected_short)
         try:
             hits = {

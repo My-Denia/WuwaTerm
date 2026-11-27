@@ -16,6 +16,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +37,33 @@ class KnowledgeBuildError(RuntimeError):
 
 _SPACE_RE = re.compile(r"\s+")
 _TE_ANCHOR_RE = re.compile(
-    r"<te\b([^>]*)>(.*?)</te>",
+    r"""<te\b((?:[^"'>]|"[^"]*"|'[^']*')*)>(.*?)</te>""",
     re.IGNORECASE | re.DOTALL,
 )
-_TE_HREF_ATTR_RE = re.compile(
-    r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""",
-    re.IGNORECASE,
-)
+
+
+class _TeStartTagParser(HTMLParser):
+    """Parse ``<te ...>`` attributes strictly at HTML attribute boundaries."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.href: str | None = None
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag.casefold() == "te" and self.href is None:
+            for name, value in attrs:
+                if name.casefold() == "href" and value is not None:
+                    self.href = value
+                    break
+
+
+def _parse_te_href_attr(attrs_text: str) -> str | None:
+    parser = _TeStartTagParser()
+    parser.feed(f"<te{attrs_text}>")
+    parser.close()
+    return parser.href
 _WORD_TBA_RE = re.compile(r"\b(?:tba|tbd)\b", re.IGNORECASE)
 _DIRTY_SUBSTRINGS = (
     "dnt/",
@@ -154,18 +175,10 @@ def extract_te_anchors(raw: str | None) -> list[tuple[str, str]]:
         return []
     anchors: list[tuple[str, str]] = []
     for match in _TE_ANCHOR_RE.finditer(raw):
-        href_match = _TE_HREF_ATTR_RE.search(match.group(1))
-        if href_match is None:
+        raw_href = _parse_te_href_attr(match.group(1))
+        if raw_href is None:
             continue
-        term_id = (
-            href_match.group(1)
-            if href_match.group(1) is not None
-            else (
-                href_match.group(2)
-                if href_match.group(2) is not None
-                else href_match.group(3)
-            )
-        ).strip()
+        term_id = raw_href.strip()
         if not term_id or not term_id.isascii() or not term_id.isdigit() or int(term_id) <= 0:
             continue
         surface = clean_kb_text(match.group(2))

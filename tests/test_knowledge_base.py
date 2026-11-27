@@ -24,6 +24,7 @@ from wuwaterm.domain_knowledge import (
     select_domain_knowledge_candidates,
 )
 from wuwaterm.knowledge_builder import (
+    EntitySpec,
     KnowledgeBuildError,
     build_knowledge_database,
     build_knowledge_database_atomic,
@@ -1250,5 +1251,150 @@ def test_verify_knowledge_db_rejects_emptied_fts_and_short_ngram_indexes(tmp_pat
         conn.commit()
     with pytest.raises(VerificationError, match="kb_short_ngrams missing"):
         verify_knowledge_database(empty_short, terms_db_path=terms_db)
+
+
+def test_unicode_nfd_nfc_lock_coverage_and_fts_substring_lock_regression(
+    tmp_path: Path,
+):
+    # Repro 1a: NFC lock "Café Forge" must cover NFD source "Cafe\u0301 Forge" so "Forge" is dropped.
+    forge_candidate = DomainKnowledgeCandidate(
+        entity_id="area:901",
+        source_surface="Forge",
+        zh="熔炉",
+        en="Forge",
+        entity_type="area",
+        trust_tier="official_authoritative",
+        retrieval_channel="lexical_alias",
+        score=0.9,
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Cafe\u0301 Forge",
+            [forge_candidate],
+            locked_surfaces=("Café Forge",),
+        )
+        == ()
+    )
+
+    # Repro 1b: Querying "Ice" with locked "Ice" must not emit FTS hit "Ice Blade".
+    ice_blade = DomainKnowledgeCandidate(
+        entity_id="weapon:902",
+        source_surface="Ice Blade",
+        zh="冰刃",
+        en="Ice Blade",
+        entity_type="weapon",
+        trust_tier="official_authoritative",
+        retrieval_channel="fts5_trigram",
+        score=0.85,
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Ice",
+            [ice_blade],
+            locked_surfaces=("Ice",),
+        )
+        == ()
+    )
+    assert (
+        select_domain_knowledge_candidates(
+            "Cast Ice today",
+            [ice_blade],
+            locked_surfaces=("Ice",),
+        )
+        == ()
+    )
+    kept = select_domain_knowledge_candidates(
+        "Cast Ice and Blade",
+        [ice_blade],
+        locked_surfaces=("Ice",),
+    )
+    assert [c.entity_id for c in kept] == ["weapon:902"]
+
+    # End-to-end reader check on "Ice" -> "Ice Blade"
+    kb_path = tmp_path / "ice_kb.db"
+    rev = "a" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="weapon:902",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="902",
+                zh="冰刃",
+                en="Ice Blade",
+            )
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        assert any(c.en == "Ice Blade" for c in reader.query("Ice"))
+        assert reader.query("Ice", locked_surfaces=("Ice",)) == ()
+
+
+def test_verify_knowledge_db_checks_per_row_ngram_len_and_nfkc_expanding_fts_probe(
+    tmp_path: Path,
+):
+    # Repro 2a: tampering 心's ngram_len from 1 to 2 must fail verification.
+    data_dir = _build_synthetic_wutheringdata(tmp_path / "wutheringdata")
+    terms_db = tmp_path / "terms.db"
+    _build_synthetic_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    build_knowledge_database(
+        data_dir, kb_path, terms_db_path=terms_db, source_provenance=_provenance()
+    )
+
+    bad_len_db = tmp_path / "bad_ngram_len.db"
+    bad_len_db.write_bytes(kb_path.read_bytes())
+    with closing(sqlite3.connect(bad_len_db)) as conn:
+        conn.execute(
+            "UPDATE kb_short_ngrams SET ngram_len = 2 WHERE ngram = '心'"
+        )
+        conn.commit()
+    with pytest.raises(VerificationError, match="invalid ngram_len"):
+        verify_knowledge_database(bad_len_db, terms_db_path=terms_db)
+
+    # Repro 2b: single-codepoint "Ⅲ" (\u2162, NFKC-expands to "iii") must verify cleanly
+    # without false failure when it is the only FTS entry.
+    roman_kb = tmp_path / "roman_kb.db"
+    rev = "b" * 64
+    create_knowledge_database(
+        roman_kb,
+        entities=[
+            EntitySpec(
+                entity_id="term:3",
+                entity_type="term",
+                source_file="BinData/Term/termconfig.json",
+                source_id="3",
+                zh="Ⅲ",
+                en="3",
+            )
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+    counts, _meta = verify_knowledge_database(
+        roman_kb, expected_terms_db_revision=rev
+    )
+    assert counts == {"term": 1}
+
+
+def test_te_anchor_parses_href_strictly_at_html_attribute_boundaries():
+    # Repro 3: title="href=12" must never shadow the actual href="34" attribute.
+    assert extract_te_anchors('<te title="href=12" href="34">术语</te>') == [
+        ("34", "术语")
+    ]
+    assert extract_te_anchors('<te title="href=12">无真实属性</te>') == []
+    assert extract_te_anchors(
+        '<te data-href="12" title="a>b" href="34">术语</te>'
+    ) == [("34", "术语")]
+
 
 
