@@ -1581,6 +1581,76 @@ def test_exact_probe_spans_entity_priority_and_out_of_bounds_span_regressions(
     )
 
 
+def test_unified_probe_sqlite_alignment_and_tier_truncation_invariants(tmp_path: Path):
+    kb_path = tmp_path / "invariants_kb.db"
+    rev = "e" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="weapon:930",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="930",
+                zh="北境之锋",
+                en="Northern Edge",
+            ),
+            EntitySpec(
+                entity_id="weapon:931",
+                entity_type="weapon",
+                source_file="BinData/weapon/weaponconf.json",
+                source_id="931",
+                zh="冻霜甲乙",
+                en="Frozen AB",
+            ),
+            EntitySpec(
+                entity_id="stat:932",
+                entity_type="term",
+                source_file="BinData/Term/termconfig.json",
+                source_id="932",
+                zh="生命值",
+                en="HP",
+                context_gloss="Use HP to withstand enemy strikes.",
+            ),
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
+
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # Invariant 1: multi-word probes never cross punctuation or Chinese text.
+        # "Northern，随后 Edge" with locked ("Northern", "Edge") must NOT fabricate
+        # an unlocked "Northern Edge" span across "，随后 ".
+        assert (
+            reader.query(
+                "Northern，随后 Edge", locked_surfaces=("Northern", "Edge")
+            )
+            == ()
+        )
+
+        # Invariant 2: FTS5 attribution matches raw casefolded substrings, never
+        # space-stripped norms. "Frozen effect uses A B" locked "Frozen effect"
+        # only matched "Frozen" in "Frozen AB" (not "A B"), so must return ().
+        assert not any(
+            c.entity_id == "weapon:931"
+            for c in reader.query(
+                "Frozen effect uses A B", locked_surfaces=("Frozen effect",)
+            )
+        )
+
+        # Invariant 3: entity-level tier truncation runs BEFORE merging spans.
+        # "Use HP boost now" locked "HP boost" has tier-0 name/short_ngram hit on
+        # "HP" (4, 6); tier-1 gloss hit on "Use" (0, 3) is discarded before merge.
+        assert any(c.entity_id == "stat:932" for c in reader.query("Use HP boost now"))
+        assert (
+            reader.query("Use HP boost now", locked_surfaces=("HP boost",)) == ()
+        )
+
+
+
 
 
 

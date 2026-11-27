@@ -170,6 +170,28 @@ class KnowledgeRelation:
 
 _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
 _LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")
+_WHITESPACE_ONLY_RE = re.compile(r"[ \t\r\n]+")
+
+
+@dataclass(frozen=True)
+class _RawChannelHit:
+    """One unmerged retrieval hit carrying its exact evidence tier and spans."""
+
+    entity_id: str
+    surface: str
+    channel: RetrievalChannel
+    rank: int
+    evidence_tier: int
+    spans: tuple[tuple[int, int], ...]
+    trust_tier: TrustTier | None = None
+
+
+def _is_whitespace_gap(text: str, left_end: int, right_start: int) -> bool:
+    """True only when ``text[left_end:right_start]`` is non-empty pure whitespace."""
+    return (
+        left_end < right_start
+        and _WHITESPACE_ONLY_RE.fullmatch(text[left_end:right_start]) is not None
+    )
 _CHANNEL_WEIGHTS: dict[RetrievalChannel, float] = {
     "lexical_alias": 1.35,
     "short_ngram": 1.15,
@@ -347,20 +369,18 @@ def _extract_alias_probes(text: str) -> dict[str, set[tuple[int, int]]]:
         add(normalize_text(match.group(0)), (match.start(), match.end()))
     for idx in range(len(latin_matches) - 1):
         m1, m2 = latin_matches[idx], latin_matches[idx + 1]
-        add(
-            normalize_text(f"{m1.group(0)} {m2.group(0)}"),
-            (m1.start(), m2.end()),
-        )
+        if _is_whitespace_gap(text, m1.end(), m2.start()):
+            add(normalize_text(text[m1.start() : m2.end()]), (m1.start(), m2.end()))
     for idx in range(len(latin_matches) - 2):
         m1, m2, m3 = (
             latin_matches[idx],
             latin_matches[idx + 1],
             latin_matches[idx + 2],
         )
-        add(
-            normalize_text(f"{m1.group(0)} {m2.group(0)} {m3.group(0)}"),
-            (m1.start(), m3.end()),
-        )
+        if _is_whitespace_gap(text, m1.end(), m2.start()) and _is_whitespace_gap(
+            text, m2.end(), m3.start()
+        ):
+            add(normalize_text(text[m1.start() : m3.end()]), (m1.start(), m3.end()))
 
     return probes
 
@@ -373,7 +393,11 @@ def _quote_fts5_phrase(term: str) -> str:
 def _extract_fts_probes(
     text: str,
 ) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
-    """Extract FTS5 trigram probes paired with their exact original ``(start, end)`` spans."""
+    """Extract FTS5 trigram probes paired with their exact original ``(start, end)`` spans.
+
+    Every probe satisfies ``text[start:end] == probe`` and multi-word Latin
+    probes only span tokens separated by pure whitespace.
+    """
     probes: dict[str, set[tuple[int, int]]] = {}
 
     def add(value: str, span: tuple[int, int]) -> None:
@@ -403,8 +427,10 @@ def _extract_fts_probes(
     latin_matches = list(_LATIN_TOKEN_RE.finditer(text))
     for idx in range(len(latin_matches) - 1):
         m1, m2 = latin_matches[idx], latin_matches[idx + 1]
+        if not _is_whitespace_gap(text, m1.end(), m2.start()):
+            continue
         bigram = text[m1.start() : m2.end()]
-        if len(bigram.strip()) >= 3:
+        if len(bigram) >= 3:
             add(bigram, (m1.start(), m2.end()))
     for match in latin_matches:
         token = match.group(0)
@@ -426,24 +452,21 @@ def _as_trust_tier(value: str) -> TrustTier:
 
 def _matched_probe_spans_for_field(
     field_text: str,
-    probes: list[tuple[str, str, str, tuple[tuple[int, int], ...]]],
+    probes: list[tuple[str, str, tuple[tuple[int, int], ...]]],
 ) -> list[tuple[int, int]]:
-    """Return exact source spans of probes that actually matched ``field_text``.
+    """Return exact source spans of FTS5 probes that genuinely match ``field_text``.
 
-    Uses raw FTS5 trigram length (``len(probe) >= 3``) and casefolded substring
-    matching (plus normalized fallback) without ever re-searching the full
-    source text, so probes like ``A B`` (3 chars raw, 2 chars normalized) keep
-    their exact span and ``Ice`` never bleeds into unrelated words like ``price``.
+    Matches SQLite FTS5 ``trigram case_sensitive 0`` semantics directly
+    (raw ``len(probe) >= 3`` casefolded substring match without stripping
+    whitespace), so ``A B`` never falsely attributes to ``Frozen AB`` and
+    ``Ice`` never bleeds into unrelated words like ``price``.
     """
     if not field_text:
         return []
     field_cf = field_text.casefold()
-    field_norm = normalize_text(field_text)
     spans: list[tuple[int, int]] = []
-    for probe_raw, probe_cf, probe_norm, probe_spans in probes:
-        if len(probe_raw) < 3:
-            continue
-        if probe_cf in field_cf or (probe_norm and field_norm and probe_norm in field_norm):
+    for probe_raw, probe_cf, probe_spans in probes:
+        if len(probe_raw) >= 3 and probe_cf in field_cf:
             spans.extend(probe_spans)
     return spans
 
@@ -640,18 +663,20 @@ class KnowledgeBaseReader:
         if not extracted:
             return []
         probe_records = [
-            (probe, probe.casefold(), normalize_text(probe), spans)
+            (probe, probe.casefold(), spans)
             for probe, spans in extracted
         ]
         cjk_query = has_cjk(text)
 
-        scored: dict[tuple[str, str], tuple[int, float]] = {}
-        hit_spans: dict[tuple[str, str], set[tuple[int, int]]] = {}
+        # Keep scores and spans strictly segregated by (entity_id, surface, tier_rank)
+        # so tier-1 gloss spans can never merge into tier-0 surface hits.
+        scored: dict[tuple[str, str, int], float] = {}
+        hit_spans: dict[tuple[str, str, int], set[tuple[int, int]]] = {}
         batch_limit = max(limit * 4, 32)
         for start in range(0, len(probe_records), _FTS_BATCH_SIZE):
             batch = probe_records[start : start + _FTS_BATCH_SIZE]
             fts_query = " OR ".join(
-                _quote_fts5_phrase(probe_raw) for probe_raw, _, _, _ in batch
+                _quote_fts5_phrase(probe_raw) for probe_raw, _, _ in batch
             )
             try:
                 rows = self._conn.execute(
@@ -696,32 +721,30 @@ class KnowledgeBaseReader:
                     matched_spans = _matched_probe_spans_for_field(gloss, batch)
                     tier_rank = 1
 
-                key = (entity_id, matched_surface)
-                cand_rank = (tier_rank, float(row["rank_score"]))
+                key = (entity_id, matched_surface, tier_rank)
+                rank_score = float(row["rank_score"])
                 prev = scored.get(key)
-                if prev is None or cand_rank < prev:
-                    scored[key] = cand_rank
+                if prev is None or rank_score < prev:
+                    scored[key] = rank_score
                 hit_spans.setdefault(key, set()).update(matched_spans)
 
-        # Entity-level evidence priority: if an entity has any direct
-        # surface/name/alias match (tier_rank == 0), discard gloss-only hits
-        # (tier_rank == 1) for that same entity before downstream lock gating.
+        # Entity-level evidence priority before returning from FTS.
         direct_entities = {
             entity_id
-            for (entity_id, _surface), (tier_rank, _score) in scored.items()
+            for entity_id, _surface, tier_rank in scored
             if tier_rank == 0
         }
         ordered = sorted(
             (
                 item
                 for item in scored.items()
-                if item[1][0] == 0 or item[0][0] not in direct_entities
+                if item[0][2] == 0 or item[0][0] not in direct_entities
             ),
-            key=lambda item: (item[1][0], item[1][1], item[0][0], item[0][1]),
+            key=lambda item: (item[0][2], item[1], item[0][0], item[0][1]),
         )
         return [
-            (key[0], key[1], tier_rank, tuple(sorted(hit_spans.get(key, ()))))
-            for key, (tier_rank, _score) in ordered[: max(limit * 2, 16)]
+            (entity_id, surface, tier_rank, tuple(sorted(hit_spans.get((entity_id, surface, tier_rank), ()))))
+            for (entity_id, surface, tier_rank), _score in ordered[: max(limit * 2, 16)]
         ]
 
     def _load_entities(self, entity_ids: Collection[str]) -> dict[str, sqlite3.Row]:
@@ -762,62 +785,87 @@ class KnowledgeBaseReader:
         if not text or not text.strip():
             return ()
 
-        alias_hits = self._query_exact_aliases(text)
-        short_hits = self._query_short_ngrams(text)
-        fts_hits = self._query_fts_trigram(text, limit=max(max_candidates, 8))
+        # Stage 1: Collect raw hits across all channels without cross-tier merging.
+        raw_hits: list[_RawChannelHit] = []
+        for rank, (entity_id, surface, trust_tier, spans) in enumerate(
+            self._query_exact_aliases(text), start=1
+        ):
+            raw_hits.append(
+                _RawChannelHit(
+                    entity_id=entity_id,
+                    surface=surface,
+                    channel="lexical_alias",
+                    rank=rank,
+                    evidence_tier=0,
+                    spans=spans,
+                    trust_tier=trust_tier,
+                )
+            )
+        for rank, (entity_id, surface, spans) in enumerate(
+            self._query_short_ngrams(text), start=1
+        ):
+            raw_hits.append(
+                _RawChannelHit(
+                    entity_id=entity_id,
+                    surface=surface,
+                    channel="short_ngram",
+                    rank=rank,
+                    evidence_tier=0,
+                    spans=spans,
+                )
+            )
+        for rank, (entity_id, surface, evidence_tier, spans) in enumerate(
+            self._query_fts_trigram(text, limit=max(max_candidates, 8)), start=1
+        ):
+            raw_hits.append(
+                _RawChannelHit(
+                    entity_id=entity_id,
+                    surface=surface,
+                    channel="fts5_trigram",
+                    rank=rank,
+                    evidence_tier=evidence_tier,
+                    spans=spans,
+                )
+            )
 
+        if not raw_hits:
+            return ()
+
+        # Stage 2: Entity-level evidence-tier truncation BEFORE any span/score merge.
+        best_tier_by_entity: dict[str, int] = {}
+        for hit in raw_hits:
+            prev_tier = best_tier_by_entity.get(hit.entity_id)
+            if prev_tier is None or hit.evidence_tier < prev_tier:
+                best_tier_by_entity[hit.entity_id] = hit.evidence_tier
+
+        retained_hits = [
+            hit
+            for hit in raw_hits
+            if hit.evidence_tier == best_tier_by_entity[hit.entity_id]
+        ]
+
+        # Stage 3: Merge RRF scores and source spans ONLY within retained same-tier hits.
         fused_scores: dict[tuple[str, str], float] = {}
         best_channel: dict[tuple[str, str], tuple[float, RetrievalChannel]] = {}
         tier_overrides: dict[tuple[str, str], TrustTier] = {}
         matched_spans_by_key: dict[tuple[str, str], set[tuple[int, int]]] = {}
-        evidence_tier_by_key: dict[tuple[str, str], int] = {}
 
-        def record_channel(
-            channel: RetrievalChannel,
-            items: list[tuple[str, str, int, tuple[tuple[int, int], ...]]],
-        ) -> None:
-            weight = _CHANNEL_WEIGHTS[channel]
-            for rank, (entity_id, surface, evidence_tier, spans) in enumerate(
-                items, start=1
-            ):
-                key = (entity_id, surface)
-                contribution = weight / (RRF_K + rank)
-                fused_scores[key] = fused_scores.get(key, 0.0) + contribution
-                prev = best_channel.get(key)
-                if prev is None or contribution > prev[0]:
-                    best_channel[key] = (contribution, channel)
-                prev_tier = evidence_tier_by_key.get(key)
-                if prev_tier is None or evidence_tier < prev_tier:
-                    evidence_tier_by_key[key] = evidence_tier
-                if spans:
-                    matched_spans_by_key.setdefault(key, set()).update(spans)
+        for hit in retained_hits:
+            key = (hit.entity_id, hit.surface)
+            contribution = _CHANNEL_WEIGHTS[hit.channel] / (RRF_K + hit.rank)
+            fused_scores[key] = fused_scores.get(key, 0.0) + contribution
+            prev_ch = best_channel.get(key)
+            if prev_ch is None or contribution > prev_ch[0]:
+                best_channel[key] = (contribution, hit.channel)
+            if hit.trust_tier is not None and key not in tier_overrides:
+                tier_overrides[key] = hit.trust_tier
+            if hit.spans:
+                matched_spans_by_key.setdefault(key, set()).update(hit.spans)
 
-        for entity_id, surface, tier, _spans in alias_hits:
-            tier_overrides[(entity_id, surface)] = tier
-        record_channel("lexical_alias", [(e, s, 0, sp) for e, s, _, sp in alias_hits])
-        record_channel("short_ngram", [(e, s, 0, sp) for e, s, sp in short_hits])
-        record_channel("fts5_trigram", fts_hits)
-
-        if not fused_scores:
-            return ()
-
-        # Entity-level evidence priority across all channels: once an entity has
-        # direct name/alias/short-ngram evidence (tier 0), drop gloss-only hits
-        # (tier 1) for that entity before applying lock-coverage filtering.
-        entities_with_direct_evidence = {
-            entity_id
-            for (entity_id, _surface), ev_tier in evidence_tier_by_key.items()
-            if ev_tier == 0
-        }
-
+        # Stage 4: Build candidates and run lock-coverage / single-char gating.
         entities = self._load_entities({entity_id for entity_id, _ in fused_scores})
         candidates: list[DomainKnowledgeCandidate] = []
         for (entity_id, surface), score in fused_scores.items():
-            if (
-                evidence_tier_by_key.get((entity_id, surface), 1) > 0
-                and entity_id in entities_with_direct_evidence
-            ):
-                continue
             row = entities.get(entity_id)
             if row is None:
                 continue
