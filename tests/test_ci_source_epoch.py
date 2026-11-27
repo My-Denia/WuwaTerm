@@ -77,17 +77,67 @@ def temporary_git_objects(tmp_path, monkeypatch):
 
 def test_real_milestones_and_last_bundled_are_inclusive(config):
     floor = epoch.resolve(FLOOR, config)
-    assert (floor["source_epoch"], floor["telegram_optional"],
-            floor["public_interface_smoke"], floor["manuscript_interop"]) == ("legacy", False, False, False)
+    assert (floor["source_epoch"], floor["telegram_mode"], floor["telegram_optional"],
+            floor["public_interface_smoke"], floor["manuscript_interop"]) == ("legacy", "bundled", False, False, False)
     transition = epoch.resolve(OPTIONAL, config)
-    assert (transition["source_epoch"], transition["telegram_optional"],
-            transition["public_interface_smoke"], transition["manuscript_interop"]) == ("legacy", True, False, True)
+    assert (transition["source_epoch"], transition["telegram_mode"], transition["telegram_optional"],
+            transition["public_interface_smoke"], transition["manuscript_interop"]) == ("legacy", "optional", True, False, True)
     assert epoch.resolve(PUBLIC, config)["public_interface_smoke"] is True
     last = epoch.resolve(LAST, config)
     assert last["source_epoch"] == "legacy"
+    assert last["telegram_mode"] == "optional"
+    assert last["telegram_optional"] is True
     assert last["web_revision"] == "6cbba41bb934d44d1dde1b94f1b50d6d845af599"
     assert last["windows_revision"] is None
     assert last["required_jobs"][-1] == config["jobs"]["legacy_windows"]
+
+
+def test_telegram_mode_three_states_and_retired_milestone(config, temporary_git_objects):
+    commit, change_tree = temporary_git_objects
+
+    # 1. Pre-retirement split commit (still carries optional telegram extra + bot.py) -> optional.
+    optional_split = "3144f7b0c5e793826ebea0985b68499b37d8c191"
+    opt_res = epoch.resolve(optional_split, config)
+    assert opt_res["telegram_mode"] == "optional"
+    assert opt_res["telegram_optional"] is True
+
+    # 2. Construct a retired split commit tree (no telegram extra, no bot.py, no web/app.py).
+    base = git("rev-parse", "HEAD")
+    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    tree = change_tree(base, "pyproject.toml", pyproject_text)
+    for retired_path in ("src/wuwaterm/bot.py", "src/wuwaterm_api/web/app.py"):
+        if subprocess.run(["git", "cat-file", "-e", f"{base}:{retired_path}"], cwd=ROOT, capture_output=True).returncode == 0:
+            tree = change_tree(tree, retired_path, None)
+    retired_commit = commit(tree, base)
+
+    # Without retired_telegram_milestone pinned (pre-merge PR branch): resolves as retired.
+    cfg_unpinned = copy.deepcopy(config)
+    cfg_unpinned["retired_telegram_milestone"] = None
+    unpinned_res = epoch.resolve(retired_commit, cfg_unpinned)
+    assert unpinned_res["source_epoch"] == "split"
+    assert unpinned_res["telegram_mode"] == "retired"
+    assert unpinned_res["telegram_optional"] is False
+
+    # With retired_telegram_milestone pinned: descendants are retired, ancestors remain optional.
+    cfg_pinned = copy.deepcopy(config)
+    cfg_pinned["retired_telegram_milestone"] = retired_commit
+    child_retired = commit(tree, retired_commit)
+    assert epoch.resolve(retired_commit, cfg_pinned)["telegram_mode"] == "retired"
+    assert epoch.resolve(child_retired, cfg_pinned)["telegram_mode"] == "retired"
+    assert epoch.resolve(optional_split, cfg_pinned)["telegram_mode"] == "optional"
+
+    # Fail-closed: dropping telegram extra while bot.py still exists is rejected.
+    if subprocess.run(["git", "cat-file", "-e", f"{base}:src/wuwaterm/bot.py"], cwd=ROOT, capture_output=True).returncode == 0:
+        broken_tree = change_tree(base, "pyproject.toml", pyproject_text)
+        broken_commit = commit(broken_tree, base)
+        with pytest.raises(ValueError, match="optional Telegram"):
+            epoch.resolve(broken_commit, cfg_unpinned)
+
+    # Fail-closed: re-introducing bot.py after retired_telegram_milestone is rejected.
+    reintroduced_tree = change_tree(tree, "src/wuwaterm/bot.py", "# forbidden\n")
+    reintroduced = commit(reintroduced_tree, retired_commit)
+    with pytest.raises(ValueError, match="must not ship src/wuwaterm/bot.py"):
+        epoch.resolve(reintroduced, cfg_pinned)
 
 
 def test_equal_tree_does_not_replace_actual_main_ancestry(config, temporary_git_objects):

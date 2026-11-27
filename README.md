@@ -89,11 +89,10 @@ One command does the first install and each later addition:
 ```
 
 The Telegram bot is a separate product, [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram), with
-its own release, verified artifacts and Compose file. `--with-telegram` checks
-this installation, gives the bot a copy of the database and writes its `.env`
-when you point it at that checkout (`--telegram-dir`), then prints the
-product's own install steps. This checkout no longer starts the inline bot it
-still carries; that became an explicit `--with-legacy-bot`.
+its own release, verified artifacts and Compose file. `--with-telegram` orchestrates
+the standalone Telegram product (or prepares a checkout with `--telegram-dir`).
+The legacy inline bot and legacy in-process Python Web UI have been retired
+from Core (roll back to `v0.16.0` if you still need them).
 
 A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10
 and a clone of the v0.9.1 tag those of Telegram v0.3.0 (which pins Core
@@ -173,9 +172,9 @@ Every guide is listed in the [documentation index](docs/README.md).
 
 ## Under the hood
 
-Public Web source and its Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python service, the deprecated inline bot, the dictionary builder, and deployment tools; [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product, and [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) owns the supported Telegram bot.
+Public and self-hosted Web source and Node CI live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web). This repository keeps the Python Core library, HTTP API service, dictionary builder, and deployment tools; [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) owns the desktop product, and [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) owns the standalone Telegram bot.
 
-- **Python 3.11+** with python-telegram-bot (long polling) and FastAPI, over a SQLite dictionary that the serving containers mount read-only.
+- **Python 3.11+** with FastAPI, over a SQLite dictionary that the serving container mounts read-only.
 - **Architecture rules that CI enforces**: the application layer imports no presentation code, and the API contract is drift-checked against a committed OpenAPI snapshot ([ADR 0009](docs/adr/0009-http-api-adapter.md)).
 - **Revocable device credentials** for the API, stored only as salted scrypt verifiers ([ADR 0010](docs/adr/0010-device-principal-authentication.md)).
 - **Transactional updates** in the maintainer's deployment tooling: the new image, and for data updates a candidate database, is verified before the running service is touched, and an ordinary failure restores the previous image, database and commit pointer ([ADR 0008](docs/adr/0008-candidate-verification-and-transactional-deployment.md)).

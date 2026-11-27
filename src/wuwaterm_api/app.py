@@ -2262,9 +2262,14 @@ def create_app(
     term_service=None,
     translator=None,
 ) -> FastAPI:
-    from .settings import ApiSettings, DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE
+    from .settings import (
+        ApiSettings,
+        DEFAULT_AUTH_STATUS_RATE_LIMIT_PER_MINUTE,
+        validate_retired_web_setting,
+    )
 
     resolved = settings or ApiSettings.from_env()
+    validate_retired_web_setting(resolved.retired_web_enabled_raw)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -2372,44 +2377,6 @@ def create_app(
 
     _register_error_handlers(app)
     _register_routes(app)
-    # The owner-private web presentation layer, mounted LAST and only when it
-    # is switched on. Default off (see settings.DEFAULT_WEB_ENABLED): with the
-    # switch off nothing is mounted at all, so the route table, the OpenAPI
-    # document and the behaviour of every existing endpoint are byte-for-byte
-    # what they were before this layer existed. That is the property that makes
-    # "no regression to the API" checkable rather than merely asserted.
-    #
-    # Imported here rather than at module scope because the sub-application
-    # imports helpers from THIS module; deferring it to call time keeps the
-    # dependency one-directional.
-    if resolved.web_enabled:
-        from starlette.routing import Route as _PlainRoute
-
-        from .web.app import WebSurfaceEnvelope, bare_mount_guard, create_web_app
-        from .settings import WEB_MOUNT_PATH
-
-        # OUTERMOST, so it wraps the body-limit and timeout middleware and can
-        # see the responses THEY synthesise without entering the sub-app. A
-        # strict no-op for every path outside the mount, so the existing API's
-        # behaviour is unchanged; only added when the layer is switched on, so
-        # the default deployment does not gain a middleware at all.
-        app.add_middleware(WebSurfaceEnvelope)
-
-        app.mount(WEB_MOUNT_PATH, create_web_app(app))
-        # The mount path WITHOUT its trailing slash, registered FIRST so it
-        # matches before this router's own slash redirect can answer it. A
-        # Mount matches only the slash-prefixed remainder, so `/wuwaterm-web`
-        # would otherwise be handled by the parent's redirect_slashes and
-        # answer 307 to a caller that never presented the edge marker —
-        # re-opening, one level up, exactly the existence oracle the
-        # sub-application closes. A plain Route, not an APIRoute, so the
-        # published OpenAPI document is still untouched.
-        # No `methods=`: the endpoint is an ASGI callable, so Starlette applies
-        # NO method filter and this matches every verb. Passing a method list
-        # here is what left the first version of this fix answering 405 (from
-        # the parent, unhardened) to an off-edge POST while GET was correctly
-        # refused — the same oracle reached by a different verb.
-        app.router.routes.insert(0, _PlainRoute(WEB_MOUNT_PATH, bare_mount_guard(app)))
     _install_openapi_client_limits(app)
     return app
 

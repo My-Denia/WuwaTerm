@@ -148,47 +148,19 @@ MAX_LONG_TEXT_INPUT_LIMIT = 16384
 # credential check itself into the load.
 DEFAULT_AUTH_MAX_CONCURRENCY = 2
 
-# The owner-private web presentation layer. Mounted INSIDE this process (see
-# docs/adr/0014): a third process would mean a third independent LLM budget,
-# because ADR 0009 accounts that budget per process, and the aggregate ceiling
-# would rise. The cost of sharing the process is that a defect in the web layer
-# can take the API down with it, and the first mitigation is this switch:
-# DEFAULT OFF, so the surface does not exist unless an operator asks for it.
-DEFAULT_WEB_ENABLED = False
-# Mount path. Identical inside the process and on the public site, so the Caddy
-# route is a `handle` that strips nothing: with a stripping route the app would
-# have to reconstruct the public prefix to emit correct form actions, and the
-# one thing a same-origin design must not do is disagree with itself about
-# where it lives.
-WEB_MOUNT_PATH = "/wuwaterm-web"
-DEFAULT_WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
-# A ceiling on live browser sessions. This is a single-owner surface, so the
-# real number is 1-2; the bound exists so that a loop which somehow reaches
-# session creation cannot grow the map without limit.
-DEFAULT_WEB_MAX_SESSIONS = 32
-
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
+RETIRED_WEB_ERROR_MESSAGE = (
+    "WUWATERM_API_WEB_ENABLED is no longer supported: the legacy in-process "
+    "Python Web UI has been retired from WuwaTerm Core; deploy the standalone "
+    "My-Denia/WuwaTerm-Web product instead (or roll back to v0.16.0)"
+)
+
 
 def parse_bool(raw: str, default: bool) -> bool:
-    """Parse a boolean setting, treating anything unrecognised as the default.
-
-    Deliberately DOES NOT RAISE, and the reason is the same one stated for
-    ``bind`` and ``log_level`` below: ``from_env()`` runs for EVERY subcommand,
-    including ``device revoke``. An earlier version of this reader raised on an
-    unrecognised value, so a typo in a serve-only web setting -
-    ``WUWATERM_API_WEB_ENABLED=treu`` - made it impossible to revoke a
-    compromised device until the environment was repaired. Gating credential
-    revocation on the spelling of a presentation-layer flag is the worst
-    available trade, and the precedent against it was already written in this
-    file, twenty lines away, when the reader was added.
-
-    The default direction is OFF, so an unreadable value never turns a surface
-    on. Being wrong about it is caught loudly on the serve path by
-    ``validate_web_enabled``, which is where a serve-time setting belongs.
-    """
+    """Parse a boolean setting, treating anything unrecognised as the default."""
     value = (raw or "").strip().lower()
     if value in _TRUE_WORDS:
         return True
@@ -200,12 +172,9 @@ def parse_bool(raw: str, default: bool) -> bool:
 def parse_int(raw: str, default: int, *, minimum: int, maximum: int) -> int:
     """Lenient integer parsing for serve-only settings read on every command.
 
-    Same contract and same reason as ``parse_bool``: unreadable or out of range
-    becomes the default rather than an exception, because ``from_env()`` runs
-    for ``device revoke`` too. Fixing only the boolean switch left these two
-    still raising, so a typo in a session TTL kept blocking revocation - the
-    fix was complete for the case that was reported and incomplete for the
-    property, which is the failure this file has now seen twice.
+    Unreadable or out-of-range values become the default here because
+    ``from_env()`` runs for ``device revoke`` too; strict serve-time validation
+    lives in ``validate_serve_numeric_settings``.
     """
     try:
         value = int((raw or "").strip())
@@ -225,42 +194,19 @@ def parse_float(
     return value if minimum <= value <= maximum else default
 
 
-def validate_web_limits(ttl_raw: str, max_sessions_raw: str) -> None:
-    """Serve-path validation for the web-only numeric settings."""
-    for name, raw, minimum, maximum in (
-        ("WUWATERM_API_WEB_SESSION_TTL_SECONDS", ttl_raw, 60, 30 * 24 * 60 * 60),
-        ("WUWATERM_API_WEB_MAX_SESSIONS", max_sessions_raw, 1, 1024),
-    ):
-        candidate = (raw or "").strip()
-        if not candidate:
-            continue
-        try:
-            value = int(candidate)
-        except ValueError:
-            raise ApiConfigError(f"{name} must be an integer") from None
-        if not minimum <= value <= maximum:
-            raise ApiConfigError(
-                f"{name} must be between {minimum} and {maximum}"
-            )
+def validate_retired_web_setting(raw: str) -> None:
+    """Fail closed on serve if a legacy env file asks to enable in-process Web.
 
-
-def validate_web_enabled(raw: str) -> bool:
-    """Serve-path validation for the web switch. Raises on a typo.
-
-    The strictness the parser gives up lives here instead, on the one path
-    where refusing to start is the right answer and where refusing cannot
-    strand an operator who is trying to revoke a credential.
+    Existing `.env` templates explicitly carried ``WUWATERM_API_WEB_ENABLED=0``
+    (or blank/unset), so falsey and empty values are silently ignored to keep
+    in-place upgrades smooth. Any truthy or unrecognised non-empty value fails
+    closed without echoing the raw value so an operator never gets silent
+    degradation into an API without the web UI they expected.
     """
     value = (raw or "").strip()
-    if not value:
-        return False
-    if value.lower() in _TRUE_WORDS:
-        return True
-    if value.lower() in _FALSE_WORDS:
-        return False
-    raise ApiConfigError(
-        "WUWATERM_API_WEB_ENABLED must be one of 1/0, true/false, yes/no, on/off"
-    )
+    if not value or value.lower() in _FALSE_WORDS:
+        return
+    raise ApiConfigError(RETIRED_WEB_ERROR_MESSAGE)
 
 
 def _validate_int(name: str, raw: str, *, minimum: int, maximum: int) -> None:
@@ -337,28 +283,10 @@ class ApiSettings:
         default_factory=_ServeNumericRaw, repr=False, compare=False
     )
     log_level: str = DEFAULT_LOG_LEVEL
-    web_enabled: bool = DEFAULT_WEB_ENABLED
-    # The raw string as the operator wrote it, kept so the serve path can
-    # refuse a typo that the lenient parser above deliberately swallowed.
-    web_enabled_raw: str = ""
-    # The device token the browser session is mapped onto. Held HERE, in the
-    # server process, and never sent to the browser: that is what makes the
-    # "no credential lands in the browser" property structural rather than a
-    # rule the operator has to keep. Carried as a plain str because it is a
-    # presented credential, not a stored one - the store keeps only a derived
-    # verifier, and this is the thing presented TO it.
-    web_device_token: str = ""
-    # Shared secret that the edge proxy injects on every proxied request. The
-    # app refuses anything arriving without it, which is what makes "rejected
-    # before it reaches application logic" true of a request that bypassed the
-    # edge entirely by talking straight to the loopback port.
-    web_edge_secret: str = ""
-    web_session_ttl_seconds: int = DEFAULT_WEB_SESSION_TTL_SECONDS
-    web_max_sessions: int = DEFAULT_WEB_MAX_SESSIONS
-    # Raw forms, for the same reason as web_enabled_raw: the serve path is
-    # where a typo in a web-only setting must be refused, not from_env().
-    web_session_ttl_raw: str = ""
-    web_max_sessions_raw: str = ""
+    # Retained raw so serve/create_app can fail closed if an old .env still
+    # tries to turn on the retired in-process Python Web UI, without blocking
+    # operator commands such as `device revoke`.
+    retired_web_enabled_raw: str = field(default="", repr=False, compare=False)
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -467,42 +395,8 @@ class ApiSettings:
                 os.getenv("WUWATERM_API_LOG_LEVEL") or DEFAULT_LOG_LEVEL
             ).strip()
             or DEFAULT_LOG_LEVEL,
-            # Carried raw AND parsed leniently, for the same reason as `bind`
-            # and `log_level`: from_env() runs for every subcommand, so a
-            # serve-only typo must not block `device revoke`. The strict
-            # check is validate_web_enabled, applied on the serve path.
-            web_enabled=parse_bool(
-                os.getenv("WUWATERM_API_WEB_ENABLED") or "", DEFAULT_WEB_ENABLED
-            ),
-            web_enabled_raw=(os.getenv("WUWATERM_API_WEB_ENABLED") or "").strip(),
-            # NOT stripped of internal whitespace and NOT validated for shape:
-            # the token's format is the credential store's business, and a
-            # settings-layer opinion about what a token looks like would be a
-            # second, divergent parser. Surrounding whitespace goes because that
-            # is an artefact of how environment files are written, not of the
-            # credential.
-            web_device_token=(os.getenv("WUWATERM_API_WEB_DEVICE_TOKEN") or "").strip(),
-            web_edge_secret=(os.getenv("WUWATERM_API_WEB_EDGE_SECRET") or "").strip(),
-            # Lenient here, strict on the serve path (validate_web_limits).
-            # Reading these strictly made a mistyped session TTL block
-            # `device revoke`, exactly as the boolean switch had.
-            web_session_ttl_seconds=parse_int(
-                os.getenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS") or "",
-                DEFAULT_WEB_SESSION_TTL_SECONDS,
-                minimum=60,
-                maximum=30 * 24 * 60 * 60,
-            ),
-            web_session_ttl_raw=(
-                os.getenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS") or ""
-            ).strip(),
-            web_max_sessions=parse_int(
-                os.getenv("WUWATERM_API_WEB_MAX_SESSIONS") or "",
-                DEFAULT_WEB_MAX_SESSIONS,
-                minimum=1,
-                maximum=1024,
-            ),
-            web_max_sessions_raw=(
-                os.getenv("WUWATERM_API_WEB_MAX_SESSIONS") or ""
+            retired_web_enabled_raw=(
+                os.getenv("WUWATERM_API_WEB_ENABLED") or ""
             ).strip(),
         )
 

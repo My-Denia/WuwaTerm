@@ -5,6 +5,43 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Breaking / Retired Legacy Adapters
+
+- Retire the legacy inline Telegram bot (`src/wuwaterm/bot.py`, `channel.py`,
+  `channel_reply_index.py`, `channel_reply_schema.py`, `channel_runtime.py`,
+  `settings.py`, `runtime_keys.py`, `telegram_html.py`, `telegram_text.py`),
+  the `SentenceTranslator` HTML compatibility bridges, the `wuwaterm[telegram]`
+  extra (`python-telegram-bot`), the `services.wuwaterm` (`wuwaterm-bot`)
+  Compose service, and `deploy/setup.sh --with-legacy-bot`. Protocol-neutral
+  `src/wuwaterm/protected_text.py` and `src/wuwaterm/normalize.py` remain in
+  Core. Running `wuwaterm bot` or `entrypoint.sh bot` now exits `64` with
+  migration guidance pointing to standalone `My-Denia/WuwaTerm-Telegram`.
+- Retire the legacy in-process Python private Web UI (`src/wuwaterm_api/web/`
+  and `/wuwaterm-web` mount). To prevent silent degradation on upgrade,
+  `wuwaterm-api serve` and `create_app()` now fail closed with `ApiConfigError`
+  when `WUWATERM_API_WEB_ENABLED` is truthy or unrecognised (while silently
+  ignoring unset, empty, or falsey `0`/`false`/`no`/`off` values and never
+  blocking `wuwaterm-api device` subcommands). Deploy standalone
+  `My-Denia/WuwaTerm-Web` instead.
+- Update `deploy/Dockerfile` (`--extra api`, `CMD ["api"]`),
+  `deploy/entrypoint.sh` (default `api`), `deploy/docker-compose*.yml`,
+  `deploy/env.example`, `.env.example`, `scripts/ci_source_epoch.py` (3-state
+  `telegram_mode`: `bundled` / `optional` / `retired`), architecture boundary
+  guards, package artifact audits, dependency audit sentinels, and GitHub
+  Actions workflows.
+- Preserve read-only compatibility for historical schema 2/3 deployment
+  manifests and legacy container state-migration journals (`product_manifest.py`,
+  `component_state_journal.py`, `component_state_copy_v4.py`) as well as
+  `deploy/setup.sh --status` detection of leftover `wuwaterm-bot` containers.
+- Update `docs/telegram-behavior.md` (resolving `MY-360` by removing the
+  outdated 2,000-character independent chunking claim and redirecting to
+  `My-Denia/WuwaTerm-Telegram`), `docs/web-presentation-layer.md`,
+  `docs/architecture.md`, `docs/deployment.md`, `docs/self-hosting.md`,
+  `docs/products.md`, `docs/support-matrix.md`, `README.md`, and
+  `README.zh-CN.md`.
+- **Rollback:** Deployments that still require the retired inline Telegram bot
+  or in-process Python Web UI should pin or roll back to Core tag `v0.16.0`.
+
 ## 0.16.0 - 2026-11-27
 
 ### Installer

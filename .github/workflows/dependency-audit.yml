@@ -77,7 +77,7 @@ jobs:
           # A green audit over an empty or truncated export is the failure mode
           # this gate exists to prevent, so the input is checked before it is
           # audited rather than trusted afterwards.
-          for required in httpx certifi fastapi uvicorn python-telegram-bot; do
+          for required in httpx certifi fastapi uvicorn; do
             grep -q "^${required}==" requirements-locked.txt || {
               echo "::error title=Export::requirements-locked.txt is missing ${required}"
               exit 1

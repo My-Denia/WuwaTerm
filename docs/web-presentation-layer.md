@@ -1,4 +1,26 @@
-# The owner-private web presentation layer
+# The owner-private web presentation layer (Retired from WuwaTerm Core)
+
+> **Status: Retired from WuwaTerm Core.** The legacy in-process Python Web UI
+> (`src/wuwaterm_api/web/`, mounted at `/wuwaterm-web` via
+> `WUWATERM_API_WEB_ENABLED`) has been removed from Core.
+>
+> - **Replacement:** Deploy the standalone [My-Denia/WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)
+>   workbench (for example via `./deploy/setup.sh --with-web --web-origin https://...`;
+>   see [Self-Hosting](self-hosting.md) and [Products](products.md)).
+> - **Fail-closed upgrade guard:** Existing `.env` files that leave
+>   `WUWATERM_API_WEB_ENABLED` unset, empty, or falsey (`0`/`false`/`no`/`off`)
+>   continue to start `wuwaterm-api` cleanly. Any truthy or unrecognised value
+>   for `WUWATERM_API_WEB_ENABLED` fails closed on `wuwaterm-api serve` with an
+>   explicit `ApiConfigError` so an operator never silently loses the web UI on
+>   upgrade. Operator credential commands (`wuwaterm-api device ...`) are never
+>   blocked.
+> - **Rollback:** If you still need the retired in-process Python Web UI, roll
+>   back to Core release [v0.16.0](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.16.0).
+
+The sections below are preserved as historical reference for the retired
+v0.16.0 in-process surface and its reverse-proxy design ([ADR 0014](adr/0014-private-web-presentation-layer.md)).
+
+---
 
 A mobile-first browser interface for dictionary lookup and sentence
 translation, for the owner's own use from a phone. It is a third presentation

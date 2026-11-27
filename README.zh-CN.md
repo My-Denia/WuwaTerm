@@ -113,9 +113,9 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ## 技术实现
 
-公共 Web 源码与 Node CI 已独立至 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)。本仓继续维护 Python 核心、API、Bot、词库构建、部署工具；Windows 客户端由 [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) 独立维护；跨仓任务仍统一在现有 Linear WuwaTerm Project。
+公共与自托管 Web 源码和 Node CI 已独立至 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)。本仓维护 Python 核心、HTTP API、词库构建与部署工具；Telegram Bot 由 [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) 独立维护（Core 旧内置 Bot 与旧内置 Python Web 已退役，回退请使用 `v0.16.0`）；Windows 客户端由 [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) 独立维护；跨仓任务仍统一在现有 Linear WuwaTerm Project。
 
-- **Python 3.11+**，使用 python-telegram-bot（长轮询）与 FastAPI，服务容器以只读方式挂载 SQLite 词典。
+- **Python 3.11+**，使用 FastAPI，服务容器以只读方式挂载 SQLite 词典。
 - **由 CI 强制的架构约束**：应用层不导入任何表示层代码；CI 会比对 API 契约与仓库中的 OpenAPI 快照，检查是否漂移（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
 - **可吊销的设备凭据**：API 凭据只以加盐 scrypt 校验值保存（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
 - **事务式更新**：维护者自用的部署工具先校验新镜像（数据更新时还有候选数据库），通过后才动运行中的服务；常规失败会恢复之前的镜像、数据库与提交指针（[ADR 0008](docs/adr/0008-candidate-verification-and-transactional-deployment.md)）。

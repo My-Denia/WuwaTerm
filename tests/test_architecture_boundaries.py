@@ -72,16 +72,6 @@ def test_type_checking_else_import_is_runtime(tmp_path: Path):
     assert by_name.get("bot") is False
 
 
-def test_channel_bot_import_is_type_checking_only():
-    from scripts import check_architecture_boundaries as cab
-
-    modules = cab._pkg_modules()
-    events = cab._iter_import_events(modules["channel"])
-    bot_events = [(type_only, lineno) for name, type_only, lineno in events if name == "bot"]
-    assert bot_events, "expected channel to TYPE_CHECKING-import BotConfig from bot"
-    assert all(type_only for type_only, _ in bot_events)
-
-
 def test_build_pinyin_only_from_allowed_importers():
     from scripts import check_architecture_boundaries as cab
 
@@ -90,16 +80,6 @@ def test_build_pinyin_only_from_allowed_importers():
         events = cab._iter_import_events(path)
         if any(imported == "build_pinyin" for imported, *_ in events):
             assert name in cab.BUILD_PINYIN_ALLOWED_IMPORTERS, name
-
-
-def test_presentation_does_not_import_builder_modules():
-    from scripts import check_architecture_boundaries as cab
-
-    modules = cab._pkg_modules()
-    for pres in ("bot", "channel"):
-        events = cab._iter_import_events(modules[pres])
-        imported = {name for name, *_ in events if name in modules}
-        assert not imported & cab.BUILDER, (pres, imported & cab.BUILDER)
 
 
 def test_domain_lookup_has_no_presentation_runtime_imports():
@@ -114,48 +94,16 @@ def test_domain_lookup_has_no_presentation_runtime_imports():
     assert "channel" not in runtime_local
 
 
-def test_sentence_only_allows_the_named_direct_lazy_legacy_imports(tmp_path: Path, monkeypatch):
+def test_sentence_rejects_any_telegram_sdk_or_presentation_import(tmp_path: Path, monkeypatch):
     from scripts import check_architecture_boundaries as cab
 
     real_modules, collisions = cab._discover_modules()
     sample = tmp_path / "sentence.py"
-    sample.write_text(
-        "class SentenceTranslator:\n"
-        "    def translate_html(self):\n"
-        "        from .telegram_html import translate_html\n"
-        "    def translate_protected(self):\n"
-        "        from .telegram_html import translate_html\n",
-        encoding="utf-8",
-    )
-    assert cab._sentence_legacy_bridge_lines(sample) == {3}
+    sample.write_text("import telegram\n", encoding="utf-8")
     modules = dict(real_modules)
     modules["sentence"] = sample
     monkeypatch.setattr(cab, "_discover_modules", lambda: (modules, collisions))
-    assert any("telegram_html" in failure for failure in cab.check())
-
-    sample.write_text(
-        "from .telegram_html import translate_html\n"
-        "class SentenceTranslator:\n"
-        "    def translate_html(self):\n"
-        "        from .telegram_html import translate_html\n",
-        encoding="utf-8",
-    )
-    assert any("telegram_html" in failure for failure in cab.check())
-
-
-def test_sentence_legacy_bridge_cannot_allow_other_imports(tmp_path: Path):
-    from scripts import check_architecture_boundaries as cab
-
-    sample = tmp_path / "sentence.py"
-    sample.write_text(
-        "class SentenceTranslator:\n"
-        "    def translate_html(self):\n"
-        "        if True:\n"
-        "            from .telegram_html import translate_html\n"
-        "        from .telegram_html import protect_telegram_html\n",
-        encoding="utf-8",
-    )
-    assert cab._sentence_legacy_bridge_lines(sample) == set()
+    assert any("Telegram SDK" in failure for failure in cab.check())
 
 
 def test_check_reports_unclassified_modules(monkeypatch):
@@ -244,7 +192,10 @@ def test_presentation_must_not_import_cli(monkeypatch, tmp_path: Path):
         (pkg / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
     (pkg / "bot.py").write_text("from .cli import main\n", encoding="utf-8")
     monkeypatch.setattr(cab, "PACKAGE", pkg)
-    # Use real layer sets; ensure required stems exist as empty modules.
+    synthetic_presentation = frozenset({"bot", "channel", "telegram_html", "telegram_text"})
+    monkeypatch.setattr(cab, "PRESENTATION", synthetic_presentation)
+    monkeypatch.setattr(cab, "ALL_CLASSIFIED", cab.ALL_CLASSIFIED | synthetic_presentation)
+    # Use real layer sets plus synthetic presentation; ensure required stems exist as empty modules.
     for name in cab.ALL_CLASSIFIED:
         path = pkg / f"{name.replace('.', '/')}.py"
         if not path.exists():

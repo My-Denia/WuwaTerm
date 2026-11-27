@@ -25,6 +25,7 @@ jobs:
     outputs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
       source_epoch: ${{ steps.epoch.outputs.source_epoch }}
+      telegram_mode: ${{ steps.epoch.outputs.telegram_mode }}
       telegram_optional: ${{ steps.epoch.outputs.telegram_optional }}
       manuscript_interop: ${{ steps.epoch.outputs.manuscript_interop }}
       web_revision: ${{ steps.epoch.outputs.web_revision }}
@@ -68,13 +69,14 @@ jobs:
           python scripts/ci_source_epoch.py resolve "$SOURCE" --workflow .github/workflows/ci.yml > "$RUNNER_TEMP/epoch.json"
           jq -e '
             (.source_epoch == "legacy" or .source_epoch == "split") and
+            (.telegram_mode == "bundled" or .telegram_mode == "optional" or .telegram_mode == "retired") and
             (.telegram_optional | type == "boolean") and
             (.manuscript_interop | type == "boolean") and
             (.web_revision | type == "string" and test("^[0-9a-f]{40}$")) and
             (if .source_epoch == "legacy" then .windows_revision == null
              else (.windows_revision | type == "string" and test("^[0-9a-f]{40}$")) end)
           ' "$RUNNER_TEMP/epoch.json" > /dev/null
-          for key in source_epoch telegram_optional manuscript_interop web_revision windows_revision; do
+          for key in source_epoch telegram_mode telegram_optional manuscript_interop web_revision windows_revision; do
             printf '%s=%s\n' "$key" "$(jq -r --arg key "$key" 'if .[$key] == null then "" else .[$key] | tostring end' "$RUNNER_TEMP/epoch.json")" >> "$GITHUB_OUTPUT"
           done
       - uses: actions/checkout@v7
@@ -113,9 +115,9 @@ jobs:
       - run: python -m pip install -U pip
       - name: Install source dependencies
         env:
-          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
         run: |
-          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+          if [ "$TELEGRAM_MODE" = optional ]; then
             python -m pip install -e ".[dev,telegram]"
           else
             python -m pip install -e ".[dev]"
@@ -153,13 +155,20 @@ jobs:
       # image. Bind uv explicitly to 3.11 rather than its managed default.
       - name: Install locked runtime dependencies
         env:
-          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
         run: |
           extras=(--extra api --extra dev)
-          if [ "$TELEGRAM_OPTIONAL" = true ]; then extras+=(--extra telegram); fi
+          if [ "$TELEGRAM_MODE" = optional ]; then extras+=(--extra telegram); fi
           uv sync --locked --python 3.11 "${extras[@]}"
       - name: Record locked runtime interpreter and dependencies
-        run: .venv/bin/python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
+        env:
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
+        run: |
+          if [ "$TELEGRAM_MODE" = retired ]; then
+            .venv/bin/python -c "import importlib.util, sys, importlib.metadata as m; assert importlib.util.find_spec('telegram') is None; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx']})"
+          else
+            .venv/bin/python -c "import sys, importlib.metadata as m; print(sys.version); print({p:m.version(p) for p in ['fastapi','starlette','pydantic','httpx','python-telegram-bot']})"
+          fi
       - run: .venv/bin/python scripts/validate.py
 
   web-contract:
@@ -213,9 +222,9 @@ jobs:
           node-version: "24"
       - name: Install source dependencies
         env:
-          TELEGRAM_OPTIONAL: ${{ needs.source.outputs.telegram_optional }}
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
         run: |
-          if [ "$TELEGRAM_OPTIONAL" = true ]; then
+          if [ "$TELEGRAM_MODE" = optional ]; then
             python -m pip install -e ".[dev,telegram]"
           else
             python -m pip install -e ".[dev]"
@@ -273,7 +282,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - run: python -m pip install -e ".[dev,telegram]"
+      - name: Install source dependencies
+        env:
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
+        run: |
+          if [ "$TELEGRAM_MODE" = optional ]; then
+            python -m pip install -e ".[dev,telegram]"
+          else
+            python -m pip install -e ".[dev]"
+          fi
       - run: python -m pytest -m cross_component tests/test_windows_contract.py
         env:
           WUWATERM_WINDOWS_ROOT: ${{ github.workspace }}/windows
@@ -320,19 +337,30 @@ jobs:
             docker run --rm wuwaterm-runtime:ci "$forbidden" || status=$?
             test "$status" -eq 64
           done
-      - name: Runtime image serves both inbound surfaces
+      - name: Runtime image serves expected surfaces
+        env:
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
         run: |
-          docker run --rm --entrypoint sh wuwaterm-runtime:ci -c 'python -c "import wuwaterm.bot, wuwaterm_api.app"'
+          if [ "$TELEGRAM_MODE" = retired ]; then
+            docker run --rm --entrypoint sh wuwaterm-runtime:ci -c 'python -c "import importlib.util, wuwaterm_api.app; assert importlib.util.find_spec(\"telegram\") is None; assert importlib.util.find_spec(\"wuwaterm.bot\") is None; assert importlib.util.find_spec(\"wuwaterm_api.web\") is None"'
+            status=0
+            docker run --rm wuwaterm-runtime:ci bot || status=$?
+            test "$status" -eq 64
+          else
+            docker run --rm --entrypoint sh wuwaterm-runtime:ci -c 'python -c "import wuwaterm.bot, wuwaterm_api.app"'
+          fi
           docker run --rm wuwaterm-runtime:ci api --help >/dev/null
           docker run --rm wuwaterm-runtime:ci device list >/dev/null
       - name: Runtime image excludes builder tooling; builder retains git
+        env:
+          TELEGRAM_MODE: ${{ needs.source.outputs.telegram_mode }}
         run: |
           docker run --rm --entrypoint sh wuwaterm-runtime:ci -c '! command -v git && ! command -v uv && ! command -v uvx'
           docker run --rm --entrypoint sh wuwaterm-builder:ci -c 'command -v git >/dev/null'
-          if [ "${{ needs.source.outputs.telegram_optional }}" = true ]; then
-            docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
-          else
+          if [ "$TELEGRAM_MODE" = bundled ]; then
             docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is not None"
+          else
+            docker run --rm --entrypoint python wuwaterm-builder:ci -c "import importlib.util; assert importlib.util.find_spec('telegram') is None"
           fi
       - name: Runtime image excludes WebSocket implementations
         run: |

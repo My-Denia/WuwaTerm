@@ -158,10 +158,11 @@ def test_every_existing_package_caller_is_covered():
 
 
 @pytest.mark.parametrize(
-    "telegram_optional,public_smoke", [(False, False), (True, False), (True, True)]
+    "telegram_mode,public_smoke",
+    [("bundled", False), ("optional", False), ("optional", True), ("retired", True)],
 )
 def test_package_smokes_follow_resolved_historical_capabilities(
-    tmp_path, telegram_optional, public_smoke
+    tmp_path, telegram_mode, public_smoke
 ):
     """Run the actual workflow steps; a selected smoke must execute and exist."""
     root = tmp_path / "source"
@@ -194,11 +195,12 @@ esac
 ''')
     stub.chmod(0o755)
     log = tmp_path / "invocations"
+    bundled = telegram_mode == "bundled"
     env = {
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "MOCK_PYTHON": str(stub), "MOCK_LOG": str(log), "RUNNER_TEMP": str(runner),
-        "MOCK_INSTALLED": str(not telegram_optional).lower(),
-        "TELEGRAM_OPTIONAL": str(telegram_optional).lower(),
+        "MOCK_INSTALLED": str(bundled).lower(),
+        "TELEGRAM_MODE": telegram_mode,
         "PUBLIC_INTERFACE_SMOKE": str(public_smoke).lower(),
     }
     steps = _workflow("python-package.yml")["jobs"]["build"]["steps"]
@@ -209,14 +211,14 @@ esac
     ):
         step = _step(steps, name)
         assert step["env"] == {
-            "TELEGRAM_OPTIONAL": "${{ steps.epoch.outputs.telegram_optional }}",
+            "TELEGRAM_MODE": "${{ steps.epoch.outputs.telegram_mode }}",
             "PUBLIC_INTERFACE_SMOKE": "${{ steps.epoch.outputs.public_interface_smoke }}",
         }
         result = _run(step["run"], root, env)
         assert result.returncode == 0, (name, result.stderr)
     calls = log.read_text().splitlines()
-    assert sum("find_spec('telegram') is None" in line for line in calls) == (4 if telegram_optional else 0)
-    assert calls.count("-c import telegram") == (0 if telegram_optional else 4)
+    assert sum("find_spec('telegram') is None" in line for line in calls) == (0 if bundled else 4)
+    assert calls.count("-c import telegram") == (4 if bundled else 0)
     assert sum("check_package_public_interface.py" in line for line in calls) == (4 if public_smoke else 0)
     if public_smoke:
         (root / "scripts" / "check_package_public_interface.py").unlink()
@@ -241,10 +243,11 @@ def test_package_resolves_at_control_before_checking_out_source():
 @pytest.mark.parametrize(
     "epoch,valid",
     [
-        ({"telegram_optional": False, "public_interface_smoke": False}, True),
-        ({"telegram_optional": True, "public_interface_smoke": True}, True),
-        ({"telegram_optional": False}, False),
-        ({"telegram_optional": "false", "public_interface_smoke": False}, False),
+        ({"telegram_mode": "bundled", "public_interface_smoke": False}, True),
+        ({"telegram_mode": "optional", "public_interface_smoke": True}, True),
+        ({"telegram_mode": "retired", "public_interface_smoke": True}, True),
+        ({"telegram_mode": "bundled"}, False),
+        ({"telegram_mode": "unknown", "public_interface_smoke": False}, False),
     ],
 )
 def test_package_rejects_missing_or_invalid_resolver_outputs(tmp_path, epoch, valid):
@@ -268,7 +271,7 @@ def test_package_rejects_missing_or_invalid_resolver_outputs(tmp_path, epoch, va
     assert (result.returncode == 0) == valid, result.stderr
     if valid:
         assert output.read_text().splitlines() == [
-            f'telegram_optional={str(epoch["telegram_optional"]).lower()}',
+            f'telegram_mode={epoch["telegram_mode"]}',
             f'public_interface_smoke={str(epoch["public_interface_smoke"]).lower()}',
         ]
     else:

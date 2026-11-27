@@ -84,17 +84,17 @@ UNKNOWN = "unknown"
 # dropped it - and that is fatal.
 BOOTSTRAP_BLIND_SPOT = frozenset({"packaging", "pip", "setuptools", "wheel"})
 
-# The pins every export of this lock contains: both adapters (the Telegram bot
-# and the HTTP API), the HTTP client they share, and the CA bundle the runtime
-# actually trusts. The join below cannot see a file that was truncated together
-# with its report - both would agree on the smaller set - so the export is
-# checked for these names before its report is believed.
+# The pins every export of this lock contains: the HTTP API adapter, the HTTP
+# client it shares with Core, and the CA bundle the runtime actually trusts.
+# The join below cannot see a file that was truncated together with its report
+# - both would agree on the smaller set - so the export is checked for these
+# names before its report is believed.
 # `.github/workflows/dependency-audit.yml` greps for the same names before the
 # audit runs, so a truncated export never reaches pip-audit at all; the check is
 # repeated here so the gate stands on its own, and
 # tests/test_dependency_advisories.py compares the two lists so they cannot
 # drift apart.
-REQUIRED_PINS = frozenset({"certifi", "fastapi", "httpx", "python-telegram-bot", "uvicorn"})
+REQUIRED_PINS = frozenset({"certifi", "fastapi", "httpx", "uvicorn"})
 
 # `uv export` writes one pin per line, optionally followed by the lock's
 # environment marker. Each line here comes from that command, not from a human.

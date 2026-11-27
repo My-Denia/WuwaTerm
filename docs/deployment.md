@@ -171,15 +171,16 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 Do not move this candidate over `data/terms.db` manually. The transactional
 updater is the production promotion boundary.
 
-The compose service uses long polling (`wuwaterm bot`) and
-`restart: unless-stopped`. It does not configure webhook delivery, inline query
-handling, or any extra command-routing layer. Starting the service is
-owner-gated:
+The Compose stack runs `wuwaterm-api` (`command: ["api"]`) with
+`restart: unless-stopped`. The legacy inline `wuwaterm` (`wuwaterm-bot`)
+Compose service has been retired from Core (use standalone `WuwaTerm-Telegram`,
+or roll back to `v0.16.0` if the legacy inline bot is still needed). Starting
+the service is owner-gated:
 
 ```bash
 cd /opt/wuwaterm/current
 export WUWATERM_STATE_ROOT=/opt/wuwaterm
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
 ```
 
 ## API Resource Settings On An Adopted Deployment

@@ -36,7 +36,6 @@ def build_wheel(
     members = {
         "wuwaterm/__init__.py": "",
         "wuwaterm/cli.py": "def main():\n    return 0\n",
-        "wuwaterm/bot.py": "",
         "wuwaterm/application.py": "",
         "wuwaterm/cjk_span.py": "",
         "wuwaterm/cjk_words.txt": "",
@@ -47,10 +46,6 @@ def build_wheel(
         "wuwaterm_api/cli.py": "",
         "wuwaterm_api/errors.py": "",
         "wuwaterm_api/settings.py": "",
-        "wuwaterm_api/web/__init__.py": "",
-        "wuwaterm_api/web/app.py": "",
-        "wuwaterm_api/web/render.py": "",
-        "wuwaterm_api/web/session.py": "",
         f"{dist_info}/METADATA": WHEEL_METADATA,
         f"{dist_info}/entry_points.txt": ENTRY_POINTS,
         f"{dist_info}/RECORD": "",
@@ -77,7 +72,6 @@ def build_sdist(
         f"{root}/PKG-INFO": WHEEL_METADATA,
         f"{root}/src/wuwaterm/__init__.py": "",
         f"{root}/src/wuwaterm/cli.py": "",
-        f"{root}/src/wuwaterm/bot.py": "",
         f"{root}/src/wuwaterm/application.py": "",
         f"{root}/src/wuwaterm/cjk_span.py": "",
         f"{root}/src/wuwaterm/cjk_words.txt": "",
@@ -88,10 +82,6 @@ def build_sdist(
         f"{root}/src/wuwaterm_api/cli.py": "",
         f"{root}/src/wuwaterm_api/errors.py": "",
         f"{root}/src/wuwaterm_api/settings.py": "",
-        f"{root}/src/wuwaterm_api/web/__init__.py": "",
-        f"{root}/src/wuwaterm_api/web/app.py": "",
-        f"{root}/src/wuwaterm_api/web/render.py": "",
-        f"{root}/src/wuwaterm_api/web/session.py": "",
     }
     members.update(extra or {})
     for name in omit or set():
@@ -177,9 +167,9 @@ def test_wheel_with_forbidden_member_fails(tmp_path: Path):
 
 
 def test_wheel_missing_required_member_fails(tmp_path: Path):
-    wheel = build_wheel(tmp_path / "bad.whl", omit={"wuwaterm/bot.py"})
+    wheel = build_wheel(tmp_path / "bad.whl", omit={"wuwaterm/application.py"})
     failures = audit_wheel(wheel, VERSION)
-    assert any("missing required member: wuwaterm/bot.py" in f for f in failures)
+    assert any("missing required member: wuwaterm/application.py" in f for f in failures)
 
 
 def test_wheel_and_sdist_missing_cjk_words_fail(tmp_path: Path):
@@ -192,21 +182,14 @@ def test_wheel_and_sdist_missing_cjk_words_fail(tmp_path: Path):
     assert any("missing required member: src/wuwaterm/cjk_words.txt" in f for f in sdist_failures)
 
 
-def test_wheel_missing_the_web_subpackage_fails(tmp_path: Path):
-    """The subpackage is the member a packaging change drops most quietly.
-
-    `packages.find` discovers `wuwaterm_api.web` only because it carries an
-    __init__.py. A switch to an explicit package list, or an __init__.py lost in
-    a refactor, would leave the parent package shipping intact while this
-    directory vanished - and the symptom would not be a build error but a 404
-    for the whole browser surface on a deployed host. Named individually rather
-    than trusting the parent's presence to imply it.
-    """
+def test_wheel_missing_api_package_member_fails(tmp_path: Path):
     for member in (
-        "wuwaterm_api/web/__init__.py",
-        "wuwaterm_api/web/app.py",
-        "wuwaterm_api/web/render.py",
-        "wuwaterm_api/web/session.py",
+        "wuwaterm_api/__init__.py",
+        "wuwaterm_api/app.py",
+        "wuwaterm_api/auth.py",
+        "wuwaterm_api/cli.py",
+        "wuwaterm_api/errors.py",
+        "wuwaterm_api/settings.py",
     ):
         wheel = build_wheel(tmp_path / "bad.whl", omit={member})
         failures = audit_wheel(wheel, VERSION)

@@ -21,6 +21,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=("core", "api", "build"), default="core")
     mode = parser.parse_args().mode
     assert importlib.util.find_spec("telegram") is None
+    assert importlib.util.find_spec("wuwaterm.bot") is None
+    assert importlib.util.find_spec("wuwaterm.telegram_html") is None
+    assert importlib.util.find_spec("wuwaterm_api.web") is None
 
     from wuwaterm.application import (
         ProtectedStructure,
@@ -112,6 +115,9 @@ def main() -> None:
             assert pinyin_for("声骸") == "shenghai"
 
     assert importlib.util.find_spec("telegram") is None
+    assert importlib.util.find_spec("wuwaterm.bot") is None
+    assert importlib.util.find_spec("wuwaterm.telegram_html") is None
+    assert importlib.util.find_spec("wuwaterm_api.web") is None
     print(f"installed {mode} public-interface smoke passed")
 
 

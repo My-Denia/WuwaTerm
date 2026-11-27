@@ -62,16 +62,15 @@ FORBIDDEN_NAME_PREFIXES = (
 # packaging configuration changed underneath us.
 FORBIDDEN_NAME_MARKERS = ("wutheringdata", "credential", "wuwaterm_client")
 
-# The public wheel deliberately ships BOTH adapters: the Telegram bot and the
-# HTTP adapter package. Only generated data, game data and runtime state are
-# out of bounds for a distribution, and neither adapter carries those. Listing
-# the HTTP modules here keeps that decision explicit: if a packaging change
+# The public wheel ships the protocol-neutral Core library and the HTTP API
+# adapter package. The legacy inline Telegram bot and in-process Python Web UI
+# have been retired; standalone clients live in their own repositories. Listing
+# the HTTP modules here keeps that boundary explicit: if a packaging change
 # ever drops wuwaterm_api from the wheel, this gate fails instead of silently
 # shipping a `wuwaterm-api` entry point that cannot import its own package.
 REQUIRED_WHEEL_MEMBERS = (
     "wuwaterm/__init__.py",
     "wuwaterm/cli.py",
-    "wuwaterm/bot.py",
     "wuwaterm/application.py",
     "wuwaterm/cjk_span.py",
     "wuwaterm/cjk_words.txt",
@@ -82,25 +81,12 @@ REQUIRED_WHEEL_MEMBERS = (
     "wuwaterm_api/cli.py",
     "wuwaterm_api/errors.py",
     "wuwaterm_api/settings.py",
-    # The web presentation layer is a SUBPACKAGE, and subpackages are the thing
-    # a packaging change drops most quietly: `packages.find` discovers it only
-    # because it carries an __init__.py, and a switch to an explicit package
-    # list - or an __init__.py lost in a refactor - would leave the parent
-    # package shipping intact while this directory vanished. The failure that
-    # produces is not an import error at build time but a 404 for the whole
-    # surface on a deployed host, which is exactly the kind of thing this gate
-    # says it exists to prevent.
-    "wuwaterm_api/web/__init__.py",
-    "wuwaterm_api/web/app.py",
-    "wuwaterm_api/web/render.py",
-    "wuwaterm_api/web/session.py",
 )
 REQUIRED_SDIST_MEMBERS = (
     "pyproject.toml",
     "PKG-INFO",
     "src/wuwaterm/__init__.py",
     "src/wuwaterm/cli.py",
-    "src/wuwaterm/bot.py",
     "src/wuwaterm/application.py",
     "src/wuwaterm/cjk_span.py",
     "src/wuwaterm/cjk_words.txt",
@@ -111,10 +97,6 @@ REQUIRED_SDIST_MEMBERS = (
     "src/wuwaterm_api/cli.py",
     "src/wuwaterm_api/errors.py",
     "src/wuwaterm_api/settings.py",
-    "src/wuwaterm_api/web/__init__.py",
-    "src/wuwaterm_api/web/app.py",
-    "src/wuwaterm_api/web/render.py",
-    "src/wuwaterm_api/web/session.py",
 )
 ENTRY_POINT_LINES = (
     "wuwaterm = wuwaterm.cli:main",

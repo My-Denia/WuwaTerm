@@ -252,19 +252,15 @@ than by the declared length, and a bounded credential-verification pool with
 non-queuing admission (a saturated verifier sheds `429` rather than queueing
 work an unauthenticated caller can schedule).
 
-## Telegram as presentation layer
+## Telegram as presentation layer (Retired from Core)
 
-Telegram is one UI and transport, not the domain model.
-
-| Presentation | Responsibility | Module |
-|--------------|----------------|--------|
-| Command bot | Handlers, auth, rate limits, replies, polling bootstrap | `src/wuwaterm/bot.py` |
-| Linked channel | Admission, translate, deliver/edit, flood retry | `src/wuwaterm/channel.py` |
-| HTML/text helpers | Protect/validate Telegram HTML; chunk limits | `telegram_html.py`, `telegram_text.py` |
-
-Domain (`lookup`, `normalize`, `models`, `review`, `term_matching`,
-`term_preparation`) and storage (`db` reads, `settings`, `channel_reply_index`)
-must remain usable from CLI and tests without a live Telegram session. See
+Telegram is a separate presentation product ([My-Denia/WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)),
+not part of the Core domain model. The legacy inline bot modules (`bot.py`,
+`channel.py`, `channel_reply_index.py`, `channel_reply_schema.py`,
+`channel_runtime.py`, `settings.py`, `runtime_keys.py`, `telegram_html.py`,
+`telegram_text.py`) and `wuwaterm[telegram]` extra have been retired from Core
+(preserved through release `v0.16.0`). Protocol-neutral structure protection
+(`protected_text.py`) and normalization (`normalize.py`) remain in Core. See
 [ADR 0001](adr/0001-telegram-as-presentation-layer.md).
 
 ## HTTP API as presentation layer
@@ -292,13 +288,11 @@ Intended layers (modular monolith — [ADR 0002](adr/0002-modular-monolith.md)):
 
 ```
 cli (bootstrap)                    wuwaterm_api (separate top-level package)
-  |-> bot / channel                  |-> app / auth / errors / settings / cli / web
-  |     |-> application  <-----------'        (allowlisted imports only)
-  |     |     |-> lookup / review / sentence / normalize / translation_policy   domain
-  |     |     |                    |-> term_preparation -> term_matching
-  |     |     |                    `-> term_matching
-  |     |-> settings / channel_reply_* / channel_runtime         local infra
-  |     |-> telegram_html / telegram_text                 presentation helpers
+  |                                  |-> app / auth / errors / settings / cli
+  |                                  |     `-> application (allowlisted imports only)
+  |                                  |           `-> lookup / review / sentence / normalize / translation_policy   domain
+  |                                  |                             |-> term_preparation -> term_matching
+  |                                  |                             `-> term_matching
   |-> builder / data_source / db (write) / build_pinyin            builder path
   |     `-> term_matching                                          pure matching
   |-> lookup / sentence / db (read)                                offline CLI
@@ -313,15 +307,15 @@ knowledge_builder (offline KB build)   scripts/verify_knowledge_db.py
 |-------|---------|-----------------|
 | Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
-| Domain + provider | `sentence`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK, except the three lazy compatibility imports described below; builder-only modules |
+| Domain + provider | `sentence`, `provider_capabilities`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
-| Shared policy | `translation_policy`, `runtime_keys`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
-| Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, `knowledge_builder`, bootstrap `cli` |
-| Presentation (HTTP) | `wuwaterm_api.*` | everything in `wuwaterm` except the five allowlisted modules below; the Telegram SDK |
-| Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime`, `logging_utils`, `request_trace` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Shared policy | `translation_policy`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Presentation (chat) | *(retired from Core; standalone `WuwaTerm-Telegram`)* | — |
+| Presentation (HTTP) | `wuwaterm_api.*` (in-process `wuwaterm_api.web` retired; standalone `WuwaTerm-Web`) | everything in `wuwaterm` except the five allowlisted modules below; the Telegram SDK |
+| Local state | `logging_utils`, `request_trace` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Storage | `db` | presentation / Telegram SDK; `build_pinyin` only inside write helpers (lazy) |
-| Builder | `builder`, `data_source`, `build_pinyin`, `knowledge_builder` | `bot`, `channel` |
-| Bootstrap | `cli` | may wire both runtime and builder entrypoints |
+| Builder | `builder`, `data_source`, `build_pinyin`, `knowledge_builder` | presentation / Telegram SDK |
+| Bootstrap | `cli` | Telegram SDK; may wire both runtime and builder entrypoints |
 
 Companion entity knowledge base modules keep soft retrieval strictly isolated
 from mandatory placeholder locks: `domain_knowledge` sits in `PURE_MATCHING`
@@ -493,7 +487,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 | Large `bot.py` (config, auth, rate limit, translate orchestration, migration, polling) | Accepted concentration | Documented; not mass-split in this formalization |
 | `translate_query*` in `bot.py` are thin wrappers over `application` | Resolved | The pipeline itself lives in `application.py`; `bot.py` only adds Telegram wording, HTML parse mode and the UTF-16 splitter |
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
-| `sentence` → `telegram_html` | Transitional | Three lazy legacy forwarding methods remain until the Telegram product cutover; the neutral translation path has no presentation dependency |
+| `sentence` → `telegram_html` | Resolved | Legacy HTML forwarding bridges and `telegram_html.py` retired from Core; `sentence.py` has zero presentation dependencies |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
 | `segmentation`/`translation_plan`/`sentence` imported pure text helpers from `review` | Resolved | Pure Unicode-scalar span helpers (`WHITESPACE`, `sentence_ranges`, `sentence_ranges_v2`, `review_sentence_ranges_v2`, `segment_core`, `paragraph_ranges`) live in stdlib-only `text_spans`; Rule #11 forbids `db`, `lookup`, `review`, and `sqlite3` across all pure matching/text modules (checked transitively by `tests/test_architecture_boundaries.py`), while `review` re-exports compatible public/private aliases |
 | Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |

@@ -45,10 +45,40 @@ def capture(path: Path, kind: str, mounts: list[dict], *, require_writer: bool =
     return endpoint.validate_endpoint(json.loads(proc.stdout))
 
 
+ROOT = Path(__file__).resolve().parents[1]
+VALIDATOR_SCRIPT = ROOT / "scripts" / "validate_state_file.py"
+
+
+def _legacy_bot_stub_prefix() -> str:
+    """Provide a synthetic legacy ``wuwaterm.bot._validate_state_file`` inside ``-I`` probes.
+
+    Historical pre-retirement legacy containers shipped ``wuwaterm.bot._validate_state_file``.
+    Core no longer ships ``wuwaterm.bot``, so host-side unit tests for the legacy copy probe
+    inject the equivalent validator shim backed by ``scripts/validate_state_file.py``.
+    """
+    script_literal = json.dumps(str(VALIDATOR_SCRIPT))
+    return (
+        "import importlib.util as _iu, sys as _sys, types as _types\n"
+        f"_vspec = _iu.spec_from_file_location('_wuwaterm_legacy_validator', {script_literal})\n"
+        "_vmod = _iu.module_from_spec(_vspec)\n"
+        "_vspec.loader.exec_module(_vmod)\n"
+        "_pkg = _types.ModuleType('wuwaterm')\n"
+        "_pkg.__path__ = []\n"
+        "_bot = _types.ModuleType('wuwaterm.bot')\n"
+        "def _validate_state_file(path, *, label):\n"
+        " _name = 'chat_settings.json' if label == 'chat settings' else 'channel_replies.json'\n"
+        " _vmod.validate(path, _name)\n"
+        "_bot._validate_state_file = _validate_state_file\n"
+        "_pkg.bot = _bot\n"
+        "_sys.modules['wuwaterm'] = _pkg\n"
+        "_sys.modules['wuwaterm.bot'] = _bot\n"
+    )
+
+
 def execute(request: dict, *, trace: bool = False) -> subprocess.CompletedProcess[str]:
-    prefix = ""
+    prefix = _legacy_bot_stub_prefix()
     if trace:
-        prefix = r'''import os,sys,stat,atexit
+        prefix += r'''import os,sys,stat,atexit
 real_sync=os.fsync; real_truncate=os.ftruncate; events=[]
 def traced_sync(fd):
  events.append('dir' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file'); return real_sync(fd)

@@ -160,7 +160,7 @@ SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<bo
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
     "Synchronous sentence translation cannot call the LLM from a running "
-    "event loop; use translate_async() or translate_html_async() instead."
+    "event loop; use translate_async() or translate_protected_async() instead."
 )
 
 LlmCallGuard = Callable[[], object]
@@ -736,19 +736,6 @@ class SentenceTranslator:
                 TRANSLATION_UNAVAILABLE_NOTICE, reason="protected_text_integrity"
             ) from exc
 
-    def _lock_html_terms(self, protected, *, allow_plural_inflection: bool = False):
-        """Compatibility bridge for callers of the former private helper."""
-        return self._lock_protected_terms(
-            protected.neutral, allow_plural_inflection=allow_plural_inflection
-        )
-
-    @staticmethod
-    def _restore_html(protected, locked, translated: str, *, to_en: bool) -> str:
-        """Compatibility bridge; parsing and HTML validation remain in the adapter."""
-        from .telegram_html import restore_html
-
-        return restore_html(protected, locked, translated, to_en=to_en)
-
     def translate(self, text: str, *, to_chinese: bool = False) -> str:
         """Translate plain text through the synchronous API.
 
@@ -1243,26 +1230,6 @@ class SentenceTranslator:
         return self._restore_protected(
             protected, locked, _require_nonblank_llm_output(translated),
             to_en=not to_chinese,
-        )
-
-    def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
-        """Compatibility bridge to the Telegram HTML adapter."""
-        from .telegram_html import translate_html
-
-        return translate_html(self, html_text, to_chinese=to_chinese)
-
-    async def translate_html_async(
-        self,
-        html_text: str,
-        *,
-        to_chinese: bool = False,
-        before_llm_call: LlmCallGuard | None = None,
-    ) -> str:
-        """Async compatibility bridge to the Telegram HTML adapter."""
-        from .telegram_html import translate_html_async
-
-        return await translate_html_async(
-            self, html_text, to_chinese=to_chinese, before_llm_call=before_llm_call
         )
 
     async def _call_llm_async_limited(

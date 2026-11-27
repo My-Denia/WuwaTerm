@@ -25,10 +25,6 @@ Changelog = "https://github.com/My-Denia/WuwaTerm/blob/main/CHANGELOG.md"
 build = [
   "pypinyin>=0.54,<1",
 ]
-# The existing Telegram bot and HTTP adapter can be installed independently.
-telegram = [
-  "python-telegram-bot>=22.7,<23",
-]
 api = [
   "anyio>=4,<5",
   "fastapi>=0.115,<1",

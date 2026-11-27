@@ -8,9 +8,7 @@
 # this file omits keeps the base file's value, so wuwaterm-builder stays behind
 # its `builder` profile and still has to be named or profiled to run.
 services:
-  wuwaterm:
-    image: ghcr.io/my-denia/wuwaterm:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}
   wuwaterm-api:
-    image: ghcr.io/my-denia/wuwaterm:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}
+    image: ghcr.io/my-denia/wuwaterm:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.16.0}
   wuwaterm-builder:
-    image: ghcr.io/my-denia/wuwaterm-builder:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}
+    image: ghcr.io/my-denia/wuwaterm-builder:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.16.0}

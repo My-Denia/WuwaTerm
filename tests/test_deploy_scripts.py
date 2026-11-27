@@ -281,13 +281,13 @@ def test_builder_entrypoint_passes_extra_build_arguments():
     assert '"$@"' in text
 
 
-def test_runtime_entrypoint_forwards_bot_arguments():
+def test_runtime_entrypoint_forwards_api_arguments():
     env = os.environ.copy()
     env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
     env["PYTHONPATH"] = f"{ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
     result = subprocess.run(
-        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), "bot", "--help"],
+        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), "api", "--help"],
         cwd=ROOT,
         env=env,
         text=True,
@@ -358,14 +358,30 @@ def test_runtime_entrypoint_rejects_data_builder_commands(command: str):
     assert "use the builder image for data commands" in result.stderr
 
 
+def test_runtime_entrypoint_rejects_retired_bot_command():
+    result = subprocess.run(
+        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), "bot"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 64
+    assert "WuwaTerm-Telegram" in result.stderr
+    assert "v0.16.0" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [("api", "wuwaterm_api.cli serve"), ("device", "wuwaterm_api.cli device")],
 )
 def test_runtime_entrypoint_serves_the_api_surfaces(command: str, expected: str):
-    """The runtime image runs both inbound surfaces, and only those."""
+    """The runtime image runs the API and device surfaces, and only those."""
     text = (ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
 
+    assert 'COMMAND="${1:-api}"' in text
     assert f"exec python -m {expected}" in text
     assert f"  {command})" in text
 
@@ -376,26 +392,33 @@ def test_env_examples_are_byte_identical():
     ).read_bytes()
 
 
-def test_env_example_covers_runtime_state_and_llm_controls():
+def test_env_example_covers_core_api_and_llm_controls():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
     for name in (
-        "WUWATERM_LLM_TIMEOUT_SECONDS",
-        "WUWATERM_LLM_MAX_CONCURRENCY",
-        "WUWATERM_CHANNEL_MIN_LATIN",
-        "WUWATERM_CHANNEL_MAX_PENDING",
-        "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE",
-        "WUWATERM_CHANNEL_REPLY_INDEX_PATH",
-        "WUWATERM_SETTINGS_PATH",
-        "WUWATERM_STATE_DIR",
-        "OWNER_USER_ID",
-        "WUWATERM_TR_REJECT_SILENT",
+        "WUWATERM_DB_PATH=data/terms.db",
+        "WUWATERM_DATA_DIR=data/wutheringdata",
+        "WUWATERM_SOURCE_PROFILE=arikatsu",
+        "WUWATERM_OPENAI_BASE_URL=",
+        "WUWATERM_OPENAI_API_KEY=",
+        "WUWATERM_OPENAI_MODEL=",
+        "WUWATERM_TRANSLATION_THINKING_ZH_EN=disabled",
+        "WUWATERM_TRANSLATION_THINKING_EN_ZH=omit",
+        "WUWATERM_API_PORT=8788",
+        "WUWATERM_API_STATE_DIR=state-api",
+        "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
+        "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
+        "WUWATERM_API_LLM_TIMEOUT_SECONDS=45",
+        "WUWATERM_API_RATE_LIMIT_PER_MINUTE=30",
     ):
         assert name in text
-    assert "WUWATERM_STATE_DIR=state" in text
-    assert "#WUWATERM_SETTINGS_PATH=state/chat_settings.json" in text
-    assert "#WUWATERM_CHANNEL_REPLY_INDEX_PATH=state/channel_replies.json" in text
-    assert "WUWATERM_SETTINGS_PATH=data/chat_settings.json" not in text
-    assert "WUWATERM_CHANNEL_REPLY_INDEX_PATH=data/channel_replies.json" not in text
+    for retired in (
+        "TELEGRAM_BOT_TOKEN=",
+        "WUWATERM_CHANNEL_AUTOTRANSLATE=",
+        "WUWATERM_SETTINGS_PATH=",
+        "WUWATERM_API_WEB_ENABLED=",
+        "WUWATERM_API_WEB_EDGE_SECRET=",
+    ):
+        assert retired not in text
 
 
 def test_pypinyin_is_build_only_dependency():
@@ -405,6 +428,7 @@ def test_pypinyin_is_build_only_dependency():
     optional = pyproject["project"]["optional-dependencies"]
 
     assert not any(item.startswith("pypinyin") for item in dependencies)
+    assert "telegram" not in optional
     assert any(item.startswith("pypinyin") for item in optional["build"])
     assert any(item.startswith("pypinyin") for item in optional["dev"])
 
@@ -414,16 +438,16 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
 
     assert "FROM python-base AS runtime" in text
     assert "FROM python-base AS builder" in text
-    assert "uv sync --locked --no-dev --no-editable --extra telegram --extra api --no-cache" in text
+    assert "uv sync --locked --no-dev --no-editable --extra api --no-cache" in text
     assert "uv sync --locked --no-dev --no-editable --extra build --no-cache" in text
     runtime_section = text.split("FROM python-base AS runtime", 1)[1].split(
         "FROM python-base AS builder", 1
     )[0]
     builder_section = text.split("FROM python-base AS builder", 1)[1]
     assert "--extra build" not in runtime_section
-    # The combined serving image needs both extras; the builder needs neither.
     assert "--extra api" in runtime_section
-    assert "--extra telegram" in runtime_section
+    assert "--extra telegram" not in runtime_section
+    assert 'CMD ["api"]' in runtime_section
     assert "--extra api" not in builder_section
     assert "--extra telegram" not in builder_section
     assert "apt-get install -y --no-install-recommends git ca-certificates" in builder_section
@@ -435,19 +459,15 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
 def test_compose_uses_readonly_data_for_runtime_and_writable_data_for_builder():
     text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
 
+    assert "\n  wuwaterm:\n" not in text
+    assert "container_name: wuwaterm-bot" not in text
     assert "target: runtime" in text
     assert "target: builder" in text
     assert "wuwaterm-runtime:local" in text
     assert "wuwaterm-builder:local" in text
     assert f"{STATE_ROOT}/data:/app/data:ro" in text
-    assert f"{STATE_ROOT}/state:/app/state" in text
-    assert "WUWATERM_STATE_DIR: /app/state" in text
+    assert f"{STATE_ROOT}/state-api:/app/state-api" in text
     assert "WUWATERM_SOURCE_PROFILE: ${WUWATERM_SOURCE_PROFILE:-arikatsu}" in text
-    assert "WUWATERM_SETTINGS_PATH: /app/state/chat_settings.json" in text
-    assert (
-        "WUWATERM_CHANNEL_REPLY_INDEX_PATH: /app/state/channel_replies.json"
-        in text
-    )
     assert f"{STATE_ROOT}/data:/app/data\n" in text
     builder_section = text.split("  wuwaterm-builder:", 1)[1]
     assert "env_file:" not in builder_section
@@ -521,8 +541,8 @@ def test_ghcr_overlay_declares_image_references_only():
         else:
             raise AssertionError(f"unexpected key in the overlay: {line!r}")
 
-    assert services == ["wuwaterm", "wuwaterm-api", "wuwaterm-builder"]
-    assert len(images) == 3
+    assert services == ["wuwaterm-api", "wuwaterm-builder"]
+    assert len(images) == 2
     # Comments are excluded on purpose: the header explains that the overlay
     # does not remove the base file's build sections, and that sentence must
     # not be what this assertion reads.
@@ -1598,13 +1618,12 @@ def test_vps_update_upgrades_api_and_leaves_stopped_legacy_bot_untouched(deploy_
 
 
 def test_api_state_directory_is_not_inside_the_bot_state_tree():
-    """The bot mounts all of state/ read-write; credentials must be outside."""
+    """API credential store mounts state-api/, never legacy state/."""
     compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
-    bot_section = compose.split("  wuwaterm:", 1)[1].split("  wuwaterm-api:", 1)[0]
-    assert f"{STATE_ROOT}/state:/app/state" in bot_section
+    assert "\n  wuwaterm:\n" not in compose
     api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
     assert f"{STATE_ROOT}/state-api:/app/state-api" in api_section
     assert ":/app/state" + chr(10) not in api_section

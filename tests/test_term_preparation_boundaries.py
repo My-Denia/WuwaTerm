@@ -46,10 +46,15 @@ def test_protected_translation_numbers_locks_and_deduplicates_references(
 
     async def run():
         try:
-            return await translator.translate_html_async(
-                "Echo Jinhsi <b>Echo Camellya Jinhsi</b> Resonators &amp; Echo",
-                to_chinese=True,
+            source = ProtectedText(
+                ("Echo Jinhsi ", "Echo Camellya Jinhsi", " Resonators ", " Echo"),
+                (
+                    ProtectedStructure("<b>"),
+                    ProtectedStructure("</b>"),
+                    ProtectedStructure("&amp;", "&"),
+                ),
             )
+            return (await translator.translate_protected_async(source, to_chinese=True)).render()
         finally:
             await translator.aclose()
 
@@ -253,8 +258,11 @@ def test_structured_references_preserve_exact_llm_request_payload(monkeypatch, s
         try:
             await translator.translate_async("今汐和声骸", to_chinese=False)
             await translator.translate_async("欢迎椿和声骸", to_chinese=False)
-            await translator.translate_html_async(
-                "Echo Jinhsi <b>Echo Camellya Jinhsi</b>",
+            await translator.translate_protected_async(
+                ProtectedText(
+                    ("Echo Jinhsi ", "Echo Camellya Jinhsi", ""),
+                    (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+                ),
                 to_chinese=True,
             )
         finally:

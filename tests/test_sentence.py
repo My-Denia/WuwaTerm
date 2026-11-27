@@ -601,9 +601,36 @@ def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_d
     translator = SentenceTranslator(sample_db)
 
     async def run():
-        return await translator.translate_html_async("<b>__TERM_0__</b>声骸")
+        return (await translator.translate_protected_async(
+            _protected_from_markup("<b>__TERM_0__</b>声骸")
+        )).render()
 
     assert asyncio.run(run()) == "<b>__TERM_0__</b>声骸"
+
+
+def _protected_from_markup(markup: str):
+    """Test-only helper splitting synthetic markup/entities into ProtectedText."""
+    import html as _html
+    from wuwaterm.protected_text import ProtectedStructure, ProtectedText
+
+    token_re = re.compile(r"<[^>]+>|&(?:#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);")
+    segments: list[str] = []
+    structures: list[ProtectedStructure] = []
+    cursor = 0
+    for match in token_re.finditer(markup):
+        segments.append(markup[cursor : match.start()])
+        token = match.group(0)
+        visible_ctx = _html.unescape(token) if token.startswith("&") else ""
+        structures.append(ProtectedStructure(token, visible_ctx))
+        cursor = match.end()
+    segments.append(markup[cursor:])
+    return ProtectedText(tuple(segments), tuple(structures))
+
+
+def _strip_markup(markup: str) -> str:
+    import html as _html
+
+    return _html.unescape(re.sub(r"<[^>]+>", "", markup))
 
 
 @pytest.mark.parametrize(
@@ -677,9 +704,9 @@ def test_html_translation_protects_structure_and_only_locks_visible_text(
     translator = SentenceTranslator(sample_db)
 
     async def run():
-        return await translator.translate_html_async(
-            html_text, to_chinese=to_chinese
-        )
+        return (await translator.translate_protected_async(
+            _protected_from_markup(html_text), to_chinese=to_chinese
+        )).render()
 
     assert asyncio.run(run()) == expected
     locked_text = seen["locked_text"]
@@ -701,9 +728,6 @@ def test_html_translation_protects_structure_and_only_locks_visible_text(
         "duplicated",
         "reordered",
         "unknown",
-        "added-tag",
-        "added-entity",
-        "unterminated-tag",
     ],
 )
 def test_html_translation_rejects_any_structural_drift(
@@ -732,20 +756,14 @@ def test_html_translation_rejects_any_structural_drift(
                 .replace(tokens[1], tokens[0], 1)
                 .replace(marker, tokens[1], 1)
             )
-        if drift == "unknown":
-            return f"{locked_text}__WUWA_HTML_deadbeefdeadbeef_9999__"
-        if drift == "added-tag":
-            return f"{locked_text}<i>injected</i>"
-        if drift == "unterminated-tag":
-            return f"{locked_text}<i"
-        return f"{locked_text}&quot;"
+        return f"{locked_text}__WUWA_HTML_deadbeefdeadbeef_9999__"
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     translator = SentenceTranslator(sample_db)
 
     async def run():
-        return await translator.translate_html_async(
-            "<b>今汐</b> &amp; <i>声骸</i>"
+        return await translator.translate_protected_async(
+            _protected_from_markup("<b>今汐</b> &amp; <i>声骸</i>")
         )
 
     with pytest.raises(LLMTranslationError) as exc_info:
@@ -765,7 +783,7 @@ def test_sync_html_translation_rejects_structural_drift(monkeypatch, sample_db):
     translator = SentenceTranslator(sample_db)
 
     with pytest.raises(LLMTranslationError) as exc_info:
-        translator.translate_html("<b>今汐</b>")
+        translator.translate_protected(_protected_from_markup("<b>今汐</b>"))
     assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
 
@@ -1329,7 +1347,9 @@ def test_html_translation_blank_llm_output_is_unavailable(
 
     async def run():
         with pytest.raises(LLMTranslationError) as exc_info:
-            await translator.translate_html_async("<b>今汐</b>说声骸很强")
+            await translator.translate_protected_async(
+                _protected_from_markup("<b>今汐</b>说声骸很强")
+            )
         assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
     asyncio.run(run())
@@ -1760,13 +1780,11 @@ def test_quoted_single_character_speaker_does_not_inject_overlapping_naked_refer
     assert ("心", "心", "Hsin", "resonator") not in a3_tuples
 
     # 5. Protected text / markup keeps coordinate mapping intact without naked injection.
-    from wuwaterm.telegram_html import protect_telegram_html
-
-    protected = protect_telegram_html(
+    protected = _protected_from_markup(
         "<b>全新3.7版本「心照红尘」即将开启！</b>完成任务可结识「心」。"
     )
     locked_protected = translator._lock_protected_terms_with_references(
-        protected.neutral, to_chinese=False
+        protected, to_chinese=False
     )
     protected_tuples = {ref.as_tuple() for ref in locked_protected.references}
     assert ("「心」", "「心」", '"Hsin"', "speaker") in protected_tuples
@@ -1797,13 +1815,11 @@ def test_single_character_name_keeps_placeholder_integrity(single_name_db, copie
 
 
 def test_single_character_html_name_does_not_change_attributes(single_name_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(single_name_db)
-    protected = protect_telegram_html('<a href="https://example.invalid/椿">椿加入队伍。</a>')
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup('<a href="https://example.invalid/椿">椿加入队伍。</a>')
+    locked = translator._lock_protected_terms(protected)
     assert len(locked.locks) == 1
-    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+    assert translator._restore_protected(protected, locked, locked.locked_text, to_en=True).render() == (
         '<a href="https://example.invalid/椿">Camellya加入队伍。</a>'
     )
 
@@ -1854,21 +1870,20 @@ def test_html_single_character_visible_adjacency(
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_async_call)
     translator = SentenceTranslator(single_name_db)
+    protected = _protected_from_markup(html_text)
     if async_path:
-        actual = asyncio.run(translator.translate_html_async(html_text))
+        actual = asyncio.run(translator.translate_protected_async(protected)).render()
     else:
-        actual = translator.translate_html(html_text)
+        actual = translator.translate_protected(protected).render()
     assert actual == expected
 
 
 def test_html_single_character_context_keeps_multichar_matching_segment_local(sample_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(sample_db)
-    protected = protect_telegram_html("声<b>骸</b>")
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup("声<b>骸</b>")
+    locked = translator._lock_protected_terms(protected)
     assert locked.locks == ()
-    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+    assert translator._restore_protected(protected, locked, locked.locked_text, to_en=True).render() == (
         "声<b>骸</b>"
     )
 
@@ -1890,17 +1905,15 @@ def test_html_single_character_context_keeps_multichar_matching_segment_local(sa
 def test_html_cjk_boundaries_use_visible_context_across_tags_and_entities(
     sample_db, html, expected
 ):
-    from wuwaterm.telegram_html import protect_telegram_html, strip_telegram_html
-
     translator = SentenceTranslator(sample_db)
-    protected = protect_telegram_html(html)
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup(html)
+    locked = translator._lock_protected_terms(protected)
     assert {zh for _, zh, _ in locked.locks} == expected
     # The same displayed text gets the same locking decision in plain text.
-    plain = translator.lock_terms(strip_telegram_html(html))
+    plain = translator.lock_terms(_strip_markup(html))
     assert {zh for _, zh, _ in plain.locks} == expected
     # Structural bytes stay protected even when a cross-word span is refused.
-    assert protected.restore(locked.restore(locked.locked_text, to_en=False)) == html
+    assert protected.restore(locked.restore(locked.locked_text, to_en=False)).render() == html
 
 
 def _locked_zh(translator: SentenceTranslator, text: str) -> set[str]:
@@ -1985,14 +1998,12 @@ def test_lowercase_encore_speaker_prefix_still_resolves(sample_db):
 
 
 def test_lowercase_encore_html_visible_text_and_attributes_stay_unchanged(sample_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(sample_db)
     html = '<a href="https://example.invalid/encore">The audience asked for an encore.</a>'
-    protected = protect_telegram_html(html)
-    locked = translator._lock_html_terms(protected, allow_plural_inflection=True)
+    protected = _protected_from_markup(html)
+    locked = translator._lock_protected_terms(protected, allow_plural_inflection=True)
     assert locked.locks == ()
-    assert translator._restore_html(protected, locked, locked.locked_text, to_en=False) == html
+    assert translator._restore_protected(protected, locked, locked.locked_text, to_en=False).render() == html
 
 
 @pytest.mark.parametrize("name", ["velmira", "VELMIRA"])
@@ -2072,14 +2083,12 @@ def test_case_variant_locks_inside_mixed_chinese_text(case_variant_db):
 
 
 def test_case_variant_html_lock_keeps_attributes_byte_identical(case_variant_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(case_variant_db)
     html = '<a href="https://example.invalid/velmira">velmira joins</a>'
-    protected = protect_telegram_html(html)
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup(html)
+    locked = translator._lock_protected_terms(protected)
     assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
-    assert translator._restore_html(protected, locked, locked.locked_text, to_en=True) == (
+    assert translator._restore_protected(protected, locked, locked.locked_text, to_en=True).render() == (
         '<a href="https://example.invalid/velmira">Velmira joins</a>'
     )
 
@@ -2134,19 +2143,15 @@ def test_case_variant_follows_the_record_its_official_casing_locks_to(
     "html", ["<b>velmira</b>s join", "x<b>velmira</b> joins", "<b>élodie ruè</b>s wave"]
 )
 def test_case_variant_boundaries_span_html_structures(case_variant_db, html):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(case_variant_db)
-    locked = translator._lock_html_terms(protect_telegram_html(html))
+    locked = translator._lock_protected_terms(_protected_from_markup(html))
     assert locked.locks == ()
 
 
 def test_case_variant_locks_inside_html_formatting(case_variant_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(case_variant_db)
-    protected = protect_telegram_html("我和<b>velmira</b>组队")
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup("我和<b>velmira</b>组队")
+    locked = translator._lock_protected_terms(protected)
     assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
 
 
@@ -2249,18 +2254,16 @@ def test_invalid_exclusion_metadata_fails_open_with_one_warning(
 
 
 def test_html_translation_honours_exclusions_and_keeps_attributes(exclusion_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     _set_exclusions(exclusion_db, _exclusion_value([("Wren", 12, 0)]))
     translator = SentenceTranslator(exclusion_db)
     html = '<a href="https://example.invalid/Wren/Velmira">Wren met Velmira</a>'
-    protected = protect_telegram_html(html)
-    locked = translator._lock_html_terms(protected)
+    protected = _protected_from_markup(html)
+    locked = translator._lock_protected_terms(protected)
 
     assert [(zh, en) for _, zh, en in locked.locks] == [("维米拉", "Velmira")]
-    assert translator._restore_html(
+    assert translator._restore_protected(
         protected, locked, locked.locked_text, to_en=False
-    ) == '<a href="https://example.invalid/Wren/Velmira">Wren met 维米拉</a>'
+    ).render() == '<a href="https://example.invalid/Wren/Velmira">Wren met 维米拉</a>'
 
 
 def test_excluded_resonator_gets_no_case_variants(exclusion_db):
@@ -2334,7 +2337,6 @@ def test_exclusions_keep_case_variant_ambiguity_and_exact_blocking(case_variant_
 def test_exclusions_keep_derived_soft_spelling_casefold_ambiguity(
     case_variant_db, other_en
 ):
-    from wuwaterm.telegram_html import protect_telegram_html
     from wuwaterm.term_matching import (
         exact_lockable_source_records,
         model_reference_candidates,
@@ -2414,9 +2416,9 @@ def test_exclusions_keep_derived_soft_spelling_casefold_ambiguity(
     assert locked.references == ()
 
     protected_locked = translator._lock_protected_terms_with_references(
-        protect_telegram_html(
+        _protected_from_markup(
             "<b>Tidecore</b>: vexil tubes, VEXIL TUBE, VEXIL TUBES."
-        ).neutral,
+        ),
         to_chinese=True,
         allow_plural_inflection=True,
     )
@@ -2935,9 +2937,10 @@ def test_plural_html_translation_en_zh_keeps_tags_untouched(monkeypatch, plural_
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
     translator = SentenceTranslator(plural_db)
 
-    result = translator.translate_html(
-        "<b>Resonators</b> await <i>Terminals</i>", to_chinese=True
-    )
+    result = translator.translate_protected(
+        _protected_from_markup("<b>Resonators</b> await <i>Terminals</i>"),
+        to_chinese=True,
+    ).render()
 
     assert "Resonators" not in seen["locked_text"]
     assert "Terminals" not in seen["locked_text"]
@@ -2955,11 +2958,11 @@ def test_plural_html_translation_default_off_unchanged(monkeypatch, plural_db):
     monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
     translator = SentenceTranslator(plural_db)
 
-    # zh->en HTML path: plural inflection never activates; the term is a
+    # zh->en protected path: plural inflection never activates; the term is a
     # reference the model writes in English itself.
-    assert translator.translate_html("<b>声骸</b>来了", to_chinese=False) == (
-        "<b>Echo</b>来了"
-    )
+    assert translator.translate_protected(
+        _protected_from_markup("<b>声骸</b>来了"), to_chinese=False
+    ).render() == "<b>Echo</b>来了"
 
 
 def test_plural_signature_changes_are_keyword_only_with_safe_defaults():
@@ -2968,7 +2971,7 @@ def test_plural_signature_changes_are_keyword_only_with_safe_defaults():
     parameters = inspect.signature(sentence_module.select_term_spans).parameters
     assert parameters["allow_plural_inflection"].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["allow_plural_inflection"].default is False
-    for name in ("_lock_terms", "_lock_html_terms"):
+    for name in ("_lock_terms", "_lock_protected_terms"):
         parameters = inspect.signature(getattr(SentenceTranslator, name)).parameters
         assert "allow_plural_inflection" in parameters
         assert parameters["allow_plural_inflection"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -3034,17 +3037,15 @@ def test_exact_surface_beats_synthesized_plural_at_same_bounds(plural_db):
 def test_html_tag_cannot_change_ascii_lock_eligibility_or_plural(
     plural_db, html_text, allow_plural, expected_locks, expected_restore
 ):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(plural_db)
-    protected = protect_telegram_html(html_text)
-    locked = translator._lock_html_terms(
+    protected = _protected_from_markup(html_text)
+    locked = translator._lock_protected_terms(
         protected, allow_plural_inflection=allow_plural
     )
     assert len(locked.locks) == expected_locks
-    restored = translator._restore_html(
+    restored = translator._restore_protected(
         protected, locked, locked.locked_text, to_en=False
-    )
+    ).render()
     assert restored == expected_restore
 
 
@@ -3172,16 +3173,14 @@ def test_exclusion_keys_constrain_raw_and_canonical_spellings(nfkc_surface_db):
 
 
 def test_protected_text_skips_the_candidate_but_keeps_raw_exact(nfkc_surface_db):
-    from wuwaterm.telegram_html import protect_telegram_html
-
     translator = SentenceTranslator(nfkc_surface_db)
     assert len(translator.lock_terms("微光（稀有）").locks) == 1
     hidden = translator._lock_protected_terms_with_references(
-        protect_telegram_html("<b>微光(稀有)</b>").neutral, to_chinese=False
+        _protected_from_markup("<b>微光(稀有)</b>"), to_chinese=False
     )
     assert hidden.locks == () and hidden.references == ()
     raw = translator._lock_protected_terms_with_references(
-        protect_telegram_html("<b>微光（稀有）</b>").neutral, to_chinese=False
+        _protected_from_markup("<b>微光（稀有）</b>"), to_chinese=False
     )
     assert ("微光（稀有）", "微光（稀有）", "Glimmer（Rare）", "term") in {
         ref.as_tuple() for ref in raw.references
