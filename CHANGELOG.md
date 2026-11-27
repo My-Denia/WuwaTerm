@@ -5,6 +5,33 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Installer
+
+- `deploy/setup.sh` defaults the installer to Web `v0.6.0` and Telegram
+  `v0.6.1` (still pinning Core `v0.13.0`), the releases
+  `contracts/products.json` now records.
+
+### Contract Pins
+
+- The Core CI client pins move to Web `v0.6.0` (`eed5d30e`) and Windows
+  `v0.8.0` (`97c659e2`). Neither release moved its own cross-repository pins:
+  Web `0.6.0` still names Core `v0.14.0` (`27375301`) in
+  `contracts/backend-ref.txt`, and Windows `0.8.0` still names Core `v0.14.0`
+  and Web `v0.5.0` (`6cd0a7c5`) in `contracts/sources.json`, so
+  `contracts/products.json` `ci_pins.web_tests_core` stays on `2737530`.
+
+### Release Records
+
+- `contracts/products.json`, `docs/products.md` and `docs/release-checklist.md`
+  record the published Core `v0.15.0`, Web `v0.6.0`, Windows `v0.8.0` and
+  Telegram `v0.6.1` releases with their assets, SHA-256 values and workflow
+  runs. The production VPS `wuwaterm-telegram` upgrade from `v0.6.0`
+  (`c4f6a81`) to `v0.6.1` (`f1fe528`, Core `0.13.0`) is recorded alongside the
+  still-running `wuwaterm-api` `r15` (`v0.14.1`, `1949f8d`; Core `v0.15.0` is
+  published and not yet deployed to VPS). `README.md`, `README.zh-CN.md`,
+  `docs/self-hosting.md`, `docs/support-matrix.md` and `SECURITY.md` state the
+  same versions.
+
 ## 0.15.0 - 2026-11-27
 
 ### Installer

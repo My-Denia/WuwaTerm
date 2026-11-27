@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_on": "2026-11-26",
+  "observed_on": "2026-11-27",
   "scope": "A dated discovery and compatibility snapshot, not a live version authority. Check each repository and release for newer evidence. The releases recorded here were read from their GitHub Release pages, including each asset's published SHA-256. Here each product's release is also the one its release page marks latest, and for Telegram and Web the tag this checkout's installer names.",
   "coordination": {
     "github_project": "https://github.com/users/My-Denia/projects/1",
@@ -47,8 +47,8 @@
         "windows",
         "web"
       ],
-      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/13faa392cd6f4826d2115ae8ad04117a95577ffe/contracts/manuscript-v5/SPEC.md",
-      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4, then v5). v5 adds a review_features list, the ambiguous_mention reason and segmentation-v1-gaps segment records and otherwise keeps v4; it ships in Web 0.5.0, 0.5.1 and Windows 0.7.0, 0.7.1, and Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject a v5 file. The v4 contract ships in Web 0.4.0, 0.4.1 and 0.4.2 and in Windows 0.6.0, 0.6.1 and 0.6.2, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
+      "specification": "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/contracts/manuscript-v5/SPEC.md",
+      "note": "v1 and v2 keep their meaning, and an imported v1 or v2 report, a document-mode choice or a semantic decision stays history, not a fresh check. v3 adds per-segment term results for long manuscripts: a saved segment result is reused only when its content hashes, review basis and request inputs all match a live review-v2 basis. v4 keeps v3's 13 top-level keys, the 44 MiB file limit and the canonical bytes, and raises the findings, resolutions and choices limits from 32 to 128 while allowing a reason on a not_evaluated finding; only the label v4 brings those limits, so a v1, v2 or v3 file keeps its 32-item caps and rejects reason. A writer stores the lowest format that holds the content (v1/v2, then v3, then v4, then v5). v5 adds a review_features list, the ambiguous_mention reason and segmentation-v1-gaps segment records and otherwise keeps v4; it ships in Web 0.5.0, 0.5.1, 0.6.0 and Windows 0.7.0, 0.7.1, 0.8.0, and Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject a v5 file. The v4 contract ships in Web 0.4.0, 0.4.1 and 0.4.2 and in Windows 0.6.0, 0.6.1 and 0.6.2, not in Web 0.3.1 or Windows 0.5.1, which reject a v4 file; the shipped-release records below keep the format each release was recorded with."
     },
     "terms_database": {
       "schema_version": "2",
@@ -81,13 +81,36 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
-        "tree": "ac381d4ae5a764a4b8a94c8b52396b0eeb400df4",
+        "commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+        "tree": "6d48c25b3849256595e8fbfba39d5b9463a3638d",
         "status": "success",
-        "status_note": "The v0.14.1 release source (#343, chore(release): prepare Core 0.14.1). ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed on this commit; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1. This repository's main has since moved on (#344)."
+        "status_note": "The v0.15.0 release source (#349, chore(release): prepare Core 0.15.0), which is also this repository's main when this snapshot was recorded. ci.yml main push run 45959452344, CodeQL run 45959452198 and Dependency audit run 45959452110 all passed on this commit; release.yml (dry_run=false) run 45961013922 and release-triggered promote-images run 45961311451 passed and published v0.15.0."
       },
-      "source_version": "0.14.1",
+      "source_version": "0.15.0",
       "release": {
+        "version": "0.15.0",
+        "tag": "v0.15.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.15.0",
+        "published_at": "2026-11-27T07:51:03Z",
+        "source_commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+        "source_tree": "6d48c25b3849256595e8fbfba39d5b9463a3638d",
+        "assets": [
+          "wuwaterm-0.15.0-py3-none-any.whl",
+          "wuwaterm-0.15.0.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.15.0-py3-none-any.whl": "339952666807d75c1b734d31b6f5d42301ef297ea6f9afbb65bdbec813f879cf",
+          "wuwaterm-0.15.0.tar.gz": "2c54d87a6f342c402ea34b1f2751fdaf43a835e0e1444bac2f80b40c14fe3028",
+          "release-manifest.json": "8216022ef272a6b5ce8fd13ba70255db1d2c208188e773d0950d911d291f2c68",
+          "SHA256SUMS": "90d014647f0c48ce6eaade69b85e33d7d5e7895e6cee11afc0162cf8c01c817c"
+        },
+        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T07:48:39Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:ef1cdfd519eeb7e44bf988dd87fa3b6e9fe2a67c131f740d13212f33e11d84d3 and builder sha256:a93c3988bf59faa44488011ea2acd820b7fc4a9d3aafda8a54e0305ea7bcf5d9. Both were first pushed under sha-122870b and promoted to v0.15.0 and 0.15 after publication; the historical version tags were retained.",
+        "note": "v0.15.0 adds opt-in, default-off review, translation-memory and engine candidates on top of v0.14.1 (#344, #345, #346, #347, #348, #349). #344 extracts attribution-candidates-v1 (src/wuwaterm/attribution_candidates.py), gates the semantic-review hint behind WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS (default off), and adds ADR 0023 and ADR 0024; #347 refines ADR 0023 TM freshness and context_exact rules and passes prepared_scalars into RequestPolicy.paragraph_repair_thinking_mode; #345 adds opt-in, default-off engine candidates C1 (wuwaterm-termbase-v1), C3 (DocumentAnchor) and C4 (WUWATERM_TRANSLATION_THINKING_ZH_EN=auto behind zh_en_auto_thinking=False); #346 records the v0.14.1, v0.5.1 and v0.7.1 releases and moves the CI client pins; #348 adds H3 Protocol Revision (d) --expected-model binding and bindings.tools_sha256 receipt verification; #349 prepares release 0.15.0. All experimental and candidate flags stay off by default, docs/api/openapi.json differs from v0.14.1 only in info.version (0.15.0), and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged from v0.14.1, so v0.14.x hosts keep their terms.db and upgrade with --runtime-only. On source_commit 122870b1, ci.yml main push run 45959452344, CodeQL run 45959452198, Dependency audit run 45959452110, release.yml (dry_run=false) run 45961013922 and promote-images run 45961311451 all passed and published v0.15.0. All four published assets (wuwaterm-0.15.0-py3-none-any.whl 589,060 bytes, wuwaterm-0.15.0.tar.gz 571,769 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) are published with the digests above."
+      },
+      "previous_release": {
         "version": "0.14.1",
         "tag": "v0.14.1",
         "status": "released",
@@ -108,30 +131,7 @@
           "SHA256SUMS": "0daec0065c90aef28769783394f2984dfd8279aed4ac486db01d7c4baa6f552e"
         },
         "manifest_note": "The release manifest records the source commit, built_utc 2026-11-26T15:42:30Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:a9353ec6c7d30500aca989d8937af474df88891ded8a339361d580efab0bd199 and builder sha256:884f1f260c8b6ca048143a7f62abb162980a579bff758a59e39f532768e33e15. Both were first pushed under sha-1949f8d and promoted to v0.14.1 and 0.14 after publication; the historical version tags were retained.",
-        "note": "v0.14.1 is a patch release on top of v0.14.0 (#335, #336, #337, #338, #339, #340, #341, #342, #343). #341 reduces false alarms and fixes boundary cases in POST /v1/structure-checks (structure-check-v1, MY-515): {Cus:<Kind>,...} template arguments are masked from number reading, digits immediately preceded by an ASCII letter and standalone uppercase Roman numerals 1-39 act as excuse-only values, attached percent and unit forms stay reportable, bare N+M followed by x stays arithmetic rather than a build marker, and trailing comparison lookahead skips markup tags; on the 27,385-pair 3.7.8 official corpus flagged pairs dropped from 2,270 to 990 per direction (-56.4%) with 0/128 fixture false alarms and 82/82 detections, and the rule ids, finding categories and response fields are unchanged. #335 records the three v0.14.0-era releases in this file, moves the Core CI client pins to Web v0.5.0 (6cd0a7c5) and Windows v0.7.0 (d87a66c3), defaults the installer to Web v0.5.0 and updates the version statements in the README, self-hosting, release-checklist, support-matrix and SECURITY pages. #336, #337, #338, #339 and #342 add the offline H3 corpus gate, tree-differential harness and protocol revision (c) work plus the structure-attribution candidate signal; no request path calls them and no live model call was made to add them. #340 bounds two subprocess tests by progress instead of wall clock. The HTTP contract does not change: docs/api/openapi.json differs from v0.14.0 only in info.version. SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, the wuwaterm-cjk-matcher-v11 matcher and the en->zh omit and zh->en disabled defaults are unchanged from v0.14.0, so a v0.14.0 host keeps its terms.db and upgrades with --runtime-only. On source_commit 1949f8d, ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1. No dry-run dispatch was made for this version, so the real run is the only execution recorded for this source. All four published assets (wuwaterm-0.14.1-py3-none-any.whl 569,831 bytes, wuwaterm-0.14.1.tar.gz 554,830 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) were downloaded anonymously and the wheel and sdist verified via sha256sum -c SHA256SUMS; the wheel METADATA reports Version 0.14.1."
-      },
-      "previous_release": {
-        "version": "0.14.0",
-        "tag": "v0.14.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.14.0",
-        "published_at": "2026-11-26T05:06:50Z",
-        "source_commit": "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
-        "source_tree": "22deee153703d39c66c0ce97b53fa088b0386f2d",
-        "assets": [
-          "wuwaterm-0.14.0-py3-none-any.whl",
-          "wuwaterm-0.14.0.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.14.0-py3-none-any.whl": "d167b042c235addf5ec30546afe3743dab4137efb3f46e655ff59e2be3397e36",
-          "wuwaterm-0.14.0.tar.gz": "ed2f4521d75f7e863d4799a5c8c81503f8b53b63a2d0e300f169a56d259b7a42",
-          "release-manifest.json": "d3d6417cade50daef4df47ba0f063129bafb4924d73d2268c2131ef2f5004696",
-          "SHA256SUMS": "09e8f5eb059541af5ae89ba8d324dd55e4b8d07edb9662fe69ac00e6f769ac4e"
-        },
-        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-26T05:03:25Z, the pinned upstream data revision and image digests: runtime sha256:972d799f856ecbbd2a5d06d4da2521a2024d627d7b224c4ab1729d9379ecba40 and builder sha256:350c0f3ae8cd79f5aee8c767fb33274b69047476deef4f15b6cad7bd27606355. Both were first pushed under sha-2737530 and promoted to v0.14.0 and 0.14 after publication; the historical version tags were retained.",
-        "note": "v0.14.0 adds opt-in review evidence for ambiguous one-character names, deterministic structure checks and API resource settings on top of v0.13.0 (#321, #323, #325, #326, #327, #328, #330, #331, #332, #333, #334). #323 adds wuwaterm.single_char_context with ambiguous_mention_exposure off by default; #325 adds the opt-in review-v2 feature ambiguous-mention-v1 and moves the matcher label to wuwaterm-cjk-matcher-v11 (MATCHER_REVISION 286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664) without changing matcher inputs, so stored v10 resolution contexts and manuscript-v3 and v4 segment results saved under v10 become stale and are re-reviewed. #326 and #331 add POST /v1/structure-checks (structure-check-v1), which calls no model, and GET /v1/capabilities always lists ambiguous-mention-v1 and structure-check-v1. #328 gives wuwaterm-api mem_reservation 96m and oom_score_adj -500, and #332 adds deploy/product-update.sh refresh-runtime-options for already adopted component deployments. #321, #327, #330 and #333 change evaluation tools, protocol documents and tests. The HTTP API changes are additive; SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, the en->zh omit default and the zh->en disabled default are unchanged from v0.13.0, so v0.13.0 hosts can keep their terms.db and upgrade with --runtime-only. On source_commit 27375301, ci.yml main push run 45757490491, CodeQL run 45757489642, Dependency audit run 45757490006, release.yml dry run 45758878872, release.yml (dry_run=false) run 45759059251 and promote-images run 45759444992 all succeeded. All four published assets (wuwaterm-0.14.0-py3-none-any.whl 568,952 bytes, wuwaterm-0.14.0.tar.gz 553,774 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) were downloaded anonymously, and the wheel and sdist verified via sha256sum -c SHA256SUMS. Kept as history after v0.14.1; the release and its assets are still published."
+        "note": "v0.14.1 is a patch release on top of v0.14.0 (#335, #336, #337, #338, #339, #340, #341, #342, #343). #341 reduces false alarms and fixes boundary cases in POST /v1/structure-checks (structure-check-v1, MY-515): {Cus:<Kind>,...} template arguments are masked from number reading, digits immediately preceded by an ASCII letter and standalone uppercase Roman numerals 1-39 act as excuse-only values, attached percent and unit forms stay reportable, bare N+M followed by x stays arithmetic rather than a build marker, and trailing comparison lookahead skips markup tags; on the 27,385-pair 3.7.8 official corpus flagged pairs dropped from 2,270 to 990 per direction (-56.4%) with 0/128 fixture false alarms and 82/82 detections, and the rule ids, finding categories and response fields are unchanged. #335 records the three v0.14.0-era releases in this file, moves the Core CI client pins to Web v0.5.0 (6cd0a7c5) and Windows v0.7.0 (d87a66c3), defaults the installer to Web v0.5.0 and updates the version statements in the README, self-hosting, release-checklist, support-matrix and SECURITY pages. #336, #337, #338, #339 and #342 add the offline H3 corpus gate, tree-differential harness and protocol revision (c) work plus the structure-attribution candidate signal; no request path calls them and no live model call was made to add them. #340 bounds two subprocess tests by progress instead of wall clock. The HTTP contract does not change: docs/api/openapi.json differs from v0.14.0 only in info.version. SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, the wuwaterm-cjk-matcher-v11 matcher and the en->zh omit and zh->en disabled defaults are unchanged from v0.14.0, so a v0.14.0 host keeps its terms.db and upgrades with --runtime-only. On source_commit 1949f8d, ci.yml main push run 45835886140, CodeQL run 45835884918 and Dependency audit run 45835885367 all passed; release.yml (dry_run=false) run 45851742681 and release-triggered promote-images run 45855302440 passed and published v0.14.1. No dry-run dispatch was made for this version, so the real run is the only execution recorded for this source. All four published assets (wuwaterm-0.14.1-py3-none-any.whl 569,831 bytes, wuwaterm-0.14.1.tar.gz 554,830 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) were downloaded anonymously and the wheel and sdist verified via sha256sum -c SHA256SUMS; the wheel METADATA reports Version 0.14.1. Kept as history after v0.15.0; the release and its assets are still published."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -151,11 +151,11 @@
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
       "adoption": "deployed",
-      "adoption_note": "Core v0.14.1 is deployed on production VPS API r15 by deploy/vps-update.sh --runtime-only (verified 2026-11-26). /opt/wuwaterm/current points to /opt/wuwaterm/releases/r15 and .deploy_commit is 1949f8ddf9c81dfd02b2bbea59bc8799d4943728, the v0.14.1 tag commit itself, running the locally built image wuwaterm-runtime:1949f8d... (sha256:d866d58bd4ec04d66e0451dc6b9b9480e360bd974e0541f5e8e386470f3aedb5). /openapi.json reports info.version 0.14.1, /healthz and /readyz answer 200 with {\"status\":\"ok\"} and {\"status\":\"ready\"}, and /v1/capabilities answers 401 without a device token, as its device authentication requires. The container keeps HostConfig.MemoryReservation 100663296 (96 MiB) and OomScoreAdj -500, the host system.slice keeps memory.low 134217728 (128 MiB), the wuwaterm-api RestartCount is 0, the sanitized error-log scan found 0 errors, .env keeps mode 0600 and its hash 7b50817a..., data/terms.db keeps sha256 9ddee819... unchanged by the transaction, and no staging or run containers remain. deploy_smoke.py inside the API container reports TELEGRAM_BOT_TOKEN missing because that container blanks the bot credential; run in a one-off bot-service container with the test chat blanked it reports Bot API getMe ok and sendMessage skipped, so no Telegram message was sent. Rollback point r14 (2737530, Core v0.14.0) and its runtime image wuwaterm-runtime:rollback-runtime-1949f8ddf9c8-943794 (058abef4a583...) are retained.",
+      "adoption_note": "Production VPS API wuwaterm-api still runs r15 (Core v0.14.1, .deploy_commit 1949f8ddf9c81dfd02b2bbea59bc8799d4943728, locally built image wuwaterm-runtime:1949f8d..., verified 2026-11-26); Core v0.15.0 (122870b) is published and has not yet been deployed to the production VPS. On r15, /openapi.json reports info.version 0.14.1, /healthz and /readyz answer 200, /v1/capabilities answers 401 without a device token, HostConfig.MemoryReservation is 100663296 (96 MiB), OomScoreAdj is -500, system.slice keeps memory.low 134217728 (128 MiB), RestartCount is 0, .env keeps mode 0600 (7b50817a...), data/terms.db keeps sha256 9ddee819..., and rollback point r14 (2737530, Core v0.14.0) is retained.",
       "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/1949f8ddf9c81dfd02b2bbea59bc8799d4943728/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/1949f8ddf9c81dfd02b2bbea59bc8799d4943728/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/122870b1eb20195f4e790c2899e0fa6d73bbb020/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/122870b1eb20195f4e790c2899e0fa6d73bbb020/docs/data-refresh.md"
       ]
     },
     {
@@ -163,13 +163,54 @@
       "repository": "https://github.com/My-Denia/WuwaTerm-Telegram",
       "responsibility": "Standalone Telegram bot and its installation, operation and state.",
       "main": {
-        "commit": "c4f6a8101e22a735f5c0bb88bea60aa9515c6f69",
-        "tree": "e6e5e1f7bb17ba135962cc8dfdbefd1da140aab7",
+        "commit": "f1fe528ff7a10cfb5451cddb840299f5aa93a198",
+        "tree": "615b02669cb64cedde2f68edd3bf793723afdc62",
         "status": "success",
-        "status_note": "The v0.6.0 release source (#48). Main CI push run 45684222505, Dependency audit run 45684222415 and release workflow run 45684277127 all passed on this commit. This repository's main has since moved on (#49)."
+        "status_note": "The v0.6.1 release source (#50, chore(release): prepare Telegram 0.6.1), which is also this repository's main when this snapshot was recorded. Telegram CI run 45933927538, Dependency audit run 45933927515 and Telegram release workflow run 45933964205 all passed on this commit."
       },
-      "source_version": "0.6.0",
+      "source_version": "0.6.1",
       "release": {
+        "version": "0.6.1",
+        "tag": "v0.6.1",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.6.1",
+        "published_at": "2026-11-27T03:27:02Z",
+        "source_commit": "f1fe528ff7a10cfb5451cddb840299f5aa93a198",
+        "source_tree": "615b02669cb64cedde2f68edd3bf793723afdc62",
+        "assets": [
+          "wuwaterm_telegram-0.6.1-py3-none-any.whl",
+          "wuwaterm_telegram-0.6.1.tar.gz",
+          "bundle.json",
+          "image.oci.tar",
+          "install-probe.json",
+          "source.tar",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm_telegram-0.6.1-py3-none-any.whl": "eac82992ffe7c0db5ee32e775ab373db4d5644dfc9f193830703b3f53ef26118",
+          "wuwaterm_telegram-0.6.1.tar.gz": "09a05f74374e93d2f2d70615041adf44ac3bb21f938cc9e51bc5c459411a68a2",
+          "bundle.json": "8d5a9a668c5f349f412fb17b7b8350af2b79685c48f423e078acb83966159ac5",
+          "image.oci.tar": "0e37b11d68d7eb841d9d7934533357843a145bc6b149310f3b3249c874b19594",
+          "install-probe.json": "4bc391e121cbd37d941103a808cdef27fc1f359ff4196786eb8a8a58b32ad287",
+          "source.tar": "9c46531e4ffb20dfe9edb1a76e5c0fcbfb5659b110a0d04a15176759bf623447",
+          "SHA256SUMS": "04816f2ea23fbb0d975289a07fa846f632cd7af7b9b9782d62425614e25b3910"
+        },
+        "note": "v0.6.1 keeps core-lock.json pinned to published Core 0.13.0 (wheel SHA-256 cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c, core_source_commit e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8, declared compatibility exact; OCI index sha256:cf75203ca688f92f147cf281f9c118231e66c3fdef8b67f427c83ae0d90f4c47, manifest sha256:b2e177acea2122b03a0bcf98d3987b75d86906c3207a39eaa0ce89b071f99579, config sha256:ef18bfacbe2a041b1630c562303912bed33d0c3e3aa603f0ce18bfe4a84a53b1, built by release run 45933964205). Changes since v0.6.0 (#49, #50): harden HTML parse fallback in bot and review_bot, guard channel language threshold check on non-empty stripped pipeline_plain, serialize per-job /review callbacks and snapshot accepted state, prevent user_id=None identity collisions, and restore the summary footer on back-button edits; #50 bumps wuwaterm-telegram to 0.6.1. Asset sizes: wuwaterm_telegram-0.6.1-py3-none-any.whl 110,185 bytes, wuwaterm_telegram-0.6.1.tar.gz 275,598 bytes, bundle.json 19,286 bytes, image.oci.tar 52,073,472 bytes, install-probe.json 13,717 bytes, source.tar 1,300,480 bytes, SHA256SUMS 524 bytes."
+      },
+      "adoption": "deployed",
+      "compatibility": {
+        "core_package_version": "0.13.0",
+        "core_wheel_sha256": "cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c",
+        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/f1fe528ff7a10cfb5451cddb840299f5aa93a198/core-lock.json",
+        "terms_database_schema_version": "2",
+        "http_api_required": false,
+        "note": "core-lock.json pins the published Core v0.13.0 wheel; release-to-release dependency, not a CI artifact."
+      },
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/f1fe528ff7a10cfb5451cddb840299f5aa93a198/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/f1fe528ff7a10cfb5451cddb840299f5aa93a198/docs/artifact-verification.md"
+      ],
+      "previous_release": {
         "version": "0.6.0",
         "tag": "v0.6.0",
         "status": "released",
@@ -195,62 +236,55 @@
           "source.tar": "4f76f42bc0d9c7843a3e0c63c47f962610cecac3b8a526ad3bbc61777196904a",
           "SHA256SUMS": "9e5a4a3ca1c604ca7a8bfb6c5399fa4609c9f7f8580c922446434f417d170471"
         },
-        "note": "v0.6.0 upgrades the Core pin to published Core 0.13.0 (wheel SHA-256 cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c, core_source_commit e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8, declared compatibility exact; OCI index sha256:1ed01cbfb02b8a28982194c73ea39b522b385691a2fab88cd20074f11b474a94, manifest sha256:c506333de8e7cb8d4d9a4a26e67303917aa082d1c3ad9ceba4ee6e9d67d51f23, config sha256:0530dd063fd81d8db9f000308db5e2a34b7e661a6ebf5483c7ce3b84944b9336, built by release run 45684277127). Changes since v0.5.0: /review lists dictionary findings Core marked not_evaluated with their reason and says when term results were truncated (#46); the adapter owns the Telegram wrapper cleanup that Core 0.13.0 no longer does inside translation, calling strip_telegram_wrapper_noise on the plain /tr paths and on the linked-channel plain pipeline, and judges linked-channel direction on the stripped text (#47); #48 moves core-lock.json, pyproject.toml and CORE_VERSION to Core 0.13.0, bumps the package to 0.6.0, and strips the plain text on every telegram_translation_reply path. Per PR #48, tests/run_isolated.py reports 925 passed, 0 skipped in both the source tree and a clean wheel environment (--installed), and ruff is clean. All seven published assets were downloaded and verified via sha256sum -c SHA256SUMS."
+        "note": "v0.6.0 upgrades the Core pin to published Core 0.13.0 (wheel SHA-256 cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c, core_source_commit e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8, declared compatibility exact; OCI index sha256:1ed01cbfb02b8a28982194c73ea39b522b385691a2fab88cd20074f11b474a94, manifest sha256:c506333de8e7cb8d4d9a4a26e67303917aa082d1c3ad9ceba4ee6e9d67d51f23, config sha256:0530dd063fd81d8db9f000308db5e2a34b7e661a6ebf5483c7ce3b84944b9336, built by release run 45684277127). Changes since v0.5.0: /review lists dictionary findings Core marked not_evaluated with their reason and says when term results were truncated (#46); the adapter owns the Telegram wrapper cleanup that Core 0.13.0 no longer does inside translation, calling strip_telegram_wrapper_noise on the plain /tr paths and on the linked-channel plain pipeline, and judges linked-channel direction on the stripped text (#47); #48 moves core-lock.json, pyproject.toml and CORE_VERSION to Core 0.13.0, bumps the package to 0.6.0, and strips the plain text on every telegram_translation_reply path. Per PR #48, tests/run_isolated.py reports 925 passed, 0 skipped in both the source tree and a clean wheel environment (--installed), and ruff is clean. All seven published assets were downloaded and verified via sha256sum -c SHA256SUMS. Kept as history after v0.6.1; v0.6.0 and earlier remain published."
       },
-      "adoption": "deployed",
-      "compatibility": {
-        "core_package_version": "0.13.0",
-        "core_wheel_sha256": "cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c",
-        "core_lock": "https://github.com/My-Denia/WuwaTerm-Telegram/blob/c4f6a8101e22a735f5c0bb88bea60aa9515c6f69/core-lock.json",
-        "terms_database_schema_version": "2",
-        "http_api_required": false,
-        "note": "core-lock.json pins the published Core v0.13.0 wheel; release-to-release dependency, not a CI artifact."
-      },
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/c4f6a8101e22a735f5c0bb88bea60aa9515c6f69/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Telegram/blob/c4f6a8101e22a735f5c0bb88bea60aa9515c6f69/docs/artifact-verification.md"
-      ],
-      "previous_release": {
-        "version": "0.5.0",
-        "tag": "v0.5.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Telegram/releases/tag/v0.5.0",
-        "published_at": "2026-11-24T12:19:16Z",
-        "source_commit": "92962646e21c195f52f7eb31174b84b9b6c7f0d6",
-        "source_tree": "55166fecfdf9aba28397267ce488ff440c1eed8c",
-        "assets": [
-          "wuwaterm_telegram-0.5.0-py3-none-any.whl",
-          "wuwaterm_telegram-0.5.0.tar.gz",
-          "bundle.json",
-          "image.oci.tar",
-          "install-probe.json",
-          "source.tar",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm_telegram-0.5.0-py3-none-any.whl": "f1e7928371837b998eecc7ab1c74ccec40412ca6f3d75e16550913c0905d2c76",
-          "wuwaterm_telegram-0.5.0.tar.gz": "fd73943be8c925786f8cd95118778fa1341b2b32933e13b87c03ac2827fa54cb",
-          "bundle.json": "edc3a548a02a8823eed57ebbc570eaa25b8cb43d53976642f2c993d2c934d02d",
-          "image.oci.tar": "dd27df3bdaaf1048649492e4c732229038f86d9eb3dc196d3ca3046dd0b77409",
-          "install-probe.json": "4bfbc0dca2389eb2c229650a92b6eddd7135281e9df283ea6adcddc60fc77b11",
-          "source.tar": "bf7ff3036e8d18f91ac60de885f6ca2d60af7cdae1a62ad747e63d06f8f62239",
-          "SHA256SUMS": "d835fed4dd583fcd5bc52516b4d6abce3970066e7d1cc4e29a583744cd06b852"
-        },
-        "note": "v0.5.0 upgrades the Core pin to published Core 0.12.0 (wheel SHA-256 b243fa064bc1090ecdabb70130775449c73fa53f85b6800cad72f889d43803ad, core_source_commit 6fb4d8a44b26f170a7b1c8e23f00f75b2bbfd2b8, declared compatibility exact; OCI index sha256:5e1f71128f08dbe241067632faa3f19ad4527835ea533a3ac132f59c70914621, manifest sha256:3768175e8c2eb8aefc5817df69612266ec5a7760f044d07f7a16a57298e6cd44, config sha256:fd91e9b023c773889f1c9d5a6f7e150d51b0f2d5fed839a814d17f44d726b425, built by release run 45391931037). PR #45 updates core-lock.json and pyproject.toml (wuwaterm==0.12.0, wuwaterm-telegram==0.5.0), verifies OperationExecutionBudget and wuwaterm.llm_transport.current_execution_budget plus execution_budget parameters in core_compat.py, scopes channel.py and telegram_html.py to ChannelRuntime.reserve(...) with allow_plain_fallback restricted to single-segment posts (<= LLM_INPUT_CHAR_LIMIT) and max_corrective_calls=0 on split chunks, binds a run-scoped OperationExecutionBudget(max_total_calls=len(ready), max_corrective_calls=0, max_corrective_calls_per_segment=0) with gate/CancelledError cancellation and operation_budget->llm_budget_exhausted / cancelled->aborted mapping in review_flow.py and review_backend.py, preserves zh->en=disabled and en->zh=omit defaults while documenting opt-in auto, updates placeholder_for to TermReference in tests, adds real-Core 0.12.0 budget and cancellation tests in tests/test_core_012_budgets.py, and passed 905 tests in both editable and clean-wheel --installed runs plus ruff. All seven published assets were anonymously downloaded and verified via sha256sum -c SHA256SUMS. Kept as history after v0.6.0; v0.5.0 and earlier remain published."
-      },
-      "adoption_note": "Standalone Telegram 0.6.0 on Core 0.13.0 is deployed on the owner VPS on 2026-11-25 (UTC), after the v0.6.0 release was published. wuwaterm_telegram.operations identity reports Telegram 0.6.0 and Core 0.13.0, operations health reports ready, ERROR_SCAN_COUNT is 0 and the container's RestartCount is 0. The previous 0.5.0 runtime image wuwaterm-telegram:rollback-0.5.0-local (489a4161f54c…) and the state backup taken before the cutover (mode 0700) are retained as the rollback. The Core API moves to r14 (Core 0.14.0) and then r15 (Core 0.14.1, 1949f8d) on 2026-11-26 did not change this product: it stays on Telegram 0.6.0 pinning the Core 0.13.0 wheel, and its container is up with RestartCount 0 after both updates, which did not touch it."
+      "adoption_note": "Standalone Telegram 0.6.1 on Core 0.13.0 is deployed on the owner VPS on 2026-11-27, upgrading production container wuwaterm-telegram from v0.6.0 (c4f6a81) to v0.6.1 (f1fe528) using image wuwaterm-telegram:v0.6.1 / local (806d423f…). /usr/local/share/wuwaterm/install-probe.json confirms wuwaterm-telegram 0.6.1 and wuwaterm 0.13.0, operations health reports ready, RestartCount is 0, .env keeps mode 0600, data/terms.db keeps sha256 9ddee819… unchanged, and sanitized log scan found 0 errors. A pre-cutover state backup and the pre-0.6.1 rollback image tag are retained; wuwaterm-api (r15, Core 0.14.1) was not touched."
     },
     {
       "id": "windows",
       "repository": "https://github.com/My-Denia/WuwaTerm-Windows",
       "responsibility": "Windows desktop client, local manuscript editing, packaging and independent release.",
       "main": {
-        "commit": "1ada119a0ff9284359fff2740f887140f6324545",
-        "tree": "375f0c782af592fd407994fac19f7d61cc3c10a7",
+        "commit": "97c659e22b97f05b9a817c0740ca19d4add63441",
+        "tree": "625046a828000dd53c9f04b1a652e13c4e9fd1a8",
         "status": "success",
-        "status_note": "The v0.7.1 release source (#59, chore(release): prepare Windows 0.7.1). CI push run 45832586573, Dependency audit run 45832586594 and release run 45833727454 all passed on this commit. This repository's main has since moved on (#60, #61)."
+        "status_note": "The v0.8.0 release source (#65, chore(release): prepare Windows 0.8.0), which is also this repository's main when this snapshot was recorded. CI push run 45956691400, Dependency audit run 45956691402 and release run 45957285553 all passed on this commit."
       },
       "release": {
+        "version": "0.8.0",
+        "tag": "v0.8.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.8.0",
+        "published_at": "2026-11-27T07:22:18Z",
+        "source_commit": "97c659e22b97f05b9a817c0740ca19d4add63441",
+        "source_tree": "625046a828000dd53c9f04b1a652e13c4e9fd1a8",
+        "assets": [
+          "WuwaTerm-0.8.0-windows-x64.zip",
+          "manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "WuwaTerm-0.8.0-windows-x64.zip": "d6ffa4893b1b4a6c77fb13dec9bd36a1844e55ae36585faf5fd94e53baff7191",
+          "manifest.json": "b549d19bf74abb15d6964c5fc797dc6fe1731772fd1b14eb771a0755cee52862",
+          "SHA256SUMS": "d314d0f683ba693e9197c3b19043b51944769a1a9db78858aaa66fdfeab8b7b8"
+        },
+        "zip_sha256": "d6ffa4893b1b4a6c77fb13dec9bd36a1844e55ae36585faf5fd94e53baff7191",
+        "signed": false,
+        "note": "v0.8.0 adds local SQLite translation memory and workbench controls on top of v0.7.1 (#60, #61, #62, #63, #64, #65). #60 adds the local SQLite translation memory MVP and manager dialog (MY-491); #61 adds in-editor find/replace, termbase promotion and default unhandled filters (MY-16, MY-201); #62 wires the local confirmed translation memory panel into the workbench (MY-491); #63 enforces context-exact fresh reuse, 3-state freshness, auto L1 check and incremental skip (MY-491); #64 separates live service meta/review provenance from historical workfiles (MY-491); #65 bumps the package version to 0.8.0 in pyproject.toml, wuwaterm_client.__version__ and uv.lock and updates DocumentRunController._tm_provenance() docstring. contracts/sources.json keeps the Core v0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) pins, so this release names no new contract source. Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 58,549,622 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 97c659e2; release run 45957285553 succeeded."
+      },
+      "adoption": "unknown",
+      "compatibility": {
+        "api": "v1",
+        "review": "review-v2",
+        "manuscript": "wuwaterm-manuscript-v5",
+        "note": "The client reads wuwaterm-manuscript-v1 through v5 and writes the lowest format that holds the content: v5 only for a recorded review feature or gap-tolerant segment records. Windows 0.6.6 and earlier reject v5 files. The structure check and the single-character list need a service that lists structure-check-v1 and ambiguous-mention-v1. Local manuscript editing works offline, and online features require a configured API and device credential."
+      },
+      "validation": "0.8.0: main CI push run 45956691400 and Dependency audit run 45956691402 passed on 97c659e2 (including Linux offscreen Qt workbench verification), and release run 45957285553 passed on the same commit. The three published assets (WuwaTerm-0.8.0-windows-x64.zip 58,549,622 bytes, manifest.json 283 bytes, SHA256SUMS 97 bytes) were downloaded anonymously, matched sha256sum -c SHA256SUMS and passed unzip -tq. The manifest records source_commit 97c659e2, validation_run_id 45956691400 and signed false. No physical Windows desktop run is recorded for 0.8.0 yet.",
+      "instructions": [
+        "https://github.com/My-Denia/WuwaTerm-Windows/blob/97c659e22b97f05b9a817c0740ca19d4add63441/README.md"
+      ],
+      "source_version": "0.8.0",
+      "previous_release": {
         "version": "0.7.1",
         "tag": "v0.7.1",
         "status": "released",
@@ -270,56 +304,63 @@
         },
         "zip_sha256": "7ea9d97f11f22ebf5be1ba75986574ec2d961afc34b65f65994866fb5a7e86f4",
         "signed": false,
-        "note": "v0.7.1 is a patch release on top of v0.7.0 (#57, #58, #59). #58 keeps progress.current when a no-op save follows open; #57 aligns the README's v5 trigger with release.yml and manuscript.py (MY-515); #59 bumps the package version to 0.7.1 in pyproject.toml, wuwaterm_client.__version__ and uv.lock, moves the version-info test's pinned expectations with it and leaves build/version_info.txt generated at build time from the package version. contracts/sources.json keeps the Core v0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) pins, so this release names no new contract source. Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 57,480,645 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 1ada119a; release run 45833727454 succeeded."
+        "note": "v0.7.1 is a patch release on top of v0.7.0 (#57, #58, #59). #58 keeps progress.current when a no-op save follows open; #57 aligns the README's v5 trigger with release.yml and manuscript.py (MY-515); #59 bumps the package version to 0.7.1 in pyproject.toml, wuwaterm_client.__version__ and uv.lock, moves the version-info test's pinned expectations with it and leaves build/version_info.txt generated at build time from the package version. contracts/sources.json keeps the Core v0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) pins, so this release names no new contract source. Manuscript formats and the /v1 HTTP API paths and api_version are unchanged. The release ZIP is 57,480,645 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from 1ada119a; release run 45833727454 succeeded. Kept as history after v0.8.0; v0.7.1 and earlier remain published."
       },
-      "adoption": "unknown",
-      "compatibility": {
-        "api": "v1",
-        "review": "review-v2",
-        "manuscript": "wuwaterm-manuscript-v5",
-        "note": "The client reads wuwaterm-manuscript-v1 through v5 and writes the lowest format that holds the content: v5 only for a recorded review feature or gap-tolerant segment records. Windows 0.6.6 and earlier reject v5 files. The structure check and the single-character list need a service that lists structure-check-v1 and ambiguous-mention-v1. Local manuscript editing works offline, and online features require a configured API and device credential."
-      },
-      "validation": "0.7.1: main CI push run 45832586573 and Dependency audit run 45832586594 passed on 1ada119a, and release run 45833727454 passed on the same commit. The three published assets (WuwaTerm-0.7.1-windows-x64.zip 57,480,645 bytes, manifest.json 283 bytes, SHA256SUMS 97 bytes) were downloaded anonymously, matched sha256sum -c SHA256SUMS and passed unzip -tq; the archive holds WuwaTerm/WuwaTerm.exe. The manifest records source_commit 1ada119a, validation_run_id 45832586573 and signed false. No Windows desktop run and no readback of FileVersion or ProductVersion on Windows are recorded for 0.7.1, so only the package bytes, not its behaviour on Windows, were verified for this release.",
-      "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Windows/blob/1ada119a0ff9284359fff2740f887140f6324545/README.md"
-      ],
-      "source_version": "0.7.1",
-      "previous_release": {
-        "version": "0.7.0",
-        "tag": "v0.7.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.7.0",
-        "published_at": "2026-11-26T05:57:13Z",
-        "source_commit": "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
-        "source_tree": "6de2d3df38c23685fbc41bb28d676a27c0199d26",
-        "assets": [
-          "WuwaTerm-0.7.0-windows-x64.zip",
-          "manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "WuwaTerm-0.7.0-windows-x64.zip": "2c30e827565ef9d1d6eca280d61d859bb661931a087610af12604b7b83bc121e",
-          "manifest.json": "aef0e60ee8c6c363cb80f0e73e6a145ab178c06b2dbe3736f84dedadc8551922",
-          "SHA256SUMS": "a928ffcca71268a4a2cb1c86480140383b3015b964ef0e5646e3cd84439fe8f3"
-        },
-        "zip_sha256": "2c30e827565ef9d1d6eca280d61d859bb661931a087610af12604b7b83bc121e",
-        "signed": false,
-        "note": "v0.7.0 invalidates only the paragraph alignments an edit affects, keeps 50 undo steps, scrolls both editors together and adds keyboard navigation (#51), adds the local reference termbase wuwaterm-termbase-v1 that is not used for translation or term locking (#52), adds wuwaterm-manuscript-v5 with gap-tolerant pairing, layered review whose first layer is an on-demand structure check that calls no model, and a separate list of single characters that may be a character's name (#53), makes each test destroy its windows (#54), and moves contracts/sources.json to Core 0.14.0 (27375301) and Web v0.5.0 (6cd0a7c5) while bumping the package version to 0.7.0 (#55). The /v1 HTTP API paths and api_version are unchanged. The release ZIP is 57,481,555 bytes (manifest.json 283 bytes, SHA256SUMS 97 bytes) built from d87a66c3; release dry run 45763681182 and release run 45764243464 succeeded. Kept as history after v0.7.1; v0.7.0 and earlier remain published."
-      },
-      "adoption_note": "0.7.1 is published. Its three assets were downloaded anonymously and verified as recorded in validation. No Windows run check and no installed copy in the owner's own profile are recorded for 0.7.1, so adoption is unknown."
+      "adoption_note": "0.8.0 is published. Its three assets were downloaded anonymously and verified (sha256sum -c SHA256SUMS and unzip -tq) after CI and Linux offscreen Qt workbench verification; no physical Windows run receipt and no installed copy in the owner's own profile are recorded for 0.8.0 yet, so adoption is unknown."
     },
     {
       "id": "web",
       "repository": "https://github.com/My-Denia/WuwaTerm-Web",
       "responsibility": "One browser workbench and same-origin backend for public and self-hosted use; Sites is a hosting target.",
       "main": {
-        "commit": "13faa392cd6f4826d2115ae8ad04117a95577ffe",
-        "tree": "e32b94c65f5692dc3534c6cdec8854dac460b025",
+        "commit": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "tree": "7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277",
         "status": "success",
-        "status_note": "The v0.5.1 release source (#74, chore(release): prepare Web 0.5.1). Web CI run 45832552132, Dependency audit run 45832552120 and CodeQL run 45832552000 passed on this commit, and self-host candidate runs 45833727355 (root) and 45833734606 (prefix /private) plus self-host release publication runs 45834408521 (validate) and 45834893660 (publish) passed. This repository's main has since moved on (#75)."
+        "status_note": "The v0.6.0 release source (#79, chore(release): prepare Web 0.6.0), which is also this repository's main when this snapshot was recorded. Web CI run 45961100673, Dependency audit run 45961100634 and CodeQL run 45961100609 passed on this commit, and self-host candidate runs 45961960285 (root) and 45961963454 (prefix /private) plus self-host release publication runs 45962189728 (validate) and 45962269883 (publish) passed."
       },
-      "source_version": "0.5.1",
+      "source_version": "0.6.0",
       "release": {
+        "version": "0.6.0",
+        "tag": "v0.6.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.6.0",
+        "published_at": "2026-11-27T08:00:19Z",
+        "source_commit": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "source_tree": "7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277",
+        "builds": {
+          "root": {
+            "manifest": "manifest-root.json",
+            "archive": "wuwaterm-web-v0.6.0-linux-x64-root.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": ""
+          },
+          "prefix": {
+            "manifest": "manifest-prefix.json",
+            "archive": "wuwaterm-web-v0.6.0-linux-x64-prefix-71708eb255bc.tar.gz",
+            "entry": "bundle/start.mjs",
+            "base_path": "/private"
+          }
+        },
+        "assets": [
+          "wuwaterm-web-v0.6.0-linux-x64-root.tar.gz",
+          "manifest-root.json",
+          "SHA256SUMS-root",
+          "wuwaterm-web-v0.6.0-linux-x64-prefix-71708eb255bc.tar.gz",
+          "manifest-prefix.json",
+          "SHA256SUMS-prefix"
+        ],
+        "asset_sha256": {
+          "wuwaterm-web-v0.6.0-linux-x64-root.tar.gz": "90787bccdcc47714b14abd9416680ab19cc58355804fee296eeaaf6acf8f14a3",
+          "manifest-root.json": "47ffa67d7f9e303384b4defa07843ad138923a1a5a2780cc03c8f3f0fee630cc",
+          "SHA256SUMS-root": "bf0a99868dab20d8b08982d2563743dd9979affcb7bfd04fbe7481fd5e42875a",
+          "wuwaterm-web-v0.6.0-linux-x64-prefix-71708eb255bc.tar.gz": "f7e7c8aca3e5d39b2ba2687616f08494186db8e575fae7a1c457bc6bc6375591",
+          "manifest-prefix.json": "bd76ec8bb826f1e1abafdf22bb8a0a9790c66d1fb9b21b13327cf734e8f5c295",
+          "SHA256SUMS-prefix": "ef80c56568013a415f5b6a08dc7db2648f48f74a3fccf2065b4be1c9b0f0346b"
+        },
+        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45961960285 (artifact 15181365966) and 45961963454 (artifact 15181168108, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45961100673 and carry tag_status proposed, so the release separately verifies that the v0.6.0 tag resolves to source_sha eed5d30e. The root archive is 33,533,799 bytes and the prefix archive 33,534,569 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
+        "note": "v0.6.0 adds workbench controls and in-memory translation memory on top of v0.5.1 (#75, #76, #77, #78, #79). #75 aligns mobile focus order, adds sync scroll, hides resolved checks, adds promote-to-termbase and safe Markdown preview (MY-16); #76 adds explicit in-memory wuwaterm-tm-v1 import/export and context suggestions (MY-491); #77 distinguishes three freshness states and enforces strict context and an 8 MiB merge guard (MY-491); #78 wires the live service game version and dictionary into memory freshness (MY-491); #79 bumps the package version to 0.6.0 in package.json and package-lock.json and points the self-host release commands and tag examples in docs/self-hosting.md at v0.6.0. The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45962189728 and publication run 45962269883 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS."
+      },
+      "previous_release": {
         "version": "0.5.1",
         "tag": "v0.5.1",
         "status": "released",
@@ -358,48 +399,7 @@
           "SHA256SUMS-prefix": "754398fe1498fa05f41721e9ef22ee010acb26cae04be7c3832a615ac39c373b"
         },
         "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45833727355 (artifact 15124356174) and 45833734606 (artifact 15123171738, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45832552132 and carry tag_status proposed, so the release separately verifies that the v0.5.1 tag resolves to source_sha 13faa392. The root archive is 33,508,155 bytes and the prefix archive 33,507,992 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
-        "note": "v0.5.1 is a patch release on top of v0.5.0 (#72, #73, #74). #72 resets the radio height, drops the favicon console filter and names the v4 and v5 sizes (MY-515); #73 scrolls located words into view, keeps a paused run resumable and tightens the phone layout; #74 bumps the package version to 0.5.1 in package.json and package-lock.json and points the self-host release commands and tag examples in docs/self-hosting.md at v0.5.1. The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45834408521 and publication run 45834893660 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS."
-      },
-      "previous_release": {
-        "version": "0.5.0",
-        "tag": "v0.5.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.5.0",
-        "published_at": "2026-11-26T05:31:18Z",
-        "source_commit": "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
-        "source_tree": "c05b3f227a4b49f0bd9d5898c4b6b527f23f9718",
-        "builds": {
-          "root": {
-            "manifest": "manifest-root.json",
-            "archive": "wuwaterm-web-v0.5.0-linux-x64-root.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": ""
-          },
-          "prefix": {
-            "manifest": "manifest-prefix.json",
-            "archive": "wuwaterm-web-v0.5.0-linux-x64-prefix-71708eb255bc.tar.gz",
-            "entry": "bundle/start.mjs",
-            "base_path": "/private"
-          }
-        },
-        "assets": [
-          "wuwaterm-web-v0.5.0-linux-x64-root.tar.gz",
-          "manifest-root.json",
-          "SHA256SUMS-root",
-          "wuwaterm-web-v0.5.0-linux-x64-prefix-71708eb255bc.tar.gz",
-          "manifest-prefix.json",
-          "SHA256SUMS-prefix"
-        ],
-        "asset_sha256": {
-          "wuwaterm-web-v0.5.0-linux-x64-root.tar.gz": "fbd34080b58cd39c0e28e202a3189bb86f62ca89f82ce25f2e71b9f4db014234",
-          "manifest-root.json": "3ded40b67759ad00468cb990090cc9ed413267794764152a7da1061dfbadfe38",
-          "SHA256SUMS-root": "a807c1548083b447c8e070020a85303e79387b94d4f2b2a980297b38032a6123",
-          "wuwaterm-web-v0.5.0-linux-x64-prefix-71708eb255bc.tar.gz": "5d0f5d1e94fb93f10a2d20a51c1e4661b8cd6107b53a6ee9cdf020dad682eee0",
-          "manifest-prefix.json": "1e592a87e65bc3bb65d343239a031cd2bb63603edd26f6afc21b13f2bde9acb5",
-          "SHA256SUMS-prefix": "21f669ee0f3e61cfb9b0cf16d8f634bdf6daf91f21c22d1a05a4056e63622e94"
-        },
-        "manifest_note": "The published manifest records the archive under archive.name and the build prefix under base_path; the launcher, port and responses belong to the bundle (bundle/start.mjs, PORT defaults to 3000). The archives are the root and prefix candidates of workflow runs 45761779578 (artifact 15089978877) and 45761789722 (artifact 15090351121, base path /private), attempt 1 of each, promoted without rebuilding; both manifests name Web CI run 45761147421 and carry tag_status proposed, so the release separately verifies that the v0.5.0 tag resolves to source_sha 6cd0a7c5. The root archive is 33,505,717 bytes and the prefix archive 33,505,960 bytes (manifest-root.json 758 bytes, SHA256SUMS-root 193 bytes, manifest-prefix.json 781 bytes, SHA256SUMS-prefix 210 bytes); each SHA256SUMS carries its own archive and manifest.",
-        "note": "v0.5.0 keeps unaffected alignments across edits and adds redo (#64), merges quick translation and manuscript review into one document workspace (#66), adds the in-memory reference termbase wuwaterm-termbase-v1 (#67), adds wuwaterm-manuscript-v5 and layered review with a deterministic structure check and separately listed ambiguous single characters (#68), proves v5 interchange with a pinned Windows client (#69), fixes interface styling (#70) and prepares release 0.5.0 (#71), whose tested backend is Core v0.14.0 (27375301); its contracts/windows-ref.txt pins Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45761977306 and publication run 45762051857 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS. Kept as history after v0.5.1; v0.5.0 and earlier remain published on the release page."
+        "note": "v0.5.1 is a patch release on top of v0.5.0 (#72, #73, #74). #72 resets the radio height, drops the favicon console filter and names the v4 and v5 sizes (MY-515); #73 scrolls located words into view, keeps a paused run resumable and tightens the phone layout; #74 bumps the package version to 0.5.1 in package.json and package-lock.json and points the self-host release commands and tag examples in docs/self-hosting.md at v0.5.1. The Core and Windows contract pins stay where v0.5.0 left them: contracts/backend-ref.txt remains the Core v0.14.0 release source 27375301 and contracts/windows-ref.txt the Windows source commit 31fe402e316540039cdbdddfbdef6f25fa31abac, a test input rather than a Windows release. The release publishes the self-hosted bundles and does not deploy the public Site. Publication validation run 45834408521 and publication run 45834893660 succeeded. All six published assets were downloaded anonymously, and both archives and both manifests verified against their SHA256SUMS. Kept as history after v0.6.0; v0.5.1 and earlier remain published on the release page."
       },
       "candidate_source": {
         "commit": "c9dde012cf88b934a70aac18c12778e8057ffc63",
@@ -435,16 +435,16 @@
         "note": "The Web BFF validates response shapes strictly; a matching API version alone does not prove compatibility. The client writes wuwaterm-manuscript-v5 only for a recorded review feature or gap-tolerant segment records and keeps the lowest earlier format otherwise; Web 0.4.5 and earlier and Windows 0.6.6 and earlier reject v5 files. The structure check and ambiguous single characters appear only when the Core API lists structure-check-v1 and ambiguous-mention-v1."
       },
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/13faa392cd6f4826d2115ae8ad04117a95577ffe/README.md",
-        "https://github.com/My-Denia/WuwaTerm-Web/blob/13faa392cd6f4826d2115ae8ad04117a95577ffe/docs/self-hosting.md"
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/README.md",
+        "https://github.com/My-Denia/WuwaTerm-Web/blob/eed5d30e26c6446dbff49aa63905ec3ba2db9677/docs/self-hosting.md"
       ],
-      "adoption_note": "Web v0.5.1 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.5.1, from source commit 13faa392cd6f4826d2115ae8ad04117a95577ffe and tree e32b94c65f5692dc3534c6cdec8854dac460b025. Its six public assets were downloaded anonymously: both archives and both manifests matched their SHA256SUMS (root archive 9b730012..., /private archive 403942b5...), and the release record's own digests matched every asset. v0.5.1 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.5.1: it remains recorded as version 33, deployed from the v0.4.2 source tree aa855aa6afc911f05816ac0651054ba1f553925f, with version 32 as the previous rollback version; v0.4.3, v0.4.4, v0.4.5, v0.5.0 and v0.5.1 have not been deployed there."
+      "adoption_note": "Web v0.6.0 is published at https://github.com/My-Denia/WuwaTerm-Web/releases/tag/v0.6.0, from source commit eed5d30e26c6446dbff49aa63905ec3ba2db9677 and tree 7fe9d7f3ee9a9bacf0bf6ff99d14931f72354277. Its six public assets were downloaded anonymously: both archives and both manifests matched their SHA256SUMS (root archive 90787bcc..., /private archive f7e7c8ac...), and the release record's own digests matched every asset. v0.6.0 is also this Core checkout's installer default now, so deploy/setup.sh downloads it without an override. Public Sites is not deployed from v0.6.0: it remains recorded as version 33, deployed from the v0.4.2 source tree aa855aa6afc911f05816ac0651054ba1f553925f, with version 32 as the previous rollback version; v0.4.3 through v0.6.0 have not been deployed there."
     }
   ],
   "ci_pins": {
-    "core_tests_web": "13faa392cd6f4826d2115ae8ad04117a95577ffe",
-    "core_tests_windows": "1ada119a0ff9284359fff2740f887140f6324545",
+    "core_tests_web": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+    "core_tests_windows": "97c659e22b97f05b9a817c0740ca19d4add63441",
     "web_tests_core": "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.5.1 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.7.1 tag commit, which carries manuscript v5 and names Web commit 6cd0a7c5 and Core v0.14.0 (27375301) as its contract sources; the Core pin is the contracts/backend-ref.txt of the pinned Web commit, still the Core v0.14.0 release source 2737530, because Web v0.5.1 did not move it. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json carry the same two client revisions."
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.6.0 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.8.0 tag commit, which carries manuscript v5 and names Web commit 6cd0a7c5 and Core v0.14.0 (27375301) as its contract sources; the Core pin is the contracts/backend-ref.txt of the pinned Web commit, still the Core v0.14.0 release source 2737530, because Web v0.6.0 did not move it. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). Note that the Core v0.15.0 tag itself pins Web v0.5.1 (13faa392cd6f4826d2115ae8ad04117a95577ffe) and Windows v0.7.1 (1ada119a0ff9284359fff2740f887140f6324545); this commit on main moves contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json to Web v0.6.0 (eed5d30e) and Windows v0.8.0 (97c659e2)."
   }
 }
