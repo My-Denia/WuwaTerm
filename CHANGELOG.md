@@ -58,12 +58,13 @@ does not distribute generated game data or generated SQLite databases.
   [ADR 0024](docs/adr/0024-diagnose-then-repair-targeted-review.md)
   (five-stage diagnose-then-repair layered review with six pre-registered
   acceptance metrics, #344), and update ADR 0023 (`MY-491`, #347) to separate
-  the shipped Windows SQLite MVP and Web in-memory import/export baseline from
-  the updated contract for upcoming client releases: two-sided `context_exact`
-  neighbour hash bounds (`prev_source_hash !== null || next_source_hash !==
-  null`, 2,000-scalar neighbour cap), three-state freshness (`verified_fresh`,
-  `known_stale`, `provenance_unknown`), and restricting automatic
-  batch/incremental skip to `context_exact` + `verified_fresh` entries only.
+  the Windows SQLite MVP and Web in-memory import/export baseline already merged
+  in the client repositories from the updated contract for upcoming client
+  releases: two-sided `context_exact` neighbour hash bounds (`prev_source_hash
+  !== null || next_source_hash !== null`, 2,000-scalar neighbour cap),
+  three-state freshness (`verified_fresh`, `known_stale`, `provenance_unknown`),
+  and restricting automatic batch/incremental skip to `context_exact` +
+  `verified_fresh` entries only.
 
 ### Translation Engine
 
