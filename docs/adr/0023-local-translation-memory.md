@@ -57,12 +57,18 @@ provenance-checked, and never a shared service.
    digit-template variants (`numeric_variant`) and whitespace-collapsed matches
    (`normalized_exact`). No embeddings, no fuzzy similarity.
 3. **Trusted reuse boundary (`context_exact` + `verified_fresh` only).** Only a
-   `context_exact` match (both `prev_source_hash` and `next_source_hash`
-   present in request context and matching the entry on both sides) whose
-   freshness is `verified_fresh` may enter batch / incremental skip (reuse
-   without a model call). Every other match — `exact`, `numeric_variant`,
-   `normalized_exact`, `known_stale`, and `provenance_unknown` — is a read-only
-   reference only and is never auto-applied or skipped silently.
+   `context_exact` match — where at least one neighbour hash is present
+   (`prev_source_hash !== null || next_source_hash !== null`), `prev_source_hash`
+   and `next_source_hash` match on both sides (`null` at a document edge), and
+   any neighbour segment exceeding the `2,000`-scalar bound cannot be hashed or
+   certified as `context_exact` — whose freshness is `verified_fresh` may enter
+   batch / incremental skip (reuse without a model call). Strict two-sided
+   comparison (downgrading to `exact` when either neighbour is omitted or
+   changed) is being landed in the Windows and Web `MY-491` remediation
+   branches and is not yet merged on `main`. Every other match — `exact`,
+   `numeric_variant`, `normalized_exact`, `known_stale`, and
+   `provenance_unknown` — is a read-only reference only and is never
+   auto-applied or skipped silently.
 4. **Three-state freshness decides trust.** Every entry records the dictionary
    revision (`terms_db_revision`) and game version (`game_version`) it was
    confirmed under. Lookup classifies every match into one of three states:
@@ -165,8 +171,12 @@ Entry keys (canonical order; uniqueness identity is `(direction, sha256(source_t
   (`localStorage`, `sessionStorage`, `IndexedDB`, and cookies stay untouched),
   matching ADR 0021 and [Privacy and LLM](../privacy-and-llm.md).
 - Explicit import and export of `wuwaterm-tm-v1` JSON are the only persistence
-  paths; capacity (`10,000` entries, `8 MiB` UTF-8) is enforced on import,
-  confirmation, merge, and export.
+  paths; the contract caps capacity at `10,000` entries and `8 MiB` UTF-8 across
+  import, merge, confirmation, and export. On `main`, the initial Web `MY-491`
+  implementation already enforces `10,000` entries and `8 MiB` on import,
+  confirmation, and export; merge-time `8 MiB` enforcement and three-state
+  freshness alignment are being landed in the Web remediation branch and are not
+  yet merged to `main`.
 - Imported entries stay in page memory only; nothing is written to the server,
   uploaded to any API, or embedded into `.wuwaterm` manuscripts, and closing or
   refreshing the tab clears them.
@@ -178,21 +188,36 @@ Match kinds (ranked `0..3`, ties broken by `use_count` desc, then parsed
 
 | Match kind | Condition | Reusable for skip? |
 | --- | --- | --- |
-| `context_exact` | Exact `source_text`, request provides context (`prev_source_hash !== null \|\| next_source_hash !== null`), and **both** `prev_source_hash` and `next_source_hash` equal the entry | Only when `freshness === "verified_fresh"` |
+| `context_exact` | Exact `source_text`, request supplies at least one neighbour hash (`prev_source_hash !== null \|\| next_source_hash !== null`, document edges `null`, neighbours > `2,000` scalars cannot be hashed/certified), and **both** `prev_source_hash` and `next_source_hash` equal the entry | Only when `freshness === "verified_fresh"` |
 | `exact` | Exact `source_text`, but no request context or either neighbour differs/is missing | Read-only reference only |
 | `numeric_variant` | `numeric_mask(source_text)` matches (ASCII digit runs differ) | Read-only reference only (`numeric_changed`) |
 | `normalized_exact` | Whitespace/line-ending normalized source matches | Read-only reference only |
 
 Deleting or changing either neighbour (`prev_source` or `next_source`) downgrades
-`context_exact` to `exact`.
+`context_exact` to `exact`. Strict two-sided comparison is being aligned across
+the Windows and Web `MY-491` remediation branches (not yet merged on `main`).
 
-Three-state freshness (`freshness`):
+Three-state freshness (`freshness`), evaluated with a single cross-client
+precedence rule:
+
+1. Collect all applicable `stale_reasons` independently without masking missing
+   evidence (`terms_revision_changed` when both `terms_db_revision` values are
+   non-null and unequal; `game_version_changed` when both `game_version` values
+   are non-null and unequal; `numeric_changed` for `numeric_variant`; and
+   `provenance_unknown` whenever `current_terms_db_revision === null`,
+   `entry.terms_db_revision === null`, or `game_version` is `null` on one side
+   only).
+2. Assign `freshness` strictly in precedence order:
+   **`known_stale`** (`terms_revision_changed` or `game_version_changed` or
+   `numeric_changed`) **>** **`provenance_unknown`** (no explicit mismatch,
+   but missing `terms_db_revision` or one-sided `game_version`) **>**
+   **`verified_fresh`**.
 
 | Freshness | Condition | `stale_reasons` / effect |
 | --- | --- | --- |
-| `verified_fresh` | `current_terms_db_revision !== null` and `entry.terms_db_revision === current_terms_db_revision`, `game_version` sides are both `null` or equal, and not `numeric_variant` | `needs_recheck = false`; eligible for skip only if also `context_exact` |
-| `known_stale` | Both `terms_db_revision` values non-null and unequal (`terms_revision_changed`), or both `game_version` values non-null and unequal (`game_version_changed`), or `numeric_variant` (`numeric_changed`) | `needs_recheck = true`; read-only reference only, never auto-applied |
-| `provenance_unknown` | Neither `terms_revision_changed` nor `game_version_changed` triggered, and `current_terms_db_revision === null`, `entry.terms_db_revision === null`, or `game_version` is `null` on one side only | `provenance_unknown` added to `stale_reasons`; `needs_recheck = true`; read-only reference only, never auto-applied |
+| `verified_fresh` | `current_terms_db_revision !== null` and `entry.terms_db_revision === current_terms_db_revision`, `game_version` sides are both `null` or equal, and not `numeric_variant` | `stale_reasons = []`, `needs_recheck = false`; eligible for skip only if also `context_exact` |
+| `known_stale` | Both `terms_db_revision` values non-null and unequal (`terms_revision_changed`), or both `game_version` values non-null and unequal (`game_version_changed`), or `numeric_variant` (`numeric_changed`) | Carries all matching stale reasons (plus `provenance_unknown` if the other provenance field is missing); `needs_recheck = true`; read-only reference only, never auto-applied |
+| `provenance_unknown` | Not `known_stale`, and `current_terms_db_revision === null`, `entry.terms_db_revision === null`, or `game_version` is `null` on one side only | `stale_reasons` contains `provenance_unknown`; `needs_recheck = true`; read-only reference only, never auto-applied |
 
 **Trusted reuse invariant:** Only `context_exact` + `verified_fresh` may enter
 batch / incremental skip (served without a model call). All other matches —
@@ -217,9 +242,10 @@ Rules that follow from this:
    candidates coexist without overwriting each other; repeat confirmations
    increment `use_count` and update `updated_at`, while ranking prefers higher
    `use_count` then newer `updated_at`.
-4. **No cross-document auto-application.** An entry born in one document only
-   auto-reuses when both exact text and both neighbours match under
-   `verified_fresh` provenance; otherwise it is reference only.
+4. **Cross-document reuse requires a trusted match.** An entry born in one
+   document only auto-reuses in another when exact text and both neighbours
+   match (`context_exact`) under `verified_fresh` provenance; otherwise it is a
+   read-only reference only.
 5. **Bounded work per lookup.** Indexed exact/normalized/masked lookups with
    `MAX_LOOKUP_CANDIDATES` / `MAX_LOOKUP_LIMIT` caps; no unbounded full-table
    scoring scan.
@@ -238,7 +264,10 @@ For an edited guide or announcement:
    path.
 3. An insertion or deletion changes the neighbour hashes of at most the
    adjacent segments, so the untouched interior of a long document stays
-   `context_exact` — this is the saving the memory exists for.
+   `context_exact` (and qualifies for skip when `verified_fresh`) — this is the
+   saving the memory exists for. Untouched segments whose match is `known_stale`
+   or `provenance_unknown` still go to the model rather than being silently
+   reused.
 4. The run receipt reports counts (reused, referenced, stale/unknown,
    re-translated) plus `terms_db_revision` and `game_version` — counts and
    provenance only, never segment text.
@@ -270,14 +299,20 @@ For an edited guide or announcement:
 
 Frozen before any measurement, on fixed documents rather than ad-hoc samples:
 
-1. **Reuse correctness.** On a set of real edited guides, exactly the segments
-   whose source or neighbours changed are sent to the model; every untouched
-   interior segment (`context_exact` + `verified_fresh`) is reused with zero
-   model calls, and deleting or changing either neighbour downgrades to `exact`.
-2. **Staleness & unknown provenance.** 100% of entries whose `terms_db_revision`
-   or `game_version` differs from the running instance are reported
-   `known_stale`, entries with missing/unverified provenance are reported
-   `provenance_unknown`, and none is auto-applied.
+1. **Reuse correctness.** On a set of real edited guides whose baseline entries
+   were confirmed under the running dictionary revision and game version,
+   every qualifying (`context_exact` + `verified_fresh`) untouched interior
+   segment is reused with zero model calls; every segment whose source or
+   neighbours changed, as well as any untouched segment whose provenance is
+   `known_stale` or `provenance_unknown`, goes to the model (never silently
+   reused); and deleting or changing either neighbour downgrades to `exact`.
+2. **Staleness & unknown provenance.** 100% of entries with an explicit
+   `terms_db_revision` or `game_version` mismatch are classified `known_stale`,
+   and 100% of entries with missing or one-sided `null` provenance (without an
+   explicit mismatch) are classified `provenance_unknown` (while mixed
+   mismatch-plus-missing entries keep `known_stale` and still retain
+   `provenance_unknown` in `stale_reasons`); neither class may ever be
+   auto-applied or skipped.
 3. **Manual-confirmed-only.** A test proves no code path creates an entry from
    model output, review output, or an imported file that claims an `origin`
    outside `"human_confirmed" | "imported_confirmed"`.
