@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -343,3 +345,44 @@ assert len(cjk_span._WORDS) == cjk_span.LEXICON_COUNT
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_concurrent_first_load_initializes_words_once(monkeypatch):
+    import wuwaterm.cjk_span as cjk_span
+
+    real_load = cjk_span._load_words
+    load_calls = 0
+    monkeypatch.delitem(cjk_span.__dict__, "_WORDS", raising=False)
+
+    def slow_load() -> frozenset[str]:
+        nonlocal load_calls
+        load_calls += 1
+        time.sleep(0.02)
+        return real_load()
+
+    monkeypatch.setattr(cjk_span, "_load_words", slow_load)
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[bool, frozenset[str]]] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            matched = span_inside_known_word("音乐家使用变奏曲并入场。", 5, 7)
+            results.append((matched, cjk_span._WORDS))
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert not errors
+    assert load_calls == 1
+    assert len(results) == 2
+    assert results[0][0] is True and results[1][0] is True
+    assert results[0][1] is results[1][1] is cjk_span._WORDS

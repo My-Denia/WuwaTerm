@@ -139,10 +139,13 @@ go stale by the existing freshness rule and are re-reviewed.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     _WORDS: frozenset[str]
+
+_WORDS_LOCK = threading.Lock()
 
 MAX_WORD_LEN = 8
 LEXICON_COUNT = 66315
@@ -207,9 +210,12 @@ def _get_words() -> frozenset[str]:
     words = globals().get("_WORDS")
     if words is not None:
         return words
-    loaded = _load_words()
-    globals()["_WORDS"] = loaded
-    return loaded
+    with _WORDS_LOCK:
+        if "_WORDS" in globals():
+            return globals()["_WORDS"]
+        loaded = _load_words()
+        globals()["_WORDS"] = loaded
+        return loaded
 
 
 def __getattr__(name: str) -> object:
