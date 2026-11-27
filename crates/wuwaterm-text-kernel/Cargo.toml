@@ -1,0 +1,18 @@
+[package]
+name = "wuwaterm-text-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure-algorithm shared text kernel for WuwaTerm (Core PyO3 and Web WASM)."
+
+[lib]
+name = "wuwaterm_text_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wuwaterm-kernel-cli"
+path = "src/bin/wuwaterm_kernel_cli.rs"
+
+# Pure std-only core library: zero external runtime, network, SQLite, or UI dependencies.
+[dependencies]
