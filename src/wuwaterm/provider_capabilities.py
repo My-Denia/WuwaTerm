@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -208,14 +209,33 @@ class _FrozenJsonArray:
     items: tuple[Any, ...]
 
 
+def _validate_utf8_string(value: str, field_name: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8") from exc
+    return value
+
+
+def _reject_non_finite_json_constant(token: str) -> Any:
+    raise ValueError(f"non-finite JSON constant {token!r} is not allowed")
+
+
 def _freeze_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("provider extra_body floats must be finite")
+        return value
+    if isinstance(value, str):
+        return _validate_utf8_string(value, "extra_body string value")
     if isinstance(value, Mapping):
         entries: list[tuple[str, Any]] = []
         for k, v in sorted(value.items(), key=lambda item: str(item[0])):
             if not isinstance(k, str):
                 raise ValueError("extra_body nested object keys must be strings")
+            _validate_utf8_string(k, "extra_body nested object key")
             entries.append((k, _freeze_value(v)))
         return _FrozenJsonObject(tuple(entries))
     if isinstance(value, (list, tuple)):
@@ -248,6 +268,7 @@ def _freeze_extra_body(
     for key, value in sorted(mapping.items(), key=lambda item: str(item[0])):
         if not isinstance(key, str) or not key.strip():
             raise ValueError("extra_body keys must be non-empty strings")
+        _validate_utf8_string(key, "extra_body key")
         if key in _RESERVED_WIRE_KEYS:
             raise ValueError(f"provider extra_body may not replace {key}")
         frozen.append((key, _freeze_value(value)))
@@ -263,6 +284,7 @@ def _freeze_effort_mapping(
     for key, value in sorted(mapping.items(), key=lambda item: str(item[0])):
         if not isinstance(key, str):
             raise ValueError("effort_mapping keys must be strings")
+        _validate_utf8_string(key, "effort_mapping key")
         parsed = parse_concrete_thinking_mode(key)
         if parsed is None or parsed in ("disabled", "omit"):
             raise ValueError(
@@ -272,6 +294,7 @@ def _freeze_effort_mapping(
             raise ValueError(
                 f"effort_mapping value for {key!r} must be a non-empty string"
             )
+        _validate_utf8_string(value, "effort_mapping value")
         frozen.append((parsed, value.strip()))
     return tuple(frozen)
 
@@ -293,8 +316,17 @@ _KNOWN_WIRE_EFFORTS: frozenset[str] = frozenset(
 )
 
 
+def _safe_utf8_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()[:8]
+
+
 def redact_effective_effort(value: str | None) -> str | None:
-    """Return a bounded, non-sensitive effort value for logs and metadata."""
+    """Return a bounded, non-sensitive effort value for logs and metadata.
+
+    Known wire effort tokens pass through verbatim; every other string is
+    always hashed to ``custom:<8-hex>`` (never bypassing on a ``custom:``
+    prefix).
+    """
     if value is None:
         return None
     if type(value) is not str:
@@ -304,16 +336,15 @@ def redact_effective_effort(value: str | None) -> str | None:
         return None
     if cleaned in _KNOWN_WIRE_EFFORTS:
         return cleaned
-    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
-    return f"custom:{digest}"
+    return f"custom:{_safe_utf8_digest(cleaned)}"
 
 
 def redact_provider_profile_name(name: str | None) -> str | None:
     """Return a bounded, non-sensitive identifier for logs and telemetry.
 
-    Built-in preset names pass through verbatim; custom gateway names are
-    replaced with a short non-reversible fingerprint ``custom:<8-hex>`` so
-    user-supplied config strings can never leak into logs or observer records.
+    Built-in preset names pass through verbatim; every custom gateway name
+    (including names shaped like ``custom:<8-hex>``) is always hashed to
+    ``custom:<8-hex>`` from the raw name at this single shared entry point.
     """
     if name is None:
         return None
@@ -324,8 +355,7 @@ def redact_provider_profile_name(name: str | None) -> str | None:
         return None
     if cleaned in BUILTIN_PROVIDER_PROFILES:
         return cleaned
-    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
-    return f"custom:{digest}"
+    return f"custom:{_safe_utf8_digest(cleaned)}"
 
 
 @dataclass(frozen=True)
@@ -367,12 +397,14 @@ class ProviderProfile:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("provider profile name must be a non-empty string")
+        _validate_utf8_string(self.name, "provider profile name")
         if self.thinking_protocol not in _THINKING_PROTOCOLS:
             raise ValueError(
                 f"unknown thinking_protocol {self.thinking_protocol!r}"
             )
         if not isinstance(self.effort_field, str) or not self.effort_field.strip():
             raise ValueError("effort_field must be a non-empty string")
+        _validate_utf8_string(self.effort_field, "effort_field")
         if self.effort_field in _RESERVED_WIRE_KEYS:
             raise ValueError(
                 f"effort_field may not replace reserved key {self.effort_field!r}"
@@ -508,6 +540,13 @@ class ProviderProfile:
     def supports_effort(self, mode: ConcreteThinkingMode) -> bool:
         """Return whether ``mode`` maps to a non-omitted wire representation."""
         return not self.resolve_effort(mode).omitted
+
+    def has_explicit_disable_thinking(self) -> bool:
+        """Return whether ``disabled`` emits an explicit non-omitted wire payload."""
+        if not self.supports_disable_thinking:
+            return False
+        resolution = self.resolve_effort("disabled")
+        return not resolution.omitted and bool(resolution.extra_body)
 
     def to_identity_dict(self) -> dict[str, Any]:
         """Stable identity dictionary for operation hashing.
@@ -742,11 +781,14 @@ def resolve_provider_profile_from_env(
     raw_json = os.getenv(PROVIDER_CAPABILITIES_JSON_ENV, "").strip()
     if raw_json:
         try:
-            parsed = json.loads(raw_json)
+            _validate_utf8_string(raw_json, PROVIDER_CAPABILITIES_JSON_ENV)
+            parsed = json.loads(
+                raw_json, parse_constant=_reject_non_finite_json_constant
+            )
             if not isinstance(parsed, dict):
                 raise ValueError("must be a JSON object")
             return provider_profile_from_config(parsed)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, UnicodeError):
             active_logger.warning(
                 "invalid %s; using %s",
                 PROVIDER_CAPABILITIES_JSON_ENV,

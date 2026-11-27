@@ -1227,7 +1227,7 @@ class RequestPolicy:
         return (
             configured == TRANSLATION_THINKING_AUTO
             and initial_thinking_mode in TRANSLATION_THINKING_REASONING_MODES
-            and provider_profile.supports_disable_thinking
+            and provider_profile.has_explicit_disable_thinking()
             and provider_profile.distinguishes_thinking_modes(
                 initial_thinking_mode, "disabled"
             )
@@ -1256,21 +1256,37 @@ class RequestPolicy:
         lock_count: int,
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
         prepared_scalars: int | None = None,
+        remaining_budget_seconds: float | None = None,
     ) -> ConcreteThinkingMode:
+        if (
+            self.configured_mode(to_chinese=to_chinese)
+            != TRANSLATION_THINKING_AUTO
+        ):
+            return initial_thinking_mode
         target_mode, _ = clamp_effort_to_ceiling("low", self.auto_reasoning_ceiling)
         if (
             initial_thinking_mode == "disabled"
             and target_mode != "disabled"
             and lock_count < self.auto_lock_limit
-            and self.configured_mode(to_chinese=to_chinese)
-            == TRANSLATION_THINKING_AUTO
             and provider_profile.distinguishes_thinking_modes("disabled", target_mode)
             and self._repair_may_step_up(
                 to_chinese=to_chinese, prepared_scalars=prepared_scalars
             )
         ):
             return target_mode
-        return initial_thinking_mode
+        bounded_mode, _ = clamp_effort_to_ceiling(
+            initial_thinking_mode, self.auto_reasoning_ceiling
+        )
+        effective_window = (
+            float(self.timeout_seconds)
+            if remaining_budget_seconds is None
+            else min(float(self.timeout_seconds), float(remaining_budget_seconds))
+        )
+        if effective_window < float(
+            self.auto_high_min_timeout_seconds
+        ) and bounded_mode in ("medium", "high", "xhigh", "max", "ultra"):
+            bounded_mode, _ = clamp_effort_to_ceiling("low", self.auto_reasoning_ceiling)
+        return bounded_mode
 
     def _repair_may_step_up(
         self, *, to_chinese: bool, prepared_scalars: int | None
@@ -2479,6 +2495,7 @@ def build_paragraph_repair_request_spec(
         lock_count=len(plan.locks),
         provider_profile=provider_profile,
         prepared_scalars=len(plan.locked_text),
+        remaining_budget_seconds=timeout_override,
     )
     prompt_suffix = plan.prompt_templates.format_paragraph_repair_instruction(
         paragraphs

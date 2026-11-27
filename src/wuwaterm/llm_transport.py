@@ -19,11 +19,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hashlib
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -33,6 +31,10 @@ from typing import Any, Literal, Protocol
 import httpx
 
 from . import request_trace
+from .provider_capabilities import (
+    redact_effective_effort,
+    redact_provider_profile_name,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -159,18 +161,6 @@ _KNOWN_REQUESTED_EFFORTS = frozenset(
         "omit",
     }
 )
-_KNOWN_EFFECTIVE_EFFORTS = _KNOWN_REQUESTED_EFFORTS | frozenset({"none", "off"})
-_KNOWN_PROVIDER_PROFILES = frozenset(
-    {
-        "openai_compatible_deepseek",
-        "deepseek",
-        "openai_reasoning",
-        "openai",
-        "neon_gateway",
-        "neon",
-        "omit_all",
-    }
-)
 _KNOWN_ATTEMPT_KINDS = frozenset(
     {"initial", "timeout_fallback", "paragraph_repair"}
 )
@@ -187,7 +177,6 @@ CONTROLLED_CANCEL_REASONS = frozenset(
         "task_cancelled",
     }
 )
-_CUSTOM_FINGERPRINT_RE = re.compile(r"^custom:[0-9a-f]{8}$")
 
 
 def _safe_requested_effort(value: object) -> str | None:
@@ -197,27 +186,19 @@ def _safe_requested_effort(value: object) -> str | None:
 
 
 def _safe_effective_effort(value: object) -> str | None:
+    if value is None:
+        return None
     if type(value) is not str:
-        return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned in _KNOWN_EFFECTIVE_EFFORTS or _CUSTOM_FINGERPRINT_RE.fullmatch(cleaned):
-        return cleaned
-    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
-    return f"custom:{digest}"
+        return "custom"
+    return redact_effective_effort(value)
 
 
 def _safe_provider_profile(value: object) -> str | None:
+    if value is None:
+        return None
     if type(value) is not str:
-        return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned in _KNOWN_PROVIDER_PROFILES or _CUSTOM_FINGERPRINT_RE.fullmatch(cleaned):
-        return cleaned
-    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
-    return f"custom:{digest}"
+        return "custom"
+    return redact_provider_profile_name(value)
 
 
 def _safe_attempt_kind(value: object) -> str | None:
@@ -889,7 +870,19 @@ async def post_chat_completion(
             )
         outcome = "ok"
         return content
-    except LLMTranslationError:
+    except LLMTranslationError as exc:
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            if exc.reason == "cancelled":
+                raise
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            ) from exc
         raise
     except httpx.TimeoutException as exc:
         if active_budget is not None and active_budget.is_cancelled:

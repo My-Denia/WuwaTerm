@@ -129,6 +129,8 @@ from .translation_plan import (
     build_translation_request_spec as build_translation_request_spec,
     canonical_json,
     coerce_term_reference as _coerce_term_reference,
+    redact_effective_effort,
+    redact_provider_profile_name,
     render_context_instruction,
     resolve_configured_thinking_mode,
     resolve_provider_profile_from_env,
@@ -989,19 +991,19 @@ class SentenceTranslator:
         constraint = current_prompt_templates().format_paragraph_repair_instruction(
             paragraphs
         )
-        # A mode that had no reasoning to spend on the first attempt gets some
-        # for this one: the retry is trying to lay out more structure, and on a
-        # document with few enough locks that is the measured better answer. A
-        # request that was already reasoning keeps the effort it chose, and an
-        # explicit mode is never second-guessed — only ``auto`` picks a mode per
-        # request, so only ``auto`` may pick a different one here.
-        retry_thinking_mode = active_policy.paragraph_repair_thinking_mode(
-            to_chinese=to_chinese,
-            initial_thinking_mode=thinking_mode,
-            lock_count=len(locked.locks),
-            provider_profile=self._provider_profile,
-            prepared_scalars=len(locked.locked_text),
-        )
+        # Resolve the paragraph-repair mode inside the concurrency slot against
+        # the repair attempt's actual remaining timeout window, applying both
+        # the auto ceiling and timeout budget down-shift consistently.
+        def _resolve_repair_mode(effective_window: float) -> ConcreteThinkingMode:
+            return active_policy.paragraph_repair_thinking_mode(
+                to_chinese=to_chinese,
+                initial_thinking_mode=thinking_mode,
+                lock_count=len(locked.locks),
+                provider_profile=self._provider_profile,
+                prepared_scalars=len(locked.locked_text),
+                remaining_budget_seconds=effective_window,
+            )
+
         if budget is not None:
             budget.consume_corrective_call()
         try:
@@ -1012,11 +1014,12 @@ class SentenceTranslator:
                 references=locked.references,
                 before_llm_call=before_llm_call,
                 context=context,
-                thinking_mode=retry_thinking_mode,
+                thinking_mode=None,
                 prompt_suffix=constraint,
                 timeout_seconds=timeout_seconds,
                 attempt_kind="paragraph_repair",
                 execution_budget=op_budget,
+                thinking_mode_resolver=_resolve_repair_mode,
             )
             retried = _require_nonblank_llm_output(retried)
             restored = locked.restore(retried, to_en=not to_chinese)
@@ -1125,6 +1128,7 @@ class SentenceTranslator:
         execution_budget: OperationExecutionBudget | None = None,
         policy: RequestPolicy | None = None,
         on_thinking_resolved: Callable[[ConcreteThinkingMode], None] | None = None,
+        thinking_mode_resolver: Callable[[float], ConcreteThinkingMode] | None = None,
     ) -> str:
         """One model call under the shared slot and the caller's guard.
 
@@ -1174,7 +1178,23 @@ class SentenceTranslator:
                 else min(attempt_timeout, remaining_budget)
             )
             resolved_thinking_mode = thinking_mode
-            if resolved_thinking_mode is None and policy is not None:
+            if resolved_thinking_mode is None and thinking_mode_resolver is not None:
+                resolved_thinking_mode = thinking_mode_resolver(effective_window)
+                effort_resolution = self._provider_profile.resolve_effort(
+                    resolved_thinking_mode
+                )
+                request_trace.note_effort_resolution(
+                    requested_effort=effort_resolution.requested_effort,
+                    effective_effort=redact_effective_effort(
+                        effort_resolution.effective_effort
+                    ),
+                    provider_profile=redact_provider_profile_name(
+                        effort_resolution.provider_profile
+                    ),
+                )
+                if on_thinking_resolved is not None:
+                    on_thinking_resolved(resolved_thinking_mode)
+            elif resolved_thinking_mode is None and policy is not None:
                 resolved_thinking_mode = policy.resolve_initial_thinking_mode(
                     to_chinese=to_chinese,
                     locked_text=locked_text,
@@ -1192,8 +1212,12 @@ class SentenceTranslator:
                 )
                 request_trace.note_effort_resolution(
                     requested_effort=effort_resolution.requested_effort,
-                    effective_effort=effort_resolution.effective_effort,
-                    provider_profile=effort_resolution.provider_profile,
+                    effective_effort=redact_effective_effort(
+                        effort_resolution.effective_effort
+                    ),
+                    provider_profile=redact_provider_profile_name(
+                        effort_resolution.provider_profile
+                    ),
                 )
                 if on_thinking_resolved is not None:
                     on_thinking_resolved(resolved_thinking_mode)

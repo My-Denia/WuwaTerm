@@ -1379,3 +1379,276 @@ def test_profile_without_disable_thinking_skips_timeout_fallback(
     assert caught.value.reason == "timeout"
     assert calls == 1
 
+
+def test_paragraph_repair_downgrades_high_to_low_when_remaining_window_is_tight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up 1: paragraph repair applies its own post-slot remaining timeout window."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "auto")
+
+    now = [100.0]
+    budget = OperationExecutionBudget.for_segments(
+        1, timeout_seconds=45.0, clock=lambda: now[0]
+    )
+    seen_bodies: list[dict[str, Any]] = []
+    seen_timeouts: list[float] = []
+    records: list[llm_transport.LlmCallRecord] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_bodies.append(json.loads(request.content))
+        seen_timeouts.append(float(request.extensions["timeout"]["read"]))
+        if len(seen_bodies) == 1:
+            # First call took 25s -> 20s remaining (repair timeout becomes 18s < 30s).
+            now[0] = 125.0
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "Encore used Resonance Skill in one merged paragraph."}}]},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Encore arrived.\n\nShe used Resonance Skill."}}]},
+        )
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    translator = SentenceTranslator(
+        db_path,
+        llm_timeout_seconds=45.0,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    try:
+        out = asyncio.run(
+            translator.translate_async(
+                "安可来了。\n\n她使用了共鸣技能。",
+                to_chinese=False,
+                context=TranslationContext(),
+                execution_budget=budget,
+            )
+        )
+    finally:
+        remove_obs()
+        asyncio.run(translator.aclose())
+
+    assert out == "Encore arrived.\n\nShe used Resonance Skill."
+    assert len(seen_bodies) == 2
+    assert seen_bodies[0]["reasoning_effort"] == "high"
+    assert seen_bodies[1]["reasoning_effort"] == "low"
+    assert seen_timeouts[1] == pytest.approx(18.0)
+    assert records[0].attempt_kind == "initial"
+    assert records[0].requested_effort == "high"
+    assert records[1].attempt_kind == "paragraph_repair"
+    assert records[1].requested_effort == "low"
+    assert records[1].timeout_seconds == pytest.approx(18.0)
+
+
+def test_cooperative_cancel_during_truncated_response_records_cancelled_in_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up 2: finish_reason=length racing with cancel records cancelled everywhere."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "disabled")
+
+    budget = OperationExecutionBudget.for_segments(1)
+    records: list[llm_transport.LlmCallRecord] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        budget.cancel("user_cancelled")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "partial"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    translator = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError) as caught:
+            asyncio.run(
+                translator.translate_async(
+                    "你好世界。",
+                    to_chinese=False,
+                    propagate_errors=True,
+                    execution_budget=budget,
+                )
+            )
+    finally:
+        remove_obs()
+        asyncio.run(translator.aclose())
+
+    assert caught.value.reason == "cancelled"
+    assert len(records) == 1
+    assert records[0].outcome == "cancelled"
+    assert records[0].cancelled is True
+    assert records[0].cancel_reason == "user_cancelled"
+
+
+def test_provider_config_rejects_non_finite_floats_and_lone_surrogates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up 3: reject NaN/Infinity and lone Unicode surrogates in config and env."""
+    for bad_float in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            provider_profile_from_config(
+                {
+                    "name": "bad_float_gw",
+                    "enabled_extra_body": {"scale": bad_float},
+                }
+            )
+
+    monkeypatch.setenv(
+        PROVIDER_CAPABILITIES_JSON_ENV,
+        '{"name": "nan_gw", "enabled_extra_body": {"scale": NaN}}',
+    )
+    assert resolve_provider_profile_from_env() == DEFAULT_PROVIDER_PROFILE
+
+    monkeypatch.setenv(
+        PROVIDER_CAPABILITIES_JSON_ENV,
+        '{"name": "inf_gw", "enabled_extra_body": {"scale": Infinity}}',
+    )
+    assert resolve_provider_profile_from_env() == DEFAULT_PROVIDER_PROFILE
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        provider_profile_from_config({"name": "bad-\ud800-name"})
+    with pytest.raises(ValueError, match="UTF-8"):
+        provider_profile_from_config(
+            {"name": "bad_body", "enabled_extra_body": {"tag": "bad-\udfff"}}
+        )
+    monkeypatch.setenv(
+        PROVIDER_CAPABILITIES_JSON_ENV,
+        '{"name": "surrogate_\\ud800_gw"}',
+    )
+    assert resolve_provider_profile_from_env() == DEFAULT_PROVIDER_PROFILE
+
+
+def test_custom_prefix_profile_name_cannot_bypass_hashing_and_matches_across_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Follow-up 4: custom:<8-hex>-shaped raw names still hash once identically everywhere."""
+    db_path = _make_encore_db(tmp_path)
+    spoofed_name = "custom:deadbeef"
+    spoofed_effort = "custom:01234567"
+    profile = build_custom_provider_profile(
+        name=spoofed_name,
+        effort_mapping={"high": spoofed_effort},
+    )
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "high")
+
+    records: list[llm_transport.LlmCallRecord] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hi."}}]})
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(handler),
+        provider_profile=profile,
+    )
+    trace = request_trace.start()
+    try:
+        with caplog.at_level(logging.INFO, logger="wuwaterm.llm_transport"):
+            asyncio.run(translator.translate_async("你好世界。", to_chinese=False))
+    finally:
+        request_trace.reset()
+        remove_obs()
+        asyncio.run(translator.aclose())
+
+    plan = TranslationPlan(
+        source_text="你好世界。",
+        prepared_text="你好世界。",
+        locked_text="你好世界。",
+        locks=(),
+        references=(),
+        to_chinese=False,
+    )
+    spec = build_translation_request_spec(
+        plan,
+        policy=RequestPolicy(configured_thinking_zh_en="high"),
+        provider_profile=profile,
+        model=TEST_MODEL,
+    )
+    exec_meta = spec.execution_metadata_dict()
+    effort_meta = profile.resolve_effort("high").to_metadata_dict()
+
+    # Must NOT pass through the raw spoofed strings verbatim.
+    assert records[0].provider_profile != spoofed_name
+    assert records[0].effective_effort != spoofed_effort
+    assert spoofed_name not in caplog.text
+    assert spoofed_effort not in caplog.text
+
+    # Single shared fingerprint across effort_meta, exec_meta, LlmCallRecord, and RequestTrace (no double hashing).
+    assert (
+        effort_meta["provider_profile"]
+        == exec_meta["provider_profile"]
+        == records[0].provider_profile
+        == trace.provider_profile
+    )
+    assert (
+        effort_meta["effective_effort"]
+        == exec_meta["effective_effort"]
+        == records[0].effective_effort
+        == trace.effective_effort
+    )
+
+
+def test_custom_profile_without_explicit_disable_body_skips_timeout_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up 5: custom profile with only name + effort_mapping skips disabled timeout retry."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_EN_ZH_ENV, "auto")
+
+    custom_no_disable = provider_profile_from_config(
+        {
+            "name": "effort_only_proxy",
+            "effort_mapping": {"low": "low", "high": "high"},
+        }
+    )
+    assert custom_no_disable.resolve_effort("disabled").omitted is True
+    assert custom_no_disable.has_explicit_disable_thinking() is False
+
+    policy = RequestPolicy(configured_thinking_en_zh="auto", timeout_seconds=45.0)
+    assert (
+        policy.allows_timeout_fallback(
+            to_chinese=True,
+            initial_thinking_mode="low",
+            provider_profile=custom_no_disable,
+        )
+        is False
+    )
+
+    calls = 0
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(timeout_handler),
+        provider_profile=custom_no_disable,
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError) as caught:
+            asyncio.run(
+                translator.translate_async(
+                    "Short line that times out.",
+                    to_chinese=True,
+                    propagate_errors=True,
+                )
+            )
+    finally:
+        asyncio.run(translator.aclose())
+
+    assert caught.value.reason == "timeout"
+    assert calls == 1
