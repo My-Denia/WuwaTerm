@@ -202,6 +202,8 @@ def segment_text(
     text: str, limit: int = SEGMENT_LIMIT, *, prefer_native: bool = True
 ) -> list[Segment]:
     """Cut ``text`` into ``segmentation-v1`` segments of at most ``limit`` core scalars."""
+    if isinstance(limit, bool) or limit <= 0:
+        raise ValueError("limit must be positive")
     mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         return [
@@ -220,6 +222,8 @@ def pair_segments(
     prefer_native: bool = True,
 ) -> list[SegmentPair]:
     """Pair ``source`` and ``target`` text per ``segmentation-v1``."""
+    if isinstance(limit, bool) or limit <= 0:
+        raise ValueError("limit must be positive")
     mod = _load_digit_safe_native_module(prefer_native=prefer_native)
     if mod is not None:
         rows = mod.pair_segments(source, target, limit, alignments)

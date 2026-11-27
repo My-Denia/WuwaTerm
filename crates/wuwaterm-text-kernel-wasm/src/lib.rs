@@ -6,7 +6,7 @@
 //! linear memory and writes its UTF-8 JSON output (or error message) to a
 //! module-owned result buffer readable via `wasm_result_ptr` / `wasm_result_len`.
 
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -94,7 +94,7 @@ pub extern "C" fn wasm_alloc(len: usize) -> *mut u8 {
     let Ok(layout) = Layout::from_size_align(size, 1) else {
         return std::ptr::null_mut();
     };
-    let ptr = unsafe { alloc(layout) };
+    let ptr = unsafe { alloc_zeroed(layout) };
     if !ptr.is_null() {
         LIVE_ALLOCS.with(|slot| {
             slot.borrow_mut().insert(ptr as usize, len);
@@ -773,10 +773,15 @@ mod tests {
         );
         assert!(read_result_string().contains("live WASM allocation"));
 
-        // 2. Valid allocation works, over-length read is rejected.
+        // 2. Valid allocation is zero-initialized (safe to read before host writes),
+        //    and over-length read is rejected.
         let payload = br#"{"text":"abc","limit":1800}"#;
         let ptr = wasm_alloc(payload.len());
         assert!(!ptr.is_null());
+        assert_eq!(
+            unsafe { read_utf8_slice(ptr, 4) }.expect("zeroed bytes are valid utf8"),
+            "\0\0\0\0"
+        );
         unsafe {
             std::ptr::copy_nonoverlapping(payload.as_ptr(), ptr, payload.len());
         }

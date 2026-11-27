@@ -88,6 +88,12 @@ def test_text_spans_and_utf16_coordinates_python_fallback(monkeypatch: pytest.Mo
     with pytest.raises(ValueError):
         native_kernel.utf16_to_scalar("hello", -1)
 
+    for bad_limit in (0, -1, False):
+        with pytest.raises(ValueError, match="limit must be positive"):
+            native_kernel.segment_text("甲。", limit=bad_limit)
+        with pytest.raises(ValueError, match="limit must be positive"):
+            native_kernel.pair_segments("甲。", "A.", limit=bad_limit)
+
 
 def test_term_scanner_overlaps_priority_and_empty_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WUWATERM_DISABLE_NATIVE_KERNEL", "1")
