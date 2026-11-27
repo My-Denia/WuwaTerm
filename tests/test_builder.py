@@ -989,3 +989,338 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
         "生活中枢 = Living Commons (location)",
     ):
         assert reference in system
+
+
+def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path):
+    texts = {
+        # Official non-CJK acronyms, dotted initialisms, and titled items must stay.
+        "Term151106_Title": ("SQL", "SQL"),
+        "ItemInfo_54006_Name": ("VIOLET", "VIOLET"),
+        "ItemInfo_71200009_Name": ("「All Eyes On You」", '"All Eyes On You"'),
+        "ItemInfo_71200099_Name": ("《All Eyes On You》", '"All Eyes On You"'),
+        "Speaker_100086_Name": ("N.A.N.A.", "N.A.N.A."),
+        # Isolated test/ markers (zh has CJK, en has alpha).
+        "Skill_1001908_SkillName": ("test/巧手烹调", "Skillful Cooking"),
+        "Skill_1002008_SkillName": ("测试技能", "test/Skill"),
+        "Area_1500001_Title": ("TD测试用例空气墙", "Invisible Walls for TD test cases"),
+        # Isolated error placeholders (zh-only vs en-only) plus real Sundial.
+        "ItemInfo_31000013_Name": ("存在异常，如有疑问请联系官方客服", "Sundial"),
+        "ItemInfo_31000099_Name": (
+            "占位文本",
+            "An error happened. Please contact Customer Service",
+        ),
+        "Speaker_250058_Name": ("版本空置项", "2.7 Placeholder"),
+        "ItemInfo_70139310_Name": ("日晷", "Sundial"),
+        # Isolated [?？\dP]+ (en has alpha 'P' while zh has CJK) and non-alpha en.
+        "Speaker_850743_Name": ("测试角色甲", "P"),
+        "Speaker_850744_Name": ("空白代号", "---"),
+        # Isolated non-CJK zh noise (en has valid alpha, not [?？\dP]+).
+        "ItemInfo_80110401_Name": ("Saving Light", "Saving Light"),
+        "ItemInfo_80110409_Name": ("승소산의 메아리", "Thawing Fates"),
+        "Speaker_40_Name": ("os", "os"),
+        "Speaker_750088_Name": ("{PlayerName}", "{PlayerName}"),
+        "Speaker_1304_Name": ("今汐", "Jinhsi"),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 54006, "Name": "ItemInfo_54006_Name"},
+            {"Id": 71200009, "Name": "ItemInfo_71200009_Name"},
+            {"Id": 71200099, "Name": "ItemInfo_71200099_Name"},
+            {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
+            {"Id": 31000099, "Name": "ItemInfo_31000099_Name"},
+            {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
+            {"Id": 80110401, "Name": "ItemInfo_80110401_Name"},
+            {"Id": 80110409, "Name": "ItemInfo_80110409_Name"},
+        ],
+        "skill/skill.json": [
+            {"Id": 1001908, "SkillName": "Skill_1001908_SkillName"},
+            {"Id": 1002008, "SkillName": "Skill_1002008_SkillName"},
+        ],
+        "area/area.json": [
+            {"AreaId": 1500001, "Title": "Area_1500001_Title"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps(
+            [
+                {"Id": 100086},
+                {"Id": 250058},
+                {"Id": 850743},
+                {"Id": 850744},
+                {"Id": 40},
+                {"Id": 750088},
+                {"Id": 1304},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.category, r.source_id, r.zh, r.en) for r in records] == [
+        ("core_term", "Term151106_Title", "SQL", "SQL"),
+        ("item", "54006", "VIOLET", "VIOLET"),
+        ("item", "71200009", "「All Eyes On You」", '"All Eyes On You"'),
+        ("item", "71200099", "《All Eyes On You》", '"All Eyes On You"'),
+        ("item", "70139310", "日晷", "Sundial"),
+        ("speaker", "100086", "N.A.N.A.", "N.A.N.A."),
+        ("speaker", "1304", "今汐", "Jinhsi"),
+    ]
+
+
+def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
+    tmp_path: Path,
+):
+    from wuwaterm.constants import SOURCE_PROFILES
+    from wuwaterm.lookup import TermService
+
+    texts = {
+        "Speaker_288_Name": ("我", "Rover"),
+        "Speaker_900220_Name": ("通讯", "Contacting"),
+        # Exact-pair duplicate comm entry (same zh_norm & en_norm) is dropped.
+        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+        "Speaker_1110_Name": ("穗穗", "Suisui"),
+        # Single-sided conflict comm entries keep their original suffix so they
+        # neither shadow existing primaries nor disappear from exact lookup.
+        "Speaker_850656_Name": ("知远（通讯中）", "Zhiyuan"),
+        "Speaker_858_Name": ("致远", "Zhiyuan"),
+        "Speaker_850632_Name": ("残星会会长（通讯中）", "Fractsidus Grand Architect"),
+        "Speaker_250069_Name": ("残星会会长", "Grand Architect"),
+        # Non-conflicting comm-suffix entries are stripped and kept.
+        "Speaker_200014_Name": ("阿尔伯特先生（通讯中）", "Mr. Alberto"),
+        "Speaker_750563_Name": ("认真的天工匠(通讯中）", "Focused Artisan"),
+        "Speaker_100058_Name": ("布兰特（通讯）", "Brant (Contacting)"),
+        "Speaker_50092_Name": ("？？？（通讯中）", "???"),
+        "Speaker_50121_Name": ("{PlayerName}（通讯中）", "{PlayerName}"),
+        "Speaker_1001_Name": ("景燃", "Jingran"),
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, {})
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps(
+            [
+                {"Id": 288},
+                {"Id": 900220},
+                {"Id": 800498},
+                {"Id": 1110},
+                {"Id": 850656},
+                {"Id": 858},
+                {"Id": 850632},
+                {"Id": 250069},
+                {"Id": 200014},
+                {"Id": 750563},
+                {"Id": 100058},
+                {"Id": 50092},
+                {"Id": 50121},
+                {"Id": 1001},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.source_id, r.zh, r.en) for r in records] == [
+        ("1110", "穗穗", "Suisui"),
+        ("858", "致远", "Zhiyuan"),
+        ("250069", "残星会会长", "Grand Architect"),
+        ("1001", "景燃", "Jingran"),
+        ("850656", "知远（通讯中）", "Zhiyuan"),
+        ("850632", "残星会会长（通讯中）", "Fractsidus Grand Architect"),
+        ("200014", "阿尔伯特先生", "Mr. Alberto"),
+        ("750563", "认真的天工匠", "Focused Artisan"),
+        ("100058", "布兰特", "Brant"),
+    ]
+
+    profile = SOURCE_PROFILES["arikatsu"]
+    db_path = tmp_path / "speaker_lookup.db"
+    create_database(
+        db_path,
+        iter_records(root, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    service = TermService(db_path)
+    assert [
+        (c.entry.zh, c.entry.en) for c in service.lookup_exact("Zhiyuan").candidates
+    ] == [("致远", "Zhiyuan"), ("知远（通讯中）", "Zhiyuan")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("知远（通讯中）").candidates
+    ] == [("知远（通讯中）", "Zhiyuan")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("残星会会长").candidates
+    ] == [("残星会会长", "Grand Architect")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("Fractsidus Grand Architect").candidates
+    ] == [("残星会会长（通讯中）", "Fractsidus Grand Architect")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("《All Eyes On You》").candidates
+    ] == []  # synthetic speaker DB has no item rows
+
+
+def test_titled_non_cjk_item_exact_lookup(tmp_path: Path):
+    from wuwaterm.constants import SOURCE_PROFILES
+    from wuwaterm.lookup import TermService
+
+    texts = {
+        "ItemInfo_71200009_Name": ("「All Eyes On You」", '"All Eyes On You"'),
+        "ItemInfo_71200099_Name": ("《All Eyes On You》", '"All Eyes On You"'),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 71200009, "Name": "ItemInfo_71200009_Name"},
+            {"Id": 71200099, "Name": "ItemInfo_71200099_Name"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    profile = SOURCE_PROFILES["arikatsu"]
+    db_path = tmp_path / "titled_lookup.db"
+    create_database(
+        db_path,
+        iter_records(root, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    service = TermService(db_path)
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("「All Eyes On You」").candidates
+    ] == [("「All Eyes On You」", '"All Eyes On You"')]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("《All Eyes On You》").candidates
+    ] == [("《All Eyes On You》", '"All Eyes On You"')]
+
+
+def test_iter_records_filters_generic_cooking_staple_items(tmp_path: Path):
+    texts = {
+        "ItemInfo_80050003_Name": ("糖", "Sugar"),
+        "ItemInfo_80050008_Name": ("盐", "Salt"),
+        "ItemInfo_80050006_Name": ("米", "Rice"),
+        "ItemInfo_80020004_Name": ("豆腐", "Tofu"),
+        "ItemInfo_42601210_Name": ("盐海珀", "Amber Halite"),
+        "ItemInfo_2_Name": ("贝币", "Shell Credit"),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 80050003, "ShowTypes": [26, 31], "Name": "ItemInfo_80050003_Name"},
+            {"Id": 80050008, "ShowTypes": [26, 31], "Name": "ItemInfo_80050008_Name"},
+            {"Id": 80050006, "ShowTypes": [26, 31], "Name": "ItemInfo_80050006_Name"},
+            {"Id": 80020004, "ShowTypes": [25, 26], "Name": "ItemInfo_80020004_Name"},
+            {"Id": 42601210, "ShowTypes": [26], "Name": "ItemInfo_42601210_Name"},
+            {"Id": 2, "Name": "ItemInfo_2_Name"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+
+    records = [
+        r
+        for r in iter_records(root, "arikatsu")
+        if r.source_file != "official_announcement"
+    ]
+
+    assert [(r.source_id, r.zh, r.en) for r in records] == [
+        ("42601210", "盐海珀", "Amber Halite"),
+        ("2", "贝币", "Shell Credit"),
+    ]
+
+
+def test_build_database_excludes_cleaned_noise_and_keeps_schema_v2(
+    monkeypatch, tmp_path: Path
+):
+    from wuwaterm.constants import SOURCE_PROFILES
+
+    texts = {
+        "ItemInfo_80050003_Name": ("糖", "Sugar"),
+        "ItemInfo_31000013_Name": ("存在异常，如有疑问请联系官方客服", "Sundial"),
+        "ItemInfo_70139310_Name": ("日晷", "Sundial"),
+        "Skill_1002008_SkillName": ("1", "test/"),
+        "Speaker_288_Name": ("我", "Rover"),
+        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+    }
+    for idx in range(12):
+        texts[f"line_{idx}"] = (f"天气不错，第{idx}行。", f"test/ line {idx}.")
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 80050003, "ShowTypes": [26, 31], "Name": "ItemInfo_80050003_Name"},
+            {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
+            {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
+        ],
+        "skill/skill.json": [
+            {"Id": 1002008, "SkillName": "Skill_1002008_SkillName"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    (root / "README.md").write_text(
+        "# WW_Data\n\n> Game Version: 3.7.0</br>\n> Resource Version: 3.7.8</br>\n> Changelist: 8975829\n",
+        encoding="utf-8",
+    )
+    (root / "BinData" / "speaker").mkdir()
+    (root / "BinData" / "speaker" / "speaker.json").write_text(
+        json.dumps([{"Id": 288}, {"Id": 800498}]),
+        encoding="utf-8",
+    )
+    _git("init", "-b", "main", cwd=root)
+    _git("add", ".", cwd=root)
+    _git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+        cwd=root,
+    )
+    commit = _git("rev-parse", "HEAD", cwd=root)
+    profile = replace(SOURCE_PROFILES["arikatsu"], pinned_commit=commit)
+    monkeypatch.setitem(SOURCE_PROFILES, "arikatsu", profile)
+    _git("remote", "add", "origin", profile.repo_url, cwd=root)
+
+    db_path = tmp_path / "cleaned.db"
+    build_database(root, db_path, profile_name="arikatsu")
+
+    with connect(db_path) as conn:
+        metadata = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
+        rows = [
+            (r["category"], r["zh"], r["en"])
+            for r in conn.execute(
+                "SELECT category, zh, en FROM terms WHERE source_file != 'official_announcement' ORDER BY id"
+            )
+        ]
+
+    assert metadata["schema_version"] == "2"
+    assert rows == [
+        ("item", "日晷", "Sundial"),
+        ("speaker", "穗穗", "Suisui"),
+    ]
+    assert json.loads(metadata["free_text_lock_exclusions"])["surfaces"] == []
+    assert json.loads(metadata["free_text_lock_exclusions_zh"])["surfaces"] == []
