@@ -843,6 +843,86 @@ web_db_dir() {
     printf '%s' "$db_dir"
 }
 
+# WuwaTerm-Web v0.7.0+ derives its self-hosted translation memory database as
+# tmDatabasePathForPool(WUWATERM_LOCAL_DB_PATH) = dirname(poolDbPath)/tm.sqlite3
+# and ignores any separate env var. An older web.env that pointed
+# WUWATERM_LOCAL_DB_PATH at .../tm.sqlite3 therefore opens the same file for both
+# databases and fails startup on SQLite application_id mismatch. Relocate the
+# pool path to .../pool.sqlite3 (and move an existing non-TM host file if safe)
+# before starting the Web container.
+reconcile_web_pool_db_path() {
+    web_env_file=$1
+    data_dir=$2
+    local_db_path=$(file_value "$web_env_file" WUWATERM_LOCAL_DB_PATH || true)
+    [ -n "$local_db_path" ] || return 0
+    db_dir=$(web_db_dir "$web_env_file")
+    [ "$(basename "$local_db_path")" = "tm.sqlite3" ] || return 0
+
+    new_pool_path="$db_dir/pool.sqlite3"
+    host_tm_file="$data_dir/tm.sqlite3"
+    host_pool_file="$data_dir/pool.sqlite3"
+    if [ -e "$host_tm_file" ]; then
+        if [ -e "$host_pool_file" ]; then
+            fail "both $host_pool_file and $host_tm_file exist while WUWATERM_LOCAL_DB_PATH in $web_env_file points to $local_db_path; inspect both SQLite files and point WUWATERM_LOCAL_DB_PATH at the admission pool database before rerunning"
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+            if ! python3 - "$host_tm_file" <<'PY'
+import sqlite3
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as f:
+        header = f.read(16)
+    if header != b"SQLite format 3\x00":
+        raise SystemExit(0)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
+    finally:
+        conn.close()
+    if app_id == 0x5755544E:
+        raise SystemExit(2)
+except SystemExit:
+    raise
+except OSError:
+    pass
+except sqlite3.DatabaseError:
+    pass
+PY
+            then
+                fail "$host_tm_file is already a translation-memory database while WUWATERM_LOCAL_DB_PATH in $web_env_file points to $local_db_path; update WUWATERM_LOCAL_DB_PATH=$new_pool_path in $web_env_file"
+            fi
+        fi
+        mv -f "$host_tm_file" "$host_pool_file"
+        for suffix in -wal -shm; do
+            if [ -e "$host_tm_file$suffix" ]; then
+                mv -f "$host_tm_file$suffix" "$host_pool_file$suffix"
+            fi
+        done
+    fi
+
+    tmp_env="$web_env_file.tmp.$$"
+    (
+        umask 077
+        WUWATERM_NEW_POOL_PATH="$new_pool_path" awk '
+            BEGIN { replaced = 0; val = ENVIRON["WUWATERM_NEW_POOL_PATH"] }
+            index($0, "WUWATERM_LOCAL_DB_PATH=") == 1 {
+                print "WUWATERM_LOCAL_DB_PATH=" val
+                replaced = 1
+                next
+            }
+            { print }
+            END {
+                if (!replaced) print "WUWATERM_LOCAL_DB_PATH=" val
+            }
+        ' "$web_env_file" >"$tmp_env"
+    ) && chmod 600 "$tmp_env" && mv -f "$tmp_env" "$web_env_file" \
+        || { rm -f "$tmp_env"; fail "could not update WUWATERM_LOCAL_DB_PATH in $web_env_file"; }
+    printf 'setup: relocated WUWATERM_LOCAL_DB_PATH in %s from %s to %s to avoid colliding with tm.sqlite3.\n' \
+        "$web_env_file" "$local_db_path" "$new_pool_path"
+}
+
 enable_web() {
     [ "$with_web" = 1 ] || return 0
     web_env="$code_root/state-web/web.env"
@@ -880,6 +960,7 @@ enable_web() {
     esac
     [ "${#edge_secret}" -ge 32 ] && [ "${#edge_secret}" -le 128 ] \
         || fail "WUWATERM_WEB_EDGE_SECRET in $web_env must be 32-128 characters; change it there and in the reverse proxy."
+    reconcile_web_pool_db_path "$web_env" "$data_dir"
     web_data_dir=$(web_db_dir "$web_env")
     case "$web_data_dir" in
         /app|/app/*)

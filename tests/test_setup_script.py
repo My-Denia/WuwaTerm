@@ -573,6 +573,86 @@ def test_web_env_with_a_relative_database_path_is_refused(install_root):
     assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 
+def test_web_env_with_tm_sqlite3_pool_path_is_relocated_before_web_starts(install_root):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    legacy_pool = data / "tm.sqlite3"
+    with sqlite3.connect(legacy_pool) as conn:
+        conn.execute("PRAGMA application_id=0x5755544d")
+        conn.execute("CREATE TABLE shared_pool (id INTEGER PRIMARY KEY NOT NULL)")
+    legacy_pool.chmod(0o600)
+    (state / "web.env").write_text(
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_API_BASE_URL=http://127.0.0.1:8788\n"
+        "WUWATERM_SITE_DEVICE_TOKEN=wtd1.dev123.secret\n"
+        "WUWATERM_TRANSLATION_ENABLED=true\n"
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n",
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = web_env_values(install_root)
+    assert values["WUWATERM_LOCAL_DB_PATH"] == "/var/lib/wuwaterm-web/pool.sqlite3"
+    assert mode_of(state / "web.env") == 0o600
+    assert (data / "pool.sqlite3").is_file()
+    assert not (data / "tm.sqlite3").exists()
+    assert "relocated WUWATERM_LOCAL_DB_PATH" in result.stdout
+
+
+def test_web_env_with_tm_sqlite3_pool_path_refuses_when_tm_db_already_exists(install_root):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    tm_file = data / "tm.sqlite3"
+    with sqlite3.connect(tm_file) as conn:
+        conn.execute("PRAGMA application_id=0x5755544e")
+        conn.execute("CREATE TABLE tm_schema (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+    (state / "web.env").write_text(
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n",
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "already a translation-memory database" in result.stderr
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
 def test_web_package_archive_with_the_published_layout(install_root):
     write_env(install_root)
     package = write_web_package(install_root / "web-archive-src", "manifest-root.json", WEB_ROOT_MANIFEST)
