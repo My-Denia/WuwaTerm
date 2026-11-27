@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import httpx
@@ -702,3 +703,314 @@ def test_benchmark_core_perf_fail_closed_and_wal_backup(tmp_path: Path, sample_d
         assert copied_svc.lookup_exact("备份验证词条").exact is True
     finally:
         writer.close()
+
+
+def test_wal_visibility_window_does_not_cache_stale_snapshot_before_shm_commit(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """WAL cache key tracks -shm WAL-index headers and refuses to cache mid-commit states."""
+    wal_db = tmp_path / "wal-window.db"
+    shutil.copy2(sample_db, wal_db)
+    init_conn = connect(wal_db)
+    try:
+        assert init_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    service = TermService(wal_db)
+    writer = connect(wal_db)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="win.json",
+                    source_id="w1",
+                    text_key="Win_1",
+                    zh="窗口初始词",
+                    en="Window Initial",
+                )
+            ],
+        )
+        writer.commit()
+        assert service.lookup_exact("窗口初始词").exact is True
+        rev_v1 = service.dictionary_identity().revision
+
+        # Part A: Simulate a writer that has already appended frames to -wal
+        # before updating -shm mxFrame (the exact WAL commit visibility window).
+        wal_path = Path(f"{wal_db}-wal")
+        wal_before = wal_path.read_bytes()
+        with open(wal_path, "ab") as wal_handle:
+            wal_handle.write(b"\x00" * 4120)
+        try:
+            # Reading during the window must still reflect committed v1 state.
+            assert service.dictionary_identity().revision == rev_v1
+        finally:
+            wal_path.write_bytes(wal_before)
+
+        # Now writer finishes committing a second row (advancing -shm mxFrame).
+        insert_records(
+            writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="win.json",
+                    source_id="w2",
+                    text_key="Win_2",
+                    zh="窗口新词",
+                    en="Window Committed",
+                )
+            ],
+        )
+        writer.commit()
+
+        # Service must immediately observe the new -shm mxFrame and return v2.
+        assert service.lookup_exact("窗口新词").exact is True
+        assert service.dictionary_identity().revision != rev_v1
+
+        # Part B: Torn -shm header (hdr1 != hdr2) must not pin a snapshot into cache.
+        real_pread = service._pread_slot_locked
+        torn_once = {"active": True}
+
+        def torn_shm_pread(slot, path, inode, size, offset=0):
+            data = real_pread(slot, path, inode, size, offset)
+            if slot == 1 and torn_once["active"] and len(data) >= 96:
+                # Flip one byte in hdr2 so hdr1 != hdr2 (mid-commit state).
+                return data[:48] + bytes([data[48] ^ 0xFF]) + data[49:]
+            return data
+
+        service._snapshot_cache = None
+        service._snapshot_stamp = None
+        monkeypatch.setattr(service, "_pread_slot_locked", torn_shm_pread)
+        snap = service.snapshot()
+        assert snap.term_count > 0
+        assert service._snapshot_cache is None
+
+        # Once hdr1 == hdr2 again, normal caching resumes.
+        torn_once["active"] = False
+        cached_snap = service.snapshot()
+        assert service._snapshot_cache is cached_snap
+    finally:
+        writer.close()
+        service.close()
+
+
+def test_last_closing_short_connection_cleans_up_wal_before_atomic_replace(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """When writer closes first and TermService's short read connection closes last, WAL is cleaned up."""
+    live_db = tmp_path / "last-closer.db"
+    shutil.copy2(sample_db, live_db)
+    init_conn = connect(live_db)
+    try:
+        assert init_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        init_conn.commit()
+    finally:
+        init_conn.close()
+
+    writer = connect(live_db)
+    writer.execute("PRAGMA wal_autocheckpoint = 0")
+    insert_records(
+        writer,
+        [
+            TermRecord(
+                category="item",
+                source_file="old.json",
+                source_id="o1",
+                text_key="Old_1",
+                zh="旧尾词条",
+                en="Old Tail Term",
+            )
+        ],
+    )
+    writer.commit()
+
+    # Coordinate so TermService opens its short connection BEFORE writer closes,
+    # writer closes FIRST, and TermService's short connection closes LAST.
+    reader_opened = threading.Event()
+    writer_closed = threading.Event()
+    from wuwaterm import lookup as lookup_mod
+
+    real_connect = lookup_mod._connect_for_snapshot
+
+    def coordinated_connect(path: Path) -> sqlite3.Connection:
+        conn = real_connect(path)
+        if not reader_opened.is_set():
+            reader_opened.set()
+            assert writer_closed.wait(timeout=5.0)
+        return conn
+
+    service = TermService(live_db)
+    monkeypatch.setattr(lookup_mod, "_connect_for_snapshot", coordinated_connect)
+
+    errors: list[BaseException] = []
+
+    def run_reader() -> None:
+        try:
+            assert service.lookup_exact("旧尾词条").exact is True
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run_reader)
+    t.start()
+    assert reader_opened.wait(timeout=5.0)
+    writer.close()
+    writer_closed.set()
+    t.join(timeout=5.0)
+    assert not errors
+
+    # Because TermService uses a standard RW short connection when writable,
+    # closing last cleanly checkpoints and removes -wal/-shm (matching main).
+    assert not Path(f"{live_db}-wal").exists()
+    assert not Path(f"{live_db}-shm").exists()
+
+    # Replace live_db atomically with a clean candidate and open in RW mode:
+    # zero old WAL pages can corrupt the new database.
+    candidate = tmp_path / "clean-candidate.db"
+    cand_conn = connect(candidate)
+    try:
+        initialize(cand_conn)
+        cand_conn.execute("INSERT INTO metadata VALUES ('schema_version', '2')")
+        insert_records(
+            cand_conn,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="clean.json",
+                    source_id="c1",
+                    text_key="Clean_1",
+                    zh="干净新词",
+                    en="Clean Replacement",
+                )
+            ],
+        )
+        cand_conn.commit()
+    finally:
+        cand_conn.close()
+
+    os.replace(candidate, live_db)
+    assert service.lookup_exact("干净新词").exact is True
+    assert service.lookup_exact("旧尾词条").exact is False
+    service.close()
+
+    verify = sqlite3.connect(live_db)
+    try:
+        assert verify.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert verify.execute("SELECT zh, en FROM terms").fetchall() == [
+            ("干净新词", "Clean Replacement")
+        ]
+    finally:
+        verify.close()
+
+    # Read-only fallback check: read-only file + directory still loads via ?mode=ro.
+    ro_dir = tmp_path / "ro-dir"
+    ro_dir.mkdir()
+    ro_db = ro_dir / "ro.db"
+    shutil.copy2(live_db, ro_db)
+    os.chmod(ro_db, 0o444)
+    os.chmod(ro_dir, 0o555)
+    try:
+        ro_svc = TermService(ro_db)
+        assert ro_svc.lookup_exact("干净新词").exact is True
+        ro_svc.close()
+    finally:
+        os.chmod(ro_dir, 0o755)
+        os.chmod(ro_db, 0o644)
+
+
+def test_delete_mode_coarse_timestamp_same_size_inplace_update_invalidates_cache(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """DELETE-mode same-second same-size in-place UPDATE invalidates via SQLite file_change_counter."""
+    db_path = tmp_path / "coarse-delete.db"
+    shutil.copy2(sample_db, db_path)
+    service = TermService(db_path)
+
+    before_id = service.dictionary_identity()
+    before_exact = service.lookup_exact("声骸")
+    assert before_exact.best is not None and before_exact.best.entry.en == "Echo"
+
+    frozen_stat = os.stat(db_path)
+
+    # In-place same-length UPDATE in DELETE journal mode.
+    w = connect(db_path)
+    try:
+        w.execute(
+            "UPDATE terms SET en = ?, en_norm = ? WHERE zh = ?",
+            ("Ech0", "ech0", "声骸"),
+        )
+        w.commit()
+    finally:
+        w.close()
+
+    # Simulate a coarse 1-second filesystem where stat (dev, ino, size, mtime, ctime) is identical.
+    os.utime(db_path, ns=(frozen_stat.st_atime_ns, frozen_stat.st_mtime_ns))
+    from wuwaterm import lookup as lookup_mod
+
+    real_stat_tuple = lookup_mod._stat_tuple
+
+    def coarse_stat_tuple(path: Path) -> tuple[int, int, int, int, int]:
+        if path == db_path.resolve(strict=False):
+            return (
+                frozen_stat.st_dev,
+                frozen_stat.st_ino,
+                frozen_stat.st_size,
+                frozen_stat.st_mtime_ns,
+                frozen_stat.st_ctime_ns,
+            )
+        return real_stat_tuple(path)
+
+    monkeypatch.setattr(lookup_mod, "_stat_tuple", coarse_stat_tuple)
+
+    after_id = service.dictionary_identity()
+    after_exact = service.lookup_exact("声骸")
+    assert after_id.revision != before_id.revision
+    assert after_exact.best is not None and after_exact.best.entry.en == "Ech0"
+    service.close()
+
+
+def test_exact_lookup_cross_index_zh_norm_vs_en_norm_tie_matches_sqlite(
+    tmp_path: Path,
+):
+    """Cross-index tie (en_norm-only id=1 vs zh_norm+en_norm id=2) matches SQLite MULTI-INDEX OR."""
+    tie_db = tmp_path / "cross-index-tie.db"
+    conn = connect(tie_db)
+    try:
+        initialize(conn)
+        conn.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '2')")
+        conn.executemany(
+            """
+            INSERT INTO terms(
+              id, category, source_file, source_id, text_key, zh, en, zh_norm, en_norm,
+              pinyin, pinyin_abbrev, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "term", "a.json", "s1", "k1", "甲乙", "Foo", "甲乙", "foo", "jiayi", "jy", 5),
+                (2, "term", "a.json", "s1", "k2", "fo", "Foo", "foo", "foo", "fo", "f", 5),
+            ],
+        )
+        conn.commit()
+        sql_order = [
+            (row["id"], row["zh"])
+            for row in conn.execute(
+                """
+                SELECT id, zh FROM terms
+                WHERE zh_norm = ? OR en_norm = ?
+                ORDER BY priority, length(zh), category, source_file, source_id
+                """,
+                ("foo", "foo"),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    assert sql_order == [(2, "fo"), (1, "甲乙")]
+    service = TermService(tie_db)
+    result = service.lookup_exact("Foo", limit=10)
+    assert result.exact is True
+    assert [(c.entry.id, c.entry.zh) for c in result.candidates] == [(2, "fo"), (1, "甲乙")]
+    service.close()

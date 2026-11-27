@@ -10,6 +10,7 @@ import sqlite3
 import struct
 import sys
 import threading
+import weakref
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -335,30 +336,66 @@ def _build_exact_index(
     entries: tuple[TermEntry, ...],
     row_norms: tuple[tuple[str, str, int], ...],
 ) -> Mapping[str, tuple[LookupCandidate, ...]]:
-    buckets: dict[str, list[tuple[int, int, str, str, str, TermEntry]]] = {}
+    # Each bucket item carries (priority, len(zh), category, source_file,
+    # source_id, match_rank, id, entry) where match_rank=0 for idx_terms_zh_norm
+    # hits and match_rank=1 for idx_terms_en_norm-only hits, mirroring SQLite's
+    # MULTI-INDEX OR scan order before ORDER BY.
+    buckets: dict[
+        str, list[tuple[int, int, str, str, str, int, int, TermEntry]]
+    ] = {}
     for entry, (zh_norm, en_norm, priority) in zip(entries, row_norms, strict=True):
-        item = (
-            priority,
-            len(entry.zh),
-            entry.category,
-            entry.source_file,
-            entry.source_id,
-            entry,
+        buckets.setdefault(zh_norm, []).append(
+            (
+                priority,
+                len(entry.zh),
+                entry.category,
+                entry.source_file,
+                entry.source_id,
+                0,
+                entry.id,
+                entry,
+            )
         )
-        buckets.setdefault(zh_norm, []).append(item)
         if en_norm != zh_norm:
-            buckets.setdefault(en_norm, []).append(item)
+            buckets.setdefault(en_norm, []).append(
+                (
+                    priority,
+                    len(entry.zh),
+                    entry.category,
+                    entry.source_file,
+                    entry.source_id,
+                    1,
+                    entry.id,
+                    entry,
+                )
+            )
 
     index: dict[str, tuple[LookupCandidate, ...]] = {}
     for norm, items in buckets.items():
         if len(items) > 1:
-            # Match SQLite's index-scan / ORDER BY tie-breaking (id ASC).
             items.sort(
-                key=lambda row: (row[0], row[1], row[2], row[3], row[4], row[5].id)
+                key=lambda row: (
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                )
             )
         candidates: list[LookupCandidate] = []
         seen: set[tuple[str, str, str]] = set()
-        for _prio, _zh_len, _cat, _src_file, _src_id, entry in items:
+        for (
+            _prio,
+            _zh_len,
+            _cat,
+            _src_file,
+            _src_id,
+            _match_rank,
+            _entry_id,
+            entry,
+        ) in items:
             key = (entry.zh, entry.en, entry.category)
             if key in seen:
                 continue
@@ -536,82 +573,103 @@ class DictionarySnapshot:
         return self
 
 
+_SQLITE_WAL_INDEX_VERSION = 3007000
+# SQLite WAL-index header (48 bytes, native byte order):
+#   iVersion(u32), unused(u32), iChange(u32), isInit(u8), bigEndCksum(u8),
+#   szPage(u16), mxFrame(u32), nPage(u32), aFrameCksum(8B), aSalt(8B), aCksum(8B)
+_SHM_HEADER_STRUCT = struct.Struct("=IIIBBHII8s8s8s")
+
+
 def _stat_tuple(path: Path) -> tuple[int, int, int, int, int]:
     st = os.stat(path)
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _wal_fingerprint(wal_path: Path) -> tuple[object, ...] | None:
-    """Read a lightweight fingerprint of an optional SQLite ``-wal`` file.
+def _optional_stat_tuple(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
-    Never opens the main database file or ``-shm`` (so POSIX ``fcntl`` locks
-    held by other in-process SQLite connections are never disturbed), and holds
-    no persistent file descriptor. Captures stat metadata, the 32-byte WAL
-    header (checkpoint sequence, salt1/salt2, header checksum), the active
-    frame count for the current salt generation (found in O(log N) seeks), and
-    the 24-byte header (including cumulative checksum) of the last active frame
-    and physical tail frame so both appends and pre-allocated WAL resets are
-    detected immediately.
+
+def _close_fd_holder(holder: list[int | None]) -> None:
+    for idx in range(len(holder)):
+        fd = holder[idx]
+        holder[idx] = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _parse_shm_wal_index(
+    raw: bytes,
+) -> tuple[tuple[object, ...] | None, bool]:
+    """Parse the mirrored 48-byte SQLite WAL-index headers from ``-shm``.
+
+    Returns ``(fingerprint, cacheable)``. When the two mirrored headers
+    disagree (a writer is mid-commit updating ``-shm``) or ``isInit != 1``,
+    ``cacheable`` is ``False`` so callers never pin a snapshot to a transient
+    WAL visibility window.
     """
-    try:
-        st = os.stat(wal_path)
-    except OSError:
-        return None
-    wal_stat = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    if st.st_size == 0:
-        return (wal_stat, b"", 0, b"", b"")
-    try:
-        with open(wal_path, "rb") as handle:
-            header = handle.read(32)
-            if len(header) < 32:
-                return (wal_stat, header, 0, b"", b"")
-            page_size = struct.unpack_from(">I", header, 8)[0]
-            if page_size < 512 or page_size > 65536 or (page_size & (page_size - 1)):
-                tail_pos = max(32, st.st_size - 64)
-                handle.seek(tail_pos)
-                return (wal_stat, header, 0, b"", handle.read(64))
-            frame_size = 24 + page_size
-            num_frames = (st.st_size - 32) // frame_size
-            if num_frames <= 0:
-                return (wal_stat, header, 0, b"", b"")
-            header_salt = header[16:24]
-
-            def read_frame_header(idx: int) -> bytes:
-                handle.seek(32 + idx * frame_size)
-                return handle.read(24)
-
-            tail_hdr = read_frame_header(num_frames - 1)
-            if len(tail_hdr) == 24 and tail_hdr[8:16] == header_salt:
-                return (wal_stat, header, num_frames, tail_hdr, tail_hdr)
-
-            first_hdr = read_frame_header(0)
-            if len(first_hdr) < 24 or first_hdr[8:16] != header_salt:
-                return (wal_stat, header, 0, b"", tail_hdr)
-
-            lo, hi = 0, num_frames - 1
-            best_idx = 0
-            best_hdr = first_hdr
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                hdr = read_frame_header(mid)
-                if len(hdr) == 24 and hdr[8:16] == header_salt:
-                    best_idx = mid
-                    best_hdr = hdr
-                    lo = mid + 1
-                else:
-                    hi = mid - 1
-            return (wal_stat, header, best_idx + 1, best_hdr, tail_hdr)
-    except OSError:
-        return None
+    if len(raw) < 96:
+        return None, False
+    hdr1 = raw[:48]
+    hdr2 = raw[48:96]
+    if hdr1 != hdr2:
+        return None, False
+    (
+        i_version,
+        _unused,
+        i_change,
+        is_init,
+        _big_end_cksum,
+        sz_page,
+        mx_frame,
+        n_page,
+        a_frame_cksum,
+        a_salt,
+        a_cksum,
+    ) = _SHM_HEADER_STRUCT.unpack(hdr1)
+    if i_version != _SQLITE_WAL_INDEX_VERSION or is_init != 1:
+        return None, False
+    return (
+        i_version,
+        i_change,
+        is_init,
+        sz_page,
+        mx_frame,
+        n_page,
+        a_frame_cksum,
+        a_salt,
+        a_cksum,
+    ), True
 
 
-def _connect_readonly(path: Path) -> sqlite3.Connection:
-    """Open a short-lived read-only SQLite connection that never checkpoints WAL."""
-    conn = sqlite3.connect(
-        f"{path.resolve().as_uri()}?mode=ro",
-        uri=True,
-        isolation_level=None,
-    )
+def _connect_for_snapshot(path: Path) -> sqlite3.Connection:
+    """Open a short-lived SQLite connection for reading a snapshot.
+
+    Uses a standard read-write connection when the database file and its parent
+    directory are writable so that closing the last connection on a WAL
+    database triggers SQLite's normal automatic checkpoint and ``-wal``/``-shm``
+    cleanup (matching ``main``). Falls back to ``?mode=ro`` for read-only files
+    or mounts.
+    """
+    resolved = path.resolve(strict=False)
+    conn: sqlite3.Connection | None = None
+    if os.access(resolved, os.W_OK) and os.access(resolved.parent, os.W_OK):
+        try:
+            conn = sqlite3.connect(resolved, isolation_level=None)
+        except sqlite3.OperationalError:
+            conn = None
+    if conn is None:
+        conn = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro",
+            uri=True,
+            isolation_level=None,
+        )
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -620,43 +678,140 @@ class TermService:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self._lock = threading.RLock()
+        # Raw O_RDONLY file descriptors for pread() header checks only (index 0:
+        # main DB header bytes 24..44; index 1: optional -shm WAL-index header
+        # bytes 0..96). Keeping them open per inode avoids open()+close() on
+        # every read so in-process POSIX fcntl locks held by SQLite connections
+        # are never disturbed, while holding zero SQLite connections or locks.
+        self._fd_holder: list[int | None] = [None, None]
+        self._fd_inodes: list[tuple[int, int] | None] = [None, None]
+        self._finalizer = weakref.finalize(self, _close_fd_holder, self._fd_holder)
         self._snapshot_stamp: tuple[object, ...] | None = None
         self._snapshot_cache: DictionarySnapshot | None = None
 
     def close(self) -> None:
-        """Release the cached snapshot reference (no persistent SQLite handles exist)."""
+        """Release cached snapshot and raw read-only header descriptors."""
         with self._lock:
+            self._close_fds_locked()
             self._snapshot_stamp = None
             self._snapshot_cache = None
 
-    def _storage_stamp(self) -> tuple[object, ...]:
-        """Return a WAL- and replacement-aware storage stamp without persistent connections.
+    def _close_fd_slot_locked(self, slot: int) -> None:
+        fd = self._fd_holder[slot]
+        self._fd_holder[slot] = None
+        self._fd_inodes[slot] = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
-        Combines main-file stat (detecting atomic inode replacement and in-place
-        rollback-journal commits) with a read-only ``-wal`` file fingerprint
-        (stat + 32-byte header + active-frame salt/checksum). Holds no open
-        SQLite connection and never opens the main DB file directly, so atomic
-        DB replacement cannot trigger stale WAL checkpoints and in-process POSIX
-        ``fcntl`` locks are never disturbed.
+    def _close_fds_locked(self) -> None:
+        self._close_fd_slot_locked(0)
+        self._close_fd_slot_locked(1)
+
+    def _pread_slot_locked(
+        self,
+        slot: int,
+        path: Path,
+        inode: tuple[int, int],
+        size: int,
+        offset: int = 0,
+    ) -> bytes:
+        fd = self._fd_holder[slot]
+        if fd is None or self._fd_inodes[slot] != inode:
+            self._close_fd_slot_locked(slot)
+            fd = os.open(path, os.O_RDONLY)
+            self._fd_holder[slot] = fd
+            self._fd_inodes[slot] = inode
+        return os.pread(fd, size, offset)
+
+    def _storage_stamp_locked(self) -> tuple[tuple[object, ...], bool]:
+        """Return ``(storage_stamp, cacheable)`` without persistent SQLite connections.
+
+        - Main DB: ``os.stat`` + SQLite header bytes ``24..44`` (``file_change_counter``,
+          ``db_size_pages``, freelist header, ``schema_cookie``) read via
+          ``os.pread`` on a cached ``O_RDONLY`` fd, detecting same-second
+          same-size DELETE-mode commits even on coarse-grained filesystems while
+          preserving in-process POSIX ``fcntl`` locks.
+        - WAL visibility: reads the mirrored 48-byte WAL-index headers (bytes
+          ``0..96``) from ``-shm`` via ``os.pread`` on a cached ``O_RDONLY`` fd
+          and requires ``hdr1 == hdr2`` and ``isInit == 1``. Raw uncommitted
+          ``-wal`` frames written before ``-shm`` advances are NOT used as cache
+          keys, and transient states (``hdr1 != hdr2``, ``isInit != 1``, or a
+          non-empty ``-wal`` without a valid ``-shm``) return ``cacheable=False``
+          so stale snapshots are never cached.
         """
         path = self.db_path.resolve(strict=False)
-        main_stat = _stat_tuple(path)
-        wal_resolved = Path(f"{path}-wal")
-        wal_direct = Path(f"{self.db_path}-wal")
-        wal_fp = _wal_fingerprint(wal_resolved)
-        if wal_direct != wal_resolved:
-            wal_direct_fp = _wal_fingerprint(wal_direct)
-            return (str(path), main_stat, wal_fp, wal_direct_fp)
-        return (str(path), main_stat, wal_fp)
+        try:
+            main_stat = _stat_tuple(path)
+        except OSError:
+            self._close_fds_locked()
+            raise
+        main_inode = (main_stat[0], main_stat[1])
+        try:
+            main_header = self._pread_slot_locked(0, path, main_inode, 44, 0)
+            main_header_slice = (
+                main_header[24:44] if len(main_header) >= 44 else main_header
+            )
+        except OSError:
+            self._close_fd_slot_locked(0)
+            main_header_slice = b""
+
+        shm_path = Path(f"{path}-shm")
+        wal_path = Path(f"{path}-wal")
+        shm_stat = _optional_stat_tuple(shm_path)
+        wal_stat = _optional_stat_tuple(wal_path)
+        # Also detect symlink-adjacent -shm/-wal if db_path itself is a symlink.
+        if shm_stat is None and Path(f"{self.db_path}-shm") != shm_path:
+            alt_shm = Path(f"{self.db_path}-shm")
+            shm_stat = _optional_stat_tuple(alt_shm)
+            if shm_stat is not None:
+                shm_path = alt_shm
+        if wal_stat is None and Path(f"{self.db_path}-wal") != wal_path:
+            wal_stat = _optional_stat_tuple(Path(f"{self.db_path}-wal"))
+
+        cacheable = True
+        shm_key: tuple[object, ...] | None = None
+        if shm_stat is not None:
+            shm_inode = (shm_stat[0], shm_stat[1])
+            try:
+                shm_raw = self._pread_slot_locked(1, shm_path, shm_inode, 96, 0)
+                parsed_shm, shm_ok = _parse_shm_wal_index(shm_raw)
+                if shm_ok and parsed_shm is not None:
+                    shm_key = (shm_inode, parsed_shm)
+                else:
+                    cacheable = False
+            except OSError:
+                self._close_fd_slot_locked(1)
+                cacheable = False
+        else:
+            self._close_fd_slot_locked(1)
+            # Non-empty -wal without a valid -shm means WAL has not yet been
+            # indexed/recovered; never cache against that transient state.
+            if wal_stat is not None and wal_stat[2] > 0:
+                cacheable = False
+
+        wal_present = wal_stat is not None and wal_stat[2] > 0
+        stamp = (
+            str(path),
+            main_stat,
+            main_header_slice,
+            shm_key,
+            wal_present,
+        )
+        return stamp, cacheable
 
     def _identity(self) -> tuple[object, ...]:
-        """Storage identity for cache validation, aware of SQLite WAL commits."""
-        return self._storage_stamp()
+        """Storage identity for cache validation, aware of SQLite WAL and DELETE commits."""
+        with self._lock:
+            stamp, _cacheable = self._storage_stamp_locked()
+            return stamp
 
     def _read_snapshot(
         self, path: Path, stamp: tuple[object, ...]
     ) -> DictionarySnapshot:
-        conn = _connect_readonly(path)
+        conn = _connect_for_snapshot(path)
         try:
             conn.execute("BEGIN")
             try:
@@ -692,30 +847,34 @@ class TermService:
     def snapshot(self) -> DictionarySnapshot:
         """Return the current immutable :class:`DictionarySnapshot`.
 
-        Validates the cached snapshot against filesystem and SQLite WAL state
-        without keeping any persistent SQLite connection open. Reloads
-        atomically in a single read-only transaction when the database changed,
-        while leaving any previously returned snapshot untouched for in-flight
-        requests.
+        Validates the cached snapshot against main-file header counters and
+        ``-shm`` WAL-index headers without keeping any persistent SQLite
+        connection open. Caches only when ``stamp_before == stamp_after`` and
+        the WAL-index header is consistent (never during a mid-commit window).
         """
         with self._lock:
             snapshot: DictionarySnapshot | None = None
             for _attempt in range(2):
-                stamp_before = self._storage_stamp()
+                stamp_before, cacheable_before = self._storage_stamp_locked()
                 if (
-                    self._snapshot_cache is not None
+                    cacheable_before
+                    and self._snapshot_cache is not None
                     and stamp_before == self._snapshot_stamp
                 ):
                     return self._snapshot_cache
                 resolved_path = self.db_path.resolve(strict=False)
                 snapshot = self._read_snapshot(resolved_path, stamp_before)
-                stamp_after = self._storage_stamp()
-                if stamp_before == stamp_after:
+                stamp_after, cacheable_after = self._storage_stamp_locked()
+                if (
+                    cacheable_before
+                    and cacheable_after
+                    and stamp_before == stamp_after
+                ):
                     self._snapshot_stamp = stamp_after
                     self._snapshot_cache = snapshot
                     return snapshot
-            # A dictionary that changed twice while being read is not safe to
-            # cache: serve the fresh snapshot and retry caching next call.
+            # Transient/in-flight write state (or DB changed twice while read):
+            # return the freshly loaded snapshot without pinning it in cache.
             assert snapshot is not None
             return snapshot
 
