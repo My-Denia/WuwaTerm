@@ -908,6 +908,7 @@ PY
 
 pool_dbs_identical() {
     python3 - "$1" "$2" <<'PY'
+from pathlib import Path
 import sqlite3
 import sys
 
@@ -919,7 +920,7 @@ query = (
 )
 
 def read_rows(path: str) -> list[tuple[int, ...]]:
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     try:
         return conn.execute(query).fetchall()
     finally:
@@ -1048,6 +1049,8 @@ reconcile_web_pool_db_path() {
                     pool_dbs_identical "$host_tm_file" "$host_pool_file" \
                         || fail "refusing to remove $host_tm_file: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
                     stop_web_container
+                    pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+                        || fail "refusing to remove $host_tm_file: $host_tm_file changed before container stopped and differs from $host_pool_file"
                     rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
                 else
                     stop_web_container
@@ -1073,6 +1076,8 @@ reconcile_web_pool_db_path() {
         pool_dbs_identical "$host_tm_file" "$host_pool_file" \
             || fail "refusing to migrate: $host_tm_file and $host_pool_file are both admission pool databases with different contents"
         stop_web_container
+        pool_dbs_identical "$host_tm_file" "$host_pool_file" \
+            || fail "refusing to migrate: $host_tm_file changed before container stopped and differs from $host_pool_file"
         rm -f "$host_tm_file" "$host_tm_file-wal" "$host_tm_file-shm"
         rewrite_web_env_pool_path "$web_env_file" "$new_pool_path"
     elif [ -e "$host_tm_file" ]; then

@@ -848,6 +848,63 @@ def test_web_migration_fails_closed_when_both_pool_dbs_have_different_contents(i
     assert "run -d --name wuwaterm-web" not in docker_log(install_root)
 
 
+def test_web_migration_rechecks_after_stop_to_block_toctou_write(install_root):
+    import sqlite3
+
+    write_env(install_root)
+    package = write_web_package(install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST)
+    state = install_root / "state-web"
+    data = state / "data"
+    data.mkdir(parents=True)
+    tm_db = data / "tm.sqlite3"
+    pool_db = data / "pool.sqlite3"
+    _create_legacy_pool_db(tm_db, second_key=111)
+    _create_legacy_pool_db(pool_db, second_key=111)
+
+    original_env = (
+        "WUWATERM_RUNTIME_MODE=selfhost\n"
+        "WUWATERM_WEB_ORIGIN=https://wuwaterm.example\n"
+        f"WUWATERM_WEB_EDGE_SECRET={'b' * 64}\n"
+        "WUWATERM_WEB_BASE_PATH=\n"
+        "WUWATERM_LOCAL_DB_PATH=/var/lib/wuwaterm-web/tm.sqlite3\n"
+    )
+    (state / "web.env").write_text(original_env, encoding="utf-8")
+
+    # Replace docker stub so `rm -f wuwaterm-web` simulates a final write to
+    # tm.sqlite3 right before the container stops.
+    docker_bin = install_root / "bin" / "docker"
+    docker_bin.write_text(
+        DOCKER_STUB.replace(
+            '  "rm -f wuwaterm-web")\n',
+            '  "rm -f wuwaterm-web")\n'
+            '    python3 -c "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); '
+            'c.execute(\'UPDATE shared_pool SET second_key = 987 WHERE id = 1\'); '
+            'c.commit(); c.close()" "$STUB_ROOT/state-web/data/tm.sqlite3"\n',
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_setup(
+        install_root,
+        "--with-web",
+        "--web-package",
+        str(package),
+        "--web-origin",
+        "https://wuwaterm.example",
+        "--no-adopt",
+    )
+
+    assert result.returncode == 1
+    assert "differs from" in result.stderr
+    assert tm_db.exists()
+    with sqlite3.connect(tm_db) as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (987,)
+    with sqlite3.connect(pool_db) as conn:
+        assert conn.execute("SELECT second_key FROM shared_pool WHERE id = 1").fetchone() == (111,)
+    assert (state / "web.env").read_text(encoding="utf-8") == original_env
+    assert "run -d --name wuwaterm-web" not in docker_log(install_root)
+
+
 def test_web_migration_fails_closed_on_custom_pool_path_with_legacy_tm_sqlite3(install_root):
     import sqlite3
 
