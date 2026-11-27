@@ -34,6 +34,15 @@ api = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.30,<1",
 ]
+# Optional offline/CPU dense-vector RAG tooling (never installed in runtime/builder images).
+rag-onnx = [
+  "numpy>=1.26,<3",
+  "onnxruntime>=1.19,<2",
+  "tokenizers>=0.20,<1",
+]
+rag-vec = [
+  "sqlite-vec>=0.1.6,<1",
+]
 dev = [
   "pypinyin>=0.54,<1",
   # The test suite runner and coverage measurement.
