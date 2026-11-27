@@ -190,3 +190,11 @@ context rules also preserve numeric shorthand such as `3+1` or `S0R1`, resolve
 omitted actors from the clause without turning rhetorical addressees into
 actors, and require every clause to be translated. Previous-segment context
 remains read-only and human precedents retain occurrence scope.
+
+The two ADR 0021 members of that context stay outside admission entirely. A
+`document_anchor` is prompt background: it adds no `TermReference`, no lock and
+no admitted span. A `user_glossary_references` entry renders as a non-binding
+preference line, never as a `TermReference` or a `__WUWA_TERM_...__` placeholder,
+and it is dropped when the segment's own official locks or references already
+own the same source surface — so an official pair always wins, and no user entry
+can reach `POST /v1/reviews`.

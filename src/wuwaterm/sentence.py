@@ -83,6 +83,7 @@ from .translation_plan import (
     CONTEXTUAL_REFERENCE_INSTRUCTION,
     DEFAULT_LLM_TIMEOUT_SECONDS as DEFAULT_LLM_TIMEOUT_SECONDS,
     DEFAULT_PROVIDER_PROFILE as DEFAULT_PROVIDER_PROFILE,
+    DOCUMENT_ANCHOR_INSTRUCTION,
     EN_ZH_AUTO_LOCK_LIMIT as EN_ZH_AUTO_LOCK_LIMIT,
     EN_ZH_AUTO_PARAGRAPH_LIMIT as EN_ZH_AUTO_PARAGRAPH_LIMIT,
     HTML_MODE_INSTRUCTION,
@@ -103,7 +104,10 @@ from .translation_plan import (
     TRANSLATION_THINKING_REASONING_MODES as TRANSLATION_THINKING_REASONING_MODES,
     TRANSLATION_THINKING_ZH_EN_DEFAULT as TRANSLATION_THINKING_ZH_EN_DEFAULT,
     TRANSLATION_THINKING_ZH_EN_ENV as TRANSLATION_THINKING_ZH_EN_ENV,
+    TRANSLATION_THINKING_ZH_EN_MODES as TRANSLATION_THINKING_ZH_EN_MODES,
     UNTRUSTED_SOURCE_INSTRUCTION,
+    USER_GLOSSARY_HEADER,
+    USER_GLOSSARY_INSTRUCTION,
     ZH_EN_FIDELITY_INSTRUCTION,
     AttemptKind,
     ConcreteThinkingMode,
@@ -126,6 +130,7 @@ from .translation_plan import (
     resolve_configured_thinking_mode,
     resolve_request_policy_from_env,
     select_en_zh_auto_thinking as select_en_zh_auto_thinking,
+    select_zh_en_auto_thinking as select_zh_en_auto_thinking,
     sha256_bytes,
 )
 
@@ -745,7 +750,7 @@ class SentenceTranslator:
                     execution_budget=op_budget,
                 )
             except LLMTranslationError as exc:
-                # The one failure ``auto`` into Chinese is allowed to retry: it
+                # The one failure ``auto`` in either direction may retry: it
                 # picked thinking on for a segment that then ran out of time.
                 translated = await self._retry_without_thinking(
                     exc,
@@ -804,23 +809,24 @@ class SentenceTranslator:
         budget: SegmentExecutionBudget | None = None,
         execution_budget: OperationExecutionBudget | None = None,
     ) -> str:
-        """One faster retry of a timed-out ``auto`` English-to-Chinese call.
+        """One faster retry of a timed-out ``auto`` call that chose to think.
 
-        The only case this answers: an English-to-Chinese request whose mode came
-        from ``auto``, which chose to think, and which then ran out of the model
-        timeout. Thinking is the part that overran (see
-        ``EN_ZH_AUTO_LOCK_LIMIT``), so the retry keeps the prompt, the references
-        and the locks byte-for-byte and changes two things only — thinking off,
-        and a bound short enough that the request still has time to answer with
-        the result. Measured: the two shapes ``auto`` sends with thinking off
-        answered in 3.3 s.
+        The case this answers: a request whose mode came from ``auto`` in that
+        request's direction, which chose to think, and which then ran out of the
+        model timeout. Thinking is the part that overran (see
+        ``EN_ZH_AUTO_LOCK_LIMIT`` and ``ZH_EN_AUTO_SCALAR_LIMIT``), so the retry
+        keeps the prompt, the references and the locks byte-for-byte and changes
+        two things only — thinking off, and a bound short enough that the request
+        still has time to answer with the result. Measured into Chinese: the two
+        shapes ``auto`` sends with thinking off answered in 3.3 s.
 
         Every other outcome re-raises the original failure unchanged: a different
-        reason, a mode an operator named explicitly (never second-guessed), an
-        English-to-English request, no mode that was reasoning to begin with, too
-        little budget left, a guard that refuses the second call, or a retry that
-        fails on its own. A request that already timed out cannot be made worse
-        by trying, and it is not made slower than the budget it has left.
+        reason, a mode an operator named explicitly (never second-guessed), a
+        direction that did not opt into ``auto``, no mode that was reasoning to
+        begin with, too little budget left, a guard that refuses the second call,
+        or a retry that fails on its own. A request that already timed out cannot
+        be made worse by trying, and it is not made slower than the budget it has
+        left.
 
         This call is the segment's one corrective call: the budget consumes it
         and skips the paragraph repair, so a segment whose ``low`` attempt timed
@@ -1476,6 +1482,14 @@ _CONTEXT_RULES_INSTRUCTION = CONTEXT_RULES_INSTRUCTION
 _ZH_EN_FIDELITY_INSTRUCTION = ZH_EN_FIDELITY_INSTRUCTION
 _PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE = PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE
 
+# ADR 0021 opt-in context blocks: a bounded document anchor and bounded
+# `user_glossary` preference references. Both render only when the request
+# carries them, so a context with neither keeps the bytes it had before they
+# existed.
+_DOCUMENT_ANCHOR_INSTRUCTION = DOCUMENT_ANCHOR_INSTRUCTION
+_USER_GLOSSARY_INSTRUCTION = USER_GLOSSARY_INSTRUCTION
+_USER_GLOSSARY_HEADER = USER_GLOSSARY_HEADER
+
 
 def current_prompt_templates() -> PromptTemplates:
     """Return active prompt templates, honoring monkeypatched module constants."""
@@ -1491,6 +1505,9 @@ def current_prompt_templates() -> PromptTemplates:
         zh_en_fidelity=_ZH_EN_FIDELITY_INSTRUCTION,
         precedent_wording=PRECEDENT_WORDING,
         paragraph_repair_template=_PARAGRAPH_REPAIR_INSTRUCTION_TEMPLATE,
+        document_background=_DOCUMENT_ANCHOR_INSTRUCTION,
+        user_glossary=_USER_GLOSSARY_INSTRUCTION,
+        user_glossary_header=_USER_GLOSSARY_HEADER,
     )
 
 

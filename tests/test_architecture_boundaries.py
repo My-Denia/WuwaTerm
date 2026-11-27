@@ -735,6 +735,7 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
     assert cab.PURE_MATCHING == {
         "attribution_candidates",
         "cjk_span",
+        "document_anchor",
         "english_plural",
         "protected_text",
         "segmentation",
@@ -744,6 +745,7 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
         "term_classification",
         "term_matching",
         "term_preparation",
+        "termbase",
         "text_spans",
     }
     check_roots = cab.PURE_MATCHING | {"translation_plan", "semantic_review_contract"}
