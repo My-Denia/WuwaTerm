@@ -57,13 +57,13 @@ does not distribute generated game data or generated SQLite databases.
   staleness rules, #344) and
   [ADR 0024](docs/adr/0024-diagnose-then-repair-targeted-review.md)
   (five-stage diagnose-then-repair layered review with six pre-registered
-  acceptance metrics, #344), and sync ADR 0023 (`MY-491`, #347) with the
-  shipped Windows SQLite MVP and Web in-memory import/export contract:
-  two-sided `context_exact` neighbour hash bounds (`prev_source_hash !== null ||
-  next_source_hash !== null`, 2,000-scalar neighbour cap), three-state
-  freshness (`verified_fresh`, `known_stale`, `provenance_unknown`), and
-  restricting automatic batch/incremental skip to `context_exact` +
-  `verified_fresh` entries only.
+  acceptance metrics, #344), and update ADR 0023 (`MY-491`, #347) to separate
+  the shipped Windows SQLite MVP and Web in-memory import/export baseline from
+  the updated contract for upcoming client releases: two-sided `context_exact`
+  neighbour hash bounds (`prev_source_hash !== null || next_source_hash !==
+  null`, 2,000-scalar neighbour cap), three-state freshness (`verified_fresh`,
+  `known_stale`, `provenance_unknown`), and restricting automatic
+  batch/incremental skip to `context_exact` + `verified_fresh` entries only.
 
 ### Translation Engine
 
@@ -78,18 +78,22 @@ does not distribute generated game data or generated SQLite databases.
     non-finite numbers, isolated surrogates, NUL bytes and prototype-pollution
     keys without echoing payload content. `match_user_glossary` matches a
     segment in first-occurrence order (capped at `MAX_USER_GLOSSARY_REFERENCES =
-    16`), and `select_prompt_references` drops any entry colliding (via
-    `strip().casefold()`) with official `reference.source`, `reference.target` or
-    non-empty `occurrence.matched_text` surfaces so official pairs always win.
-    Matched entries render via `TranslationContext.user_glossary_references` as
-    non-binding preference lines, never as `TermReference` or
-    `__WUWA_TERM_...__` placeholders and never reaching admission or
-    `/v1/reviews`.
+    16`), and `select_prompt_references` drops any entry whose `source` collides
+    (via `strip().casefold()`) with `official_source_surfaces` — `reference.source`
+    (the matched surface), the source-language canonical term (`reference.en` or
+    `reference.zh`), non-empty `occurrence.matched_text`, and each lock's
+    source-language surface — so official pairs always win. Matched entries
+    render via `TranslationContext.user_glossary_references` as non-binding
+    preference lines, never as `TermReference` or `__WUWA_TERM_...__`
+    placeholders and never reaching admission or `/v1/reviews`.
   - **C3 (`src/wuwaterm/document_anchor.py`)**: add `DocumentAnchor` (topic,
     section heading, up to 8 entities, 280 scalars total) with clamping in
     `bounded_anchor_fields` (stripping whitespace-only topic/heading fields) and
-    pure `extract_document_anchor(segments, current_index)` scanning within
-    `ANCHOR_SEGMENT_WINDOW = 8`. Renders on `TranslationContext.document_anchor`
+    pure `extract_document_anchor(segments, current_index)`, which scans up to
+    `ANCHOR_SEGMENT_WINDOW` (`8`) segments from the document start for `topic`
+    and up to `8` preceding segments before `current_index` for
+    `section_heading` and `active_entities` (at most `2 * ANCHOR_SEGMENT_WINDOW`
+    = `16` segments total). Renders on `TranslationContext.document_anchor`
     only when explicitly set and enters no admission or sense-lock decision.
   - **C4 (`src/wuwaterm/translation_plan.py`, `src/wuwaterm/sentence.py`)**:
     accept `WUWATERM_TRANSLATION_THINKING_ZH_EN=auto` behind
@@ -102,17 +106,19 @@ does not distribute generated game data or generated SQLite databases.
     `auto_paragraph_limit` in `OperationIdentity` when `auto` is active.
 - Fix `SentenceTranslator` paragraph-count repair in `src/wuwaterm/sentence.py`
   (`MY-380`, #347) to pass `prepared_scalars=len(locked.locked_text)` into
-  `select_repair_thinking_mode`, preventing long `zh->en` `auto` segments (> 900
-  scalars) from stepping up to `low` during paragraph repair while allowing
-  short multi-paragraph segments (<= 900 scalars, < 4 locks) to step up.
+  `RequestPolicy.paragraph_repair_thinking_mode`, preventing long `zh->en`
+  `auto` segments (> 900 scalars) from stepping up to `low` during paragraph
+  repair while allowing short multi-paragraph segments (<= 900 scalars, < 4
+  locks) to step up.
 
 ### Evaluation & Research
 
 - Add H3 Protocol Revision (d) support in `scripts/eval_h3.py` and
   `docs/eval/h3-and-raw-baseline-protocol.md` (`MY-517`, #348): add
   `--expected-model MODEL` (default `deepseek-flash`, validated as a non-empty
-  single-line model ID) to `run` and `preflight`, hash `pinned_model` into
-  `bindings`, `--owner-approval-token` and `h3-ledger.json`, and enforce
+  single-line model ID) to `run`, `preflight` and `cost-estimate`, record
+  `pinned_model` inside `bindings` so the bound configuration feeds
+  `--owner-approval-token` and `h3-ledger.json` digests, and enforce
   `bindings.tools_sha256` verification in `_validate_acceptance_receipt` so an
   `h3-acceptance-v1` receipt whose `scripts/eval_h3.py` (or other frozen tool)
   SHA-256 differs from the running tool is rejected fail-closed. Records owner
