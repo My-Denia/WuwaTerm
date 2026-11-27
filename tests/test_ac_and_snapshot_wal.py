@@ -1834,3 +1834,80 @@ def test_hot_rollback_journal_recovers_on_snapshot_and_exact_lookup_while_ro_sta
     finally:
         os.chmod(ro_dir, 0o755)
         os.chmod(ro_db, 0o644)
+
+
+def test_validation_probe_closes_conn_on_notadb_and_skips_recovery_in_ro_dir(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """_read_validation_probe closes conn on DatabaseError and ro parent dir blocks half-recovery."""
+    from wuwaterm import lookup as lookup_mod
+
+    # 1. Non-SQLite file raises DatabaseError and closes the opened ?mode=ro connection.
+    not_a_db = tmp_path / "not-a-db.bin"
+    not_a_db.write_bytes(b"definitely not a sqlite database header")
+    resolved_bad = not_a_db.resolve(strict=False)
+
+    real_connect_ro = lookup_mod._connect_readonly
+    opened_bad: list[sqlite3.Connection] = []
+
+    def track_bad(path: Path) -> sqlite3.Connection:
+        conn = real_connect_ro(path)
+        if path.resolve(strict=False) == resolved_bad:
+            opened_bad.append(conn)
+        return conn
+
+    monkeypatch.setattr(lookup_mod, "_connect_readonly", track_bad)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        lookup_mod._read_validation_probe(not_a_db)
+
+    assert len(opened_bad) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened_bad[0].execute("SELECT 1")
+
+    # 2. Writable DB + hot -journal inside a read-only (0555) parent directory must NOT
+    # open ?mode=rw or mutate either the DB or the -journal bytes.
+    ro_parent = tmp_path / "ro-parent-hot"
+    ro_parent.mkdir()
+    hot_db = ro_parent / "hot.db"
+    shutil.copy2(sample_db, hot_db)
+
+    crash_script = (
+        "import os, sqlite3, sys; "
+        "c = sqlite3.connect(sys.argv[1], isolation_level=None); "
+        "c.execute('PRAGMA journal_mode = DELETE'); "
+        "c.execute('PRAGMA cache_size = 1'); "
+        "c.execute('BEGIN IMMEDIATE'); "
+        "c.execute(\"UPDATE terms SET en = 'DirtyHalf' WHERE zh = '声骸'\"); "
+        "c.execute('CREATE TABLE spill(pad TEXT)'); "
+        "c.executemany('INSERT INTO spill VALUES (?)', [('y' * 3000,) for _ in range(32)]); "
+        "os._exit(1)"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", crash_script, str(hot_db)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 1
+    hot_journal = Path(f"{hot_db}-journal")
+    assert hot_journal.exists() and hot_journal.stat().st_size > 0
+
+    db_sha_before = hashlib.sha256(hot_db.read_bytes()).hexdigest()
+    journal_sha_before = hashlib.sha256(hot_journal.read_bytes()).hexdigest()
+
+    os.chmod(hot_db, 0o644)
+    os.chmod(ro_parent, 0o555)
+    try:
+        svc = TermService(hot_db)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                svc.snapshot()
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                svc.lookup_exact("声骸")
+        finally:
+            svc.close()
+        assert hashlib.sha256(hot_db.read_bytes()).hexdigest() == db_sha_before
+        assert hashlib.sha256(hot_journal.read_bytes()).hexdigest() == journal_sha_before
+    finally:
+        os.chmod(ro_parent, 0o755)

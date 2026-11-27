@@ -516,6 +516,8 @@ def _maybe_recover_hot_journal(path: Path, exc: sqlite3.OperationalError) -> boo
     journal_stat = _optional_stat_tuple(Path(f"{resolved}-journal"))
     if journal_stat is None or journal_stat[2] <= 0:
         return False
+    if not os.access(resolved.parent, os.W_OK) or not os.access(resolved, os.W_OK):
+        return False
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(
@@ -542,6 +544,7 @@ def _read_validation_probe(
     """Read metadata provenance and terms (count, max(id)) in one ``?mode=ro`` snapshot."""
     for attempt in range(2):
         conn = _connect_readonly(path)
+        retry_exc: sqlite3.OperationalError | None = None
         try:
             conn.execute("BEGIN DEFERRED")
             try:
@@ -557,16 +560,21 @@ def _read_validation_probe(
                     conn.execute("ROLLBACK")
                 raise
         except sqlite3.OperationalError as exc:
-            conn.close()
-            if attempt == 0 and _maybe_recover_hot_journal(path, exc):
-                continue
-            raise
+            if attempt == 0:
+                retry_exc = exc
+            else:
+                raise
         else:
-            conn.close()
             provenance = tuple((row["key"], row["value"]) for row in metadata_rows)
             count = int(stats_row[0]) if stats_row is not None else 0
             max_id = int(stats_row[1]) if stats_row is not None else 0
             return provenance, count, max_id
+        finally:
+            conn.close()
+        if retry_exc is not None:
+            if _maybe_recover_hot_journal(path, retry_exc):
+                continue
+            raise retry_exc
     raise AssertionError("unreachable")
 
 
