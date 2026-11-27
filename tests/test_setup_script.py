@@ -956,9 +956,9 @@ def test_release_defaults_match_the_recorded_snapshot_and_the_guide():
     constants = _constants()
     recorded = _recorded_tags()
     recommended = _recommended_tags()
-    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.6.0"
+    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.6.1"
     assert recommended["telegram"] == recorded["telegram"].lstrip("v")
-    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.5.1"
+    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.6.0"
     assert recommended["web"] == recorded["web"]
 
 
@@ -971,8 +971,8 @@ def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
     result = run_setup(install_root, "--with-telegram", "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.6.0" in result.stdout
-    assert "wuwaterm_telegram-0.6.0-py3-none-any.whl" in result.stdout
+    assert "release v0.6.1" in result.stdout
+    assert "wuwaterm_telegram-0.6.1-py3-none-any.whl" in result.stdout
 
 
 def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
@@ -981,7 +981,7 @@ def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
     result = run_setup(install_root, "--with-telegram", "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.6.0" in result.stdout
+    assert "release v0.6.1" in result.stdout
 
 
 @pytest.mark.parametrize(("version", "expected"), [

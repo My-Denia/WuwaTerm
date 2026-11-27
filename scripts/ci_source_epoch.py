@@ -67,6 +67,18 @@ def load_config(raw: bytes) -> dict[str, Any]:
     for key in ("legacy_web_revision", "split_web_revision", "split_windows_revision",
                 "windows_recipe_sha"):
         _sha(consumers.get(key), key)
+    historical_pins = consumers.get("historical_split_pins")
+    if historical_pins is not None:
+        _require(isinstance(historical_pins, list), "invalid historical_split_pins")
+        seen_commits: set[str] = set()
+        for entry in historical_pins:
+            _require(isinstance(entry, dict) and set(entry) == {"source_commit", "web_revision", "windows_revision"},
+                     "invalid historical_split_pins entry")
+            source_commit = _sha(entry["source_commit"], "historical_split_pins.source_commit")
+            _sha(entry["web_revision"], "historical_split_pins.web_revision")
+            _sha(entry["windows_revision"], "historical_split_pins.windows_revision")
+            _require(source_commit not in seen_commits, "duplicate historical_split_pins source_commit")
+            seen_commits.add(source_commit)
     _require(consumers.get("web_repository") == "My-Denia/WuwaTerm-Web", "invalid Web repository")
     _require(consumers.get("windows_repository") == "My-Denia/WuwaTerm-Windows", "invalid Windows repository")
     _require(consumers.get("windows_recipe_workflow") == ".github/workflows/legacy-core-validation.yml",
@@ -209,11 +221,22 @@ def resolve(source: str, config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("invalid source dependency metadata") from exc
 
     consumers = config["consumers"]
-    web_revision = consumers["legacy_web_revision" if epoch == "legacy" else "split_web_revision"]
-    _require(_blob(source, "contracts/web-ref.txt").strip() == web_revision, "wrong source Web pin")
-    windows_revision = None
-    if epoch == "split":
+    historical_by_commit = {
+        entry["source_commit"]: entry
+        for entry in (consumers.get("historical_split_pins") or ())
+    }
+    if epoch == "legacy":
+        web_revision = consumers["legacy_web_revision"]
+        windows_revision = None
+    elif source in historical_by_commit:
+        entry = historical_by_commit[source]
+        web_revision = entry["web_revision"]
+        windows_revision = entry["windows_revision"]
+    else:
+        web_revision = consumers["split_web_revision"]
         windows_revision = consumers["split_windows_revision"]
+    _require(_blob(source, "contracts/web-ref.txt").strip() == web_revision, "wrong source Web pin")
+    if epoch == "split":
         _require(_blob(source, "contracts/windows-ref.txt").strip() == windows_revision,
                  "wrong source Windows pin")
     jobs = config["jobs"]

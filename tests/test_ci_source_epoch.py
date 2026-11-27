@@ -125,11 +125,48 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     for source in (successor, synthetic_merge):
         result = epoch.resolve(source, config)
         assert result["source_epoch"] == "split"
-        assert result["web_revision"] == "13faa392cd6f4826d2115ae8ad04117a95577ffe"
-        assert result["windows_revision"] == "1ada119a0ff9284359fff2740f887140f6324545"
+        assert result["web_revision"] == "eed5d30e26c6446dbff49aa63905ec3ba2db9677"
+        assert result["windows_revision"] == "97c659e22b97f05b9a817c0740ca19d4add63441"
         assert result["required_jobs"][-1] == "API to Windows contract"
     # Newer split CONTROL does not change the target's legacy source epoch.
     assert epoch.resolve(LAST, config)["source_epoch"] == "legacy"
+
+
+@pytest.mark.parametrize(("source", "expected_web", "expected_windows"), [
+    (
+        "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+        "13faa392cd6f4826d2115ae8ad04117a95577ffe",
+        "1ada119a0ff9284359fff2740f887140f6324545",
+    ),
+    (
+        "d36af51286199ec4900c4d7c806c5f7cac6f461d",
+        "13faa392cd6f4826d2115ae8ad04117a95577ffe",
+        "1ada119a0ff9284359fff2740f887140f6324545",
+    ),
+    (
+        "6509896c9c3c0606e45cc46bb2afc6bd663d11f2",
+        "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
+        "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
+    ),
+    (
+        "1949f8ddf9c81dfd02b2bbea59bc8799d4943728",
+        "6cd0a7c5c65243c3d2cd741dc567690fa941f460",
+        "d87a66c37b1d4809774774c45bc5731f6ebb66d2",
+    ),
+    (
+        "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
+        "ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131",
+        "d0bd6c4b2b4c6e55315dc1b804d379c02aebb854",
+    ),
+])
+def test_historical_split_release_commits_resolve_with_their_pinned_consumers(
+    config, source, expected_web, expected_windows
+):
+    result = epoch.resolve(source, config)
+    assert result["source_epoch"] == "split"
+    assert result["web_revision"] == expected_web
+    assert result["windows_revision"] == expected_windows
+    assert result["required_jobs"][-1] == "API to Windows contract"
 
 
 def test_actual_pr_event_source_includes_last_bundled_main(config):
