@@ -1778,9 +1778,58 @@ def test_two_phase_fts_evidence_completion_avoids_limit_32_truncation(tmp_path: 
         ), hits_case2
 
 
+def test_union_of_adjacent_and_overlapping_locks_filters_compound_span(tmp_path: Path):
+    kb_path = tmp_path / "union_locks_kb.db"
+    rev = "a" * 64
+    create_knowledge_database(
+        kb_path,
+        entities=[
+            EntitySpec(
+                entity_id="term_concept:glacio_dmg",
+                entity_type="term_concept",
+                source_file="BinData/property/property.json",
+                source_id="glacio_dmg",
+                zh="冷凝伤害",
+                en="Glacio DMG",
+            ),
+        ],
+        aliases=[],
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_provenance(),
+    )
 
+    with KnowledgeBaseReader(kb_path, expected_terms_db_revision=rev) as reader:
+        # Adjacent locks (0, 2) + (2, 4) cover the full compound hit (0, 4).
+        assert (
+            reader.query("冷凝伤害", locked_surfaces=("冷凝", "伤害")) == ()
+        )
+        # Overlapping locks (0, 3) + (1, 4) cover (0, 4).
+        assert (
+            reader.query("冷凝伤害", locked_surfaces=("冷凝伤", "凝伤害")) == ()
+        )
+        # Combined locked + reference spans covering (0, 4) also filter out.
+        assert (
+            reader.query(
+                "冷凝伤害",
+                locked_surfaces=("冷凝",),
+                reference_surfaces=("伤害",),
+            )
+            == ()
+        )
+        # Adjacent English locks separated only by whitespace cover the full span.
+        assert (
+            reader.query("Glacio DMG", locked_surfaces=("Glacio", "DMG")) == ()
+        )
 
+        # Partially covered compound span is still recalled as soft context.
+        partial = reader.query("冷凝伤害", locked_surfaces=("冷凝",))
+        assert [c.entity_id for c in partial] == ["term_concept:glacio_dmg"]
+        assert partial[0].lock_eligible is False
 
-
-
+        # Non-adjacent locks with an uncovered middle slice still recall it.
+        gapped = reader.query("冷凝伤害加成", locked_surfaces=("冷凝", "加成"))
+        assert [c.entity_id for c in gapped] == ["term_concept:glacio_dmg"]
+        assert gapped[0].lock_eligible is False
 

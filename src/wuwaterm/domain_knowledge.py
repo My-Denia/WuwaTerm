@@ -171,12 +171,22 @@ def find_normalized_spans(
 
 
 def _occupied_spans(
-    index: NormalizedTextIndex, surfaces: Collection[str]
+    text: str, index: NormalizedTextIndex, surfaces: Collection[str]
 ) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for surface in surfaces:
         spans.extend(find_normalized_spans(index, surface))
-    return spans
+    if len(spans) <= 1:
+        return spans
+    spans.sort()
+    merged: list[tuple[int, int]] = [spans[0]]
+    for start, end in spans[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end or not normalize_text(text[prev_end:start]):
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _is_span_covered(span: tuple[int, int], occupied: list[tuple[int, int]]) -> bool:
@@ -287,7 +297,7 @@ def select_domain_knowledge_candidates(
     blocked_norm = {
         norm for surface in blocked_surfaces if (norm := normalize_text(surface))
     }
-    occupied = _occupied_spans(norm_index, blocked_surfaces)
+    occupied = _occupied_spans(text, norm_index, blocked_surfaces)
 
     ordered = sorted(
         candidates,
