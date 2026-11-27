@@ -993,9 +993,11 @@ def test_derived_name_rows_reach_the_zh_en_model_as_references(monkeypatch, name
 
 def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path):
     texts = {
-        # Official non-CJK acronyms/titles and dotted initialisms must stay.
+        # Official non-CJK acronyms, dotted initialisms, and titled items must stay.
         "Term151106_Title": ("SQL", "SQL"),
         "ItemInfo_54006_Name": ("VIOLET", "VIOLET"),
+        "ItemInfo_71200009_Name": ("「All Eyes On You」", '"All Eyes On You"'),
+        "ItemInfo_71200099_Name": ("《All Eyes On You》", '"All Eyes On You"'),
         "Speaker_100086_Name": ("N.A.N.A.", "N.A.N.A."),
         # Isolated test/ markers (zh has CJK, en has alpha).
         "Skill_1001908_SkillName": ("test/巧手烹调", "Skillful Cooking"),
@@ -1022,6 +1024,8 @@ def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path)
     table_rows = {
         "item/iteminfo.json": [
             {"Id": 54006, "Name": "ItemInfo_54006_Name"},
+            {"Id": 71200009, "Name": "ItemInfo_71200009_Name"},
+            {"Id": 71200099, "Name": "ItemInfo_71200099_Name"},
             {"Id": 31000013, "Name": "ItemInfo_31000013_Name"},
             {"Id": 31000099, "Name": "ItemInfo_31000099_Name"},
             {"Id": 70139310, "Name": "ItemInfo_70139310_Name"},
@@ -1062,6 +1066,8 @@ def test_iter_records_filters_test_punct_non_cjk_and_error_noise(tmp_path: Path)
     assert [(r.category, r.source_id, r.zh, r.en) for r in records] == [
         ("core_term", "Term151106_Title", "SQL", "SQL"),
         ("item", "54006", "VIOLET", "VIOLET"),
+        ("item", "71200009", "「All Eyes On You」", '"All Eyes On You"'),
+        ("item", "71200099", "《All Eyes On You》", '"All Eyes On You"'),
         ("item", "70139310", "日晷", "Sundial"),
         ("speaker", "100086", "N.A.N.A.", "N.A.N.A."),
         ("speaker", "1304", "今汐", "Jinhsi"),
@@ -1077,8 +1083,11 @@ def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
     texts = {
         "Speaker_288_Name": ("我", "Rover"),
         "Speaker_900220_Name": ("通讯", "Contacting"),
-        # Conflicting comm-suffix entries must not shadow existing exact hits,
-        # even when their speaker row appears before the suffix-free row.
+        # Exact-pair duplicate comm entry (same zh_norm & en_norm) is dropped.
+        "Speaker_800498_Name": ("穗穗（通讯中）", "Suisui"),
+        "Speaker_1110_Name": ("穗穗", "Suisui"),
+        # Single-sided conflict comm entries keep their original suffix so they
+        # neither shadow existing primaries nor disappear from exact lookup.
         "Speaker_850656_Name": ("知远（通讯中）", "Zhiyuan"),
         "Speaker_858_Name": ("致远", "Zhiyuan"),
         "Speaker_850632_Name": ("残星会会长（通讯中）", "Fractsidus Grand Architect"),
@@ -1098,6 +1107,8 @@ def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
             [
                 {"Id": 288},
                 {"Id": 900220},
+                {"Id": 800498},
+                {"Id": 1110},
                 {"Id": 850656},
                 {"Id": 858},
                 {"Id": 850632},
@@ -1120,9 +1131,12 @@ def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
     ]
 
     assert [(r.source_id, r.zh, r.en) for r in records] == [
+        ("1110", "穗穗", "Suisui"),
         ("858", "致远", "Zhiyuan"),
         ("250069", "残星会会长", "Grand Architect"),
         ("1001", "景燃", "Jingran"),
+        ("850656", "知远（通讯中）", "Zhiyuan"),
+        ("850632", "残星会会长（通讯中）", "Fractsidus Grand Architect"),
         ("200014", "阿尔伯特先生", "Mr. Alberto"),
         ("750563", "认真的天工匠", "Focused Artisan"),
         ("100058", "布兰特", "Brant"),
@@ -1144,13 +1158,66 @@ def test_iter_records_cleans_speaker_comm_suffix_and_preserves_exact_lookup(
         ),
     )
     service = TermService(db_path)
-    assert [(c.entry.zh, c.entry.en) for c in service.lookup_exact("Zhiyuan").candidates] == [
-        ("致远", "Zhiyuan")
-    ]
+    assert [
+        (c.entry.zh, c.entry.en) for c in service.lookup_exact("Zhiyuan").candidates
+    ] == [("致远", "Zhiyuan"), ("知远（通讯中）", "Zhiyuan")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("知远（通讯中）").candidates
+    ] == [("知远（通讯中）", "Zhiyuan")]
     assert [
         (c.entry.zh, c.entry.en)
         for c in service.lookup_exact("残星会会长").candidates
     ] == [("残星会会长", "Grand Architect")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("Fractsidus Grand Architect").candidates
+    ] == [("残星会会长（通讯中）", "Fractsidus Grand Architect")]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("《All Eyes On You》").candidates
+    ] == []  # synthetic speaker DB has no item rows
+
+
+def test_titled_non_cjk_item_exact_lookup(tmp_path: Path):
+    from wuwaterm.constants import SOURCE_PROFILES
+    from wuwaterm.lookup import TermService
+
+    texts = {
+        "ItemInfo_71200009_Name": ("「All Eyes On You」", '"All Eyes On You"'),
+        "ItemInfo_71200099_Name": ("《All Eyes On You》", '"All Eyes On You"'),
+    }
+    table_rows = {
+        "item/iteminfo.json": [
+            {"Id": 71200009, "Name": "ItemInfo_71200009_Name"},
+            {"Id": 71200099, "Name": "ItemInfo_71200099_Name"},
+        ],
+    }
+    root = _write_arikatsu(tmp_path / "arikatsu", texts, table_rows)
+    profile = SOURCE_PROFILES["arikatsu"]
+    db_path = tmp_path / "titled_lookup.db"
+    create_database(
+        db_path,
+        iter_records(root, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
+    service = TermService(db_path)
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("「All Eyes On You」").candidates
+    ] == [("「All Eyes On You」", '"All Eyes On You"')]
+    assert [
+        (c.entry.zh, c.entry.en)
+        for c in service.lookup_exact("《All Eyes On You》").candidates
+    ] == [("《All Eyes On You》", '"All Eyes On You"')]
 
 
 def test_iter_records_filters_generic_cooking_staple_items(tmp_path: Path):

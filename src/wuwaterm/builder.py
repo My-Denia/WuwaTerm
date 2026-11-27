@@ -200,12 +200,17 @@ _ERROR_PLACEHOLDER_EN_SUBSTRINGS = (
 
 
 def _is_allowed_non_cjk_zh(zh: str) -> bool:
-    """Allow official uppercase acronyms/titles and dotted initialisms without CJK."""
+    """Allow official uppercase acronyms, dotted initialisms, and titled items."""
     if _UPPER_ACRONYM_RE.fullmatch(zh):
         return True
-    return bool(
-        _DOTTED_INITIALISM_RE.fullmatch(zh) and any("A" <= ch <= "Z" for ch in zh)
-    )
+    if _DOTTED_INITIALISM_RE.fullmatch(zh) and any("A" <= ch <= "Z" for ch in zh):
+        return True
+    if (zh.startswith("《") and zh.endswith("》")) or (
+        zh.startswith("「") and zh.endswith("」")
+    ):
+        inner = zh[1:-1].strip()
+        return any("A" <= ch <= "Z" or "a" <= ch <= "z" for ch in inner)
+    return False
 
 
 def _has_speaker_comm_suffix(zh: str, en: str) -> bool:
@@ -519,13 +524,18 @@ def iter_arikatsu_records(
 
         if comm_speakers:
             # Defer suffix-stripped speakers until every non-comm record across
-            # all tables is collected so a stripped row never shadows or alters
-            # an existing exact-lookup primary such as Zhiyuan -> 致远 or
-            # 残星会会长 -> Grand Architect.
-            covered_zh = {normalize_text(r.zh) for r in records}
-            covered_en = {normalize_text(r.en) for r in records}
+            # all tables is collected: drop exact (zh_norm, en_norm) duplicates
+            # and noise, keep original suffixed rows on single-sided conflicts
+            # (preserving Zhiyuan -> 致远, 残星会会长 -> Grand Architect, and the
+            # reverse exact lookup for Fractsidus Grand Architect / 知远（通讯中）),
+            # and strip the suffix only when neither side collides.
+            covered_pairs = {
+                (normalize_text(r.zh), normalize_text(r.en)) for r in records
+            }
+            covered_zh = {zh_norm for zh_norm, _ in covered_pairs}
+            covered_en = {en_norm for _, en_norm in covered_pairs}
             for source_id, text_key in comm_speakers:
-                record = _record_for_key(
+                cleaned = _record_for_key(
                     category="speaker",
                     source_file="BinData/speaker/speaker.json",
                     source_id=source_id,
@@ -534,15 +544,29 @@ def iter_arikatsu_records(
                     en_map=en_map,
                     strip_speaker_comm=True,
                 )
-                if record is None:
+                if cleaned is None:
                     continue
-                zh_norm = normalize_text(record.zh)
-                en_norm = normalize_text(record.en)
+                zh_norm = normalize_text(cleaned.zh)
+                en_norm = normalize_text(cleaned.en)
+                if (zh_norm, en_norm) in covered_pairs:
+                    continue
                 if zh_norm in covered_zh or en_norm in covered_en:
+                    original = _record_for_key(
+                        category="speaker",
+                        source_file="BinData/speaker/speaker.json",
+                        source_id=source_id,
+                        text_key=text_key,
+                        zh_map=zh_map,
+                        en_map=en_map,
+                        strip_speaker_comm=False,
+                    )
+                    if original is not None:
+                        records.append(original)
                     continue
+                covered_pairs.add((zh_norm, en_norm))
                 covered_zh.add(zh_norm)
                 covered_en.add(en_norm)
-                records.append(record)
+                records.append(cleaned)
 
     # Derived last, so an exact pair already present in another source is not
     # repeated. A shared surface with a different counterpart stays available
