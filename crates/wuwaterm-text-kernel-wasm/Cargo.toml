@@ -1,0 +1,16 @@
+[package]
+name = "wuwaterm-text-kernel-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "WebAssembly (wasm32-unknown-unknown) bindings for WuwaTerm shared text kernel."
+
+[lib]
+name = "wuwaterm_text_kernel_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wuwaterm-text-kernel = { path = "../wuwaterm-text-kernel" }

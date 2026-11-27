@@ -5,7 +5,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
 
 import pytest
 
@@ -24,6 +29,7 @@ from wuwaterm.cjk_span import (
     _SINGLE_NAME_HONORIFICS,
     _SINGLE_NAME_PARTICLES,
     _WORDS,
+    _matcher_revision,
     classify_single_character_mention,
     crosses_cjk_word_boundary,
     single_character_compound_at,
@@ -305,3 +311,78 @@ def test_ambiguous_and_ordinary_single_char_stay_out_of_review_v2(sample_db):
             service, text, "Ordinary translation.", "en", review_version=RULE_VERSION_V2
         )
         assert report.findings == ()
+
+
+def test_external_lexicon_file_and_matcher_revision_consistency():
+    lexicon_path = ROOT / "src" / "wuwaterm" / "cjk_words.txt"
+    lines = lexicon_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == LEXICON_COUNT == 66315
+    assert all(line and line == line.strip() for line in lines)
+    assert lines == sorted(lines)
+    assert frozenset(lines) == _WORDS
+    assert MATCHER_REVISION == _matcher_revision(_WORDS)
+
+
+def test_lexicon_is_loaded_lazily_on_first_use():
+    script = """
+import wuwaterm.cjk_span as cjk_span
+
+assert "_WORDS" not in cjk_span.__dict__
+assert cjk_span.MATCHER_REVISION == "286d29e8f25b1ee53d0634c89bf6fb8a83ef950888c21f15d485413cb25d0664"
+assert cjk_span.crosses_cjk_word_boundary("随遇而安可以，但别放弃。", 3, 5) is True
+assert "_WORDS" in cjk_span.__dict__
+assert len(cjk_span._WORDS) == cjk_span.LEXICON_COUNT
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_concurrent_first_load_initializes_words_once(monkeypatch):
+    import wuwaterm.cjk_span as cjk_span
+
+    real_load = cjk_span._load_words
+    load_calls = 0
+    monkeypatch.delitem(cjk_span.__dict__, "_WORDS", raising=False)
+
+    def slow_load() -> frozenset[str]:
+        nonlocal load_calls
+        load_calls += 1
+        time.sleep(0.02)
+        return real_load()
+
+    monkeypatch.setattr(cjk_span, "_load_words", slow_load)
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[bool, frozenset[str]]] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            matched = span_inside_known_word("音乐家使用变奏曲并入场。", 5, 7)
+            results.append((matched, cjk_span._WORDS))
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert not errors
+    assert load_calls == 1
+    assert len(results) == 2
+    assert results[0][0] is True and results[1][0] is True
+    assert results[0][1] is results[1][1] is cjk_span._WORDS

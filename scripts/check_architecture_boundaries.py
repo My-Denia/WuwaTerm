@@ -4,7 +4,7 @@
 Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     attribution_candidates, domain_knowledge, knowledge_db,
-                   lookup, normalize, models, review,
+                   lookup, native_kernel, normalize, models, review,
                    cjk_span, document_anchor, protected_text, english_plural,
                    segmentation, semantic_review_contract, single_char_context,
                    skill_references, term_classification, term_matching,
@@ -112,6 +112,7 @@ DOMAIN_CORE = frozenset(
         "domain_knowledge",
         "knowledge_db",
         "lookup",
+        "native_kernel",
         "normalize",
         "models",
         "review",
@@ -138,6 +139,7 @@ PURE_MATCHING = frozenset(
     {
         "attribution_candidates",
         "domain_knowledge",
+        "native_kernel",
         "term_matching",
         "term_preparation",
         "cjk_span",

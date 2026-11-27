@@ -738,6 +738,7 @@ def test_pure_term_modules_do_not_reach_lookup_or_db_transitively():
         "document_anchor",
         "domain_knowledge",
         "english_plural",
+        "native_kernel",
         "protected_text",
         "segmentation",
         "single_char_context",

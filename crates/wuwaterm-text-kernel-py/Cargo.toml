@@ -1,0 +1,19 @@
+[package]
+name = "wuwaterm-text-kernel-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "PyO3 / maturin Python native extension for WuwaTerm shared text kernel."
+
+[lib]
+name = "_wuwaterm_text_kernel"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = "0.25"
+wuwaterm-text-kernel = { path = "../wuwaterm-text-kernel" }
