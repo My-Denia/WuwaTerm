@@ -45,6 +45,8 @@ from .provider_capabilities import (
     clamp_effort_to_ceiling,
     parse_concrete_thinking_mode,
     parse_configured_thinking_mode,
+    redact_effective_effort,
+    redact_provider_profile_name,
     resolve_provider_profile_from_env as resolve_provider_profile_from_env,
 )
 from .semantic_review_contract import PRECEDENT_WORDING
@@ -52,6 +54,7 @@ from .structural_checks import paragraph_line_counts as paragraph_line_counts
 from .term_preparation import (
     CONTEXTUAL_REFERENCE_CATEGORIES,
     AmbiguousMention,
+    TermOccurrence,
     TermReference,
     format_ambiguous_mention_lines,
     format_scoped_reference_lines,
@@ -509,18 +512,83 @@ def analyze_term_planning(
     )
 
 
-def demote_ambiguous_locks(
+def _remap_occurrence_for_edits(
+    occ: TermOccurrence,
+    edits: Sequence[tuple[int, int, int]],
+) -> TermOccurrence:
+    if type(occ.model_start) is not int or type(occ.model_end) is not int:
+        return occ
+    start_shift = sum(delta for _s, edit_end, delta in edits if edit_end <= occ.model_start)
+    end_shift = sum(delta for _s, edit_end, delta in edits if edit_end <= occ.model_end)
+    if start_shift == 0 and end_shift == 0:
+        return occ
+    return TermOccurrence(
+        start=occ.start,
+        end=occ.end,
+        matched_text=occ.matched_text,
+        segment_index=occ.segment_index,
+        model_start=occ.model_start + start_shift,
+        model_end=occ.model_end + end_shift,
+    )
+
+
+def _remap_reference_for_edits(
+    ref: TermReference,
+    edits: Sequence[tuple[int, int, int]],
+) -> TermReference:
+    if not edits or not ref.occurrences:
+        return ref
+    remapped = tuple(_remap_occurrence_for_edits(occ, edits) for occ in ref.occurrences)
+    if remapped == ref.occurrences:
+        return ref
+    return TermReference(
+        source=ref.source,
+        zh=ref.zh,
+        en=ref.en,
+        category=ref.category,
+        occurrences=remapped,
+        origin=ref.origin,
+        reason=ref.reason,
+    )
+
+
+def _remap_ambiguous_for_edits(
+    mention: AmbiguousMention,
+    edits: Sequence[tuple[int, int, int]],
+) -> AmbiguousMention:
+    if not edits:
+        return mention
+    remapped = _remap_occurrence_for_edits(mention.occurrence, edits)
+    if remapped == mention.occurrence:
+        return mention
+    return AmbiguousMention(
+        source=mention.source,
+        zh=mention.zh,
+        en=mention.en,
+        category=mention.category,
+        occurrence=remapped,
+        evaluation=mention.evaluation,
+    )
+
+
+def demote_ambiguous_locks_with_mentions(
     locked_text: str,
     locks: Sequence[tuple[str, str, str]],
     references: Sequence[TermReference],
     *,
     to_chinese: bool,
     ambiguous: Sequence[AmbiguousMention] = (),
-) -> tuple[str, tuple[tuple[str, str, str], ...], tuple[TermReference, ...]]:
+) -> tuple[
+    str,
+    tuple[tuple[str, str, str], ...],
+    tuple[TermReference, ...],
+    tuple[AmbiguousMention, ...],
+]:
     """Convert any ambiguous/ordinary-word lock back into a contextual candidate.
 
-    Ensures the planning layer never leaves an ordinary-word-overlapping or
-    candidate-colliding term trapped inside an immutable placeholder lock.
+    Replaces demoted placeholders in ``locked_text`` and remaps ``model_start`` /
+    ``model_end`` coordinates on every existing ``TermReference`` and
+    ``AmbiguousMention`` so scoped range validation stays exact.
     """
     coerced_refs = [coerce_term_reference(ref) for ref in references]
     existing_keys = {ref.dedupe_key() for ref in coerced_refs}
@@ -529,8 +597,10 @@ def demote_ambiguous_locks(
     } | {mention.source.casefold() for mention in ambiguous}
 
     source_index = 2 if to_chinese else 1
-    new_text = locked_text
     kept_locks: list[tuple[str, str, str]] = []
+    replacements: list[tuple[int, int, str]] = []
+    demoted_refs: list[TermReference] = []
+
     for lock in locks:
         placeholder, zh, en = lock
         surface = lock[source_index]
@@ -541,7 +611,10 @@ def demote_ambiguous_locks(
             or surface.casefold() in candidate_surfaces_cf
         )
         if is_ambiguous_lock:
-            new_text = new_text.replace(placeholder, surface)
+            pos = locked_text.find(placeholder)
+            while pos != -1:
+                replacements.append((pos, pos + len(placeholder), surface))
+                pos = locked_text.find(placeholder, pos + len(placeholder))
             demoted = TermReference(
                 source=surface,
                 zh=zh,
@@ -554,10 +627,66 @@ def demote_ambiguous_locks(
             )
             if demoted.dedupe_key() not in existing_keys:
                 existing_keys.add(demoted.dedupe_key())
-                coerced_refs.append(demoted)
+                demoted_refs.append(demoted)
         else:
             kept_locks.append(lock)
-    return new_text, tuple(kept_locks), tuple(coerced_refs)
+
+    if not replacements:
+        return (
+            locked_text,
+            tuple(kept_locks),
+            tuple([*coerced_refs, *demoted_refs]),
+            tuple(ambiguous),
+        )
+
+    replacements.sort(key=lambda item: (item[0], item[1]))
+    pieces: list[str] = []
+    edits: list[tuple[int, int, int]] = []
+    cursor = 0
+    for start, end, surface in replacements:
+        if start < cursor:
+            continue
+        pieces.append(locked_text[cursor:start])
+        pieces.append(surface)
+        edits.append((start, end, len(surface) - (end - start)))
+        cursor = end
+    pieces.append(locked_text[cursor:])
+    new_text = "".join(pieces)
+
+    remapped_refs = [
+        _remap_reference_for_edits(ref, edits) for ref in coerced_refs
+    ]
+    remapped_refs.extend(demoted_refs)
+    remapped_ambiguous = tuple(
+        _remap_ambiguous_for_edits(mention, edits) for mention in ambiguous
+    )
+    return new_text, tuple(kept_locks), tuple(remapped_refs), remapped_ambiguous
+
+
+def demote_ambiguous_locks(
+    locked_text: str,
+    locks: Sequence[tuple[str, str, str]],
+    references: Sequence[TermReference],
+    *,
+    to_chinese: bool,
+    ambiguous: Sequence[AmbiguousMention] = (),
+) -> tuple[str, tuple[tuple[str, str, str], ...], tuple[TermReference, ...]]:
+    """Convert any ambiguous/ordinary-word lock back into a contextual candidate.
+
+    Ensures the planning layer never leaves an ordinary-word-overlapping or
+    candidate-colliding term trapped inside an immutable placeholder lock,
+    remapping occurrence coordinates on all surviving references.
+    """
+    new_text, kept_locks, remapped_refs, _remapped_ambiguous = (
+        demote_ambiguous_locks_with_mentions(
+            locked_text,
+            locks,
+            references,
+            to_chinese=to_chinese,
+            ambiguous=ambiguous,
+        )
+    )
+    return new_text, kept_locks, remapped_refs
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1227,7 @@ class RequestPolicy:
         return (
             configured == TRANSLATION_THINKING_AUTO
             and initial_thinking_mode in TRANSLATION_THINKING_REASONING_MODES
+            and provider_profile.supports_disable_thinking
             and provider_profile.distinguishes_thinking_modes(
                 initial_thinking_mode, "disabled"
             )
@@ -1127,17 +1257,19 @@ class RequestPolicy:
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
         prepared_scalars: int | None = None,
     ) -> ConcreteThinkingMode:
+        target_mode, _ = clamp_effort_to_ceiling("low", self.auto_reasoning_ceiling)
         if (
             initial_thinking_mode == "disabled"
+            and target_mode != "disabled"
             and lock_count < self.auto_lock_limit
             and self.configured_mode(to_chinese=to_chinese)
             == TRANSLATION_THINKING_AUTO
-            and provider_profile.distinguishes_thinking_modes("disabled", "low")
+            and provider_profile.distinguishes_thinking_modes("disabled", target_mode)
             and self._repair_may_step_up(
                 to_chinese=to_chinese, prepared_scalars=prepared_scalars
             )
         ):
-            return "low"
+            return target_mode
         return initial_thinking_mode
 
     def _repair_may_step_up(
@@ -1610,14 +1742,20 @@ class TranslationPlan:
 
     def without_ambiguous_locks(self) -> TranslationPlan:
         """Return a plan with any ambiguous/ordinary-word locks demoted to candidates."""
-        new_text, new_locks, new_refs = demote_ambiguous_locks(
-            self.locked_text,
-            self.locks,
-            self.references,
-            to_chinese=self.to_chinese,
-            ambiguous=self.ambiguous,
+        new_text, new_locks, new_refs, new_ambiguous = (
+            demote_ambiguous_locks_with_mentions(
+                self.locked_text,
+                self.locks,
+                self.references,
+                to_chinese=self.to_chinese,
+                ambiguous=self.ambiguous,
+            )
         )
-        if new_locks == self.locks and new_refs == self.references:
+        if (
+            new_locks == self.locks
+            and new_refs == self.references
+            and new_ambiguous == self.ambiguous
+        ):
             return self
         return TranslationPlan(
             source_text=self.source_text,
@@ -1631,7 +1769,7 @@ class TranslationPlan:
             dictionary_identity=self.dictionary_identity,
             matcher_revision=self.matcher_revision,
             prompt_templates=self.prompt_templates,
-            ambiguous=self.ambiguous,
+            ambiguous=new_ambiguous,
         )
 
 
@@ -2038,18 +2176,27 @@ class TranslationRequestSpec:
             if self.timeout_seconds is not None
             else effective_timeout_seconds
         )
+        safe_cancel_reason = (
+            None
+            if cancel_reason is None
+            else (
+                cancel_reason
+                if cancel_reason in llm_transport.CONTROLLED_CANCEL_REASONS
+                else "custom"
+            )
+        )
         return {
             "direction": self.direction,
             "attempt_kind": self.attempt_kind,
             "configured_thinking_mode": self.configured_thinking_mode,
             "requested_effort": self.resolved_requested_effort,
-            "effective_effort": self.effective_effort,
+            "effective_effort": redact_effective_effort(self.effective_effort),
             "effort_omitted": self.effort_omitted,
             "effort_passthrough": self.effort_passthrough,
-            "provider_profile": self.provider_profile_name,
+            "provider_profile": redact_provider_profile_name(self.provider_profile_name),
             "timeout_seconds": float(timeout_val) if timeout_val is not None else None,
             "cancelled": cancelled,
-            "cancel_reason": cancel_reason,
+            "cancel_reason": safe_cancel_reason,
             "reasoning_decision": (
                 self.reasoning_decision.to_metadata_dict()
                 if self.reasoning_decision is not None

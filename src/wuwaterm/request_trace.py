@@ -154,15 +154,51 @@ _LLM_OUTCOMES: Final[frozenset[str]] = frozenset(
         "cancelled",
     }
 )
-_SAFE_TRACE_TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_BUILTIN_PROVIDER_PROFILES: Final[frozenset[str]] = frozenset(
+    {
+        "openai_compatible_deepseek",
+        "deepseek",
+        "openai_reasoning",
+        "openai",
+        "neon_gateway",
+        "neon",
+        "omit_all",
+    }
+)
+_KNOWN_WIRE_EFFORTS: Final[frozenset[str]] = frozenset(
+    {
+        "disabled",
+        "none",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+    }
+)
+_CUSTOM_FINGERPRINT_RE: Final = re.compile(r"^custom:[0-9a-f]{8}$")
 
 UNKNOWN_VALUE: Final = "-"
 
 
-def _safe_trace_token(value: object) -> str | None:
-    if type(value) is str and _SAFE_TRACE_TOKEN_RE.fullmatch(value):
+def _safe_effort_token(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    if value in _KNOWN_WIRE_EFFORTS or value == "custom" or _CUSTOM_FINGERPRINT_RE.fullmatch(value):
         return value
-    return None
+    return "custom"
+
+
+def _safe_profile_token(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    if value in _BUILTIN_PROVIDER_PROFILES or value == "custom" or _CUSTOM_FINGERPRINT_RE.fullmatch(value):
+        return value
+    return "custom"
 
 
 def direction_from_target(target: str | None) -> str:
@@ -461,11 +497,11 @@ class RequestTrace:
             if type(requested_effort) is str and requested_effort in _CONCRETE_THINKING_MODES:
                 self._requested_effort = requested_effort
         if effective_effort is not None:
-            token = _safe_trace_token(effective_effort)
+            token = _safe_effort_token(effective_effort)
             if token is not None:
                 self._effective_effort = token
         if provider_profile is not None:
-            token = _safe_trace_token(provider_profile)
+            token = _safe_profile_token(provider_profile)
             if token is not None:
                 self._provider_profile = token
 

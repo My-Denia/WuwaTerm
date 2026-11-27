@@ -392,14 +392,20 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 
 **For sentence translation (optional, shared by both surfaces):**
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
-plus the timeout and concurrency bounds beside them and
-`WUWATERM_TRANSLATION_THINKING_ZH_EN` and `WUWATERM_TRANSLATION_THINKING_EN_ZH`
-(default `disabled` into English and `omit` into Chinese; `omit` sends no reasoning
-field, so the provider default applies, and any explicit `disabled`, `low` or
-`high` names a mode. `auto` is the opt-in that picks `disabled` or `low` from the
-request's own shape — `WUWATERM_TRANSLATION_THINKING_EN_ZH=auto` by paragraph and
-lock count, and, as the ADR 0021 candidate, `WUWATERM_TRANSLATION_THINKING_ZH_EN=auto`
-by scalar length, paragraph count and lock count into English). Known regression
+plus the timeout and concurrency bounds beside them, optional provider profile
+settings (`WUWATERM_PROVIDER_PROFILE` / `WUWATERM_PROVIDER_CAPABILITIES_JSON`,
+defaulting to the DeepSeek OpenAI-compatible effort mapping), and
+`WUWATERM_TRANSLATION_THINKING_ZH_EN`, `WUWATERM_TRANSLATION_THINKING_EN_ZH`,
+and `WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT` (default `disabled` into
+English and `omit` into Chinese; `omit` sends no reasoning field, so the
+provider default applies, and any explicit `disabled`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`, or `ultra` names a semantic effort mode mapped
+by the active provider profile. `auto` is the opt-in that dynamically picks a
+mode from both timeout/shape guards — sending `disabled` when lock, paragraph,
+or Chinese-to-English scalar bounds are hit — and semantic complexity signals
+such as ambiguous/ordinary-word-overlapping candidates, multi-segment context,
+and complex syntax, scaling up to `WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT`
+(default `high`) within the available timeout budget). Known regression
 with `disabled` into English: a character-mechanic name that contains a
 one-character resonator name may be rendered with the resonator name; set
 `WUWATERM_TRANSLATION_THINKING_ZH_EN=omit` to restore the previous behaviour.

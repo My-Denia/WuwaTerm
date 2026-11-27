@@ -46,7 +46,8 @@ from wuwaterm.provider_capabilities import (
     resolve_provider_profile_from_env,
 )
 from wuwaterm.sentence import SentenceTranslator
-from wuwaterm.term_preparation import TermOccurrence, TermReference
+from wuwaterm.single_char_context import ContextEvaluation, EvidenceHit
+from wuwaterm.term_preparation import AmbiguousMention, TermOccurrence, TermReference
 from wuwaterm.termbase import UserGlossaryReference
 from wuwaterm.translation_plan import (
     TRANSLATION_THINKING_AUTO_CEILING_ENV,
@@ -324,7 +325,10 @@ def test_custom_openai_compatible_and_neon_gateway_profiles(
     assert sent[0]["reasoning_mode"] == "adaptive"
     assert "thinking" not in sent[0]
     assert "reasoning_effort" not in sent[0]
-    assert records[0].provider_profile == "neon_custom_gateway"
+    # Custom provider profile names are fingerprinted rather than passed verbatim to observers.
+    assert records[0].provider_profile is not None
+    assert records[0].provider_profile.startswith("custom:")
+    assert "neon_custom_gateway" not in records[0].provider_profile
     assert records[0].requested_effort == "max"
     assert records[0].effective_effort == "high"
 
@@ -532,7 +536,7 @@ def test_ambiguous_encore_contexts_provide_non_locking_candidates_and_escalate_e
         db_path, llm_transport=httpx.MockTransport(handler)
     )
     try:
-        # Case A: zh->en character context ("安可使用了共鸣技能。")
+        # Case A (natural end-to-end matching): zh->en character context ("安可使用了共鸣技能。")
         exact_a, plan_a = translator.plan_translation(
             "安可使用了共鸣技能。", to_chinese=False
         )
@@ -553,53 +557,53 @@ def test_ambiguous_encore_contexts_provide_non_locking_candidates_and_escalate_e
         )
         assert out_a == "Encore used her Resonance Skill."
 
-        # Case B: en->zh ordinary word context ("The audience demanded an encore.")
-        # Even when 'encore' matches resonator candidate, it MUST be provided as a
-        # non-locking contextual candidate so the model can translate it as 返场.
-        exact_b, plan_b = translator.plan_translation(
-            "The audience demanded an encore.", to_chinese=True
+        # Case B1 (natural end-to-end matching): capitalized "Encore" in en->zh stays
+        # non-locking contextual candidate AND escalates auto effort to high.
+        exact_b1, plan_b1 = translator.plan_translation(
+            "The audience shouted Encore after the show.", to_chinese=True
         )
-        assert exact_b is None and plan_b is not None
-        # Ensure 'encore' is NOT locked as a placeholder; if lowercase 'encore' is
-        # not auto-matched by exact casing, verify both raw plan and candidate plan.
-        assert plan_b.locks == ()
-        assert "__WUWA_TERM_" not in plan_b.locked_text
-        candidate_plan_b = (
-            plan_b
-            if plan_b.has_ambiguous_candidates
-            else TranslationPlan(
-                source_text=plan_b.source_text,
-                prepared_text=plan_b.prepared_text,
-                locked_text=plan_b.locked_text,
-                locks=plan_b.locks,
-                references=(
-                    TermReference(
-                        source="encore", zh="安可", en="Encore", category="resonator"
-                    ),
-                ),
-                to_chinese=True,
-                dictionary_identity=plan_b.dictionary_identity,
-            )
-        )
-        meta_b = candidate_plan_b.term_planning_metadata()
-        assert meta_b.has_ambiguous_candidates is True
-        assert meta_b.guidance_mode == "contextual_candidates"
-        assert meta_b.lock_candidate_collisions == ()
-        spec_b = translator.build_request_spec(candidate_plan_b)
-        assert spec_b.thinking_mode == "high"
-        assert spec_b.effective_effort == "high"
-        assert "ordinary English word" in spec_b.system_prompt
-        assert "encore = 安可 (resonator)" in spec_b.system_prompt
-        assert "__WUWA_TERM_" not in spec_b.user_prompt
-
-        # Also test capitalized "Encore" in en->zh through full translator path:
-        # resonator category stays non-locking contextual candidate AND escalates to high.
-        out_b = asyncio.run(
+        assert exact_b1 is None and plan_b1 is not None
+        assert plan_b1.locks == ()
+        assert plan_b1.has_ambiguous_candidates is True
+        out_b1 = asyncio.run(
             translator.translate_async(
                 "The audience shouted Encore after the show.", to_chinese=True
             )
         )
-        assert out_b == "观众要求返场。"
+        assert out_b1 == "观众要求返场。"
+
+        # Case B2 (explicitly constructed lowercase candidate plan): lowercase "encore"
+        # in "The audience demanded an encore." is not auto-locked; when provided as a
+        # contextual candidate reference, the planner treats it as ambiguous and escalates.
+        exact_b2, plan_b2 = translator.plan_translation(
+            "The audience demanded an encore.", to_chinese=True
+        )
+        assert exact_b2 is None and plan_b2 is not None
+        assert plan_b2.locks == ()
+        assert "__WUWA_TERM_" not in plan_b2.locked_text
+        explicit_candidate_plan = TranslationPlan(
+            source_text=plan_b2.source_text,
+            prepared_text=plan_b2.prepared_text,
+            locked_text=plan_b2.locked_text,
+            locks=(),
+            references=(
+                TermReference(
+                    source="encore", zh="安可", en="Encore", category="resonator"
+                ),
+            ),
+            to_chinese=True,
+            dictionary_identity=plan_b2.dictionary_identity,
+        )
+        meta_b2 = explicit_candidate_plan.term_planning_metadata()
+        assert meta_b2.has_ambiguous_candidates is True
+        assert meta_b2.guidance_mode == "contextual_candidates"
+        assert meta_b2.lock_candidate_collisions == ()
+        spec_b2 = translator.build_request_spec(explicit_candidate_plan)
+        assert spec_b2.thinking_mode == "high"
+        assert spec_b2.effective_effort == "high"
+        assert "ordinary English word" in spec_b2.system_prompt
+        assert "encore = 安可 (resonator)" in spec_b2.system_prompt
+        assert "__WUWA_TERM_" not in spec_b2.user_prompt
     finally:
         remove_obs()
         asyncio.run(translator.aclose())
@@ -939,3 +943,439 @@ def test_env_auto_ceiling_and_execution_metadata_dict(
     assert meta["term_planning"]["disambiguation_required"] is True
     assert "encore" not in json.dumps(meta).lower()
     assert "audience" not in json.dumps(meta).lower()
+
+
+# ---------------------------------------------------------------------------
+# 4. Regression tests for review findings (budget/ceiling, cancel races,
+#    strict config JSON, coordinate remapping, redaction, non-disable fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_post_slot_budget_and_client_timeout_align_effort_and_recorded_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1A: auto effort & recorded timeout must match actual post-slot budget."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "auto")
+
+    # Subcase A: translator configured with 18s client timeout must cap auto to low
+    # and record timeout_seconds=18.0 (never 45.0).
+    seen_bodies: list[dict[str, Any]] = []
+    seen_read_timeouts: list[float] = []
+    records: list[llm_transport.LlmCallRecord] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_bodies.append(json.loads(request.content))
+        seen_read_timeouts.append(float(request.extensions["timeout"]["read"]))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "Encore used Resonance Skill."}}]}
+        )
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    short_translator = SentenceTranslator(
+        db_path,
+        llm_timeout_seconds=18.0,
+        llm_transport=httpx.MockTransport(handler),
+    )
+    try:
+        asyncio.run(
+            short_translator.translate_async("安可使用了共鸣技能。", to_chinese=False)
+        )
+    finally:
+        remove_obs()
+        asyncio.run(short_translator.aclose())
+
+    assert seen_bodies[0]["reasoning_effort"] == "low"
+    assert seen_read_timeouts[0] == pytest.approx(18.0)
+    assert records[0].requested_effort == "low"
+    assert records[0].timeout_seconds == pytest.approx(18.0)
+
+    # Subcase B: budget starts at 40s, but waiting in concurrency slot drains it to 18s;
+    # post-slot resolution must pick low and send/record ~18s timeout.
+    now = [100.0]
+    budget = OperationExecutionBudget.for_segments(
+        1, timeout_seconds=40.0, clock=lambda: now[0]
+    )
+    seen_bodies.clear()
+    seen_read_timeouts.clear()
+    records.clear()
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    queued_translator = SentenceTranslator(
+        db_path,
+        llm_timeout_seconds=45.0,
+        llm_max_concurrency=1,
+        llm_transport=httpx.MockTransport(handler),
+    )
+
+    async def run_queued() -> None:
+        slots = queued_translator._current_llm_slots()
+        await slots.acquire()
+        task = asyncio.create_task(
+            queued_translator.translate_async(
+                "安可使用了共鸣技能。",
+                to_chinese=False,
+                execution_budget=budget,
+            )
+        )
+        await asyncio.sleep(0)
+        # Simulate 22s spent waiting in slot queue -> 18s remaining upon slot acquisition.
+        now[0] = 122.0
+        slots.release()
+        await task
+
+    try:
+        asyncio.run(run_queued())
+    finally:
+        remove_obs()
+        asyncio.run(queued_translator.aclose())
+
+    assert seen_bodies[0]["reasoning_effort"] == "low"
+    assert seen_read_timeouts[0] == pytest.approx(18.0)
+    assert records[0].requested_effort == "low"
+    assert records[0].timeout_seconds == pytest.approx(18.0)
+
+
+def test_paragraph_repair_respects_auto_reasoning_ceiling() -> None:
+    """Finding 1B: paragraph_repair_thinking_mode must never exceed auto_reasoning_ceiling."""
+    policy_disabled_ceiling = RequestPolicy(
+        configured_thinking_en_zh="auto",
+        auto_reasoning_ceiling="disabled",
+    )
+    assert (
+        policy_disabled_ceiling.paragraph_repair_thinking_mode(
+            to_chinese=True,
+            initial_thinking_mode="disabled",
+            lock_count=1,
+        )
+        == "disabled"
+    )
+    policy_minimal_ceiling = RequestPolicy(
+        configured_thinking_en_zh="auto",
+        auto_reasoning_ceiling="minimal",
+    )
+    assert (
+        policy_minimal_ceiling.paragraph_repair_thinking_mode(
+            to_chinese=True,
+            initial_thinking_mode="disabled",
+            lock_count=1,
+        )
+        == "minimal"
+    )
+
+
+def test_cooperative_cancel_race_with_response_and_timeout_always_records_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 2: cooperative cancel racing with HTTP 200 or ReadTimeout never returns ok/timeout."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "disabled")
+
+    # Race A: budget.cancel fires synchronously inside transport before returning 200 OK.
+    budget_ok = OperationExecutionBudget.for_segments(1)
+    records_ok: list[llm_transport.LlmCallRecord] = []
+
+    def handler_cancel_then_ok(_request: httpx.Request) -> httpx.Response:
+        budget_ok.cancel("user_cancelled")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "MUST NOT BE RETURNED"}}]}
+        )
+
+    remove_obs = llm_transport.add_call_observer(records_ok.append)
+    translator_ok = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(handler_cancel_then_ok)
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError) as exc_ok:
+            asyncio.run(
+                translator_ok.translate_async(
+                    "你好世界。",
+                    to_chinese=False,
+                    propagate_errors=True,
+                    execution_budget=budget_ok,
+                )
+            )
+    finally:
+        remove_obs()
+        asyncio.run(translator_ok.aclose())
+
+    assert exc_ok.value.reason == "cancelled"
+    assert len(records_ok) == 1
+    assert records_ok[0].outcome == "cancelled"
+    assert records_ok[0].cancelled is True
+    assert records_ok[0].cancel_reason == "user_cancelled"
+
+    # Race B: budget.cancel fires concurrently with httpx.ReadTimeout.
+    budget_to = OperationExecutionBudget.for_segments(1)
+    records_to: list[llm_transport.LlmCallRecord] = []
+
+    def handler_cancel_then_timeout(request: httpx.Request) -> httpx.Response:
+        budget_to.cancel("client_disconnected")
+        raise httpx.ReadTimeout("raced timeout", request=request)
+
+    remove_obs = llm_transport.add_call_observer(records_to.append)
+    translator_to = SentenceTranslator(
+        db_path, llm_transport=httpx.MockTransport(handler_cancel_then_timeout)
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError) as exc_to:
+            asyncio.run(
+                translator_to.translate_async(
+                    "你好世界。",
+                    to_chinese=False,
+                    propagate_errors=True,
+                    execution_budget=budget_to,
+                )
+            )
+    finally:
+        remove_obs()
+        asyncio.run(translator_to.aclose())
+
+    assert exc_to.value.reason == "cancelled"
+    assert len(records_to) == 1
+    assert records_to[0].outcome == "cancelled"
+    assert records_to[0].cancelled is True
+    assert records_to[0].cancel_reason == "client_disconnected"
+
+
+def test_provider_config_strict_json_validation_and_lossless_structure_thaw() -> None:
+    """Finding 3: reject string bools / null effort values and preserve {} vs [[k, v]]."""
+    with pytest.raises(ValueError, match="supports_structured_output must be a boolean"):
+        provider_profile_from_config({"supports_structured_output": "false"})
+    with pytest.raises(ValueError, match="supports_disable_thinking must be a boolean"):
+        provider_profile_from_config({"supports_disable_thinking": "false"})
+    with pytest.raises(ValueError, match="effort_mapping"):
+        provider_profile_from_config({"effort_mapping": {"high": None}})
+    with pytest.raises(ValueError, match="effort_mapping"):
+        provider_profile_from_config({"effort_mapping": {"high": 123}})
+
+    # Lossless JSON round-trip: nested empty dict stays {}, pair list stays list.
+    profile = provider_profile_from_config(
+        {
+            "name": "nested_json_gateway",
+            "thinking_protocol": "custom_effort_mapping",
+            "enabled_extra_body": {
+                "options": {},
+                "pairs": [["k1", 1], ["k2", 2]],
+                "empty_list": [],
+            },
+            "disabled_extra_body": {"options": {}},
+        }
+    )
+    res_high = profile.resolve_effort("high")
+    assert res_high.extra_body == {
+        "options": {},
+        "pairs": [["k1", 1], ["k2", 2]],
+        "empty_list": [],
+        "reasoning_effort": "high",
+    }
+    assert isinstance(res_high.extra_body["options"], dict)
+    assert isinstance(res_high.extra_body["pairs"], list)
+    assert isinstance(res_high.extra_body["empty_list"], list)
+    assert profile.resolve_effort("disabled").extra_body == {"options": {}}
+
+
+def test_without_ambiguous_locks_remaps_scoped_reference_and_ambiguous_mention_offsets() -> None:
+    """Finding 4: demoting placeholders remaps downstream reference and mention coordinates."""
+    placeholder = "__WUWA_TERM_1111111111111111_0000__"
+    locked_text = f"{placeholder}和椿以及秧在战斗。"
+    camellya_start = locked_text.index("椿")
+    yang_start = locked_text.index("秧")
+
+    plan = TranslationPlan(
+        source_text="安可和椿以及秧在战斗。",
+        prepared_text="安可和椿以及秧在战斗。",
+        locked_text=locked_text,
+        locks=((placeholder, "安可", "Encore"),),
+        references=(
+            TermReference(
+                source="椿",
+                zh="椿",
+                en="Camellya",
+                category="resonator",
+                occurrences=(
+                    TermOccurrence(
+                        start=3,
+                        end=4,
+                        matched_text="椿",
+                        segment_index=0,
+                        model_start=camellya_start,
+                        model_end=camellya_start + 1,
+                    ),
+                ),
+                reason="single_char_name_mention",
+            ),
+        ),
+        ambiguous=(
+            AmbiguousMention(
+                source="秧",
+                zh="秧",
+                en="Yangyang",
+                category="resonator",
+                occurrence=TermOccurrence(
+                    start=6,
+                    end=7,
+                    matched_text="秧",
+                    segment_index=0,
+                    model_start=yang_start,
+                    model_end=yang_start + 1,
+                ),
+                evaluation=ContextEvaluation(
+                    hits=(
+                        EvidenceHit("same_paragraph_entity", ((3, 4),)),
+                        EvidenceHit("position_context", ((0, 2),)),
+                    )
+                ),
+            ),
+        ),
+        to_chinese=False,
+    )
+
+    safe_plan = plan.without_ambiguous_locks()
+    assert safe_plan.locked_text == "安可和椿以及秧在战斗。"
+    camellya_ref = next(ref for ref in safe_plan.references if ref.source == "椿")
+    occ = camellya_ref.occurrences[0]
+    assert occ.model_start == 3 and occ.model_end == 4
+    assert safe_plan.locked_text[occ.model_start : occ.model_end] == "椿"
+    amb_occ = safe_plan.ambiguous[0].occurrence
+    assert amb_occ.model_start == 6 and amb_occ.model_end == 7
+    assert safe_plan.locked_text[amb_occ.model_start : amb_occ.model_end] == "秧"
+
+    # Building request spec with scoped_alternative exposure validates ranges cleanly.
+    spec = build_translation_request_spec(
+        safe_plan,
+        policy=RequestPolicy(ambiguous_mention_exposure="scoped_alternative"),
+        model=TEST_MODEL,
+    )
+    assert "Scoped term references:" in spec.system_prompt
+    assert "Low-confidence name candidates:" in spec.system_prompt
+
+
+def test_custom_profile_name_and_free_text_cancel_reason_are_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Finding 5: custom profile names and free-text cancel reasons never leak to logs/observers."""
+    db_path = _make_encore_db(tmp_path)
+    secret_profile_name = "sk-secret-gateway-name-777"
+    secret_cancel_reason = "abort-token-secret-888"
+    secret_effort_wire = "sk-secret-wire-effort-999"
+
+    custom_profile = build_custom_provider_profile(
+        name=secret_profile_name,
+        effort_mapping={"high": secret_effort_wire},
+    )
+    monkeypatch.setenv(TRANSLATION_THINKING_ZH_EN_ENV, "high")
+
+    budget = OperationExecutionBudget.for_segments(1)
+    records: list[llm_transport.LlmCallRecord] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        budget.cancel(secret_cancel_reason)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "late"}}]})
+
+    remove_obs = llm_transport.add_call_observer(records.append)
+    translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(handler),
+        provider_profile=custom_profile,
+    )
+    trace = request_trace.start()
+    try:
+        with caplog.at_level(logging.INFO, logger="wuwaterm.llm_transport"):
+            with pytest.raises(llm_transport.LLMTranslationError) as caught:
+                asyncio.run(
+                    translator.translate_async(
+                        "你好世界。",
+                        to_chinese=False,
+                        propagate_errors=True,
+                        execution_budget=budget,
+                    )
+                )
+    finally:
+        request_trace.reset()
+        remove_obs()
+        asyncio.run(translator.aclose())
+
+    assert caught.value.reason == "cancelled"
+    assert len(records) == 1
+    assert records[0].provider_profile is not None
+    assert records[0].provider_profile.startswith("custom:")
+    assert records[0].effective_effort is not None
+    assert records[0].effective_effort.startswith("custom:")
+    assert records[0].cancel_reason == "custom"
+
+    plan = TranslationPlan(
+        source_text="你好世界。",
+        prepared_text="你好世界。",
+        locked_text="你好世界。",
+        locks=(),
+        references=(),
+        to_chinese=False,
+    )
+    spec = build_translation_request_spec(
+        plan,
+        policy=RequestPolicy(configured_thinking_zh_en="high"),
+        provider_profile=custom_profile,
+        model=TEST_MODEL,
+    )
+    exec_meta = spec.execution_metadata_dict(
+        cancelled=True, cancel_reason=secret_cancel_reason
+    )
+    assert exec_meta["provider_profile"].startswith("custom:")
+    assert exec_meta["cancel_reason"] == "custom"
+
+    combined = (
+        caplog.text
+        + json.dumps(records[0].to_metadata_dict())
+        + json.dumps(exec_meta)
+        + trace.provider_profile
+        + trace.effective_effort
+    )
+    for forbidden in (secret_profile_name, secret_cancel_reason, secret_effort_wire):
+        assert forbidden not in combined
+
+
+def test_profile_without_disable_thinking_skips_timeout_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 6: profiles with supports_disable_thinking=False must not trigger disabled retry."""
+    db_path = _make_encore_db(tmp_path)
+    monkeypatch.setenv(TRANSLATION_THINKING_EN_ZH_ENV, "auto")
+
+    policy = RequestPolicy(configured_thinking_en_zh="auto", timeout_seconds=45.0)
+    assert (
+        policy.allows_timeout_fallback(
+            to_chinese=True,
+            initial_thinking_mode="low",
+            provider_profile=OPENAI_REASONING_PROVIDER_PROFILE,
+        )
+        is False
+    )
+
+    calls = 0
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    translator = SentenceTranslator(
+        db_path,
+        llm_transport=httpx.MockTransport(timeout_handler),
+        provider_profile=OPENAI_REASONING_PROVIDER_PROFILE,
+    )
+    try:
+        with pytest.raises(llm_transport.LLMTranslationError) as caught:
+            asyncio.run(
+                translator.translate_async(
+                    "Short line that times out.",
+                    to_chinese=True,
+                    propagate_errors=True,
+                )
+            )
+    finally:
+        asyncio.run(translator.aclose())
+
+    assert caught.value.reason == "timeout"
+    assert calls == 1
+

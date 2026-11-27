@@ -21,6 +21,7 @@ deterministic, and free of network or secret state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -193,24 +194,43 @@ def clamp_effort_to_ceiling(
     return effort, False
 
 
+@dataclass(frozen=True)
+class _FrozenJsonObject:
+    """Lossless, hashable wrapper for a JSON object (preserves ``{}`` vs ``[]``)."""
+
+    items: tuple[tuple[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class _FrozenJsonArray:
+    """Lossless, hashable wrapper for a JSON array (preserves pair lists vs dicts)."""
+
+    items: tuple[Any, ...]
+
+
 def _freeze_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
     if isinstance(value, Mapping):
-        return tuple(
-            (str(k), _freeze_value(v))
-            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
-        )
+        entries: list[tuple[str, Any]] = []
+        for k, v in sorted(value.items(), key=lambda item: str(item[0])):
+            if not isinstance(k, str):
+                raise ValueError("extra_body nested object keys must be strings")
+            entries.append((k, _freeze_value(v)))
+        return _FrozenJsonObject(tuple(entries))
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_value(item) for item in value)
-    return value
+        return _FrozenJsonArray(tuple(_freeze_value(item) for item in value))
+    raise ValueError(f"unsupported JSON value type in provider extra_body: {type(value).__name__}")
 
 
 def _thaw_value(value: Any) -> Any:
-    if isinstance(value, tuple):
-        if value and all(
-            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
-            for item in value
-        ):
-            return {k: _thaw_value(v) for k, v in value}
+    if isinstance(value, _FrozenJsonObject):
+        return {k: _thaw_value(v) for k, v in value.items}
+    if isinstance(value, _FrozenJsonArray):
+        return [_thaw_value(item) for item in value.items]
+    if isinstance(value, Mapping):
+        return {str(k): _thaw_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
         return [_thaw_value(item) for item in value]
     return value
 
@@ -235,13 +255,15 @@ def _freeze_extra_body(
 
 
 def _freeze_effort_mapping(
-    mapping: Mapping[str, str] | None,
+    mapping: Mapping[Any, Any] | None,
 ) -> tuple[tuple[str, str], ...]:
     if not mapping:
         return ()
     frozen: list[tuple[str, str]] = []
-    for key, value in sorted(mapping.items()):
-        parsed = parse_concrete_thinking_mode(str(key))
+    for key, value in sorted(mapping.items(), key=lambda item: str(item[0])):
+        if not isinstance(key, str):
+            raise ValueError("effort_mapping keys must be strings")
+        parsed = parse_concrete_thinking_mode(key)
         if parsed is None or parsed in ("disabled", "omit"):
             raise ValueError(
                 f"effort_mapping key must be an active effort level, got {key!r}"
@@ -252,6 +274,58 @@ def _freeze_effort_mapping(
             )
         frozen.append((parsed, value.strip()))
     return tuple(frozen)
+
+
+_KNOWN_WIRE_EFFORTS: frozenset[str] = frozenset(
+    {
+        "disabled",
+        "none",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+    }
+)
+
+
+def redact_effective_effort(value: str | None) -> str | None:
+    """Return a bounded, non-sensitive effort value for logs and metadata."""
+    if value is None:
+        return None
+    if type(value) is not str:
+        return "custom"
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned in _KNOWN_WIRE_EFFORTS:
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"custom:{digest}"
+
+
+def redact_provider_profile_name(name: str | None) -> str | None:
+    """Return a bounded, non-sensitive identifier for logs and telemetry.
+
+    Built-in preset names pass through verbatim; custom gateway names are
+    replaced with a short non-reversible fingerprint ``custom:<8-hex>`` so
+    user-supplied config strings can never leak into logs or observer records.
+    """
+    if name is None:
+        return None
+    if type(name) is not str:
+        return "custom"
+    cleaned = name.strip()
+    if not cleaned:
+        return None
+    if cleaned in BUILTIN_PROVIDER_PROFILES:
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"custom:{digest}"
 
 
 @dataclass(frozen=True)
@@ -269,10 +343,10 @@ class EffortResolution:
         """Return a non-sensitive metadata dict suitable for logs and offline analysis."""
         return {
             "requested_effort": self.requested_effort,
-            "effective_effort": self.effective_effort,
+            "effective_effort": redact_effective_effort(self.effective_effort),
             "omitted": self.omitted,
             "passthrough": self.passthrough,
-            "provider_profile": self.provider_profile,
+            "provider_profile": redact_provider_profile_name(self.provider_profile),
         }
 
 
@@ -537,6 +611,17 @@ def build_custom_provider_profile(
     )
 
 
+def _require_optional_bool(
+    config: Mapping[str, Any], key: str, default: bool
+) -> bool:
+    if key not in config:
+        return default
+    value = config[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
 def provider_profile_from_config(config: Mapping[str, Any]) -> ProviderProfile:
     """Validate and construct a ``ProviderProfile`` from a declarative config dict."""
     if not isinstance(config, Mapping):
@@ -549,12 +634,14 @@ def provider_profile_from_config(config: Mapping[str, Any]) -> ProviderProfile:
     else:
         base = None
 
-    name_raw = config.get("name")
-    name = (
-        name_raw.strip()
-        if isinstance(name_raw, str) and name_raw.strip()
-        else (base.name if base is not None else "custom_gateway")
-    )
+    if "name" in config:
+        name_raw = config["name"]
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            raise ValueError("name must be a non-empty string")
+        name = name_raw.strip()
+    else:
+        name = base.name if base is not None else "custom_gateway"
+
     protocol_raw = config.get(
         "thinking_protocol",
         base.thinking_protocol if base is not None else "custom_effort_mapping",
@@ -563,17 +650,15 @@ def provider_profile_from_config(config: Mapping[str, Any]) -> ProviderProfile:
         raise ValueError("invalid thinking_protocol in provider capabilities config")
     thinking_protocol: ThinkingProtocol = protocol_raw  # type: ignore[assignment]
 
-    supports_structured_output = bool(
-        config.get(
-            "supports_structured_output",
-            base.supports_structured_output if base is not None else False,
-        )
+    supports_structured_output = _require_optional_bool(
+        config,
+        "supports_structured_output",
+        base.supports_structured_output if base is not None else False,
     )
-    supports_disable_thinking = bool(
-        config.get(
-            "supports_disable_thinking",
-            base.supports_disable_thinking if base is not None else True,
-        )
+    supports_disable_thinking = _require_optional_bool(
+        config,
+        "supports_disable_thinking",
+        base.supports_disable_thinking if base is not None else True,
     )
     effort_field_raw = config.get(
         "effort_field",
@@ -583,29 +668,33 @@ def provider_profile_from_config(config: Mapping[str, Any]) -> ProviderProfile:
         raise ValueError("effort_field must be a non-empty string")
 
     effort_mapping_raw = config.get("effort_mapping")
-    if effort_mapping_raw is None:
+    if "effort_mapping" not in config or effort_mapping_raw is None:
+        if "effort_mapping" in config and effort_mapping_raw is None:
+            raise ValueError("effort_mapping must be a JSON object")
         frozen_mapping = base.effort_mapping if base is not None else ()
     elif isinstance(effort_mapping_raw, Mapping):
-        merged_mapping = dict(base.effort_mapping) if base is not None else {}
+        merged_mapping: dict[Any, Any] = dict(base.effort_mapping) if base is not None else {}
         for key, value in effort_mapping_raw.items():
-            merged_mapping[str(key)] = str(value)
+            if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    "effort_mapping entries must map effort strings to non-empty strings"
+                )
+            merged_mapping[key] = value
         frozen_mapping = _freeze_effort_mapping(merged_mapping)
     else:
         raise ValueError("effort_mapping must be a JSON object")
 
-    enabled_raw = config.get("enabled_extra_body")
-    if enabled_raw is None:
+    if "enabled_extra_body" not in config:
         frozen_enabled = base.enabled_extra_body if base is not None else ()
-    elif isinstance(enabled_raw, Mapping):
-        frozen_enabled = _freeze_extra_body(enabled_raw)
+    elif isinstance(config["enabled_extra_body"], Mapping):
+        frozen_enabled = _freeze_extra_body(config["enabled_extra_body"])
     else:
         raise ValueError("enabled_extra_body must be a JSON object")
 
-    disabled_raw = config.get("disabled_extra_body")
-    if disabled_raw is None:
+    if "disabled_extra_body" not in config:
         frozen_disabled = base.disabled_extra_body if base is not None else ()
-    elif isinstance(disabled_raw, Mapping):
-        frozen_disabled = _freeze_extra_body(disabled_raw)
+    elif isinstance(config["disabled_extra_body"], Mapping):
+        frozen_disabled = _freeze_extra_body(config["disabled_extra_body"])
     else:
         raise ValueError("disabled_extra_body must be a JSON object")
 

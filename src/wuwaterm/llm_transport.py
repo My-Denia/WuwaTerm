@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -145,13 +146,92 @@ CallOutcome = Literal[
     "invalid_api_response",
     "cancelled",
 ]
-_SAFE_METADATA_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_KNOWN_REQUESTED_EFFORTS = frozenset(
+    {
+        "disabled",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+        "omit",
+    }
+)
+_KNOWN_EFFECTIVE_EFFORTS = _KNOWN_REQUESTED_EFFORTS | frozenset({"none", "off"})
+_KNOWN_PROVIDER_PROFILES = frozenset(
+    {
+        "openai_compatible_deepseek",
+        "deepseek",
+        "openai_reasoning",
+        "openai",
+        "neon_gateway",
+        "neon",
+        "omit_all",
+    }
+)
+_KNOWN_ATTEMPT_KINDS = frozenset(
+    {"initial", "timeout_fallback", "paragraph_repair"}
+)
+CONTROLLED_CANCEL_REASONS = frozenset(
+    {
+        "cancelled",
+        "user_cancelled",
+        "client_disconnected",
+        "deadline_exceeded",
+        "timeout",
+        "shutdown",
+        "superseded",
+        "budget_exhausted",
+        "task_cancelled",
+    }
+)
+_CUSTOM_FINGERPRINT_RE = re.compile(r"^custom:[0-9a-f]{8}$")
 
 
-def _safe_metadata_token(value: object) -> str | None:
-    if type(value) is str and _SAFE_METADATA_TOKEN_RE.fullmatch(value):
+def _safe_requested_effort(value: object) -> str | None:
+    if type(value) is str and value in _KNOWN_REQUESTED_EFFORTS:
         return value
     return None
+
+
+def _safe_effective_effort(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned in _KNOWN_EFFECTIVE_EFFORTS or _CUSTOM_FINGERPRINT_RE.fullmatch(cleaned):
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"custom:{digest}"
+
+
+def _safe_provider_profile(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned in _KNOWN_PROVIDER_PROFILES or _CUSTOM_FINGERPRINT_RE.fullmatch(cleaned):
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"custom:{digest}"
+
+
+def _safe_attempt_kind(value: object) -> str | None:
+    if type(value) is str and value in _KNOWN_ATTEMPT_KINDS:
+        return value
+    return None
+
+
+def _safe_cancel_reason(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is str and value in CONTROLLED_CANCEL_REASONS:
+        return value
+    return "custom"
 
 
 @dataclass(frozen=True)
@@ -630,16 +710,16 @@ async def post_chat_completion(
         payload[key] = value
     meta = call_metadata if call_metadata is not None else current_call_metadata()
     requested_effort = (
-        _safe_metadata_token(meta.requested_effort) if meta is not None else None
+        _safe_requested_effort(meta.requested_effort) if meta is not None else None
     )
     effective_effort = (
-        _safe_metadata_token(meta.effective_effort) if meta is not None else None
+        _safe_effective_effort(meta.effective_effort) if meta is not None else None
     )
     provider_profile = (
-        _safe_metadata_token(meta.provider_profile) if meta is not None else None
+        _safe_provider_profile(meta.provider_profile) if meta is not None else None
     )
     attempt_kind = (
-        _safe_metadata_token(meta.attempt_kind) if meta is not None else None
+        _safe_attempt_kind(meta.attempt_kind) if meta is not None else None
     )
     recorded_timeout = (
         float(timeout_seconds)
@@ -736,7 +816,7 @@ async def post_chat_completion(
                 current = asyncio.current_task()
                 outer_cancelling = current is not None and current.cancelling() > 0
                 if not outer_cancelling and active_budget.is_cancelled:
-                    cancel_reason = _safe_metadata_token(
+                    cancel_reason = _safe_cancel_reason(
                         getattr(active_budget, "cancel_reason", None)
                     )
                     raise LLMTranslationError(
@@ -745,6 +825,16 @@ async def post_chat_completion(
                 raise
             finally:
                 remove_cancel_cb()
+            if active_budget.is_cancelled:
+                outcome = "cancelled"
+                cancelled = True
+                cancel_reason = _safe_cancel_reason(
+                    getattr(active_budget, "cancel_reason", None)
+                )
+                request_trace.note_cancelled()
+                raise LLMTranslationError(
+                    TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+                )
         else:
             try:
                 response = await client.post(
@@ -758,35 +848,105 @@ async def post_chat_completion(
                 cancelled = True
                 request_trace.note_cancelled()
                 raise
+            if active_budget is not None and active_budget.is_cancelled:
+                outcome = "cancelled"
+                cancelled = True
+                cancel_reason = _safe_cancel_reason(
+                    getattr(active_budget, "cancel_reason", None)
+                )
+                request_trace.note_cancelled()
+                raise LLMTranslationError(
+                    TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+                )
         status_code = response.status_code
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if active_budget is not None and active_budget.is_cancelled:
+                outcome = "cancelled"
+                cancelled = True
+                cancel_reason = _safe_cancel_reason(
+                    getattr(active_budget, "cancel_reason", None)
+                )
+                request_trace.note_cancelled()
+                raise LLMTranslationError(
+                    TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+                ) from exc
             outcome = "http_error"
             raise llm_error_from_response(exc.response) from exc
         outcome = "invalid_api_response"
         data = response.json()
         content = extract_llm_content(data)
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            )
         outcome = "ok"
         return content
     except LLMTranslationError:
         raise
     except httpx.TimeoutException as exc:
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            ) from exc
         outcome = "timeout"
         raise LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout"
         ) from exc
     except httpx.ConnectError as exc:
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            ) from exc
         outcome = "connect"
         raise LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="connect"
         ) from exc
     except httpx.RequestError as exc:
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            ) from exc
         outcome = "request"
         raise LLMTranslationError(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="request"
         ) from exc
     except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        if active_budget is not None and active_budget.is_cancelled:
+            outcome = "cancelled"
+            cancelled = True
+            cancel_reason = _safe_cancel_reason(
+                getattr(active_budget, "cancel_reason", None)
+            )
+            request_trace.note_cancelled()
+            raise LLMTranslationError(
+                TRANSLATION_UNAVAILABLE_NOTICE, reason="cancelled"
+            ) from exc
         # Response ENVELOPE failure (malformed JSON, wrong schema): a gateway
         # or schema outage, not model content drift. Distinct from
         # "invalid_response" (blank output / broken placeholders) so the HTML
