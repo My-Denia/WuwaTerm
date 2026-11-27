@@ -1,0 +1,448 @@
+"""Differential Aho-Corasick parity tests and SQLite WAL snapshot regression tests."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from pathlib import Path
+
+import httpx
+import pytest
+
+from wuwaterm.application import build_term_service, build_translator, dictionary_identity
+from wuwaterm.cjk_span import crosses_cjk_word_boundary, single_character_name_context_ok
+from wuwaterm.db import connect, insert_records
+from wuwaterm.english_plural import plural_suffix_candidates as _plural_suffix_candidates
+from wuwaterm.lookup import DictionarySnapshot
+from wuwaterm.models import TermRecord
+from wuwaterm.sentence import SentenceTranslator
+from wuwaterm.term_matching import (
+    TermSpan,
+    TermSpanMatcher,
+    _ascii_word_boundaries_ok,
+    _case_variant_boundaries_ok,
+    _matched_span_ok,
+    _nfkc_spelling,
+    exact_lockable_sources,
+    select_term_spans,
+)
+from wuwaterm_api.app import create_app
+from wuwaterm_api.auth import DeviceStore, SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME
+from wuwaterm_api.settings import ApiSettings
+
+
+def _naive_select_term_spans(
+    text: str,
+    lockable: tuple[tuple[str, tuple[str, str]], ...],
+    context_text: str,
+    context_offset: int,
+    *,
+    allow_plural_inflection: bool = False,
+    nfkc_spelling_sources: frozenset[str] = frozenset(),
+) -> list[TermSpan]:
+    """Reference pre-Aho-Corasick per-surface ``text.find()`` selector."""
+    spans: list[TermSpan] = []
+    for order, (source, official) in enumerate(lockable):
+        if not source:
+            continue
+        start = text.find(source)
+        while start != -1:
+            end = start + len(source)
+            if _matched_span_ok(
+                context_text, context_offset, start, end, source, official
+            ):
+                spans.append(
+                    TermSpan(
+                        start=start,
+                        end=end,
+                        source=source,
+                        official=official,
+                        order=order,
+                    )
+                )
+            start = text.find(source, start + 1)
+
+    if nfkc_spelling_sources:
+        exact_bounds = {(span.start, span.end) for span in spans}
+        for order, (source, official) in enumerate(lockable):
+            if source not in nfkc_spelling_sources:
+                continue
+            spelling = _nfkc_spelling(source)
+            if not spelling or spelling == source:
+                continue
+            start = text.find(spelling)
+            while start != -1:
+                end = start + len(spelling)
+                if (start, end) not in exact_bounds and _matched_span_ok(
+                    context_text, context_offset, start, end, spelling, official
+                ):
+                    spans.append(
+                        TermSpan(
+                            start=start,
+                            end=end,
+                            source=source,
+                            official=official,
+                            order=order,
+                        )
+                    )
+                start = text.find(spelling, start + 1)
+
+    if allow_plural_inflection:
+        exact_bounds = {(span.start, span.end) for span in spans}
+        for order, (source, official) in enumerate(lockable):
+            for suffix in _plural_suffix_candidates(source, official):
+                inflected = source + suffix
+                start = text.find(inflected)
+                while start != -1:
+                    end = start + len(inflected)
+                    if (start, end) not in exact_bounds and (
+                        _ascii_word_boundaries_ok(
+                            context_text,
+                            context_offset + start,
+                            context_offset + end,
+                            inflected,
+                        )
+                        and (
+                            source in official
+                            or _case_variant_boundaries_ok(
+                                context_text,
+                                context_offset + start,
+                                context_offset + end,
+                            )
+                        )
+                        and (
+                            len(source) > 1
+                            or single_character_name_context_ok(
+                                context_text,
+                                context_offset + start,
+                                context_offset + end,
+                            )
+                        )
+                        and not crosses_cjk_word_boundary(
+                            context_text, context_offset + start, context_offset + end
+                        )
+                    ):
+                        spans.append(
+                            TermSpan(
+                                start=start,
+                                end=end,
+                                source=inflected,
+                                official=official,
+                                order=order,
+                            )
+                        )
+                    start = text.find(inflected, start + 1)
+
+    selected: list[TermSpan] = []
+    occupied: list[tuple[int, int]] = []
+    for span in sorted(
+        spans,
+        key=lambda item: (
+            -(item.end - item.start),
+            item.order,
+            item.start,
+            item.source,
+        ),
+    ):
+        if any(span.start < end and start < span.end for start, end in occupied):
+            continue
+        selected.append(span)
+        occupied.append((span.start, span.end))
+
+    selected.sort(key=lambda item: item.start)
+    return selected
+
+
+def _locate_real_db() -> Path | None:
+    root = Path(__file__).resolve().parents[1]
+    candidates = [root / "data" / "cjk-census-3.7.db"]
+    try:
+        common_dir = subprocess.check_output(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=root,
+            text=True,
+        ).strip()
+        if common_dir:
+            candidates.append(
+                (root / common_dir).resolve().parent / "data" / "cjk-census-3.7.db"
+            )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for path in candidates:
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+@pytest.mark.parametrize("allow_plural", [False, True])
+@pytest.mark.parametrize("use_nfkc", [False, True])
+def test_ac_select_term_spans_differential_boundary_and_priority_cases(
+    allow_plural: bool, use_nfkc: bool
+):
+    lockable: tuple[tuple[str, tuple[str, str]], ...] = (
+        ("声骸", ("声骸", "Echo")),
+        ("声骸技能", ("声骸技能", "Echo Skill")),
+        ("技能", ("技能", "Skill")),
+        ("椿", ("椿", "Camellya")),
+        ("Star", ("星星", "Star")),
+        ("Stars", ("群星", "Stars")),
+        ("Echo", ("声骸", "Echo")),
+        ("Resonator", ("共鸣者", "Resonator")),
+        ("jinhsi", ("今汐", "Jinhsi")),
+        ("élodie", ("艾洛迪", "Élodie")),
+        ("ab", ("甲乙", "ab")),
+        ("bab", ("乙甲乙", "bab")),
+        ("🌊术语", ("海浪术语", "Wave Term")),
+        ("术语", ("普通术语", "Term")),
+        ("镜锁妄世，心照红尘", ("镜锁妄世，心照红尘", "Mirror Locked")),
+        ("ﬁre", ("火焰", "fire")),
+        ("fire", ("火", "fire")),
+        ("Echo", ("重复声骸", "Duplicate Echo")),
+    )
+    nfkc_sources = (
+        frozenset({"镜锁妄世，心照红尘", "ﬁre"}) if use_nfkc else frozenset()
+    )
+    matcher = TermSpanMatcher.build(
+        lockable,
+        nfkc_spelling_sources=frozenset({"镜锁妄世，心照红尘", "ﬁre"}),
+        include_plural=True,
+    )
+
+    cases: list[tuple[str, str, int]] = [
+        ("", "", 0),
+        ("🌊使用声骸技能ababa✨🌊术语声骸", "🌊使用声骸技能ababa✨🌊术语声骸", 0),
+        ("回声骸骨里没有声骸，但欢迎椿和红椿蕊。", "回声骸骨里没有声骸，但欢迎椿和红椿蕊。", 0),
+        (
+            "Star and Stars with Echoes, New Echoes, Resonators, Resonatorses, jinhsi, xjinhsi, élodie, xélodie.",
+            "Star and Stars with Echoes, New Echoes, Resonators, Resonatorses, jinhsi, xjinhsi, élodie, xélodie.",
+            0,
+        ),
+        (
+            "镜锁妄世,心照红尘 and fire and ﬁre.",
+            "镜锁妄世,心照红尘 and fire and ﬁre.",
+            0,
+        ),
+        # Context-offset glue across invisible markup boundary: "Resonator" + "s"
+        ("Resonator", "Use Resonators now", 4),
+        ("Echo", "New Echos here", 4),
+        ("Echo", "Use Echo here", 4),
+    ]
+
+    for text, context_text, context_offset in cases:
+        expected = _naive_select_term_spans(
+            text,
+            lockable,
+            context_text,
+            context_offset,
+            allow_plural_inflection=allow_plural,
+            nfkc_spelling_sources=nfkc_sources,
+        )
+        got_cached = select_term_spans(
+            text,
+            lockable,
+            context_text,
+            context_offset,
+            allow_plural_inflection=allow_plural,
+            nfkc_spelling_sources=nfkc_sources,
+        )
+        got_explicit = select_term_spans(
+            text,
+            lockable,
+            context_text,
+            context_offset,
+            allow_plural_inflection=allow_plural,
+            nfkc_spelling_sources=nfkc_sources,
+            matcher=matcher,
+        )
+        assert got_cached == expected
+        assert got_explicit == expected
+
+
+def test_ac_select_term_spans_differential_against_real_dictionary(sample_db):
+    db_path = _locate_real_db() or sample_db
+    translator = SentenceTranslator(db_path)
+    bundle = translator.service.snapshot().lockable_snapshot()
+    lockable = bundle.eligible_lockable
+    nfkc_sources = bundle.nfkc_spelling_sources
+    exact_only = exact_lockable_sources(translator.service.entries())
+
+    texts = [
+        "今汐和守岸人在共鸣者测试中装备了声骸技能，给椿留下一份记录，同时避开回声骸骨与红椿蕊。",
+        "Resonators equipped Echoes while Jinhsi and Shorekeeper reviewed Stars and Echo Skill interactions.",
+        "🌊✨ 漂泊者、卡卡罗、安可与声骸共振；jinhsi 与 JINHSI，New Echoes 以及 Resonatorses。",
+    ]
+
+    for allow_plural in (False, True):
+        for active_nfkc in (frozenset(), nfkc_sources):
+            for text in texts:
+                expected = _naive_select_term_spans(
+                    text,
+                    lockable,
+                    text,
+                    0,
+                    allow_plural_inflection=allow_plural,
+                    nfkc_spelling_sources=active_nfkc,
+                )
+                got = select_term_spans(
+                    text,
+                    lockable,
+                    text,
+                    0,
+                    allow_plural_inflection=allow_plural,
+                    nfkc_spelling_sources=active_nfkc,
+                    matcher=bundle.matcher,
+                )
+                assert got == expected
+
+    # Verify standalone exact_lockable_sources path (builder/corpus measurement).
+    for text in texts:
+        assert select_term_spans(text, exact_only, text, 0) == _naive_select_term_spans(
+            text, exact_only, text, 0
+        )
+
+
+def test_wal_commit_with_unchanged_main_stat_refreshes_all_paths_and_isolates_inflight(
+    monkeypatch, tmp_path: Path, sample_db: Path
+):
+    """Zero-network SQLite WAL regression: unchanged main-file stat must invalidate all caches."""
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+
+    wal_db = tmp_path / "wal-unified.db"
+    wal_db.write_bytes(sample_db.read_bytes())
+    with connect(wal_db) as conn:
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode is not None and mode[0].lower() == "wal"
+        conn.commit()
+
+    service = build_term_service(wal_db)
+    translator = build_translator(wal_db, service=service)
+    standalone_translator = SentenceTranslator(wal_db)
+
+    device_db = tmp_path / "devices.db"
+    store = DeviceStore(device_db)
+    secret = "wal-test-secret-0123456789abcdef"
+    device = store.issue("wal-test-device", [SCOPE_META, SCOPE_TRANSLATE], secret=secret)
+    token = f"{TOKEN_SCHEME}.{device.device_id}.{secret}"
+    app = create_app(
+        ApiSettings(db_path=wal_db, device_db_path=device_db),
+        device_store=store,
+        term_service=service,
+        translator=translator,
+    )
+
+    async def get_dictionary() -> dict[str, object]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://api.test"
+        ) as client:
+            resp = await client.get(
+                "/v1/dictionary", headers={"Authorization": f"Bearer {token}"}
+            )
+            assert resp.status_code == 200, resp.text
+            return resp.json()
+
+    # Warm all three paths + capture an in-flight immutable snapshot before WAL write.
+    dict_before = asyncio.run(get_dictionary())
+    identity_before = dictionary_identity(service)
+    assert dict_before["revision"] == identity_before.revision
+    # Hot read must hit the cached DictionaryIdentity instance without rescanning.
+    assert service.dictionary_identity() is identity_before
+
+    fuzzy_before = service.lookup("xingchenmohe")
+    assert all(c.entry.zh != "星尘魔核" for c in fuzzy_before.candidates)
+    assert service.lookup("shenghai").best is not None
+
+    lock_before = translator.lock_terms("请携带星尘魔核进入副本。")
+    assert lock_before.locks == ()
+    standalone_before = standalone_translator.lock_terms("请携带星尘魔核进入副本。")
+    assert standalone_before.locks == ()
+
+    inflight_snapshot: DictionarySnapshot = service.snapshot()
+    inflight_lockable = inflight_snapshot.lockable_snapshot()
+    inflight_scoring_count = len(inflight_snapshot.scoring_rows)
+    inflight_identity = inflight_snapshot.dictionary_identity
+
+    # Record main DB file stat strictly BEFORE the uncheckpointed WAL write.
+    stat_before = os.stat(wal_db)
+    main_stat_before = (
+        stat_before.st_dev,
+        stat_before.st_ino,
+        stat_before.st_size,
+        stat_before.st_mtime_ns,
+        stat_before.st_ctime_ns,
+    )
+
+    # Commit a new term into the WAL without checkpointing the main DB file.
+    writer = connect(wal_db)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        insert_records(
+            writer,
+            [
+                TermRecord(
+                    category="item",
+                    source_file="BinData/item/wal_test.json",
+                    source_id="990001",
+                    text_key="Item_990001_Name",
+                    zh="星尘魔核",
+                    en="Stardust Core",
+                )
+            ],
+        )
+        writer.commit()
+    finally:
+        writer.close()
+
+    stat_after = os.stat(wal_db)
+    main_stat_after = (
+        stat_after.st_dev,
+        stat_after.st_ino,
+        stat_after.st_size,
+        stat_after.st_mtime_ns,
+        stat_after.st_ctime_ns,
+    )
+    assert main_stat_after == main_stat_before, (
+        "main DB file stat changed unexpectedly; test must exercise uncheckpointed WAL"
+    )
+    wal_file = Path(f"{wal_db}-wal")
+    assert wal_file.is_file() and wal_file.stat().st_size > 0
+
+    # 1. /v1/dictionary and TermService.dictionary_identity() immediately see new revision & count.
+    dict_after = asyncio.run(get_dictionary())
+    identity_after = dictionary_identity(service)
+    assert dict_after["revision"] == identity_after.revision
+    assert dict_after["revision"] != dict_before["revision"]
+    assert dict_after["term_count"] == int(dict_before["term_count"]) + 1  # type: ignore[arg-type]
+
+    # 2. Fuzzy lookup and exact lookup immediately see the WAL-committed term.
+    fuzzy_after = service.lookup("xingchenmohe")
+    assert fuzzy_after.best is not None
+    assert fuzzy_after.best.entry.zh == "星尘魔核"
+    assert fuzzy_after.best.entry.en == "Stardust Core"
+    exact_after = service.lookup_exact("星尘魔核")
+    assert exact_after.exact is True
+    assert exact_after.best is not None
+    assert exact_after.best.entry.en == "Stardust Core"
+
+    # 3. Translation term locking (both shared-service and standalone) immediately locks the new term.
+    lock_after = translator.lock_terms("请携带星尘魔核进入副本。")
+    assert lock_after.restore(lock_after.locked_text) == "请携带Stardust Core进入副本。"
+    standalone_after = standalone_translator.lock_terms("请携带星尘魔核进入副本。")
+    assert (
+        standalone_after.restore(standalone_after.locked_text)
+        == "请携带Stardust Core进入副本。"
+    )
+
+    # 4. In-flight snapshot reference remains strictly immutable and isolated.
+    current_snapshot = service.snapshot()
+    assert current_snapshot is not inflight_snapshot
+    assert inflight_snapshot.dictionary_identity == inflight_identity
+    assert inflight_snapshot.term_count == inflight_scoring_count
+    assert inflight_snapshot.exact_index.get("星尘魔核") is None
+    assert inflight_snapshot.lockable_snapshot() is inflight_lockable
+    assert all(src != "星尘魔核" for src, _ in inflight_lockable.eligible_lockable)
+
+    service.close()
+    standalone_translator.service.close()

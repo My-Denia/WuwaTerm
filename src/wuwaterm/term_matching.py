@@ -6,7 +6,9 @@ plain translation may opt into its existing unambiguous NFKC spellings.
 
 from __future__ import annotations
 
+import threading
 import unicodedata
+from collections import OrderedDict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -288,6 +290,413 @@ def _matched_span_ok(
     )
 
 
+_KIND_EXACT = 0
+_KIND_NFKC = 1
+_KIND_PLURAL = 2
+_EMPTY_CHILDREN: dict[str, int] = {}
+
+# (kind, order, match_len, span_source, official, gate_text)
+# - EXACT:  span_source == surface, gate_text == surface
+# - NFKC:   span_source == raw surface, gate_text == NFKC spelling
+# - PLURAL: span_source == inflected surface, gate_text == base surface
+_ACPattern = tuple[int, int, int, str, tuple[str, str], str]
+
+
+class TermSpanMatcher:
+    """Immutable pure-Python Unicode-scalar Aho-Corasick term span matcher.
+
+    Compiled once per dictionary snapshot (or cached by lockable tuple
+    identity for standalone callers) to scan text in a single O(len(text)) pass
+    while preserving 100% of the exact, NFKC-spelling, plural-inflection,
+    ``exact_bounds`` priority, boundary-gate, and global longest non-overlapping
+    selection semantics of :func:`select_term_spans`.
+    """
+
+    __slots__ = (
+        "_children",
+        "_fail",
+        "_outputs",
+        "lockable",
+        "nfkc_spelling_sources",
+        "include_plural",
+        "pattern_count",
+        "state_count",
+    )
+
+    def __init__(
+        self,
+        *,
+        lockable: tuple[tuple[str, tuple[str, str]], ...],
+        nfkc_spelling_sources: frozenset[str],
+        include_plural: bool,
+        children: tuple[dict[str, int], ...],
+        fail: tuple[int, ...],
+        outputs: tuple[tuple[_ACPattern, ...] | None, ...],
+        pattern_count: int,
+    ) -> None:
+        self.lockable = lockable
+        self.nfkc_spelling_sources = nfkc_spelling_sources
+        self.include_plural = include_plural
+        self._children = children
+        self._fail = fail
+        self._outputs = outputs
+        self.pattern_count = pattern_count
+        self.state_count = len(children)
+
+    @classmethod
+    def build(
+        cls,
+        lockable: tuple[tuple[str, tuple[str, str]], ...],
+        *,
+        nfkc_spelling_sources: frozenset[str] = frozenset(),
+        include_plural: bool = True,
+    ) -> TermSpanMatcher:
+        children: list[dict[str, int]] = [{}]
+        fail: list[int] = [0]
+        raw_outputs: list[list[_ACPattern] | None] = [None]
+        pattern_count = 0
+
+        def add_pattern(pattern: str, entry: _ACPattern) -> None:
+            nonlocal pattern_count
+            if not pattern:
+                return
+            pattern_count += 1
+            cur = 0
+            for ch in pattern:
+                cur_map = children[cur]
+                nxt = cur_map.get(ch)
+                if nxt is None:
+                    if cur_map is _EMPTY_CHILDREN:
+                        cur_map = {}
+                        children[cur] = cur_map
+                    nxt = len(children)
+                    cur_map[ch] = nxt
+                    children.append(_EMPTY_CHILDREN)
+                    fail.append(0)
+                    raw_outputs.append(None)
+                cur = nxt
+            bucket = raw_outputs[cur]
+            if bucket is None:
+                raw_outputs[cur] = [entry]
+            else:
+                bucket.append(entry)
+
+        for order, (source, official) in enumerate(lockable):
+            if source:
+                add_pattern(
+                    source,
+                    (_KIND_EXACT, order, len(source), source, official, source),
+                )
+
+        if nfkc_spelling_sources:
+            for order, (source, official) in enumerate(lockable):
+                if source not in nfkc_spelling_sources:
+                    continue
+                spelling = _nfkc_spelling(source)
+                if not spelling or spelling == source:
+                    continue
+                add_pattern(
+                    spelling,
+                    (_KIND_NFKC, order, len(spelling), source, official, spelling),
+                )
+
+        if include_plural:
+            for order, (source, official) in enumerate(lockable):
+                for suffix in _plural_suffix_candidates(source, official):
+                    inflected = source + suffix
+                    add_pattern(
+                        inflected,
+                        (
+                            _KIND_PLURAL,
+                            order,
+                            len(inflected),
+                            inflected,
+                            official,
+                            source,
+                        ),
+                    )
+
+        outputs: list[tuple[_ACPattern, ...] | None] = [None] * len(children)
+        queue: deque[int] = deque()
+        for child in children[0].values():
+            fail[child] = 0
+            child_raw = raw_outputs[child]
+            if child_raw is not None:
+                outputs[child] = tuple(child_raw)
+            queue.append(child)
+
+        while queue:
+            state = queue.popleft()
+            state_children = children[state]
+            if not state_children:
+                continue
+            state_fail = fail[state]
+            for ch, child in state_children.items():
+                f = state_fail
+                while f != 0 and ch not in children[f]:
+                    f = fail[f]
+                target = children[f].get(ch, 0)
+                fail[child] = target
+                child_raw = raw_outputs[child]
+                target_out = outputs[target]
+                if child_raw is None:
+                    if target_out is not None:
+                        outputs[child] = target_out
+                elif target_out is None:
+                    outputs[child] = tuple(child_raw)
+                else:
+                    outputs[child] = (*child_raw, *target_out)
+                queue.append(child)
+
+        return cls(
+            lockable=lockable,
+            nfkc_spelling_sources=nfkc_spelling_sources,
+            include_plural=include_plural,
+            children=tuple(children),
+            fail=tuple(fail),
+            outputs=tuple(outputs),
+            pattern_count=pattern_count,
+        )
+
+    def can_serve(
+        self,
+        *,
+        allow_plural_inflection: bool,
+        nfkc_spelling_sources: frozenset[str],
+    ) -> bool:
+        if allow_plural_inflection and not self.include_plural:
+            return False
+        if not nfkc_spelling_sources:
+            return True
+        if (
+            nfkc_spelling_sources is self.nfkc_spelling_sources
+            or nfkc_spelling_sources == self.nfkc_spelling_sources
+        ):
+            return True
+        return nfkc_spelling_sources <= self.nfkc_spelling_sources
+
+    def select_spans(
+        self,
+        text: str,
+        context_text: str,
+        context_offset: int,
+        *,
+        allow_plural_inflection: bool = False,
+        nfkc_spelling_sources: frozenset[str] = frozenset(),
+    ) -> list[TermSpan]:
+        if not text or self.pattern_count == 0:
+            return []
+
+        want_nfkc = bool(nfkc_spelling_sources)
+        nfkc_filter = want_nfkc and (
+            nfkc_spelling_sources is not self.nfkc_spelling_sources
+            and nfkc_spelling_sources != self.nfkc_spelling_sources
+        )
+        want_plural = allow_plural_inflection
+
+        children = self._children
+        fail = self._fail
+        outputs = self._outputs
+
+        exact_hits: list[tuple[int, int, int, str, tuple[str, str]]] = []
+        nfkc_hits: list[tuple[int, int, int, str, tuple[str, str], str]] = []
+        plural_hits: list[tuple[int, int, int, str, tuple[str, str], str]] = []
+
+        state = 0
+        cur_children = children[0]
+        for pos, ch in enumerate(text):
+            nxt = cur_children.get(ch)
+            while nxt is None and state != 0:
+                state = fail[state]
+                cur_children = children[state]
+                nxt = cur_children.get(ch)
+            if nxt is not None:
+                state = nxt
+                cur_children = children[state]
+                outs = outputs[state]
+                if outs is not None:
+                    end = pos + 1
+                    for kind, order, length, span_source, official, gate_text in outs:
+                        if kind == _KIND_EXACT:
+                            exact_hits.append(
+                                (end - length, end, order, span_source, official)
+                            )
+                        elif kind == _KIND_NFKC:
+                            if want_nfkc and (
+                                not nfkc_filter
+                                or span_source in nfkc_spelling_sources
+                            ):
+                                nfkc_hits.append(
+                                    (
+                                        end - length,
+                                        end,
+                                        order,
+                                        span_source,
+                                        official,
+                                        gate_text,
+                                    )
+                                )
+                        elif want_plural:
+                            plural_hits.append(
+                                (
+                                    end - length,
+                                    end,
+                                    order,
+                                    span_source,
+                                    official,
+                                    gate_text,
+                                )
+                            )
+
+        spans: list[TermSpan] = []
+        for start, end, order, source, official in exact_hits:
+            if _matched_span_ok(
+                context_text, context_offset, start, end, source, official
+            ):
+                spans.append(
+                    TermSpan(
+                        start=start,
+                        end=end,
+                        source=source,
+                        official=official,
+                        order=order,
+                    )
+                )
+
+        if nfkc_hits:
+            # Preserve an existing exact match's source identity at the same bounds.
+            exact_bounds = {(span.start, span.end) for span in spans}
+            for start, end, order, source, official, spelling in nfkc_hits:
+                if (start, end) not in exact_bounds and _matched_span_ok(
+                    context_text, context_offset, start, end, spelling, official
+                ):
+                    spans.append(
+                        TermSpan(
+                            start=start,
+                            end=end,
+                            source=source,
+                            official=official,
+                            order=order,
+                        )
+                    )
+
+        if plural_hits:
+            # Plural spans join the same global longest selection as the spans
+            # selected above. A span selected before plural synthesis always
+            # wins a bounds tie.
+            exact_bounds = {(span.start, span.end) for span in spans}
+            for start, end, order, inflected, official, base_source in plural_hits:
+                if (start, end) not in exact_bounds and (
+                    _ascii_word_boundaries_ok(
+                        context_text,
+                        context_offset + start,
+                        context_offset + end,
+                        inflected,
+                    )
+                    and (
+                        base_source in official
+                        or _case_variant_boundaries_ok(
+                            context_text,
+                            context_offset + start,
+                            context_offset + end,
+                        )
+                    )
+                    and (
+                        len(base_source) > 1
+                        or single_character_name_context_ok(
+                            context_text,
+                            context_offset + start,
+                            context_offset + end,
+                        )
+                    )
+                    and not crosses_cjk_word_boundary(
+                        context_text, context_offset + start, context_offset + end
+                    )
+                ):
+                    spans.append(
+                        TermSpan(
+                            start=start,
+                            end=end,
+                            source=inflected,
+                            official=official,
+                            order=order,
+                        )
+                    )
+
+        if not spans:
+            return []
+
+        # Select global longest non-overlapping official term spans. This
+        # intentionally prioritizes the longest single term, not maximum total
+        # coverage. Equal-length overlaps follow dictionary iteration order,
+        # then start position, then source text.
+        selected: list[TermSpan] = []
+        occupied: list[tuple[int, int]] = []
+        for span in sorted(
+            spans,
+            key=lambda item: (
+                -(item.end - item.start),
+                item.order,
+                item.start,
+                item.source,
+            ),
+        ):
+            if any(span.start < end and start < span.end for start, end in occupied):
+                continue
+            selected.append(span)
+            occupied.append((span.start, span.end))
+
+        selected.sort(key=lambda item: item.start)
+        return selected
+
+
+_MATCHER_CACHE_LOCK = threading.Lock()
+_MATCHER_CACHE: OrderedDict[tuple[int, frozenset[str], bool], TermSpanMatcher] = (
+    OrderedDict()
+)
+_MATCHER_CACHE_MAXSIZE = 8
+
+
+def _get_or_build_matcher(
+    lockable: tuple[tuple[str, tuple[str, str]], ...],
+    *,
+    allow_plural_inflection: bool,
+    nfkc_spelling_sources: frozenset[str],
+) -> TermSpanMatcher:
+    lockable_id = id(lockable)
+    exact_key = (lockable_id, nfkc_spelling_sources, allow_plural_inflection)
+    with _MATCHER_CACHE_LOCK:
+        cached = _MATCHER_CACHE.get(exact_key)
+        if cached is not None and cached.lockable is lockable:
+            _MATCHER_CACHE.move_to_end(exact_key)
+            return cached
+        # Reuse a superset matcher already compiled for the same lockable tuple
+        # (for example, one compiled with plural support serving a non-plural call).
+        for key, candidate in reversed(_MATCHER_CACHE.items()):
+            if (
+                key[0] == lockable_id
+                and candidate.lockable is lockable
+                and candidate.can_serve(
+                    allow_plural_inflection=allow_plural_inflection,
+                    nfkc_spelling_sources=nfkc_spelling_sources,
+                )
+            ):
+                _MATCHER_CACHE.move_to_end(key)
+                return candidate
+
+    built = TermSpanMatcher.build(
+        lockable,
+        nfkc_spelling_sources=nfkc_spelling_sources,
+        include_plural=allow_plural_inflection,
+    )
+    with _MATCHER_CACHE_LOCK:
+        _MATCHER_CACHE[exact_key] = built
+        _MATCHER_CACHE.move_to_end(exact_key)
+        while len(_MATCHER_CACHE) > _MATCHER_CACHE_MAXSIZE:
+            _MATCHER_CACHE.popitem(last=False)
+    return built
+
+
 def select_term_spans(
     text: str,
     lockable: tuple[tuple[str, tuple[str, str]], ...],
@@ -296,6 +705,7 @@ def select_term_spans(
     *,
     allow_plural_inflection: bool = False,
     nfkc_spelling_sources: frozenset[str] = frozenset(),
+    matcher: TermSpanMatcher | None = None,
 ) -> list[TermSpan]:
     """Return the term spans ``text`` locks, ordered by start position.
 
@@ -318,140 +728,33 @@ def select_term_spans(
     runtime supplies only surfaces whose spelling is unambiguous and not
     excluded; the builder measurement, protected text and every other caller
     stay exact.
+
+    ``matcher`` optionally supplies a pre-compiled :class:`TermSpanMatcher`
+    owned by the caller's immutable dictionary snapshot, avoiding repeated
+    automaton lookup or construction.
     """
-    spans: list[TermSpan] = []
-    for order, (source, official) in enumerate(lockable):
-        start = text.find(source)
-        while start != -1:
-            end = start + len(source)
-            if _matched_span_ok(
-                context_text, context_offset, start, end, source, official
-            ):
-                spans.append(
-                    TermSpan(
-                        start=start,
-                        end=end,
-                        source=source,
-                        official=official,
-                        order=order,
-                    )
-                )
-            start = text.find(source, start + 1)
-
-    # The runtime's prepared plain-text candidate: the dictionary surface is
-    # raw, the text is NFKC. Only surfaces the runtime admitted are compared
-    # through their other spelling, and the span still covers the text that
-    # is actually there while keeping the raw source for reference identity.
-    if nfkc_spelling_sources:
-        # Preserve an existing exact match's source identity at the same bounds.
-        exact_bounds = {(span.start, span.end) for span in spans}
-        for order, (source, official) in enumerate(lockable):
-            if source not in nfkc_spelling_sources:
-                continue
-            spelling = _nfkc_spelling(source)
-            if not spelling or spelling == source:
-                continue
-            start = text.find(spelling)
-            while start != -1:
-                end = start + len(spelling)
-                if (start, end) not in exact_bounds and _matched_span_ok(
-                    context_text, context_offset, start, end, spelling, official
-                ):
-                    spans.append(
-                        TermSpan(
-                            start=start,
-                            end=end,
-                            source=source,
-                            official=official,
-                            order=order,
-                        )
-                    )
-                start = text.find(spelling, start + 1)
-
-    if allow_plural_inflection:
-        # Plural spans join the same global longest selection as the spans
-        # selected above. Only exact English surfaces inflect, so
-        # ``source in official`` holds and the case-variant boundary branch is
-        # not needed here; the suffix is consumed into the span, so ASCII
-        # word-glue right after the inflection ("Resonatorses") still vetoes
-        # the match. A span selected before plural synthesis always wins a
-        # bounds tie: when the synthesized plural of one
-        # surface is itself another exact dictionary surface (``Star`` vs
-        # ``Stars`` -> 星星/群星, ``Luca`` vs ``Lucas``), the exact entry must
-        # keep the span regardless of dictionary iteration order.
-        exact_bounds = {(span.start, span.end) for span in spans}
-        for order, (source, official) in enumerate(lockable):
-            for suffix in _plural_suffix_candidates(source, official):
-                inflected = source + suffix
-                start = text.find(inflected)
-                while start != -1:
-                    end = start + len(inflected)
-                    if (start, end) not in exact_bounds and (
-                        # Same context rule as exact spans: a plural suffix
-                        # glued across an invisible tag ("Resonator</b>s",
-                        # visible "Resonators") is neither an exact nor an
-                        # inflected match of the segment alone — the surface
-                        # stays unlocked instead of restoring a stranded
-                        # suffix (共鸣者s).
-                        _ascii_word_boundaries_ok(
-                            context_text,
-                            context_offset + start,
-                            context_offset + end,
-                            inflected,
-                        )
-                        and (
-                            source in official
-                            or _case_variant_boundaries_ok(
-                                context_text,
-                                context_offset + start,
-                                context_offset + end,
-                            )
-                        )
-                        and (
-                            len(source) > 1
-                            or single_character_name_context_ok(
-                                context_text,
-                                context_offset + start,
-                                context_offset + end,
-                            )
-                        )
-                        and not crosses_cjk_word_boundary(
-                            context_text, context_offset + start, context_offset + end
-                        )
-                    ):
-                        spans.append(
-                            TermSpan(
-                                start=start,
-                                end=end,
-                                source=inflected,
-                                official=official,
-                                order=order,
-                            )
-                        )
-                    start = text.find(inflected, start + 1)
-
-    # Select global longest non-overlapping official term spans. This
-    # intentionally prioritizes the longest single term, not maximum total
-    # coverage. Equal-length overlaps follow dictionary iteration order,
-    # then start position, then source text.
-    selected: list[TermSpan] = []
-    occupied: list[tuple[int, int]] = []
-    for span in sorted(
-        spans,
-        key=lambda item: (
-            -(item.end - item.start),
-            item.order,
-            item.start,
-            item.source,
-        ),
-    ):
-        if any(span.start < end and start < span.end for start, end in occupied):
-            continue
-        selected.append(span)
-        occupied.append((span.start, span.end))
-
-    selected.sort(key=lambda item: item.start)
-    return selected
+    if not text or not lockable:
+        return []
+    active = (
+        matcher
+        if matcher is not None
+        and matcher.can_serve(
+            allow_plural_inflection=allow_plural_inflection,
+            nfkc_spelling_sources=nfkc_spelling_sources,
+        )
+        else _get_or_build_matcher(
+            lockable,
+            allow_plural_inflection=allow_plural_inflection,
+            nfkc_spelling_sources=nfkc_spelling_sources,
+        )
+    )
+    return active.select_spans(
+        text,
+        context_text,
+        context_offset,
+        allow_plural_inflection=allow_plural_inflection,
+        nfkc_spelling_sources=nfkc_spelling_sources,
+    )
 
 
 def exact_lockable_source_records(

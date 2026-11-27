@@ -2084,6 +2084,7 @@ def create_app(
     app.state.term_service = term_service or build_term_service(resolved.db_path)
     app.state.translator = translator or build_translator(
         resolved.db_path,
+        service=app.state.term_service,
         timeout=resolved.llm_timeout_seconds,
         max_concurrency=resolved.llm_max_concurrency,
         en_zh_protocol=True,

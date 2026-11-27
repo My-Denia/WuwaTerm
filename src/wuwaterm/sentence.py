@@ -13,7 +13,7 @@ from contextlib import contextmanager
 import inspect
 import logging
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,12 +24,12 @@ from . import llm_transport
 from . import request_trace
 from .cjk_span import MATCHER_REVISION
 from .constants import (
-    FREE_TEXT_LOCK_EXCLUSIONS_KEY,
-    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_EXCLUSIONS_KEY as FREE_TEXT_LOCK_EXCLUSIONS_KEY,
+    FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY as FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
 )
 from .exclusion_metadata import (
-    parse_free_text_lock_exclusions,
-    parse_free_text_zh_lock_exclusions,
+    parse_free_text_lock_exclusions as parse_free_text_lock_exclusions,
+    parse_free_text_zh_lock_exclusions as parse_free_text_zh_lock_exclusions,
 )
 from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_transport.X)
     BUDGET_EXHAUSTED_NOTICE,
@@ -44,7 +44,13 @@ from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_tr
     safe_llm_failure_diagnostic,
     structured_llm_error_text as _structured_llm_error_text,
 )
-from .lookup import TermService, preferred_exact_entry
+from .lookup import (
+    LockableSnapshot,
+    TermService,
+    build_lockable_snapshot,
+    free_text_exclusions,
+    preferred_exact_entry,
+)
 from .models import TermEntry
 from .normalize import normalize_prose_text, normalize_text
 from .protected_text import ProtectedText, ProtectedTextIntegrityError
@@ -53,21 +59,13 @@ from .structural_checks import (
     paragraph_line_counts as _paragraph_line_counts,
     regroup_lines_into_source_paragraphs as _regroup_lines_into_source_paragraphs,
 )
-from .skill_references import SkillReference, skill_references
-from .term_classification import (
-    derived_context_gated_sources as _derived_context_gated_sources,
-    derived_reference_only_sources as _derived_reference_only_sources,
-)
+from .skill_references import SkillReference
 from .term_matching import (
     CASE_VARIANT_CATEGORIES as CASE_VARIANT_CATEGORIES,
     ReferenceCandidates,
-    admissible_nfkc_sources,
-    case_variant_sources,
-    exact_lockable_source_records,
     exact_lockable_sources as exact_lockable_sources,
     is_cjk_character,
     is_eligible_lockable,
-    model_reference_candidates,
     select_term_spans as select_term_spans,
 )
 from .term_preparation import (
@@ -229,33 +227,8 @@ class LockedSentence:
         return result
 
 
-def _free_text_exclusions(metadata: dict[str, str]) -> frozenset[str]:
-    """Return the union of both exclusion keys, failing open per key.
-
-    The English and Chinese metadata keys are read independently: a missing
-    key is the normal state of a database built without the official corpus
-    or before that key existed, and an invalid value is logged with one
-    warning naming that key and excludes nothing from it, while the other
-    key still applies.
-    """
-    surfaces: set[str] = set()
-    for key, parser in (
-        (FREE_TEXT_LOCK_EXCLUSIONS_KEY, parse_free_text_lock_exclusions),
-        (FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY, parse_free_text_zh_lock_exclusions),
-    ):
-        value = metadata.get(key)
-        if value is None:
-            continue
-        try:
-            rows = parser(value)
-        except (TypeError, ValueError):
-            LOGGER.warning(
-                "ignoring invalid %s metadata; every dictionary surface stays lockable",
-                key,
-            )
-            continue
-        surfaces.update(surface for surface, _occurrences, _aligned in rows)
-    return frozenset(surfaces)
+def _free_text_exclusions(metadata: Mapping[str, str]) -> frozenset[str]:
+    return free_text_exclusions(metadata, logger=LOGGER)
 
 
 class SentenceTranslator:
@@ -263,13 +236,14 @@ class SentenceTranslator:
         self,
         db_path: str | Path,
         *,
+        service: TermService | None = None,
         llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
         llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
         llm_transport: httpx.AsyncBaseTransport | None = None,
         en_zh_protocol: bool = False,
         provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     ):
-        self.service = TermService(db_path)
+        self.service = TermService(db_path) if service is None else service
         self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self.llm_max_concurrency = max(1, int(llm_max_concurrency))
         self._llm_transport = llm_transport
@@ -279,17 +253,8 @@ class SentenceTranslator:
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
         self._llm_client: httpx.AsyncClient | None = None
         self._llm_client_loop: asyncio.AbstractEventLoop | None = None
-        self._lockable_sources_cache_key: tuple[object, ...] | None = None
-        self._lockable_sources_cache: _SourceSnapshot = (
-            (),
-            frozenset(),
-            frozenset(),
-            frozenset(),
-            {},
-            (),
-        )
-        self._source_categories_cache_key: tuple[object, ...] | None = None
-        self._source_categories_cache: dict[str, str] = {}
+        self._patched_lockable_cache_key: tuple[object, ...] | None = None
+        self._patched_lockable_cache: LockableSnapshot | None = None
 
     def request_policy(self, *, to_chinese: bool | None = None) -> RequestPolicy:
         """Resolve active execution policy for this translator."""
@@ -302,17 +267,11 @@ class SentenceTranslator:
 
     def dictionary_identity_digest(self) -> str:
         """Stable, path-free digest identifying the current dictionary snapshot."""
-        provenance = tuple(sorted(self.service.metadata().items()))
-        path = self.service.db_path.resolve(strict=False)
-        try:
-            stat = path.stat()
-            payload: dict[str, object] = {
-                "metadata": provenance,
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-            }
-        except OSError:
-            payload = {"metadata": provenance}
+        snapshot = self.service.snapshot()
+        payload: dict[str, object] = {
+            "revision": snapshot.dictionary_identity.revision,
+            "metadata": tuple(sorted(snapshot.metadata.items())),
+        }
         return sha256_bytes(canonical_json(payload))
 
     def plan_translation(
@@ -498,36 +457,47 @@ class SentenceTranslator:
         single_newline_paragraphs: bool = False,
     ) -> LockedSentence:
         context_text, context_offset = single_character_context or (text, 0)
-        if lockable is None:
-            lockable, nfkc_sources = self._eligible_lockable_snapshot()
-        elif allow_nfkc_spelling:
-            nfkc_sources = self._nfkc_spelling_sources()
-        else:
-            nfkc_sources = frozenset()
-        if not allow_nfkc_spelling:
-            nfkc_sources = frozenset()
+        bundle = self._lockable_bundle()
+        uses_bundle_lockable = lockable is None
+        active_lockable = bundle.eligible_lockable if uses_bundle_lockable else lockable
+        assert active_lockable is not None
+        nfkc_sources = (
+            bundle.nfkc_spelling_sources if allow_nfkc_spelling else frozenset()
+        )
         prepared = prepare_term_segment(
             text,
-            lockable=lockable,
+            lockable=active_lockable,
             context_text=context_text,
             context_offset=context_offset,
-            categories=self._source_categories() if to_chinese is not None else {},
-            reference_only=self._reference_only_sources(),
+            categories=bundle.source_categories if to_chinese is not None else {},
+            reference_only=bundle.reference_only_sources,
             to_chinese=to_chinese,
             allow_plural_inflection=allow_plural_inflection,
             nfkc_spelling_sources=nfkc_sources,
             placeholder_prefix=placeholder_prefix or new_placeholder_prefix(text),
             placeholder_offset=placeholder_offset,
             reference_candidates=(
-                self._reference_candidates() if to_chinese is not None else None
+                bundle.reference_candidates if to_chinese is not None else None
+            ),
+            soft_sources=(
+                bundle.soft_sources
+                if (to_chinese is not None and uses_bundle_lockable)
+                else None
             ),
             context_gated_reference_only=(
-                self._context_gated_reference_only_sources()
+                bundle.context_gated_reference_only_sources
                 if to_chinese is not None
                 else frozenset()
             ),
             single_newline_paragraphs=single_newline_paragraphs,
-            skill_refs=self._skill_references() if to_chinese is False else (),
+            skill_refs=bundle.skill_references if to_chinese is False else (),
+            matcher=bundle.matcher if uses_bundle_lockable else None,
+            extended_lockable=(
+                bundle.extended_lockable if uses_bundle_lockable else None
+            ),
+            extended_matcher_factory=(
+                bundle.extended_matcher if uses_bundle_lockable else None
+            ),
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
 
@@ -561,23 +531,28 @@ class SentenceTranslator:
         to_chinese: bool | None,
         allow_plural_inflection: bool,
     ) -> LockedSentence:
+        bundle = self._lockable_bundle()
         prepared = prepare_protected_terms(
             protected,
-            lockable=self._eligible_lockable_sources(),
-            categories=self._source_categories() if to_chinese is not None else {},
-            reference_only=self._reference_only_sources(),
+            lockable=bundle.eligible_lockable,
+            categories=bundle.source_categories if to_chinese is not None else {},
+            reference_only=bundle.reference_only_sources,
             to_chinese=to_chinese,
             allow_plural_inflection=allow_plural_inflection,
             placeholder_prefix=new_placeholder_prefix(protected.for_model()),
             reference_candidates=(
-                self._reference_candidates() if to_chinese is not None else None
+                bundle.reference_candidates if to_chinese is not None else None
             ),
+            soft_sources=bundle.soft_sources if to_chinese is not None else None,
             context_gated_reference_only=(
-                self._context_gated_reference_only_sources()
+                bundle.context_gated_reference_only_sources
                 if to_chinese is not None
                 else frozenset()
             ),
-            skill_refs=self._skill_references() if to_chinese is False else (),
+            skill_refs=bundle.skill_references if to_chinese is False else (),
+            matcher=bundle.matcher,
+            extended_lockable=bundle.extended_lockable,
+            extended_matcher_factory=bundle.extended_matcher,
         )
         return LockedSentence(prepared.locked_text, prepared.locks, prepared.references)
 
@@ -1308,7 +1283,7 @@ class SentenceTranslator:
         )
 
     def _eligible_lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
-        return self._eligible_rows(self._lockable_sources())
+        return self._lockable_bundle().eligible_lockable
 
     @staticmethod
     def _eligible_rows(
@@ -1325,125 +1300,74 @@ class SentenceTranslator:
     ) -> tuple[
         tuple[tuple[str, tuple[str, str]], ...], frozenset[str]
     ]:
-        (
-            rows,
-            nfkc_sources,
-            _reference_only,
-            _context_gated,
-            _candidates,
-            _skills,
-        ) = self._lockable_snapshot()
-        return self._eligible_rows(rows), nfkc_sources
+        bundle = self._lockable_bundle()
+        return bundle.eligible_lockable, bundle.nfkc_spelling_sources
 
     def _lockable_sources_identity(self) -> tuple[object, ...]:
-        path = self.service.db_path.resolve(strict=False)
-        stat = path.stat()
         provenance = tuple(sorted(self.service.metadata().items()))
-        return (
-            str(path),
-            stat.st_dev,
-            stat.st_ino,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
-            provenance,
-        )
+        return (self.service._identity(), provenance)
 
     def _read_lockable_sources(self) -> _SourceSnapshot:
-        excluded = _free_text_exclusions(self.service.metadata())
-        entries = self.service.entries()
-        pre_exclusion_sources = exact_lockable_source_records(entries)
-        sources = dict(pre_exclusion_sources)
-        # Case variants come after every exact source, so an exact surface
-        # always keeps its own record and wins equal-length overlaps. They are
-        # computed before exclusions are removed, so an excluded surface still
-        # blocks a variant equal to it and still counts for casefold ambiguity.
-        variants = case_variant_sources(pre_exclusion_sources, excluded)
-        # Same pre-exclusion snapshot: a spelling collision or exclusion still
-        # counts even when one of the colliding surfaces is later removed.
-        nfkc_sources = admissible_nfkc_sources(
-            pre_exclusion_sources, variants, excluded
-        )
-        for surface in excluded:
-            sources.pop(surface, None)
-        for variant, official in variants:
-            sources.setdefault(variant, official)
-        return (
-            tuple(sources.items()),
-            nfkc_sources,
-            _derived_reference_only_sources(entries),
-            _derived_context_gated_sources(entries),
-            model_reference_candidates(
-                entries,
-                sources,
-                excluded,
-                pre_exclusion_sources=pre_exclusion_sources,
-            ),
-            skill_references(entries, set(pre_exclusion_sources), excluded),
-        )
+        return build_lockable_snapshot(
+            self.service.metadata(), self.service.entries(), logger=LOGGER
+        ).as_source_tuple()
 
-    def _source_categories(self) -> dict[str, str]:
-        """Surface -> category, cached with the already-loaded lockable rows.
-
-        HTML translation selects terms per visible segment; rebuilding this map
-        from the full table for every segment would turn a long post into a
-        repeated full scan.
-        """
-        identity = self._lockable_sources_cache_key
-        if identity is not None and identity == self._source_categories_cache_key:
-            return self._source_categories_cache
-        categories = {
-            source: official[2] for source, official in self._lockable_sources()
-        }
-        self._source_categories_cache_key = self._lockable_sources_cache_key
-        self._source_categories_cache = categories
-        return categories
+    def _source_categories(self) -> Mapping[str, str]:
+        """Surface -> category, backed by the unified immutable snapshot."""
+        return self._lockable_bundle().source_categories
 
     def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str, str]], ...]:
-        return self._lockable_snapshot()[0]
+        return self._lockable_bundle().rows
 
     def _nfkc_spelling_sources(self) -> frozenset[str]:
         """Raw surfaces the prepared plain-text paths may also match by NFKC."""
-        return self._lockable_snapshot()[1]
+        return self._lockable_bundle().nfkc_spelling_sources
 
     def _reference_only_sources(self) -> frozenset[str]:
         """Surfaces that are references, never locks (derived names/titles)."""
-        return self._lockable_snapshot()[2]
+        return self._lockable_bundle().reference_only_sources
 
     def _context_gated_reference_only_sources(self) -> frozenset[str]:
         """Derived common-noun surfaces gated by paragraph-level official context."""
-        return self._lockable_snapshot()[3]
+        return self._lockable_bundle().context_gated_reference_only_sources
 
     def _reference_candidates(self) -> ReferenceCandidates:
         """Surface -> every official pair the model path may offer for it."""
-        return self._lockable_snapshot()[4]
+        return self._lockable_bundle().reference_candidates
 
     def _skill_references(self) -> tuple[SkillReference, ...]:
         """Bounded closed-class 2-char skill stems for zh->en references."""
-        return self._lockable_snapshot()[5]
+        return self._lockable_bundle().skill_references
 
-    def _lockable_snapshot(self) -> _SourceSnapshot:
-        # Each source text (Chinese OR English form) maps to the official
-        # (zh, en, category) record, retaining single-character name provenance.
-        # The eligible lock pairs can be restored in either
-        # direction. Cache by filesystem identity plus build provenance so an
-        # atomic DB replacement invalidates the cache without repeated full
-        # terms-table reads during normal operation. The admissible NFKC
-        # spelling set and the reference-only set are built from the same
-        # snapshot, so they cannot drift from the rows they qualify.
+    def _lockable_bundle(self) -> LockableSnapshot:
+        # In normal execution, share the unified immutable DictionarySnapshot
+        # owned by TermService (which tracks SQLite WAL data_version and atomic
+        # file replacement). When tests monkeypatch service.entries/metadata on
+        # the instance, honor those overrides via an identity-keyed bundle cache.
+        service_dict = getattr(self.service, "__dict__", {})
+        if "entries" not in service_dict and "metadata" not in service_dict:
+            return self.service.snapshot().lockable_snapshot(logger=LOGGER)
         for _attempt in range(2):
             identity_before = self._lockable_sources_identity()
-            if identity_before == self._lockable_sources_cache_key:
-                return self._lockable_sources_cache
-            snapshot = self._read_lockable_sources()
+            if (
+                self._patched_lockable_cache is not None
+                and identity_before == self._patched_lockable_cache_key
+            ):
+                return self._patched_lockable_cache
+            bundle = build_lockable_snapshot(
+                self.service.metadata(), self.service.entries(), logger=LOGGER
+            )
             identity_after = self._lockable_sources_identity()
             if identity_before == identity_after:
-                self._lockable_sources_cache_key = identity_after
-                self._lockable_sources_cache = snapshot
-                return snapshot
-        # A DB that changed twice while being read is not safe to cache. The
-        # caller still gets a fresh snapshot and the next call retries caching.
-        return self._read_lockable_sources()
+                self._patched_lockable_cache_key = identity_after
+                self._patched_lockable_cache = bundle
+                return bundle
+        return build_lockable_snapshot(
+            self.service.metadata(), self.service.entries(), logger=LOGGER
+        )
+
+    def _lockable_snapshot(self) -> _SourceSnapshot:
+        return self._lockable_bundle().as_source_tuple()
 
 
 def llm_configured() -> bool:
