@@ -13,6 +13,11 @@
     "split_windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
     "historical_split_pins": [
       {
+        "source_commit": "3144f7b0c5e793826ebea0985b68499b37d8c191",
+        "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
+        "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
+      },
+      {
         "source_commit": "716dbf85377c7a3661e0acc73a4703ba40781534",
         "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
         "windows_revision": "97c659e22b97f05b9a817c0740ca19d4add63441"
