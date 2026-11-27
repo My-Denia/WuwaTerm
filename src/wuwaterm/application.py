@@ -84,6 +84,7 @@ from .semantic_review import (
 from . import structural_checks as _structural_checks
 from .document_anchor import DocumentAnchor as DocumentAnchor
 from .document_anchor import extract_document_anchor as extract_document_anchor
+from .domain_knowledge import DomainKnowledgeCandidate as DomainKnowledgeCandidate
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -221,12 +222,17 @@ class TranslationContext:
       (ADR 0021 §3). They render as non-binding preference lines, never as
       ``__WUWA_TERM_...__`` placeholders, and an entry that collides with an
       official surface in the same segment is dropped.
+    * ``domain_knowledge_candidates`` — opt-in companion ``knowledge.db`` soft
+      background candidates (default empty). They render strictly as read-only
+      background references, never enter ``LockedSentence.locks``, and require
+      ``lock_eligible is False``.
     """
 
     before: ContextBefore | None = None
     precedents: tuple[Precedent, ...] = ()
     document_anchor: DocumentAnchor | None = None
     user_glossary_references: tuple[UserGlossaryReference, ...] = ()
+    domain_knowledge_candidates: tuple[DomainKnowledgeCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -573,6 +579,9 @@ async def _translate_long_plain_text(
     # is what a caller who set it asked for. Nothing here is added by default.
     document_anchor = context.document_anchor if context is not None else None
     glossary = context.user_glossary_references if context is not None else ()
+    domain_knowledge = (
+        context.domain_knowledge_candidates if context is not None else ()
+    )
     with op_budget.activate():
         for segment in segments:
             core = text[segment.core_start : segment.core_end]
@@ -598,6 +607,7 @@ async def _translate_long_plain_text(
                         precedents=precedents,
                         document_anchor=document_anchor,
                         user_glossary_references=glossary,
+                        domain_knowledge_candidates=domain_knowledge,
                     ),
                     execution_budget=op_budget,
                 )
@@ -833,6 +843,7 @@ def build_translator(
     max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
     en_zh_protocol: bool = False,
     provider_profile: ProviderProfile | None = None,
+    knowledge_db_path: str | Path | None = None,
 ) -> SentenceTranslator:
     """Create a term-locking translator with adapter-owned LLM budgets.
 
@@ -851,6 +862,7 @@ def build_translator(
         llm_max_concurrency=max_concurrency,
         en_zh_protocol=en_zh_protocol,
         provider_profile=resolved_profile,
+        knowledge_db_path=knowledge_db_path,
     )
 
 

@@ -94,6 +94,20 @@ class DomainKnowledgeCandidate:
             if start < 0 or end <= start:
                 raise ValueError(f"invalid matched_source_span: {(start, end)!r}")
 
+    def as_prompt_dict(self, *, to_chinese: bool = False) -> dict[str, str]:
+        """Bounded JSON-serializable shape rendered as non-binding background context."""
+        payload: dict[str, str] = {
+            "source": self.source_surface,
+            "zh": self.zh,
+            "en": self.en,
+            "target": self.zh if to_chinese else self.en,
+            "entity_type": self.entity_type,
+            "trust_tier": self.trust_tier,
+        }
+        if self.context_gloss:
+            payload["gloss"] = self.context_gloss
+        return payload
+
 
 def is_single_cjk_char(surface: str) -> bool:
     """Return True when ``surface`` is exactly one CJK unified ideograph."""
@@ -423,4 +437,100 @@ def select_domain_knowledge_candidates(
         seen_pairs.add(pair_key)
         used_scalars += full_cost
 
+    return tuple(selected)
+
+
+def prepare_prompt_domain_knowledge_candidates(
+    text: str,
+    candidates: Iterable[object],
+    *,
+    locked_surfaces: Collection[str] = (),
+    reference_surfaces: Collection[str] = (),
+    max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    max_scalars: int = DEFAULT_MAX_SCALARS,
+) -> tuple[DomainKnowledgeCandidate, ...]:
+    """Secondary render-time gate enforcing ``lock_eligible is False``, lock isolation, and caps.
+
+    Used at prompt construction time so callers passing ``DomainKnowledgeCandidate``
+    entries directly via ``TranslationContext`` or ``TranslationPlan`` can never
+    bypass type checks, ``lock_eligible is False``, lock/reference collision checks,
+    single-character ordinary-word gating, or scalar budgets.
+    """
+    valid: list[DomainKnowledgeCandidate] = []
+    for item in candidates:
+        if not isinstance(item, DomainKnowledgeCandidate):
+            continue
+        if item.lock_eligible is not False:
+            continue
+        valid.append(item)
+    if not valid or max_candidates <= 0 or max_scalars <= 0:
+        return ()
+
+    if text:
+        return select_domain_knowledge_candidates(
+            text,
+            valid,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+            max_candidates=max_candidates,
+            max_scalars=max_scalars,
+        )
+
+    # Fallback when rendered without segment text: still enforce lock/reference
+    # collision checks, deduplication, and strict scalar/count budgets.
+    blocked_norm = {
+        norm
+        for surface in (*locked_surfaces, *reference_surfaces)
+        if surface and (norm := normalize_text(surface))
+    }
+    ordered = sorted(
+        valid,
+        key=lambda item: (
+            -float(item.score),
+            _TRUST_TIER_PRIORITY[item.trust_tier],
+            item.entity_id,
+            item.source_surface,
+        ),
+    )
+    selected: list[DomainKnowledgeCandidate] = []
+    seen_entities: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    used_scalars = 0
+    for candidate in ordered:
+        if len(selected) >= max_candidates or used_scalars >= max_scalars:
+            break
+        if candidate.entity_id in seen_entities:
+            continue
+        surface_norm = normalize_text(candidate.source_surface)
+        zh_norm = normalize_text(candidate.zh)
+        en_norm = normalize_text(candidate.en)
+        if (
+            (surface_norm and surface_norm in blocked_norm)
+            or (zh_norm and zh_norm in blocked_norm)
+            or (en_norm and en_norm in blocked_norm)
+        ):
+            continue
+        pair_key = (zh_norm, en_norm)
+        if pair_key in seen_pairs:
+            continue
+        base_cost = (
+            len(candidate.source_surface) + len(candidate.zh) + len(candidate.en)
+        )
+        full_cost = base_cost + len(candidate.context_gloss)
+        remaining = max_scalars - used_scalars
+        if base_cost > remaining:
+            continue
+        if full_cost > remaining:
+            allowed_gloss = remaining - base_cost
+            trimmed_gloss = (
+                candidate.context_gloss[:allowed_gloss].rstrip()
+                if allowed_gloss > 0
+                else ""
+            )
+            candidate = replace(candidate, context_gloss=trimmed_gloss)
+            full_cost = base_cost + len(candidate.context_gloss)
+        selected.append(candidate)
+        seen_entities.add(candidate.entity_id)
+        seen_pairs.add(pair_key)
+        used_scalars += full_cost
     return tuple(selected)

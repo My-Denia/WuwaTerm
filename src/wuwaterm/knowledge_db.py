@@ -28,6 +28,7 @@ from .domain_knowledge import (
     is_single_cjk_char,
     select_domain_knowledge_candidates,
 )
+from .entity_graph import EntityGraph, GraphBoostOutcome
 from .normalize import has_cjk, normalize_text
 
 
@@ -463,6 +464,7 @@ class KnowledgeBaseReader:
         self._db_path = Path(db_path)
         self._expected_terms_db_revision = expected_terms_db_revision.strip()
         self._conn = connect_knowledge_db_read_only(self._db_path)
+        self._entity_graph: EntityGraph | None = None
         try:
             self._metadata = self._load_and_validate_metadata()
         except Exception:
@@ -498,7 +500,15 @@ class KnowledgeBaseReader:
     def metadata(self) -> dict[str, str]:
         return dict(self._metadata)
 
+    @property
+    def entity_graph(self) -> EntityGraph:
+        """Lazily load and cache the compact read-only 1-hop relation graph."""
+        if self._entity_graph is None:
+            self._entity_graph = EntityGraph.from_connection(self._conn)
+        return self._entity_graph
+
     def close(self) -> None:
+        self._entity_graph = None
         self._conn.close()
 
     def __enter__(self) -> KnowledgeBaseReader:
@@ -806,23 +816,31 @@ class KnowledgeBaseReader:
                 entities[str(row["entity_id"])] = row
         return entities
 
-    def query(
+    def query_with_diagnostics(
         self,
         text: str,
         *,
         locked_surfaces: Collection[str] = (),
         reference_surfaces: Collection[str] = (),
+        anchor_surfaces: Collection[str] = (),
+        use_graph: bool = True,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         max_scalars: int = DEFAULT_MAX_SCALARS,
-    ) -> tuple[DomainKnowledgeCandidate, ...]:
-        """Run hybrid Lexical RAG retrieval (exact alias + short-ngram + FTS5 trigram) with RRF fusion.
+    ) -> tuple[tuple[DomainKnowledgeCandidate, ...], GraphBoostOutcome]:
+        """Run hybrid Lexical RAG retrieval with optional 1-hop graph boost and diagnostics.
 
         Every returned item is an immutable ``DomainKnowledgeCandidate`` with
         ``lock_eligible=False`` and has passed the ``select_domain_knowledge_candidates``
         isolation and budget gate.
         """
+        empty_graph_outcome = GraphBoostOutcome(
+            candidates=(),
+            anchor_entity_ids=frozenset(),
+            boosted_entity_ids=frozenset(),
+            triggered_count=0,
+        )
         if not text or not text.strip():
-            return ()
+            return (), empty_graph_outcome
 
         # Phase 1: Bounded candidate discovery across alias, short-ngram, and FTS5.
         alias_hits = self._query_exact_aliases(text)
@@ -842,7 +860,7 @@ class KnowledgeBaseReader:
         }
         candidate_entity_ids = existing_tier0_entities | fts_discovered_ids
         if not candidate_entity_ids:
-            return ()
+            return (), empty_graph_outcome
 
         # Phase 2: Complete unbounded SQLite FTS5 evidence for discovered entities.
         fts_hits = self._complete_fts_evidence(
@@ -893,7 +911,7 @@ class KnowledgeBaseReader:
             )
 
         if not raw_hits:
-            return ()
+            return (), empty_graph_outcome
 
         # Stage 2: Entity-level evidence-tier truncation BEFORE any span/score merge.
         best_tier_by_entity: dict[str, int] = {}
@@ -926,7 +944,7 @@ class KnowledgeBaseReader:
             if hit.spans:
                 matched_spans_by_key.setdefault(key, set()).update(hit.spans)
 
-        # Stage 4: Build candidates and run lock-coverage / single-char gating.
+        # Stage 4: Build candidates, apply optional 1-hop graph boost, then lock/single-char gate.
         entities = self._load_entities({entity_id for entity_id, _ in fused_scores})
         candidates: list[DomainKnowledgeCandidate] = []
         for (entity_id, surface), score in fused_scores.items():
@@ -954,11 +972,63 @@ class KnowledgeBaseReader:
                 )
             )
 
-        return select_domain_knowledge_candidates(
+        if use_graph and candidates:
+            combined_anchor_surfaces = (
+                *locked_surfaces,
+                *reference_surfaces,
+                *anchor_surfaces,
+            )
+            graph_outcome = self.entity_graph.boost_candidates(
+                text,
+                candidates,
+                anchor_surfaces=combined_anchor_surfaces,
+            )
+            ranked_candidates: tuple[DomainKnowledgeCandidate, ...] = (
+                graph_outcome.candidates
+            )
+        else:
+            ranked_candidates = tuple(candidates)
+            graph_outcome = GraphBoostOutcome(
+                candidates=ranked_candidates,
+                anchor_entity_ids=frozenset(),
+                boosted_entity_ids=frozenset(),
+                triggered_count=0,
+            )
+
+        selected = select_domain_knowledge_candidates(
             text,
-            candidates,
+            ranked_candidates,
             locked_surfaces=locked_surfaces,
             reference_surfaces=reference_surfaces,
             max_candidates=max_candidates,
             max_scalars=max_scalars,
         )
+        return selected, graph_outcome
+
+    def query(
+        self,
+        text: str,
+        *,
+        locked_surfaces: Collection[str] = (),
+        reference_surfaces: Collection[str] = (),
+        anchor_surfaces: Collection[str] = (),
+        use_graph: bool = True,
+        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        max_scalars: int = DEFAULT_MAX_SCALARS,
+    ) -> tuple[DomainKnowledgeCandidate, ...]:
+        """Run hybrid Lexical RAG retrieval (exact alias + short-ngram + FTS5 trigram) with RRF fusion.
+
+        Every returned item is an immutable ``DomainKnowledgeCandidate`` with
+        ``lock_eligible=False`` and has passed the ``select_domain_knowledge_candidates``
+        isolation and budget gate.
+        """
+        selected, _graph_outcome = self.query_with_diagnostics(
+            text,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+            anchor_surfaces=anchor_surfaces,
+            use_graph=use_graph,
+            max_candidates=max_candidates,
+            max_scalars=max_scalars,
+        )
+        return selected
