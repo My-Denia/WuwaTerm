@@ -131,44 +131,6 @@ def _augment_harness_with_kb(
         )
         env_file.chmod(0o600)
 
-    # Extend the fake docker binary with build-kb and verify-kb handlers.
-    docker_script = tmp_path / "bin" / "docker"
-    original = docker_script.read_text(encoding="utf-8")
-    kb_handlers = (
-        "  *'build-kb --atomic'*)\n"
-        "    kb_cand=''\n"
-        "    for arg in \"$@\"; do\n"
-        "      case \"$arg\" in WUWATERM_KNOWLEDGE_DB_PATH=*) kb_cand=${arg#WUWATERM_KNOWLEDGE_DB_PATH=} ;; esac\n"
-        "    done\n"
-        "    kb_cand=$FAKE_DEPLOY_ROOT/data/${kb_cand#/app/data/}\n"
-        "    cp \"$FAKE_DEPLOY_ROOT/data/candidate-kb-seed.db\" \"$kb_cand\"\n"
-        "    ;;\n"
-        "  *'verify-kb'*)\n"
-        "    terms_cand=''\n"
-        "    kb_cand=''\n"
-        "    for arg in \"$@\"; do\n"
-        "      case \"$arg\" in\n"
-        "        WUWATERM_DB_PATH=*) terms_cand=${arg#WUWATERM_DB_PATH=} ;;\n"
-        "        WUWATERM_KNOWLEDGE_DB_PATH=*) kb_cand=${arg#WUWATERM_KNOWLEDGE_DB_PATH=} ;;\n"
-        "      esac\n"
-        "    done\n"
-        "    if [ \"${FAKE_POST_PROMOTE_VERIFY_KB_FAIL:-0}\" = 1 ] && [ \"$terms_cand\" = '/app/data/terms.db' ]; then\n"
-        "      echo 'injected post-promote verify-kb failure' >&2\n"
-        "      exit 1\n"
-        "    fi\n"
-        "    terms_cand=$FAKE_DEPLOY_ROOT/data/${terms_cand#/app/data/}\n"
-        "    kb_cand=$FAKE_DEPLOY_ROOT/data/${kb_cand#/app/data/}\n"
-        "    python3 \"$FAKE_DEPLOY_ROOT/scripts/verify_knowledge_db.py\" \"$kb_cand\" --terms-db \"$terms_cand\"\n"
-        "    ;;\n"
-    )
-    anchor = "  *'verify-db'*)\n"
-    assert anchor in original
-    docker_script.write_text(
-        original.replace(anchor, kb_handlers + anchor, 1),
-        encoding="utf-8",
-    )
-    docker_script.chmod(0o755)
-
     return {
         "root": root,
         "env": env,
