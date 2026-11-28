@@ -71,13 +71,16 @@ def _patch_docker(monkeypatch: pytest.MonkeyPatch, entries: list[dict[str, Any]]
     return inspected
 
 
+@pytest.mark.parametrize("legacy_state", ["exited", "created", "dead"])
 def test_project_containers_skips_stopped_legacy_bot_and_adopts_api(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy_state: str,
 ) -> None:
     inspected = _patch_docker(
         monkeypatch,
         [
-            _entry(LEGACY_BOT_ID, project="deploy", service="wuwaterm", state="exited"),
+            _entry(LEGACY_BOT_ID, project="deploy", service="wuwaterm", state=legacy_state),
             _entry(API_ID, project="deploy", service="wuwaterm-api", state="running"),
         ],
     )
@@ -112,13 +115,14 @@ def test_project_containers_skips_stopped_legacy_bot_alongside_standalone_telegr
     assert "docker rm wuwaterm-bot" in capsys.readouterr().err
 
 
-def test_project_containers_fails_closed_when_legacy_bot_is_running(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("active_state", ["running", "restarting", "paused"])
+def test_project_containers_fails_closed_when_legacy_bot_is_active(
+    monkeypatch: pytest.MonkeyPatch, active_state: str
 ) -> None:
     inspected = _patch_docker(
         monkeypatch,
         [
-            _entry(LEGACY_BOT_ID, project="deploy", service="wuwaterm", state="running"),
+            _entry(LEGACY_BOT_ID, project="deploy", service="wuwaterm", state=active_state),
             _entry(API_ID, project="deploy", service="wuwaterm-api", state="running"),
         ],
     )

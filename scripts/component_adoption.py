@@ -115,14 +115,15 @@ def _project_containers(projects: list[str]) -> dict[str, tuple[dict[str, Any], 
         if labels.get("com.docker.compose.oneoff") == "True":
             _fail("Compose project contains an unknown or duplicate service")
         if service == "wuwaterm":
-            if entry.get("State") != "running":
+            state = entry.get("State")
+            if state in {"exited", "created", "dead"}:
                 sys.stderr.write(
                     "component_adoption: skipping stopped legacy 'wuwaterm' container "
                     "(remove it manually with `docker rm wuwaterm-bot`)\n"
                 )
                 continue
             _fail(
-                "legacy inline Telegram bot container (service 'wuwaterm') is still running; "
+                f"legacy inline Telegram bot container (service 'wuwaterm', state={state!r}) is still active; "
                 "stop and remove it (`docker stop wuwaterm-bot && docker rm wuwaterm-bot`) "
                 "and migrate to standalone My-Denia/WuwaTerm-Telegram (or roll back to v0.16.0) before adopting"
             )

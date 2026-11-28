@@ -307,7 +307,7 @@ def interruptible_adoption(root: Path, args: list[str], expected_commit: str, *,
     return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
 
 
-@pytest.mark.parametrize("topology", ["api", "running-api", "telegram", "both", "wheel-both", "unknown", "unknown-no-receipt",
+@pytest.mark.parametrize("topology", ["api", "running-api", "api-with-stopped-legacy-bot", "stopped-legacy-bot-only", "wheel-both", "unknown", "unknown-no-receipt",
                                       "pointer-fail-absent", "pointer-fail-present", "legacy-no-receipt",
                                       "legacy-wrong-digest", "legacy-writable-manifest", "legacy-no-core", "legacy-interrupted",
                                       "legacy-terminal-probe", "env-drift", "leaf-committed", "leaf-pointer-fail",
@@ -388,9 +388,11 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
     env_file = root / ".env"
     env_file.write_text("FIXTURE_VALUE=local-only\n")
     env_file.chmod(0o600)
-    has_api = topology in ("api", "running-api", "both", "wheel-both", "unknown", "unknown-no-receipt", "pointer-fail-absent", "pointer-fail-present", "env-drift") or topology.startswith("legacy-") or leaf_case
-    has_telegram = topology in ("telegram", "both", "wheel-both") or topology.startswith("legacy-") or leaf_case
-    if has_telegram and wheel is None:
+    has_api = topology != "stopped-legacy-bot-only"
+    has_telegram = topology == "wheel-both"
+    has_stopped_legacy_bot = topology in ("api-with-stopped-legacy-bot", "stopped-legacy-bot-only")
+    has_legacy_manifest = topology.startswith("legacy-") or leaf_case
+    if has_legacy_manifest:
         legacy = deployment_manifest.build_manifest(
             source_commit=legacy_commit, image_ref=source["image_ref"], image_id=source["image_id"],
             image_digest="sha256:" + "0" * 64 if topology == "legacy-wrong-digest" else source["image_id"],
@@ -408,13 +410,15 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
     compose_projects.append(project)
     config = root / "adopt-compose.yml"
     services = []
-    for service, image, command, state_mount in (
-        ("wuwaterm-api", source["image_ref"], "api", "state-api"),
-        ("wuwaterm-telegram" if wheel else "wuwaterm", wheel["image_ref"] if wheel else source["image_ref"],
-         None if wheel else "bot", "state"),
-    ):
-        if (service == "wuwaterm-api" and not has_api) or (service != "wuwaterm-api" and not has_telegram):
-            continue
+    service_specs: list[tuple[str, str, str | None, str]] = []
+    if has_api:
+        service_specs.append(("wuwaterm-api", source["image_ref"], "api", "state-api"))
+    if has_telegram:
+        assert wheel is not None
+        service_specs.append(("wuwaterm-telegram", wheel["image_ref"], None, "state"))
+    if has_stopped_legacy_bot:
+        service_specs.append(("wuwaterm", source["image_ref"], "bot", "state"))
+    for service, image, command, state_mount in service_specs:
         target_state = "/app/state-api" if state_mount == "state-api" else "/app/state"
         environment = "WUWATERM_API_STATE_DIR" if state_mount == "state-api" else "WUWATERM_STATE_DIR"
         extra_environment = f"      WUWATERM_API_PORT: '{port}'\n" if running and service == "wuwaterm-api" else ""
@@ -449,7 +453,7 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
                  root, "containers")
     assert listed.returncode == 0
     ids = listed.stdout.splitlines()
-    assert len(ids) == int(has_api) + int(has_telegram)
+    assert len(ids) == int(has_api) + int(has_telegram) + int(has_stopped_legacy_bot)
     (root / "resources.json").write_text(json.dumps({"owner": "runtime-build-adopt-cbe9", "project": project,
         "containers": ids, "source_receipt": source_receipt, "wheel_receipt": wheel_receipt}, indent=2) + "\n")
     before = {identifier: snapshot(identifier) for identifier in ids}
@@ -458,13 +462,14 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
     leaves_before = leaf_snapshot(root) if leaf_case else None
     old_pointer = (root / ".deploy_commit").read_bytes() if (root / ".deploy_commit").exists() else None
     old_pointer_inode = (root / ".deploy_commit").stat().st_ino if old_pointer is not None else None
-    assert (old_pointer is not None) == (has_telegram and wheel is None or topology == "pointer-fail-present")
+    assert (old_pointer is not None) == (has_legacy_manifest or topology == "pointer-fail-present")
     arguments = [str(root / "scripts/component_runtime.py"), "--root", str(root), "adopt",
                  "--project", project, "--compose-executable", compose]
     if has_api and not topology.startswith("legacy-") and topology != "unknown-no-receipt":
         arguments += ["--api-receipt", "f" * 64 if topology == "unknown" else source_receipt]
-    if has_telegram and not topology.startswith("legacy-"):
-        arguments += ["--telegram-receipt", wheel_receipt or source_receipt]
+    if has_telegram:
+        assert wheel_receipt is not None
+        arguments += ["--telegram-receipt", wheel_receipt]
     if topology == "legacy-terminal-probe":
         failed = interruptible_adoption(root, arguments, commit)
         assert failed.returncode != 0 and "original pointers were restored" in failed.stderr
@@ -702,7 +707,7 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
         assert retried.returncode == 0, retried.stderr
         adopted = product_manifest.read_manifest(root, json.loads(retried.stdout)["deployment_id"])
         assert adopted["components"]["api"]["provenance"]["kind"] == "legacy-image"
-        assert adopted["components"]["telegram"]["provenance"]["kind"] == "legacy-image"
+        assert adopted["components"]["telegram"] is None
         assert {identifier: snapshot(identifier) for identifier in ids} == before
         assert {str(p): file_snapshot(p) for p in (env_file, root / "data/terms.db", root / "state-api/devices.db")} == files_before
         return
@@ -727,8 +732,11 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
         assert {identifier: snapshot(identifier) for identifier in ids} == before
         assert {str(p): file_snapshot(p) for p in (env_file, root / "data/terms.db", root / "state-api/devices.db")} == files_before
         return
-    if topology in ("unknown", "unknown-no-receipt", "legacy-wrong-digest", "legacy-writable-manifest", "legacy-no-core"):
+    if topology in ("unknown", "unknown-no-receipt", "stopped-legacy-bot-only", "legacy-wrong-digest", "legacy-writable-manifest", "legacy-no-core"):
         assert result.returncode != 0
+        if topology == "stopped-legacy-bot-only":
+            assert "docker rm wuwaterm-bot" in result.stderr
+            assert "no installed product containers were discovered" in result.stderr
         assert ((root / ".deploy_commit").read_bytes() if (root / ".deploy_commit").exists() else None) == old_pointer
         assert not (root / ".deploy_current").exists()
         assert not (root / ".deployments/products").exists()
@@ -745,6 +753,8 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
             assert not probes
         return
     assert result.returncode == 0, result.stderr
+    if has_stopped_legacy_bot:
+        assert "docker rm wuwaterm-bot" in result.stderr
     outcome = json.loads(result.stdout)
     assert outcome["polling_health"] == "unconfirmed"
     product = product_manifest.read_manifest(root, outcome["deployment_id"])
@@ -772,9 +782,6 @@ def test_real_metadata_adoption_preserves_installed_topology(tmp_path: Path, top
         assert product["components"]["telegram"]["provenance"]["build_receipt_sha256"] == wheel_receipt
         assert product["components"]["telegram"]["core"]["verified_commit"] != commit
         assert product["components"]["telegram"]["source"]["verified_commit"] == os.environ["WUWATERM_TELEGRAM_COMMIT"]
-    if has_telegram and not wheel:
-        assert product["components"]["telegram"]["provenance"]["kind"] == "legacy-image"
-        assert product["components"]["telegram"]["source"]["verified_commit"] is None
     if topology == "legacy-no-receipt":
         assert product["components"]["api"]["provenance"]["kind"] == "legacy-image"
         assert product["components"]["api"]["source"]["verified_commit"] is None

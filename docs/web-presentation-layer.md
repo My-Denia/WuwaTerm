@@ -49,29 +49,29 @@ API document — the process behaves exactly as it did before this layer existed
 Turning it off again is a restart, and it is the first thing to do if the layer
 is ever suspected in an API problem.
 
-## Settings
+## Settings (Historical `v0.16.0` reference)
+
+> The settings below applied only through release `v0.16.0`. On Core `main`,
+> setting `WUWATERM_API_WEB_ENABLED` to any truthy or unrecognised value fails
+> closed on `wuwaterm-api serve` / `create_app()`; unset, empty, or falsy values
+> (`0`, `false`, `no`, `off`) are silently ignored for existing `.env`
+> compatibility.
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `WUWATERM_API_WEB_ENABLED` | `false` | Mount the layer at all. Accepts `1/0`, `true/false`, `yes/no`, `on/off`; anything else fails the process rather than being read as "off". |
-| `WUWATERM_API_WEB_DEVICE_TOKEN` | — | The device token the browser session is mapped onto. Required when enabled. **Server-side only** — it is never sent to the browser and must never be typed into one. |
-| `WUWATERM_API_WEB_EDGE_SECRET` | — | Shared marker the reverse proxy injects on every proxied request. Required when enabled: with it unset the layer refuses everything. |
-| `WUWATERM_API_WEB_SESSION_TTL_SECONDS` | `43200` | Browser session lifetime. |
-| `WUWATERM_API_WEB_MAX_SESSIONS` | `32` | Ceiling on live sessions. |
+| `WUWATERM_API_WEB_ENABLED` | `false` | Historical switch to mount the retired layer (`1/0`, `true/false`, `yes/no`, `on/off`). |
+| `WUWATERM_API_WEB_DEVICE_TOKEN` | — | Historical server-side device token the retired browser session mapped onto. |
+| `WUWATERM_API_WEB_EDGE_SECRET` | — | Historical shared marker the reverse proxy injected on every proxied request. |
+| `WUWATERM_API_WEB_SESSION_TTL_SECONDS` | `43200` | Historical browser session lifetime. |
+| `WUWATERM_API_WEB_MAX_SESSIONS` | `32` | Historical ceiling on live sessions. |
 
-Issue the device token the normal way (`wuwaterm-api device issue`), give it
-both scopes, and put it in the environment file the API container reads. It is
-an ordinary device from the credential store's point of view — it can be listed
-and revoked like any other, and revoking it ends the browser session on the
-next request.
-
-**Note where those values land.** The Compose deployment gives the bot and the
-API the *same* `../.env`, so writing the web variables there expands them into
-the bot's process as well — a service with no web surface holding the web
-device token and the edge marker. The Compose file therefore blanks all three
-in the bot service's `environment:` block, which overrides `env_file`. If you
-deploy some other way, reproduce that: either give the API its own environment
-file, or blank these three for every process that is not the API.
+In `v0.16.0`, the operator issued a device token (`wuwaterm-api device issue`)
+with both scopes, put it in the API environment file, and relied on the legacy
+Compose file blanking the three web variables in the historical `wuwaterm` bot
+service's `environment:` block. On current Core, use standalone
+[My-Denia/WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) via
+`./deploy/setup.sh --with-web`, which keeps its own `state-web/web.env` and
+`state-web/device.token` outside Core's `.env`.
 
 ## The route
 

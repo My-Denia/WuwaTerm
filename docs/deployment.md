@@ -41,7 +41,7 @@ for drift.
   releases/rN        one checkout per release; N counts up and is never reused
   current            symlink to releases/rN, the release that last passed its health check
   data/              terms.db, deployment-backups/, candidates/
-  state/ state-api/  bot state; API device store
+  state/ state-api/  legacy or standalone Telegram bot state; API device store
   .env  .deployments/  .deploy_commit
 ```
 
@@ -109,10 +109,11 @@ does not apply to a release.
 `wuwaterm-api` reads that `.env` file through Compose `env_file`; the
 builder has no `env_file` at all, and `.env` is ignored and excluded from the
 image build context. What reaches the API container is narrowed by its own
-`environment:` block: `wuwaterm-api` blanks legacy `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET`, and the
-legacy bot state paths so leftover keys in an upgraded `.env` never enter the
-API process. It receives the model credentials (`WUWATERM_OPENAI_API_KEY` and
+`environment:` block: `wuwaterm-api` blanks `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET`, and
+`WUWATERM_API_DEVICE_DB_PATH` (four legacy Telegram/redaction keys plus the
+device-DB path override so one-off containers cannot diverge from
+`/app/state-api`). It receives the model credentials (`WUWATERM_OPENAI_API_KEY` and
 the other `WUWATERM_OPENAI_*` settings). Standalone Telegram bots live in
 [My-Denia/WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) with
 their own container and environment isolation.
@@ -432,7 +433,7 @@ sudo systemctl reload caddy
 
 **Rollback is deleting that block and reloading again** (or restoring the
 backup file). Nothing else is affected: the API keeps running exactly as it did
-before, still bound to loopback, and both containers are untouched. Because the
+before, still bound to loopback, and the API container is untouched. Because the
 service never binds a public interface, removing the route removes the
 exposure — there is no second place it could still be reachable from.
 
@@ -539,7 +540,7 @@ mkdir -p state-api && chmod 700 state-api
 ### Reading The Request Log
 
 The service writes to its **standard error** — the stream the standard
-library's default handler uses, and the one the bot's records already go to. The
+library's default handler uses. The
 container runtime collects both streams, so `docker compose logs` shows them; a
 collector that captures only stdout will not:
 
@@ -717,8 +718,8 @@ one on the command line and `device list` prints them.)
 A target that could itself be a credential — a client or proxy that puts a token
 in the URL instead of the `Authorization` header — is replaced entirely by the
 literal `credential-shaped`, with no digest of it either: the digest would be
-unkeyed here (this container blanks the redaction secret, which belongs to the
-bot) and a leaked line would then be a cheap way to test guesses at the secret.
+unkeyed here (this container blanks `WUWATERM_REDACTION_SECRET`, which was
+the legacy bot's key) and a leaked line would then be a cheap way to test guesses at the secret.
 
 `method` is likewise recorded by membership, not content: the standard verb when
 it is one, `other` when it is not. This service publishes `GET` and `POST` (plus
@@ -802,16 +803,19 @@ not passed by the Compose `command:` at all.
 
 ### Cost Topology
 
-The API's budgets are per process and are NOT shared with the bot:
+The API's budgets are per process and are NOT shared with any standalone
+`WuwaTerm-Telegram` or other external process:
 
 | Process | Model concurrency | Model calls per minute |
 |---|---|---|
-| `wuwaterm` (bot) | `WUWATERM_LLM_MAX_CONCURRENCY` (default 4) | per-chat request limit only, plus the linked-channel budget |
 | `wuwaterm-api` | `WUWATERM_API_LLM_MAX_CONCURRENCY` (default 2) | `WUWATERM_API_LLM_CALLS_PER_MINUTE` (default 30) |
+| Standalone `WuwaTerm-Telegram` (if deployed separately) | configured in its own container (`WUWATERM_LLM_MAX_CONCURRENCY`) | independent per-process limits in that product |
 
-The worst case for the host is the SUM of the two, never one shared ceiling.
-Nothing in either process coordinates with the other; if a single global budget
-is ever needed, that is a new mechanism, not a configuration change.
+When standalone `WuwaTerm-Telegram` runs alongside `wuwaterm-api` against the
+same upstream model account, the worst case for the host is the SUM of the
+processes, never one shared ceiling. Nothing in `wuwaterm-api` coordinates with
+an external process; if a single global budget is ever needed, that is a new
+mechanism, not a configuration change.
 
 ## Runtime-only updates
 
@@ -1203,10 +1207,14 @@ fake-docker harnesses with real durable file operations and a real
 process-group SIGKILL at the promotion window; it is not a claim about real
 host power-loss behaviour.
 
-For a state-only migration using an existing `terms.db`, let the new runtime
-perform the same validated, atomic one-time migration during startup:
+For a historical (`v0.16.0` and earlier) state-only migration of the retired
+inline `wuwaterm-bot` using an existing `terms.db`, that pre-retirement release
+performed a validated, atomic one-time migration during startup (Core no longer
+ships the `wuwaterm` service; roll back to `v0.16.0` if migrating a pre-`state/`
+inline bot before moving those files into standalone `WuwaTerm-Telegram`):
 
 ```bash
+# Historical v0.16.0 procedure only (Core main no longer defines service wuwaterm):
 cd /opt/wuwaterm/current
 export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml stop wuwaterm
@@ -1217,29 +1225,27 @@ docker compose -f deploy/docker-compose.yml up -d --build wuwaterm
 Do not manually copy these files while the old bot is running. Do not delete or
 pre-create `state/*.json`: an existing target is deliberately never overwritten.
 
-If the existing `.env` explicitly sets either state file path to the old data
-directory, remove those lines or update them to:
+On that historical `v0.16.0` path, if the existing `.env` explicitly set either
+state file path to the old data directory, those lines were removed or updated to:
 
 ```bash
 WUWATERM_SETTINGS_PATH=state/chat_settings.json
 WUWATERM_CHANNEL_REPLY_INDEX_PATH=state/channel_replies.json
 ```
 
-The Compose runtime also overrides these paths to `/app/state/...` so an old
-`.env` cannot make the read-only runtime write under `/app/data`.
+In `v0.16.0` and earlier, the legacy `wuwaterm` Compose service also overrode
+these paths to `/app/state/...` so an old `.env` could not make the read-only
+runtime write under `/app/data`. That startup path performed the one-time copy
+when `WUWATERM_STATE_DIR` was set, the new file was missing, and the legacy
+DB-adjacent file existed, without overwriting an existing file in `state/`.
 
-Startup performs the one-time copy when `WUWATERM_STATE_DIR` is set,
-the new file is missing, and the legacy DB-adjacent file exists. This includes
-old explicit settings that still point at the DB-adjacent files. It never
-overwrites an existing file in `state/`; copy failure stops startup instead of
-silently dropping the allowlist, public-mode state, or channel reply index.
+## Deployment Smoke (Historical Inline Bot / Standalone Telegram)
 
-## Deployment Smoke
-
-After the service starts, use `scripts/deploy_smoke.py` as a deployment
-reachability check. It verifies `getMe`, and when `TELEGRAM_TEST_CHAT_ID` is set
-it sends one diagnostic message without printing the token or chat id. See
-[Validation](validation.md) for live smoke caveats.
+`scripts/deploy_smoke.py` is a Telegram Bot API reachability check (`getMe`,
+and one diagnostic message when `TELEGRAM_TEST_CHAT_ID` is set, without
+printing the token or chat id). Because the inline Telegram bot has been
+retired from Core after `v0.16.0`, Core API deployments verify `/readyz`
+instead; see [Validation](validation.md) for live smoke caveats.
 
 ## Traceability Readback
 
