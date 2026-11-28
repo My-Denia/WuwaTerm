@@ -8,6 +8,7 @@ import math
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -576,3 +577,449 @@ def test_dockerfile_and_core_dependencies_stay_free_of_ml_bloat() -> None:
         lowered = item.casefold()
         for forbidden in ("onnxruntime", "sqlite-vec", "faiss", "numpy", "tokenizers"):
             assert forbidden not in lowered
+
+
+class _StubNdArray:
+    """Minimal pure-Python ndarray stub for testing OnnxInt8TextEncoder without numpy."""
+
+    def __init__(self, data: object) -> None:
+        self._data = data
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        dims: list[int] = []
+        cur = self._data
+        while isinstance(cur, list):
+            dims.append(len(cur))
+            cur = cur[0] if cur else None
+        return tuple(dims)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    def tolist(self) -> Any:
+        if isinstance(self._data, list):
+            return [
+                _StubNdArray(x).tolist() if isinstance(x, list) else x
+                for x in self._data
+            ]
+        return self._data
+
+    def _map(self, fn: object, other: object = None) -> _StubNdArray:
+        def _apply(a: Any, b: Any = None) -> Any:
+            if isinstance(a, list):
+                if isinstance(b, list):
+                    if len(b) == 1 and len(a) > 1:
+                        return [_apply(ai, b[0]) for ai in a]
+                    return [_apply(ai, bi) for ai, bi in zip(a, b)]
+                return [_apply(ai, b) for ai in a]
+            return fn(a) if b is None else fn(a, b)  # type: ignore[operator]
+
+        rhs = other._data if isinstance(other, _StubNdArray) else other
+        return _StubNdArray(_apply(self._data, rhs))
+
+    def astype(self, dtype: object) -> _StubNdArray:
+        cast = float if dtype is float else int
+        return self._map(cast)
+
+    def __gt__(self, other: object) -> _StubNdArray:
+        return self._map(lambda a, b: a > b, other)
+
+    def __sub__(self, other: object) -> _StubNdArray:
+        return self._map(lambda a, b: a - b, other)
+
+    def __rsub__(self, other: object) -> _StubNdArray:
+        return self._map(lambda a, b: b - a, other)
+
+    def __mul__(self, other: object) -> _StubNdArray:
+        return self._map(lambda a, b: a * b, other)
+
+    def __truediv__(self, other: object) -> _StubNdArray:
+        return self._map(lambda a, b: a / b, other)
+
+    def sum(self, axis: int = 1) -> _StubNdArray:
+        assert axis == 1
+        assert isinstance(self._data, list)
+        out: list[Any] = []
+        for batch_item in self._data:
+            if batch_item and isinstance(batch_item[0], list):
+                width = len(batch_item[0])
+                out.append([sum(tok[d] for tok in batch_item) for d in range(width)])
+            else:
+                out.append(sum(batch_item))
+        return _StubNdArray(out)
+
+    def any(self, axis: int = 1) -> _StubNdArray:
+        assert axis == 1
+        assert isinstance(self._data, list)
+        return _StubNdArray([any(row) for row in self._data])
+
+    def __getitem__(self, key: object) -> _StubNdArray:
+        assert isinstance(self._data, list)
+        if isinstance(key, int):
+            return _StubNdArray(self._data[key])
+        if isinstance(key, tuple):
+            if (
+                len(key) == 2
+                and key[0] == slice(None)
+                and key[1] is None
+                and self.ndim == 1
+            ):
+                return _StubNdArray([[x] for x in self._data])
+            if (
+                len(key) == 2
+                and key[0] == slice(None)
+                and isinstance(key[1], slice)
+            ):
+                s = key[1]
+                return _StubNdArray([row[s] for row in self._data])
+            if (
+                len(key) == 3
+                and key[0] == slice(None)
+                and key[1] == slice(None)
+                and key[2] is None
+            ):
+                return _StubNdArray([[[x] for x in row] for row in self._data])
+            if (
+                len(key) == 3
+                and key[0] == slice(None)
+                and isinstance(key[1], int)
+                and key[2] == slice(None)
+            ):
+                pos = key[1]
+                return _StubNdArray([row[pos] for row in self._data])
+            if (
+                len(key) == 3
+                and isinstance(key[0], _StubNdArray)
+                and isinstance(key[1], _StubNdArray)
+                and key[2] == slice(None)
+            ):
+                return _StubNdArray(
+                    [
+                        self._data[b][t]
+                        for b, t in zip(key[0].tolist(), key[1].tolist())
+                    ]
+                )
+        raise NotImplementedError(f"unsupported stub slice: {key!r}")
+
+
+class _StubNumpy:
+    int64 = int
+    float32 = float
+
+    @staticmethod
+    def asarray(data: object, dtype: object = None) -> _StubNdArray:
+        arr = _StubNdArray(data)
+        return arr.astype(dtype) if dtype is not None else arr
+
+    @staticmethod
+    def arange(n: int) -> _StubNdArray:
+        return _StubNdArray(list(range(n)))
+
+    @staticmethod
+    def zeros(shape: tuple[int, ...], dtype: object = float) -> _StubNdArray:
+        val = 0.0 if dtype is float else 0
+
+        def _build(dims: tuple[int, ...]) -> Any:
+            if len(dims) == 1:
+                return [val] * dims[0]
+            return [_build(dims[1:]) for _ in range(dims[0])]
+
+        return _StubNdArray(_build(shape))
+
+    @staticmethod
+    def argmax(arr: _StubNdArray, axis: int = 1) -> _StubNdArray:
+        assert axis == 1
+        return _StubNdArray([row.index(max(row)) for row in arr._data])
+
+    @staticmethod
+    def maximum(arr: _StubNdArray, val: float) -> _StubNdArray:
+        return arr._map(lambda x: x if x >= val else val)
+
+    @staticmethod
+    def cumsum(arr: _StubNdArray, axis: int = 1) -> _StubNdArray:
+        assert axis == 1
+        out: list[list[int]] = []
+        for row in arr._data:
+            running = 0
+            acc: list[int] = []
+            for v in row:
+                running += v
+                acc.append(running)
+            out.append(acc)
+        return _StubNdArray(out)
+
+    @staticmethod
+    def where(
+        cond: _StubNdArray, x: _StubNdArray, y: float
+    ) -> _StubNdArray:
+        out: list[list[float]] = []
+        for c_row, x_row in zip(cond._data, x._data):
+            flag = c_row[0] if isinstance(c_row, list) else c_row
+            out.append(list(x_row) if flag else [float(y)] * len(x_row))
+        return _StubNdArray(out)
+
+
+def test_onnx_encoder_pad_resolution_and_pooling_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+    import wuwaterm.retrieval_vector as rv
+
+    model_file = tmp_path / "model.int8.onnx"
+    tok_file = tmp_path / "tokenizer.json"
+    model_file.write_bytes(b"stub-onnx")
+    tok_file.write_text("{}", encoding="utf-8")
+
+    class _FakeEncoding:
+        def __init__(self, ids: list[int], mask: list[int], types_list: list[int]) -> None:
+            self.ids = ids
+            self.attention_mask = mask
+            self.type_ids = types_list
+
+    recorded: dict[str, Any] = {}
+
+    class _FakeTokenizer:
+        def __init__(
+            self,
+            *,
+            vocab: dict[str, int],
+            padding: dict[str, Any] | None = None,
+            batch_rows: list[tuple[list[int], list[int], list[int]]] | None = None,
+        ) -> None:
+            self._vocab = vocab
+            self._id_to_tok = {v: k for k, v in vocab.items()}
+            self.padding = padding
+            self._batch_rows = batch_rows or []
+            self.pad_calls: list[dict[str, Any]] = []
+
+        def token_to_id(self, token: str) -> int | None:
+            return self._vocab.get(token)
+
+        def id_to_token(self, idx: int) -> str | None:
+            return self._id_to_tok.get(idx)
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            recorded["max_length"] = max_length
+
+        def enable_padding(self, **kwargs: Any) -> None:
+            self.pad_calls.append(kwargs)
+            self.padding = dict(kwargs)
+
+        def encode_batch(self, texts: list[str]) -> list[_FakeEncoding]:
+            recorded["encoded_texts"] = list(texts)
+            return [_FakeEncoding(ids, mask, tids) for ids, mask, tids in self._batch_rows]
+
+    # Hidden states: batch=2, seq=4, native_dim=4; pad positions hold large junk
+    # values (999.0) so any pooling mistake immediately fails assertions.
+    hidden_tensor = [
+        [
+            [1.0, 2.0, 3.0, 9.0],   # tok 0 (valid)
+            [3.0, 6.0, 9.0, 9.0],   # tok 1 (valid; last valid for row 0)
+            [999.0, 999.0, 999.0, 999.0],  # pad
+            [999.0, 999.0, 999.0, 999.0],  # pad
+        ],
+        [
+            [2.0, 0.0, 0.0, 5.0],   # tok 0 (valid)
+            [0.0, 4.0, 0.0, 5.0],   # tok 1 (valid)
+            [1.0, 2.0, 2.0, 5.0],   # tok 2 (valid; last valid for row 1)
+            [999.0, 999.0, 999.0, 999.0],  # pad
+        ],
+    ]
+    batch_rows = [
+        ([10, 11, 151643, 151643], [1, 1, 0, 0], [0, 0, 0, 0]),
+        ([20, 21, 22, 151643], [1, 1, 1, 0], [0, 0, 0, 0]),
+    ]
+    active_tok: list[_FakeTokenizer] = []
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str]) -> None:
+            recorded["session_path"] = path
+            recorded["providers"] = providers
+
+        def get_inputs(self) -> list[Any]:
+            return [
+                types.SimpleNamespace(name="input_ids"),
+                types.SimpleNamespace(name="attention_mask"),
+                types.SimpleNamespace(name="position_ids"),
+            ]
+
+        def get_outputs(self) -> list[Any]:
+            return [types.SimpleNamespace(shape=["batch", "seq", 4])]
+
+        def run(self, _out: object, feeds: dict[str, Any]) -> list[Any]:
+            recorded["feeds"] = {k: v.tolist() for k, v in feeds.items()}
+            return [_StubNdArray(hidden_tensor)]
+
+    fake_ort = types.SimpleNamespace(InferenceSession=_FakeSession)
+    fake_tok_mod = types.SimpleNamespace(
+        Tokenizer=types.SimpleNamespace(from_file=lambda _p: active_tok[0])
+    )
+    real_import = rv.importlib.import_module
+
+    def patched_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "onnxruntime":
+            return fake_ort
+        if name == "tokenizers":
+            return fake_tok_mod
+        if name == "numpy":
+            return _StubNumpy
+        return real_import(name)
+
+    monkeypatch.setattr(rv.importlib, "import_module", patched_import)
+
+    # 1) Auto-resolve pad_id=1 / <pad> from tokenizer.padding (XLM-R / BGE-M3 style)
+    xlmr_tok = _FakeTokenizer(
+        vocab={"<pad>": 1, "<s>": 0},
+        padding={"pad_id": 1, "pad_token": "<pad>", "direction": "right"},
+        batch_rows=batch_rows,
+    )
+    active_tok[:] = [xlmr_tok]
+    enc_cls = OnnxInt8TextEncoder(
+        model_path=model_file, dim=3, pooling="cls", query_prefix="q: "
+    )
+    assert enc_cls.pad_id == 1
+    assert enc_cls.pad_token == "<pad>"
+    assert xlmr_tok.pad_calls[-1] == {
+        "pad_id": 1,
+        "pad_token": "<pad>",
+        "direction": "right",
+    }
+    cls_vecs = enc_cls.encode_queries(["a", "b"])
+    assert recorded["encoded_texts"] == ["q: a", "q: b"]
+    # row 0 tok 0[:3] = [1, 2, 3], row 1 tok 0[:3] = [2, 0, 0] -> [1, 0, 0]
+    norm0 = math.sqrt(1.0 + 4.0 + 9.0)
+    assert cls_vecs[0] == pytest.approx([1.0 / norm0, 2.0 / norm0, 3.0 / norm0])
+    assert cls_vecs[1] == pytest.approx([1.0, 0.0, 0.0])
+
+    # 2) Auto-resolve Qwen3 <|endoftext|> = 151643 when padding is None + last_token pooling
+    qwen_tok = _FakeTokenizer(
+        vocab={"<|endoftext|>": 151643},
+        padding=None,
+        batch_rows=batch_rows,
+    )
+    active_tok[:] = [qwen_tok]
+    enc_last = OnnxInt8TextEncoder(
+        model_path=model_file, dim=3, pooling="last_token"
+    )
+    assert enc_last.pad_id == 151643
+    assert enc_last.pad_token == "<|endoftext|>"
+    assert qwen_tok.pad_calls[-1] == {"pad_id": 151643, "pad_token": "<|endoftext|>"}
+    last_vecs = enc_last.encode_passages(["a", "b"])
+    # Check position_ids were derived from attention_mask
+    assert recorded["feeds"]["position_ids"] == [[0, 1, 1, 1], [0, 1, 2, 2]]
+    # row 0 last valid (idx 1)[:3] = [3, 6, 9]; row 1 last valid (idx 2)[:3] = [1, 2, 2]
+    norm_r0 = math.sqrt(9.0 + 36.0 + 81.0)
+    assert last_vecs[0] == pytest.approx([3.0 / norm_r0, 6.0 / norm_r0, 9.0 / norm_r0])
+    assert last_vecs[1] == pytest.approx([1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0])
+
+    # 3) Mean pooling ignores pad positions and preserves MRL truncation + L2 norm
+    enc_mean = OnnxInt8TextEncoder(
+        model_path=model_file, dim=3, pooling="mean", pad_token="<|endoftext|>"
+    )
+    assert enc_mean.pad_id == 151643
+    mean_vecs = enc_mean.encode_passages(["a", "b"])
+    # row 0 mean over idx 0,1 = [2, 4, 6]; row 1 mean over idx 0,1,2 = [1, 2, 2/3]
+    m0 = math.sqrt(4.0 + 16.0 + 36.0)
+    m1 = math.sqrt(1.0 + 4.0 + (2.0 / 3.0) ** 2)
+    assert mean_vecs[0] == pytest.approx([2.0 / m0, 4.0 / m0, 6.0 / m0])
+    assert mean_vecs[1] == pytest.approx([1.0 / m1, 2.0 / m1, (2.0 / 3.0) / m1])
+
+    # 4) Left-padded sequence + all-masked row with last_token pooling
+    left_tok = _FakeTokenizer(
+        vocab={"<|pad|>": 77},
+        padding=None,
+        batch_rows=[
+            ([77, 77, 10, 11], [0, 0, 1, 1], [0, 0, 0, 0]),
+            ([77, 77, 77, 77], [0, 0, 0, 0], [0, 0, 0, 0]),
+        ],
+    )
+    active_tok[:] = [left_tok]
+    hidden_left = [
+        [
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [1.0, 0.0, 0.0, 9.0],
+            [0.0, 3.0, 4.0, 9.0],  # last valid for left-padded row 0 -> [0, 3, 4]
+        ],
+        [
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],  # all masked -> zero vector
+        ],
+    ]
+    left_sess = types.SimpleNamespace(
+        get_inputs=lambda: [
+            types.SimpleNamespace(name="input_ids"),
+            types.SimpleNamespace(name="attention_mask"),
+        ],
+        get_outputs=lambda: [types.SimpleNamespace(shape=[2, 4, 4])],
+        run=lambda _o, _f: [_StubNdArray(hidden_left)],
+    )
+    monkeypatch.setattr(fake_ort, "InferenceSession", lambda _p, providers=None: left_sess)
+    enc_left = OnnxInt8TextEncoder(model_path=model_file, dim=3, pooling="last_token")
+    assert enc_left.pad_id == 77
+    assert enc_left.pad_token == "<|pad|>"
+    left_vecs = enc_left.encode_queries(["x", "y"])
+    assert left_vecs[0] == pytest.approx([0.0, 0.6, 0.8])
+    assert left_vecs[1] == [0.0, 0.0, 0.0]
+
+    # 5) Explicit pad_id override + fallback to (0, "[PAD]") when unknown
+    fallback_tok = _FakeTokenizer(vocab={}, padding=None, batch_rows=batch_rows)
+    active_tok[:] = [fallback_tok]
+    enc_fb = OnnxInt8TextEncoder(model_path=model_file, dim=3)
+    assert enc_fb.pad_id == 0
+    assert enc_fb.pad_token == "[PAD]"
+
+    xlmr_no_pad = _FakeTokenizer(vocab={"<pad>": 1}, padding=None)
+    active_tok[:] = [xlmr_no_pad]
+    enc_explicit = OnnxInt8TextEncoder(model_path=model_file, dim=3, pad_id=1)
+    assert enc_explicit.pad_id == 1
+    assert enc_explicit.pad_token == "<pad>"
+
+    with pytest.raises(ValueError, match="pooling"):
+        OnnxInt8TextEncoder(model_path=model_file, pooling="max")  # type: ignore[arg-type]
+
+
+def test_build_knowledge_vectors_cli_forwards_onnx_pooling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _terms_db, kb_db = _build_synthetic_fixture(tmp_path / "fx")
+    captured: dict[str, Any] = {}
+
+    class _StubOnnxEncoder:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            self.model_id = str(kwargs.get("model_id", "stub"))
+            self.dim = int(kwargs.get("dim") or 8)
+
+        def encode_queries(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+        def encode_passages(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+    monkeypatch.setattr(build_knowledge_vectors, "OnnxInt8TextEncoder", _StubOnnxEncoder)
+    onnx_model = tmp_path / "model.int8.onnx"
+    onnx_model.write_bytes(b"stub")
+    rc = build_knowledge_vectors.main(
+        [
+            "--knowledge-db",
+            str(kb_db),
+            "--out-dir",
+            str(tmp_path / "vec_out"),
+            "--encoder",
+            "onnx",
+            "--onnx-model",
+            str(onnx_model),
+            "--onnx-pooling",
+            "last_token",
+            "--dim",
+            "8",
+        ]
+    )
+    assert rc == 0
+    assert captured["pooling"] == "last_token"
+    assert captured["dim"] == 8

@@ -17,6 +17,15 @@ on:
           - Qwen/Qwen3-Embedding-0.6B
           - BAAI/bge-m3
           - all
+      dataset:
+        description: Evaluation corpus (auto = synthetic for fake-encoder dry-run, real WutheringData for ONNX models)
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - real
+          - synthetic
       dim:
         description: Target embedding dimension (MRL-512 supported where applicable)
         required: true
@@ -31,13 +40,15 @@ on:
           - int8
           - fp32
       iterations:
-        description: Timed iterations for P50/P95 latency sampling
+        description: Timed iterations for P50/P95 sampling
         required: true
         default: "5"
         type: string
 
 permissions:
   contents: read
+
+cache-mode: none
 
 jobs:
   prepare-matrix:
@@ -49,16 +60,19 @@ jobs:
       - id: set-matrix
         env:
           PRESET: ${{ inputs.model_preset }}
+          DATASET: ${{ inputs.dataset }}
         run: |
           python3 - <<'PY'
           import json, os
           preset = os.environ["PRESET"]
+          dataset = os.environ["DATASET"]
           all_models = [
               {
                   "name": "fake-encoder",
                   "repo": "",
                   "use_fake": True,
                   "dim": 512,
+                  "pooling": "mean",
                   "query_prefix": "",
                   "passage_prefix": "",
               },
@@ -67,6 +81,7 @@ jobs:
                   "repo": "intfloat/multilingual-e5-small",
                   "use_fake": False,
                   "dim": 384,
+                  "pooling": "mean",
                   "query_prefix": "query: ",
                   "passage_prefix": "passage: ",
               },
@@ -75,6 +90,7 @@ jobs:
                   "repo": "Qwen/Qwen3-Embedding-0.6B",
                   "use_fake": False,
                   "dim": 512,
+                  "pooling": "last_token",
                   "query_prefix": "Instruct: Retrieve Wuthering Waves terminology\nQuery: ",
                   "passage_prefix": "",
               },
@@ -83,18 +99,26 @@ jobs:
                   "repo": "BAAI/bge-m3",
                   "use_fake": False,
                   "dim": 512,
+                  "pooling": "cls",
                   "query_prefix": "",
                   "passage_prefix": "",
               },
           ]
           if preset == "all":
-              selected = all_models
+              selected = [dict(m) for m in all_models]
           elif preset == "fake-encoder":
-              selected = [all_models[0]]
+              selected = [dict(all_models[0])]
           else:
-              selected = [m for m in all_models if m["repo"] == preset]
+              selected = [dict(m) for m in all_models if m["repo"] == preset]
           if not selected:
               raise SystemExit(f"unknown preset: {preset}")
+          for item in selected:
+              if dataset == "real":
+                  item["use_real"] = True
+              elif dataset == "synthetic":
+                  item["use_real"] = False
+              else:
+                  item["use_real"] = not item["use_fake"]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("matrix=" + json.dumps({"include": selected}) + "\n")
           PY
@@ -116,13 +140,38 @@ jobs:
       - name: Install core (or optional CPU ONNX dependencies)
         env:
           USE_FAKE: ${{ matrix.use_fake }}
+          USE_REAL: ${{ matrix.use_real }}
         run: |
           python -m pip install -U pip
           if [ "$USE_FAKE" = "true" ]; then
-            python -m pip install -e .
+            if [ "$USE_REAL" = "true" ]; then
+              python -m pip install -e ".[build]"
+            else
+              python -m pip install -e .
+            fi
           else
-            python -m pip install -e ".[rag-onnx,rag-vec]" huggingface-hub optimum[onnxruntime]
+            python -m pip install -e ".[build,rag-onnx,rag-vec]" huggingface-hub "optimum[onnxruntime]"
           fi
+
+      - name: Build real terms.db and knowledge.db from WutheringData
+        if: matrix.use_real == true
+        run: |
+          set -euo pipefail
+          python -m wuwaterm.cli refresh-data --dest data/wutheringdata
+          python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.db --atomic
+          python - <<'PY'
+          from wuwaterm.knowledge_builder import build_knowledge_database
+
+          stats = build_knowledge_database(
+              "data/wutheringdata",
+              "data/knowledge.db",
+              terms_db_path="data/terms.db",
+          )
+          print(
+              f"built knowledge.db: entities={stats.entities} aliases={stats.aliases} "
+              f"contexts={stats.contexts} relations={stats.relations}"
+          )
+          PY
 
       - name: Export / prepare CPU ONNX INT8 model (when non-fake)
         if: matrix.use_fake != true
@@ -141,10 +190,25 @@ jobs:
           out_dir = Path(os.environ["RUNNER_TEMP"]) / "onnx-model"
           src_onnx = raw_dir / "model.onnx"
           dst_onnx = out_dir / "model.int8.onnx"
+          external_files = [
+              p
+              for p in raw_dir.iterdir()
+              if p.is_file()
+              and p != src_onnx
+              and (p.name.startswith("model.onnx") or p.suffix in (".data", ".onnx_data"))
+          ]
+          total_bytes = sum(
+              p.stat().st_size
+              for p in raw_dir.iterdir()
+              if p.is_file()
+              and (p.suffix in (".onnx", ".data", ".onnx_data") or "onnx_data" in p.name)
+          )
+          use_external = bool(external_files) or total_bytes >= 1_800_000_000
           quantize_dynamic(
               model_input=str(src_onnx),
               model_output=str(dst_onnx),
               weight_type=QuantType.QInt8,
+              use_external_data_format=use_external,
           )
           tok_src = raw_dir / "tokenizer.json"
           if tok_src.is_file():
@@ -155,18 +219,26 @@ jobs:
         env:
           CASE_NAME: ${{ matrix.name }}
           USE_FAKE: ${{ matrix.use_fake }}
+          USE_REAL: ${{ matrix.use_real }}
           TARGET_DIM: ${{ matrix.dim }}
           REQUESTED_DIM: ${{ inputs.dim }}
           QUANT: ${{ inputs.quantization }}
           ITERS: ${{ inputs.iterations }}
           MODEL_REPO: ${{ matrix.repo }}
+          POOLING: ${{ matrix.pooling }}
           Q_PREFIX: ${{ matrix.query_prefix }}
           P_PREFIX: ${{ matrix.passage_prefix }}
         run: |
           set -euo pipefail
           mkdir -p reports
+          if [ "$USE_REAL" = "true" ]; then
+            CORPUS_ARGS=(--terms-db data/terms.db --knowledge-db data/knowledge.db)
+          else
+            CORPUS_ARGS=(--synthetic)
+          fi
+
           python scripts/eval_rag_offline.py \
-            --synthetic \
+            "${CORPUS_ARGS[@]}" \
             --mode lexical \
             --iterations "$ITERS" \
             --strict \
@@ -176,7 +248,7 @@ jobs:
 
           if [ "$USE_FAKE" = "true" ]; then
             python scripts/eval_rag_offline.py \
-              --synthetic \
+              "${CORPUS_ARGS[@]}" \
               --mode hybrid \
               --fake-encoder \
               --vec-dim "$REQUESTED_DIM" \
@@ -192,10 +264,11 @@ jobs:
               eff_dim="$REQUESTED_DIM"
             fi
             python scripts/eval_rag_offline.py \
-              --synthetic \
+              "${CORPUS_ARGS[@]}" \
               --mode hybrid \
               --onnx-model "$RUNNER_TEMP/onnx-model/model.int8.onnx" \
               --onnx-tokenizer "$RUNNER_TEMP/onnx-model/tokenizer.json" \
+              --onnx-pooling "$POOLING" \
               --model-id "$MODEL_REPO" \
               --vec-dim "$eff_dim" \
               --vec-quantization "$QUANT" \
