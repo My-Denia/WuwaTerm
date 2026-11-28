@@ -27,9 +27,9 @@ on:
           - real
           - synthetic
       dim:
-        description: Target embedding dimension (MRL-512 supported where applicable)
+        description: "Target embedding dimension override ('auto' uses model defaults: 384/512/1024)"
         required: true
-        default: "512"
+        default: "auto"
         type: string
       quantization:
         description: Vector index quantization format
@@ -72,6 +72,7 @@ jobs:
                   "repo": "",
                   "use_fake": True,
                   "dim": 512,
+                  "native_dim": 512,
                   "pooling": "mean",
                   "query_prefix": "",
                   "passage_prefix": "",
@@ -81,6 +82,7 @@ jobs:
                   "repo": "intfloat/multilingual-e5-small",
                   "use_fake": False,
                   "dim": 384,
+                  "native_dim": 384,
                   "pooling": "mean",
                   "query_prefix": "query: ",
                   "passage_prefix": "passage: ",
@@ -90,6 +92,7 @@ jobs:
                   "repo": "Qwen/Qwen3-Embedding-0.6B",
                   "use_fake": False,
                   "dim": 512,
+                  "native_dim": 1024,
                   "pooling": "last_token",
                   "query_prefix": "Instruct: Retrieve Wuthering Waves terminology\nQuery: ",
                   "passage_prefix": "",
@@ -98,7 +101,8 @@ jobs:
                   "name": "bge-m3",
                   "repo": "BAAI/bge-m3",
                   "use_fake": False,
-                  "dim": 512,
+                  "dim": 1024,
+                  "native_dim": 1024,
                   "pooling": "cls",
                   "query_prefix": "",
                   "passage_prefix": "",
@@ -221,6 +225,7 @@ jobs:
           USE_FAKE: ${{ matrix.use_fake }}
           USE_REAL: ${{ matrix.use_real }}
           TARGET_DIM: ${{ matrix.dim }}
+          NATIVE_DIM: ${{ matrix.native_dim }}
           REQUESTED_DIM: ${{ inputs.dim }}
           QUANT: ${{ inputs.quantization }}
           ITERS: ${{ inputs.iterations }}
@@ -247,11 +252,15 @@ jobs:
             --markdown-out "reports/${CASE_NAME}-lexical.md"
 
           if [ "$USE_FAKE" = "true" ]; then
+            eff_dim="$TARGET_DIM"
+            if [ -n "$REQUESTED_DIM" ] && [ "$REQUESTED_DIM" != "auto" ]; then
+              eff_dim="$REQUESTED_DIM"
+            fi
             python scripts/eval_rag_offline.py \
               "${CORPUS_ARGS[@]}" \
               --mode hybrid \
               --fake-encoder \
-              --vec-dim "$REQUESTED_DIM" \
+              --vec-dim "$eff_dim" \
               --vec-quantization "$QUANT" \
               --iterations "$ITERS" \
               --strict \
@@ -260,8 +269,12 @@ jobs:
               --markdown-out "reports/${CASE_NAME}-hybrid.md"
           else
             eff_dim="$TARGET_DIM"
-            if [ "$REQUESTED_DIM" -lt "$eff_dim" ] 2>/dev/null; then
-              eff_dim="$REQUESTED_DIM"
+            if [ -n "$REQUESTED_DIM" ] && [ "$REQUESTED_DIM" != "auto" ]; then
+              if [ "$REQUESTED_DIM" -lt "$NATIVE_DIM" ] 2>/dev/null; then
+                eff_dim="$REQUESTED_DIM"
+              else
+                eff_dim="$NATIVE_DIM"
+              fi
             fi
             python scripts/eval_rag_offline.py \
               "${CORPUS_ARGS[@]}" \

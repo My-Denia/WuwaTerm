@@ -966,6 +966,49 @@ def test_onnx_encoder_pad_resolution_and_pooling_modes(
     assert left_vecs[0] == pytest.approx([0.0, 0.6, 0.8])
     assert left_vecs[1] == [0.0, 0.0, 0.0]
 
+    # 4b) Left-padded sequence + all-masked row with cls pooling selects first valid token
+    cls_left_tok = _FakeTokenizer(
+        vocab={"<pad>": 1},
+        padding={"pad_id": 1, "pad_token": "<pad>", "direction": "left"},
+        batch_rows=[
+            ([1, 1, 10, 11], [0, 0, 1, 1], [0, 0, 0, 0]),
+            ([1, 1, 1, 1], [0, 0, 0, 0], [0, 0, 0, 0]),
+        ],
+    )
+    active_tok[:] = [cls_left_tok]
+    hidden_cls_left = [
+        [
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [0.0, 3.0, 4.0, 9.0],   # first valid (CLS) for left-padded row 0 -> [0, 3, 4]
+            [1.0, 0.0, 0.0, 9.0],
+        ],
+        [
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],
+            [999.0, 999.0, 999.0, 9.0],  # all-zero mask -> zero vector
+        ],
+    ]
+    cls_left_sess = types.SimpleNamespace(
+        get_inputs=lambda: [
+            types.SimpleNamespace(name="input_ids"),
+            types.SimpleNamespace(name="attention_mask"),
+        ],
+        get_outputs=lambda: [types.SimpleNamespace(shape=[2, 4, 4])],
+        run=lambda _o, _f: [_StubNdArray(hidden_cls_left)],
+    )
+    monkeypatch.setattr(fake_ort, "InferenceSession", lambda _p, providers=None: cls_left_sess)
+    enc_cls_left = OnnxInt8TextEncoder(model_path=model_file, dim=3, pooling="cls")
+    assert cls_left_tok.pad_calls[-1] == {
+        "pad_id": 1,
+        "pad_token": "<pad>",
+        "direction": "left",
+    }
+    cls_left_vecs = enc_cls_left.encode_queries(["x", "y"])
+    assert cls_left_vecs[0] == pytest.approx([0.0, 0.6, 0.8])
+    assert cls_left_vecs[1] == [0.0, 0.0, 0.0]
+
     # 5) Explicit pad_id override + fallback to (0, "[PAD]") when unknown
     fallback_tok = _FakeTokenizer(vocab={}, padding=None, batch_rows=batch_rows)
     active_tok[:] = [fallback_tok]

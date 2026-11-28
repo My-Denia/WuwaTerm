@@ -1303,9 +1303,7 @@ class OnnxInt8TextEncoder:
         if hidden.ndim == 2:
             pooled = hidden
         elif hidden.ndim == 3:
-            if self._pooling == "cls":
-                pooled = hidden[:, 0, :]
-            elif self._pooling == "last_token":
+            if self._pooling in ("cls", "last_token"):
                 seq_len = attention_mask.shape[1]
                 if seq_len == 0:
                     pooled = self._np.zeros(
@@ -1314,11 +1312,16 @@ class OnnxInt8TextEncoder:
                 else:
                     hidden_f32 = hidden.astype(self._np.float32)
                     valid_mask = attention_mask > 0
-                    last_indices = (seq_len - 1) - self._np.argmax(
-                        valid_mask[:, ::-1], axis=1
-                    )
+                    if self._pooling == "cls":
+                        # First valid (non-pad) token per sequence; handles both right and left padding.
+                        token_indices = self._np.argmax(valid_mask, axis=1)
+                    else:
+                        # Last valid (non-pad) token per sequence; handles both right and left padding.
+                        token_indices = (seq_len - 1) - self._np.argmax(
+                            valid_mask[:, ::-1], axis=1
+                        )
                     batch_indices = self._np.arange(hidden_f32.shape[0])
-                    selected = hidden_f32[batch_indices, last_indices, :]
+                    selected = hidden_f32[batch_indices, token_indices, :]
                     has_valid = valid_mask.any(axis=1)[:, None]
                     pooled = self._np.where(has_valid, selected, 0.0)
             else:
