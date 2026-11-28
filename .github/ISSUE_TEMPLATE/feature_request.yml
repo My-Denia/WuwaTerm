@@ -39,11 +39,12 @@ body:
       label: Which surface
       description: Where this would live.
       options:
-        - Telegram bot
         - HTTP API (/v1)
-        - Private web presentation layer
-        - Windows desktop client
+        - Core library / CLI
         - Data build (dictionary from upstream game data)
+        - Standalone Web (My-Denia/WuwaTerm-Web)
+        - Standalone Telegram bot (My-Denia/WuwaTerm-Telegram)
+        - Windows desktop client (My-Denia/WuwaTerm-Windows)
         - Documentation
         - More than one of these
     validations:
@@ -63,9 +64,10 @@ body:
     attributes:
       label: Why the existing surfaces do not solve it
       description: >-
-        Say what you tried across the bot, the API, the private web layer, the
-        desktop client and the documented workflows, and where each one fell
-        short. This is the field that decides most requests.
+        Say what you tried across the Core HTTP API, standalone WuwaTerm-Web,
+        standalone WuwaTerm-Telegram, Windows desktop client, and the documented
+        workflows, and where each one fell short. This is the field that decides
+        most requests.
     validations:
       required: true
 

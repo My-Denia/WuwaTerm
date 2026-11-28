@@ -40,12 +40,12 @@ body:
       label: Which surface
       description: Where the wrong behaviour appears. Pick the one closest to it.
       options:
-        - Public beta Site
-        - Telegram bot
         - HTTP API (/v1)
-        - Private web presentation layer
-        - Windows desktop client
+        - Core library / CLI
         - Data build (dictionary from upstream game data)
+        - Standalone Web / Public beta Site (My-Denia/WuwaTerm-Web)
+        - Standalone Telegram bot (My-Denia/WuwaTerm-Telegram)
+        - Windows desktop client (My-Denia/WuwaTerm-Windows)
         - Not sure
     validations:
       required: true

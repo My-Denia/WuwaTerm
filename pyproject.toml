@@ -66,8 +66,8 @@ wuwaterm-api = "wuwaterm_api.cli:main"
 [tool.uv]
 # certifi is transitive (httpx -> httpcore/certifi) and nobody imports it
 # directly, so it is not a project dependency. The floor is here because the
-# bundled CA store is what the bot and API actually trust when httpx opens TLS
-# to Telegram and the LLM endpoints: 2026.6.17 still ships the emSign ECC
+# bundled CA store is what the Core runtime and API actually trust when httpx opens TLS
+# to upstream LLM endpoints: 2026.6.17 still ships the emSign ECC
 # Root CA - G3 chain whose intermediates had compromised keys (PYSEC-2026-4320
 # / GHSA-6q48-6c7w-9gw2). 2026.10.18 dropped the affected roots and 2026.10.19
 # put back the ones that were not compromised, so the floor is the latter.

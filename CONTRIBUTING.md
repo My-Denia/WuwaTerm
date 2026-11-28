@@ -16,18 +16,21 @@ boundaries guide what the project accepts.
 
 ## What This Repository Contains
 
-Five surfaces sit on one application layer, except that linked-channel
-auto-translation keeps its own orchestration over the same lookup and
-term-locking primitives (the last two surfaces are API consumers, not adapters):
+WuwaTerm Core holds the protocol-neutral application/domain layer, the versioned
+HTTP API under `/v1`, the offline dictionary/knowledge-base builders, and the
+packaging/deployment tooling under `deploy/`. Three independent products live in
+their own repositories and consume Core:
 
-- a Telegram bot,
-- an HTTP API under `/v1`,
-- an owner-private web presentation layer that lives inside the API process and
-  is off by default,
-- a Windows desktop client in [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), which only calls the API,
-- an anonymous public beta in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), a separately hosted same-origin proxy.
-  It is not the in-process `/wuwaterm-web` layer; see
-  [Public Beta Site](docs/sites.md).
+- [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web): standalone Web
+  workbench and the anonymous public beta Site calling `/v1` over HTTP (the
+  legacy in-process `/wuwaterm-web` Python layer was retired from Core after
+  `v0.16.0`; see [Public Beta Site](docs/sites.md)),
+- [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows): Windows
+  desktop client calling `/v1` over HTTP,
+- [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram): standalone
+  Telegram bot product consuming Core's pinned wheel and protocol-neutral
+  `ProtectedText` interfaces (the legacy inline bot was retired from Core after
+  `v0.16.0`).
 
 Terminology comes from a pinned upstream game-data repository and is built into
 a local SQLite dictionary. Wuthering Waves game data and terminology are

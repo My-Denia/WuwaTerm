@@ -59,14 +59,14 @@ services:
       # not in an environment file an operator edits in a hurry.
       WUWATERM_API_BIND: 127.0.0.1
       WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8788}
-      # The bot's credentials are not this process' business. env_file carries
-      # the shared model settings; these are blanked so a compromise or a stray
-      # environment dump here cannot yield the chat token or owner id.
+      # Defense in depth: blank legacy Telegram credentials that may remain in an
+      # upgraded .env so a compromise or stray environment dump here cannot yield
+      # an old chat token or owner id.
       TELEGRAM_BOT_TOKEN: ""
       TELEGRAM_TEST_CHAT_ID: ""
       OWNER_USER_ID: ""
-      # Keys the bot's log redaction, and only the bot's. An environment dump
-      # here would otherwise hand over the key that hashes its chat ids.
+      # Defense in depth: blank the legacy Telegram log-redaction secret if left
+      # over in an upgraded .env.
       WUWATERM_REDACTION_SECRET: ""
       # Pin the credential store to the mounted volume: this override would
       # otherwise win over WUWATERM_API_STATE_DIR and let a one-off container
