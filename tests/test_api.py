@@ -1540,6 +1540,7 @@ def test_error_codes_and_statuses_are_pinned():
         "input_too_long": 422,
         "llm_unavailable": 503,
         "llm_budget_exhausted": 503,
+        "knowledge_unavailable": 503,
         "internal": 500,
     }
 
@@ -1566,6 +1567,7 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/v1/auth/status",
         "/v1/capabilities",
         "/v1/dictionary",
+        "/v1/knowledge/query",
         "/v1/meta",
         "/v1/reviews",
         "/v1/semantic-reviews",

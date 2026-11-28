@@ -12,9 +12,7 @@ import asyncio
 from contextlib import contextmanager
 import inspect
 import logging
-import os
 import re
-import sqlite3
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,16 +28,15 @@ from .constants import (
     FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY as FREE_TEXT_LOCK_ZH_EXCLUSIONS_KEY,
 )
 from .document_anchor import bounded_anchor_fields
-from .domain_knowledge import DomainKnowledgeCandidate
+from .domain_knowledge import (
+    DomainKnowledgeCandidate,
+    prepare_prompt_domain_knowledge_candidates,
+)
 from .exclusion_metadata import (
     parse_free_text_lock_exclusions as parse_free_text_lock_exclusions,
     parse_free_text_zh_lock_exclusions as parse_free_text_zh_lock_exclusions,
 )
-from .knowledge_db import (
-    KnowledgeBaseError,
-    KnowledgeBaseReader,
-    KnowledgeBaseRevisionMismatchError,
-)
+from .knowledge_runtime import KnowledgeBaseStatus, KnowledgeRuntime
 from .llm_transport import (  # noqa: F401  (re-exported; same objects as llm_transport.X)
     BUDGET_EXHAUSTED_NOTICE,
     TRANSLATION_UNAVAILABLE_NOTICE,
@@ -245,6 +242,23 @@ class LockedSentence:
         return result
 
 
+def _protected_visible_query_text(protected: ProtectedText) -> str:
+    """Concatenate visible text of ``protected`` without ever exposing raw markup."""
+    parts: list[str] = []
+    for segment, structure in zip(
+        protected.visible_segments, protected.structures, strict=False
+    ):
+        if segment:
+            parts.append(segment)
+        if structure.visible_context:
+            parts.append(structure.visible_context)
+    if protected.visible_segments:
+        tail = protected.visible_segments[-1]
+        if tail:
+            parts.append(tail)
+    return "".join(parts)
+
+
 def _free_text_exclusions(metadata: Mapping[str, str]) -> frozenset[str]:
     return free_text_exclusions(metadata, logger=LOGGER)
 
@@ -275,10 +289,9 @@ class SentenceTranslator:
         self._knowledge_db_path: Path | None = (
             Path(knowledge_db_path) if knowledge_db_path is not None else None
         )
-        self._kb_reader: KnowledgeBaseReader | None = None
-        self._kb_reader_revision: str | None = None
-        self._kb_reader_stat: tuple[int, int, int, int, int] | None = None
-        self._kb_warned_key: tuple[object, ...] | None = None
+        self._knowledge_runtime = KnowledgeRuntime(
+            self._knowledge_db_path, logger=LOGGER
+        )
         self._llm_slots: asyncio.Semaphore | None = None
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
         self._llm_client: httpx.AsyncClient | None = None
@@ -286,84 +299,46 @@ class SentenceTranslator:
         self._patched_lockable_cache_key: tuple[object, ...] | None = None
         self._patched_lockable_cache: LockableSnapshot | None = None
 
+    @property
+    def knowledge_db_path(self) -> Path | None:
+        return self._knowledge_db_path
+
+    @property
+    def knowledge_runtime(self) -> KnowledgeRuntime:
+        return self._knowledge_runtime
+
+    def knowledge_base_status(self) -> KnowledgeBaseStatus:
+        """Return live revision-verified companion ``knowledge.db`` status."""
+        return self._knowledge_runtime.status(self.service)
+
+    def knowledge_retrieval_available(self) -> bool:
+        """Whether a revision-matched companion ``knowledge.db`` is ready right now."""
+        return self._knowledge_runtime.status(self.service).available
+
     def close_knowledge_reader(self) -> None:
         """Close any cached read-only companion ``knowledge.db`` reader."""
-        reader = self._kb_reader
-        self._kb_reader = None
-        self._kb_reader_revision = None
-        self._kb_reader_stat = None
-        if reader is not None:
-            try:
-                reader.close()
-            except Exception:
-                pass
+        self._knowledge_runtime.close()
 
     def __del__(self) -> None:
-        reader = getattr(self, "_kb_reader", None)
-        if reader is not None:
-            self._kb_reader = None
+        runtime = getattr(self, "_knowledge_runtime", None)
+        if runtime is not None:
             try:
-                reader.close()
+                runtime.close()
             except Exception:
                 pass
 
-    def _warn_kb_once(self, key: tuple[object, ...], message: str) -> None:
-        if self._kb_warned_key != key:
-            self._kb_warned_key = key
-            LOGGER.warning(message)
-
-    def _get_knowledge_reader(self) -> KnowledgeBaseReader | None:
-        """Return a revision-verified read-only KB reader, degrading safely to ``None``."""
-        kb_path = self._knowledge_db_path
-        if kb_path is None:
-            return None
-        try:
-            expected_revision = self.service.snapshot().dictionary_identity.revision
-        except Exception:
-            self.close_knowledge_reader()
-            return None
-        try:
-            st = os.stat(kb_path)
-            if not kb_path.is_file():
-                raise FileNotFoundError("not a regular file")
-            stat_key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-        except OSError:
-            self.close_knowledge_reader()
-            self._warn_kb_once(
-                ("missing", expected_revision),
-                "companion knowledge database is missing; degrading to dictionary-only mode",
-            )
-            return None
-        if (
-            self._kb_reader is not None
-            and self._kb_reader_revision == expected_revision
-            and self._kb_reader_stat == stat_key
-        ):
-            return self._kb_reader
-        self.close_knowledge_reader()
-        try:
-            reader = KnowledgeBaseReader(
-                kb_path, expected_terms_db_revision=expected_revision
-            )
-        except KnowledgeBaseRevisionMismatchError:
-            self._warn_kb_once(
-                ("revision_mismatch", expected_revision, stat_key),
-                "companion knowledge database terms_db_revision mismatch; "
-                "degrading to dictionary-only mode",
-            )
-            return None
-        except (KnowledgeBaseError, sqlite3.Error):
-            self._warn_kb_once(
-                ("unreadable", expected_revision, stat_key),
-                "companion knowledge database could not be opened read-only; "
-                "degrading to dictionary-only mode",
-            )
-            return None
-        self._kb_reader = reader
-        self._kb_reader_revision = expected_revision
-        self._kb_reader_stat = stat_key
-        self._kb_warned_key = None
-        return reader
+    def _effective_retrieval_mode(
+        self,
+        context: TranslationContextProtocol | None = None,
+        retrieval_mode: str | None = None,
+    ) -> str:
+        if retrieval_mode is not None:
+            return retrieval_mode
+        if context is not None:
+            mode = getattr(context, "retrieval_mode", "auto")
+            if isinstance(mode, str) and mode:
+                return mode
+        return "auto"
 
     def retrieve_domain_knowledge(
         self,
@@ -372,16 +347,17 @@ class SentenceTranslator:
         locked: LockedSentence,
         to_chinese: bool,
         context: TranslationContextProtocol | None = None,
+        retrieval_mode: str | None = None,
     ) -> tuple[DomainKnowledgeCandidate, ...]:
         """Retrieve soft read-only KB candidates when ``knowledge_db_path`` is enabled.
 
-        Strictly returns ``()`` when disabled or degraded; never raises to block
-        normal translation and never mutates ``locked.locks``.
+        Strictly returns ``()`` when disabled, explicitly turned off
+        (``retrieval_mode == "off"``), or degraded; never raises to block normal
+        translation and never mutates ``locked.locks``.
         """
         if self._knowledge_db_path is None or not prepared_text:
             return ()
-        reader = self._get_knowledge_reader()
-        if reader is None:
+        if self._effective_retrieval_mode(context, retrieval_mode) == "off":
             return ()
         lock_source_index = 2 if to_chinese else 1
         locked_surfaces = tuple(
@@ -398,20 +374,22 @@ class SentenceTranslator:
             if doc_anchor is not None:
                 _topic, _heading, entities = bounded_anchor_fields(doc_anchor)
                 anchor_surfaces = entities
-        try:
-            return reader.query(
-                prepared_text,
-                locked_surfaces=locked_surfaces,
-                reference_surfaces=reference_surfaces,
-                anchor_surfaces=anchor_surfaces,
-                use_graph=True,
-            )
-        except (KnowledgeBaseError, sqlite3.Error):
-            self._warn_kb_once(
-                ("query_error", self._kb_reader_revision),
-                "companion knowledge database query failed; degrading to dictionary-only mode",
-            )
+        candidates = self._knowledge_runtime.query_candidates(
+            self.service,
+            prepared_text,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+            anchor_surfaces=anchor_surfaces,
+            use_graph=True,
+        )
+        if not candidates:
             return ()
+        return prepare_prompt_domain_knowledge_candidates(
+            prepared_text,
+            candidates,
+            locked_surfaces=locked_surfaces,
+            reference_surfaces=reference_surfaces,
+        )
 
     def request_policy(self, *, to_chinese: bool | None = None) -> RequestPolicy:
         """Resolve active execution policy for this translator."""
@@ -438,6 +416,7 @@ class SentenceTranslator:
         to_chinese: bool = False,
         context: TranslationContextProtocol | None = None,
         dictionary_identity: str | None = None,
+        retrieval_mode: str | None = None,
     ) -> tuple[str | None, TranslationPlan | None]:
         """Build an immutable ``TranslationPlan`` or return a deterministic answer."""
         prepared = (
@@ -464,6 +443,7 @@ class SentenceTranslator:
             locked=locked,
             to_chinese=to_chinese,
             context=context,
+            retrieval_mode=retrieval_mode,
         )
         plan = TranslationPlan(
             source_text=text,
@@ -821,6 +801,7 @@ class SentenceTranslator:
         propagate_errors: bool = False,
         context: TranslationContextProtocol | None = None,
         execution_budget: OperationExecutionBudget | None = None,
+        retrieval_mode: str | None = None,
     ) -> str:
         """Translate plain text; ``context`` opts into translation-context-v1.
 
@@ -860,6 +841,7 @@ class SentenceTranslator:
             locked=locked,
             to_chinese=to_chinese,
             context=context,
+            retrieval_mode=retrieval_mode,
         )
         policy = self.request_policy(to_chinese=to_chinese)
         # Resolved once after acquiring the concurrency slot (against the real
@@ -1192,7 +1174,11 @@ class SentenceTranslator:
         return retry_regrouped
 
     def translate_protected(
-        self, protected: ProtectedText, *, to_chinese: bool = False
+        self,
+        protected: ProtectedText,
+        *,
+        to_chinese: bool = False,
+        retrieval_mode: str | None = None,
     ) -> ProtectedText:
         """Translate visible segments, preserving opaque originals and context.
 
@@ -1202,12 +1188,21 @@ class SentenceTranslator:
         locked = self._lock_protected_terms_with_references(
             protected, to_chinese=to_chinese, allow_plural_inflection=to_chinese
         )
+        visible_text = _protected_visible_query_text(protected)
+        kb_candidates = self.retrieve_domain_knowledge(
+            visible_text,
+            locked=locked,
+            to_chinese=to_chinese,
+            retrieval_mode=retrieval_mode,
+        )
         translated = self._call_llm_sync(
             locked.locked_text,
             locked.locks,
             html_mode=True,
             to_chinese=to_chinese,
             references=locked.references,
+            domain_knowledge_candidates=kb_candidates,
+            kb_source_text=visible_text if kb_candidates else None,
         )
         return self._restore_protected(
             protected, locked, _require_nonblank_llm_output(translated),
@@ -1222,11 +1217,23 @@ class SentenceTranslator:
         context: TranslationContextProtocol | None = None,
         before_llm_call: LlmCallGuard | None = None,
         execution_budget: OperationExecutionBudget | None = None,
+        retrieval_mode: str | None = None,
     ) -> ProtectedText:
         """Async protected translation, with the guard inside the shared slot."""
         op_budget = _resolve_operation_budget(execution_budget)
         locked = self._lock_protected_terms_with_references(
             protected, to_chinese=to_chinese, allow_plural_inflection=to_chinese
+        )
+        visible_text = _protected_visible_query_text(protected)
+        kb_candidates = self.retrieve_domain_knowledge(
+            visible_text,
+            locked=locked,
+            to_chinese=to_chinese,
+            context=context,
+            retrieval_mode=retrieval_mode,
+        )
+        has_kb = bool(kb_candidates) or bool(
+            context is not None and getattr(context, "domain_knowledge_candidates", ())
         )
         policy = self.request_policy(to_chinese=to_chinese)
         translated = await self._call_llm_async_limited(
@@ -1239,6 +1246,8 @@ class SentenceTranslator:
             before_llm_call=before_llm_call,
             execution_budget=op_budget,
             policy=policy,
+            domain_knowledge_candidates=kb_candidates,
+            kb_source_text=visible_text if has_kb else None,
         )
         return self._restore_protected(
             protected, locked, _require_nonblank_llm_output(translated),
@@ -1283,6 +1292,7 @@ class SentenceTranslator:
         on_thinking_resolved: Callable[[ConcreteThinkingMode], None] | None = None,
         thinking_mode_resolver: Callable[[float], ConcreteThinkingMode] | None = None,
         domain_knowledge_candidates: Sequence[DomainKnowledgeCandidate] = (),
+        kb_source_text: str | None = None,
     ) -> str:
         """One model call under the shared slot and the caller's guard.
 
@@ -1375,11 +1385,13 @@ class SentenceTranslator:
                 )
                 if on_thinking_resolved is not None:
                     on_thinking_resolved(resolved_thinking_mode)
-            extra_kb_kwargs: dict[str, Any] = (
-                {"domain_knowledge_candidates": tuple(domain_knowledge_candidates)}
-                if domain_knowledge_candidates
-                else {}
-            )
+            extra_kb_kwargs: dict[str, Any] = {}
+            if domain_knowledge_candidates:
+                extra_kb_kwargs["domain_knowledge_candidates"] = tuple(
+                    domain_knowledge_candidates
+                )
+            if kb_source_text is not None:
+                extra_kb_kwargs["kb_source_text"] = kb_source_text
             if op_budget is None:
                 return await _call_llm_async(
                     locked_text,
@@ -1484,12 +1496,15 @@ class SentenceTranslator:
         to_chinese: bool = False,
         references: Sequence[TermReference] = (),
         domain_knowledge_candidates: Sequence[DomainKnowledgeCandidate] = (),
+        kb_source_text: str | None = None,
     ) -> str:
-        extra_kb_kwargs: dict[str, Any] = (
-            {"domain_knowledge_candidates": tuple(domain_knowledge_candidates)}
-            if domain_knowledge_candidates
-            else {}
-        )
+        extra_kb_kwargs: dict[str, Any] = {}
+        if domain_knowledge_candidates:
+            extra_kb_kwargs["domain_knowledge_candidates"] = tuple(
+                domain_knowledge_candidates
+            )
+        if kb_source_text is not None:
+            extra_kb_kwargs["kb_source_text"] = kb_source_text
         return _call_llm(
             locked_text,
             locks,
@@ -1759,13 +1774,16 @@ def _call_llm(
     provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     transport: httpx.AsyncBaseTransport | None = None,
     domain_knowledge_candidates: Sequence[DomainKnowledgeCandidate] = (),
+    kb_source_text: str | None = None,
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
-    extra_kb_kwargs: dict[str, Any] = (
-        {"domain_knowledge_candidates": tuple(domain_knowledge_candidates)}
-        if domain_knowledge_candidates
-        else {}
-    )
+    extra_kb_kwargs: dict[str, Any] = {}
+    if domain_knowledge_candidates:
+        extra_kb_kwargs["domain_knowledge_candidates"] = tuple(
+            domain_knowledge_candidates
+        )
+    if kb_source_text is not None:
+        extra_kb_kwargs["kb_source_text"] = kb_source_text
     return asyncio.run(
         _call_llm_async(
             locked_text,
@@ -1798,6 +1816,7 @@ async def _call_llm_async(
     provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     attempt_kind: AttemptKind = "initial",
     domain_knowledge_candidates: Sequence[DomainKnowledgeCandidate] = (),
+    kb_source_text: str | None = None,
 ) -> str:
     if client is not None:
         # The shared client already carries the translator's own timeout, so the
@@ -1822,6 +1841,7 @@ async def _call_llm_async(
             provider_profile=provider_profile,
             attempt_kind=attempt_kind,
             domain_knowledge_candidates=domain_knowledge_candidates,
+            kb_source_text=kb_source_text,
         )
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds), transport=transport
@@ -1842,6 +1862,7 @@ async def _call_llm_async(
             provider_profile=provider_profile,
             attempt_kind=attempt_kind,
             domain_knowledge_candidates=domain_knowledge_candidates,
+            kb_source_text=kb_source_text,
         )
 
 
@@ -1897,6 +1918,7 @@ async def _call_llm_async_with_client(
     provider_profile: ProviderProfile = DEFAULT_PROVIDER_PROFILE,
     attempt_kind: AttemptKind = "initial",
     domain_knowledge_candidates: Sequence[DomainKnowledgeCandidate] = (),
+    kb_source_text: str | None = None,
 ) -> str:
     """One translation POST, with the prompt this request's references need.
 
@@ -1911,13 +1933,16 @@ async def _call_llm_async_with_client(
     has_kb = bool(kb_tuple) or bool(
         context is not None and getattr(context, "domain_knowledge_candidates", ())
     )
-    prepared_for_plan = locked_text
-    if has_kb and locks:
-        source_idx = 2 if to_chinese else 1
-        for placeholder, zh, en in locks:
-            prepared_for_plan = prepared_for_plan.replace(
-                placeholder, en if source_idx == 2 else zh
-            )
+    if has_kb and kb_source_text is not None:
+        prepared_for_plan = kb_source_text
+    else:
+        prepared_for_plan = locked_text
+        if has_kb and locks:
+            source_idx = 2 if to_chinese else 1
+            for placeholder, zh, en in locks:
+                prepared_for_plan = prepared_for_plan.replace(
+                    placeholder, en if source_idx == 2 else zh
+                )
     plan = TranslationPlan(
         source_text=prepared_for_plan,
         prepared_text=prepared_for_plan,

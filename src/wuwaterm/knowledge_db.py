@@ -220,7 +220,11 @@ def connect_knowledge_db_read_only(db_path: str | Path) -> sqlite3.Connection:
             f"knowledge database does not exist or is not a file: {path}"
         )
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
     except sqlite3.Error as exc:
         raise KnowledgeBaseError(
             f"cannot open knowledge database read-only: {exc}"
@@ -240,7 +244,11 @@ def compute_terms_db_revision(terms_db_path: str | Path) -> str:
     if not path.is_file():
         raise KnowledgeBaseError(f"terms database does not exist: {path}")
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
     except sqlite3.Error as exc:
         raise KnowledgeBaseError(f"cannot open terms database: {exc}") from exc
     with closing(conn):

@@ -99,6 +99,8 @@ services:
       - ${WUWATERM_STATE_ROOT:-..}/.env
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db
+      # Optional companion read-only knowledge.db (disabled when empty).
+      WUWATERM_API_KNOWLEDGE_DB_PATH: ${WUWATERM_API_KNOWLEDGE_DB_PATH:-}
       WUWATERM_API_STATE_DIR: /app/state-api
       # NOT interpolated from .env on purpose. This service uses host
       # networking, so a value like 0.0.0.0 would publish the API on every

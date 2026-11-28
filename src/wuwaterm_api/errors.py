@@ -20,6 +20,7 @@ from wuwaterm.application import (
     ERROR_INPUT_TOO_LONG,
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
+    ERROR_KNOWLEDGE_UNAVAILABLE,
     ERROR_LLM_BUDGET_EXHAUSTED,
     ERROR_LLM_UNAVAILABLE,
     ERROR_PAYLOAD_TOO_LARGE,
@@ -37,6 +38,7 @@ STATUS_BY_CODE: dict[str, int] = {
     ERROR_INPUT_TOO_LONG: 422,
     ERROR_LLM_UNAVAILABLE: 503,
     ERROR_LLM_BUDGET_EXHAUSTED: 503,
+    ERROR_KNOWLEDGE_UNAVAILABLE: 503,
     ERROR_INTERNAL: 500,
 }
 
@@ -50,6 +52,7 @@ MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_INPUT_TOO_LONG: "input text is longer than the translation limit",
     ERROR_LLM_UNAVAILABLE: "translation provider is unavailable",
     ERROR_LLM_BUDGET_EXHAUSTED: "translation call budget is exhausted",
+    ERROR_KNOWLEDGE_UNAVAILABLE: "domain knowledge base is unavailable",
     ERROR_INTERNAL: "internal error",
 }
 
