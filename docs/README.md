@@ -55,9 +55,10 @@ desktop client guide and a few design and audit records are in Chinese.
   specific host, with the transactional updater, state migration and smoke
   checks. Self-hosters should start from [Self-Hosting](self-hosting.md)
   instead.
-- [Web Presentation Layer](web-presentation-layer.md): the owner-private
-  browser interface inside the API process. Off by default, not the public
-  beta, and an extension of the [Deployment](deployment.md) runbook.
+- [Web Presentation Layer](web-presentation-layer.md): historical (`v0.16.0`
+  and earlier) reference for the retired in-process Python Web UI. Retired from
+  Core after `v0.16.0`; use standalone
+  [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) instead.
 - [Desktop client UI redesign](client-ui-redesign.md): the historical design proposal
   for the client interface. In Chinese.
 - [Repository audit](repo-audit.md): a dated, read-only inventory of the tree at

@@ -5050,3 +5050,52 @@ def test_openapi_translation_request_schema_expresses_default_and_long_text_limi
     assert custom_schema["else"] == {
         "properties": {"text": {"maxLength": LLM_INPUT_CHAR_LIMIT}}
     }
+
+
+@pytest.mark.parametrize(
+    "raw_value", ["1", "true", "TRUE", "yes", "on", "secret-typo-value"]
+)
+def test_retired_in_process_web_setting_fails_closed_on_serve_and_create_app(
+    tmp_path, sample_db, monkeypatch, capsys, raw_value
+):
+    from wuwaterm_api.cli import main as api_cli_main
+    from wuwaterm_api.settings import RETIRED_WEB_ERROR_MESSAGE, ApiConfigError
+
+    monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
+    monkeypatch.setenv("WUWATERM_API_STATE_DIR", str(tmp_path / "state-api"))
+    monkeypatch.setenv("WUWATERM_API_WEB_ENABLED", raw_value)
+
+    settings = ApiSettings.from_env()
+    with pytest.raises(ApiConfigError, match="WuwaTerm-Web") as exc_info:
+        create_app(settings)
+    assert str(exc_info.value) == RETIRED_WEB_ERROR_MESSAGE
+
+    exit_code = api_cli_main(["serve"])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert RETIRED_WEB_ERROR_MESSAGE in err
+    assert "WuwaTerm-Web" in err
+    assert "v0.16.0" in err
+    if raw_value not in RETIRED_WEB_ERROR_MESSAGE:
+        assert raw_value not in err
+
+    # Operator credential commands must never be blocked by the retired serve flag.
+    assert api_cli_main(["device", "list"]) == 0
+
+
+@pytest.mark.parametrize("raw_value", [None, "", "0", "false", "FALSE", "no", "off"])
+def test_retired_in_process_web_setting_allows_unset_and_falsey_values(
+    tmp_path, sample_db, monkeypatch, raw_value
+):
+    monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
+    monkeypatch.setenv("WUWATERM_API_STATE_DIR", str(tmp_path / "state-api"))
+    if raw_value is None:
+        monkeypatch.delenv("WUWATERM_API_WEB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("WUWATERM_API_WEB_ENABLED", raw_value)
+
+    settings = ApiSettings.from_env()
+    app = create_app(settings)
+    response = run(call(app, "GET", "/healthz"))
+    assert response.status_code == 200
+    assert run(call(app, "GET", "/wuwaterm-web/")).status_code == 404

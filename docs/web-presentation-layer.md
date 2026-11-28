@@ -1,4 +1,26 @@
-# The owner-private web presentation layer
+# The owner-private web presentation layer (Retired from WuwaTerm Core)
+
+> **Status: Retired from WuwaTerm Core.** The legacy in-process Python Web UI
+> (`src/wuwaterm_api/web/`, mounted at `/wuwaterm-web` via
+> `WUWATERM_API_WEB_ENABLED`) has been removed from Core.
+>
+> - **Replacement:** Deploy the standalone [My-Denia/WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)
+>   workbench (for example via `./deploy/setup.sh --with-web --web-origin https://...`;
+>   see [Self-Hosting](self-hosting.md) and [Products](products.md)).
+> - **Fail-closed upgrade guard:** Existing `.env` files that leave
+>   `WUWATERM_API_WEB_ENABLED` unset, empty, or falsey (`0`/`false`/`no`/`off`)
+>   continue to start `wuwaterm-api` cleanly. Any truthy or unrecognised value
+>   for `WUWATERM_API_WEB_ENABLED` fails closed on `wuwaterm-api serve` with an
+>   explicit `ApiConfigError` so an operator never silently loses the web UI on
+>   upgrade. Operator credential commands (`wuwaterm-api device ...`) are never
+>   blocked.
+> - **Rollback:** If you still need the retired in-process Python Web UI, roll
+>   back to Core release [v0.16.0](https://github.com/My-Denia/WuwaTerm/releases/tag/v0.16.0).
+
+The sections below are preserved as historical reference for the retired
+v0.16.0 in-process surface and its reverse-proxy design ([ADR 0014](adr/0014-private-web-presentation-layer.md)).
+
+---
 
 A mobile-first browser interface for dictionary lookup and sentence
 translation, for the owner's own use from a phone. It is a third presentation
@@ -27,29 +49,29 @@ API document — the process behaves exactly as it did before this layer existed
 Turning it off again is a restart, and it is the first thing to do if the layer
 is ever suspected in an API problem.
 
-## Settings
+## Settings (Historical `v0.16.0` reference)
+
+> The settings below applied only through release `v0.16.0`. On Core `main`,
+> setting `WUWATERM_API_WEB_ENABLED` to any truthy or unrecognised value fails
+> closed on `wuwaterm-api serve` / `create_app()`; unset, empty, or falsy values
+> (`0`, `false`, `no`, `off`) are silently ignored for existing `.env`
+> compatibility.
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `WUWATERM_API_WEB_ENABLED` | `false` | Mount the layer at all. Accepts `1/0`, `true/false`, `yes/no`, `on/off`; anything else fails the process rather than being read as "off". |
-| `WUWATERM_API_WEB_DEVICE_TOKEN` | — | The device token the browser session is mapped onto. Required when enabled. **Server-side only** — it is never sent to the browser and must never be typed into one. |
-| `WUWATERM_API_WEB_EDGE_SECRET` | — | Shared marker the reverse proxy injects on every proxied request. Required when enabled: with it unset the layer refuses everything. |
-| `WUWATERM_API_WEB_SESSION_TTL_SECONDS` | `43200` | Browser session lifetime. |
-| `WUWATERM_API_WEB_MAX_SESSIONS` | `32` | Ceiling on live sessions. |
+| `WUWATERM_API_WEB_ENABLED` | `false` | Historical switch to mount the retired layer (`1/0`, `true/false`, `yes/no`, `on/off`). |
+| `WUWATERM_API_WEB_DEVICE_TOKEN` | — | Historical server-side device token the retired browser session mapped onto. |
+| `WUWATERM_API_WEB_EDGE_SECRET` | — | Historical shared marker the reverse proxy injected on every proxied request. |
+| `WUWATERM_API_WEB_SESSION_TTL_SECONDS` | `43200` | Historical browser session lifetime. |
+| `WUWATERM_API_WEB_MAX_SESSIONS` | `32` | Historical ceiling on live sessions. |
 
-Issue the device token the normal way (`wuwaterm-api device issue`), give it
-both scopes, and put it in the environment file the API container reads. It is
-an ordinary device from the credential store's point of view — it can be listed
-and revoked like any other, and revoking it ends the browser session on the
-next request.
-
-**Note where those values land.** The Compose deployment gives the bot and the
-API the *same* `../.env`, so writing the web variables there expands them into
-the bot's process as well — a service with no web surface holding the web
-device token and the edge marker. The Compose file therefore blanks all three
-in the bot service's `environment:` block, which overrides `env_file`. If you
-deploy some other way, reproduce that: either give the API its own environment
-file, or blank these three for every process that is not the API.
+In `v0.16.0`, the operator issued a device token (`wuwaterm-api device issue`)
+with both scopes, put it in the API environment file, and relied on the legacy
+Compose file blanking the three web variables in the historical `wuwaterm` bot
+service's `environment:` block. On current Core, use standalone
+[My-Denia/WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) via
+`./deploy/setup.sh --with-web`, which keeps its own `state-web/web.env` and
+`state-web/device.token` outside Core's `.env`.
 
 ## The route
 

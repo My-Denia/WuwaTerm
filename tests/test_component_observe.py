@@ -220,7 +220,7 @@ def _compose_api_resources(state_root: Path) -> dict:
         capture_output=True, text=True, check=False, timeout=60)
     assert process.returncode == 0, process.stderr[-300:]
     services = json.loads(process.stdout)["services"]
-    assert "mem_reservation" not in services["wuwaterm"] and "oom_score_adj" not in services["wuwaterm"]
+    assert set(services) == {"wuwaterm-api"}
     return services["wuwaterm-api"]
 
 

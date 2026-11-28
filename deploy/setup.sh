@@ -8,7 +8,6 @@
 #   ./deploy/setup.sh --with-telegram      Core API + standalone WuwaTerm-Telegram (HTTP mode)
 #   ./deploy/setup.sh --with-all --web-origin https://...
 #                                          Core API + Web + Telegram + Windows
-#   ./deploy/setup.sh --with-legacy-bot    deprecated: start the inline bot in this checkout
 #   ./deploy/setup.sh --status | --check   report what is installed and healthy
 #
 # Re-running the same command is the supported way to add a surface to an
@@ -31,7 +30,6 @@ code_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$code_root"
 
 with_telegram=0
-with_legacy_bot=0
 telegram_dir=
 telegram_package=
 with_web=0
@@ -104,12 +102,6 @@ add any combination of client surfaces.
                         --with-windows). Each client gets its own device token
                         and state directory while sharing wuwaterm-api and
                         data/terms.db.
-  --with-legacy-bot     Deprecated. Also start the inline bot this checkout
-                        still carries (wuwaterm-bot). Requires
-                        TELEGRAM_BOT_TOKEN in .env; OWNER_USER_ID is strongly
-                        recommended (empty means private chat rejects everyone).
-                        The supported Telegram surface is the standalone
-                        product instead: --with-telegram.
   --build-local         Build the runtime images from this checkout instead of
                         pulling the official images.
   --image-tag TAG       Official image tag to pull. Default: v<declared version>.
@@ -161,7 +153,8 @@ need_value() {
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --with-telegram) with_telegram=1 ;;
-        --with-legacy-bot) with_legacy_bot=1 ;;
+        --with-legacy-bot)
+            usage_error "--with-legacy-bot has been removed: the legacy inline bot has been retired from Core; use --with-telegram (or roll back to v0.16.0)" ;;
         --telegram-dir)
             need_value "$@"; telegram_dir=$2; shift ;;
         --telegram-dir=*) telegram_dir=${1#--telegram-dir=} ;;
@@ -211,11 +204,6 @@ if [ -n "$telegram_dir" ] || [ -n "$telegram_package" ]; then
 fi
 if [ -n "$telegram_dir" ] && [ -n "$telegram_package" ]; then
     usage_error "--telegram-dir and --telegram-package are alternatives"
-fi
-# Routing the surface and installing the deprecated inline bot are two
-# different installations, and one host cannot run both against one token.
-if [ "$with_telegram" = 1 ] && [ "$with_legacy_bot" = 1 ]; then
-    usage_error "--with-telegram and --with-legacy-bot are alternatives: the standalone product replaces the inline bot"
 fi
 
 # The Compose files bind-mount ../data, ../state, ../state-api, so the root is
@@ -290,7 +278,7 @@ validate_config() {
     require_env WUWATERM_OPENAI_BASE_URL
     require_env WUWATERM_OPENAI_API_KEY
     require_env WUWATERM_OPENAI_MODEL
-    if [ "$with_legacy_bot" = 1 ] || [ -n "$telegram_dir" ]; then
+    if [ -n "$telegram_dir" ]; then
         require_env TELEGRAM_BOT_TOKEN
         warn_if_empty OWNER_USER_ID
     elif [ "$with_telegram" = 1 ]; then
@@ -827,7 +815,7 @@ preflight_telegram_containers() {
     [ "$with_telegram" = 1 ] || return 0
     [ -z "$telegram_dir" ] || return 0
     if [ "$(container_state wuwaterm-bot)" = running ]; then
-        fail "deprecated inline bot (wuwaterm-bot) is running; stop it first (docker compose -f deploy/docker-compose.yml stop wuwaterm) before starting wuwaterm-telegram"
+        fail "deprecated inline bot (wuwaterm-bot) is running; stop it first (docker stop wuwaterm-bot) before starting wuwaterm-telegram"
     fi
     if ! tg_compose_ids=$(docker ps -aq --filter label=com.docker.compose.service=wuwaterm-telegram 2>&1); then
         fail "could not inspect existing Compose-managed wuwaterm-telegram containers via docker ps: $tg_compose_ids"
@@ -982,7 +970,7 @@ install_telegram() {
         print_telegram_steps "$wheel" "$where" "$prepared"
         if [ "$(container_state wuwaterm-bot)" = running ]; then
             printf 'setup: the deprecated inline bot is running here; stop it before the product\n'
-            printf 'setup: polls the same token: docker compose -f deploy/docker-compose.yml stop wuwaterm\n'
+            printf 'setup: polls the same token: docker stop wuwaterm-bot\n'
         fi
         return 0
     fi
@@ -1078,27 +1066,6 @@ enable_windows() {
     fi
     printf 'setup:   device token: %s (mode 0600; copy into Windows Settings -> Connection)\n' "$win_token_file"
     printf 'setup:   Core API:     http://127.0.0.1:%s (expose over HTTPS via your reverse proxy, forwarding Authorization unchanged)\n' "$(api_port)"
-}
-
-# Kept for existing installations and for an explicit rollback. The install
-# entry no longer reaches it by accident: a first install starts no bot, and
-# this flag is the only thing in this script that starts the inline one.
-enable_legacy_bot() {
-    [ "$with_legacy_bot" = 1 ] || return 0
-    printf 'setup: warning: --with-legacy-bot starts the deprecated inline bot (wuwaterm-bot).\n' >&2
-    printf 'setup: warning: the supported Telegram surface is the standalone product: ./deploy/setup.sh --with-telegram\n' >&2
-    if [ "$build_local" = 1 ]; then
-        compose build wuwaterm
-        compose up -d --no-build wuwaterm
-    else
-        compose pull wuwaterm \
-            || fail "could not pull the official image $image_tag; publish that release or pass --build-local"
-        compose up -d --no-build wuwaterm
-    fi
-    sleep 3
-    state=$(docker inspect -f '{{.State.Status}}' wuwaterm-bot 2>/dev/null || true)
-    [ "$state" = "running" ] || fail "wuwaterm-bot is not running (state: ${state:-missing}); check docker logs wuwaterm-bot"
-    printf 'setup: deprecated inline bot (wuwaterm-bot) is running.\n'
 }
 
 web_variant() {
@@ -1875,7 +1842,6 @@ build_data
 start_api
 ensure_api_device
 install_telegram
-enable_legacy_bot
 enable_web
 enable_windows
 maybe_adopt

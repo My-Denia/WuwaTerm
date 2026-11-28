@@ -43,9 +43,9 @@ body:
       options:
         - Installing dependencies
         - Building the dictionary from upstream game data
-        - Starting the Telegram bot
         - Starting the HTTP API
-        - Turning on the private web presentation layer
+        - Setting up standalone WuwaTerm-Web (--with-web)
+        - Setting up standalone WuwaTerm-Telegram (--with-telegram)
         - Issuing or using a device credential
         - Getting the desktop client to talk to the API
         - Running python scripts/validate.py
@@ -86,10 +86,10 @@ body:
     attributes:
       label: Which surface you are trying to bring up
       options:
-        - Telegram bot
         - HTTP API (/v1)
-        - Private web presentation layer
-        - Windows desktop client
+        - Standalone Web (My-Denia/WuwaTerm-Web)
+        - Standalone Telegram bot (My-Denia/WuwaTerm-Telegram)
+        - Windows desktop client (My-Denia/WuwaTerm-Windows)
         - Data build (dictionary from upstream game data)
         - All of them
     validations:
@@ -114,7 +114,7 @@ body:
       description: The commands, as you ran them, with secrets replaced by placeholders.
       placeholder: |
         1. uv venv .venv
-        2. uv sync --locked --extra dev --extra telegram
+        2. uv sync --locked --extra api --extra dev
         3. python scripts/validate.py
       render: shell
     validations:

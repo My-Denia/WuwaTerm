@@ -779,32 +779,22 @@ def test_telegram_steps_pin_the_compose_project_name(install_root):
     ), result.stdout
 
 
-def test_with_legacy_bot_keeps_the_deprecated_inline_bot_explicit(install_root):
-    write_env(install_root)  # no token
+def test_with_legacy_bot_is_rejected_as_retired(install_root):
+    write_env(install_root, telegram_token="123456:stub-token")
     refused = run_setup(install_root, "--with-legacy-bot", "--no-adopt")
 
-    assert refused.returncode == 1
-    assert "TELEGRAM_BOT_TOKEN is empty" in refused.stderr
-    assert "wuwaterm-bot" not in docker_log(install_root)
-
-    write_env(install_root, telegram_token="123456:stub-token")
-    accepted = run_setup(
-        install_root, "--with-legacy-bot", "--no-adopt", env={"STUB_BOT_STATE": "running"}
-    )
-
-    assert accepted.returncode == 0, accepted.stderr
-    assert "deprecated inline bot (wuwaterm-bot) is running" in accepted.stdout
-    assert "--with-legacy-bot starts the deprecated inline bot" in accepted.stderr
-    assert re.search(
-        r"up -d --no-build wuwaterm$", docker_log(install_root), re.MULTILINE
-    ), docker_log(install_root)
+    assert refused.returncode == 2
+    assert "--with-legacy-bot has been removed" in refused.stderr
+    assert "--with-telegram" in refused.stderr
+    assert "v0.16.0" in refused.stderr
+    assert docker_log(install_root) == ""
 
 
-def test_the_two_telegram_installations_are_alternatives(install_root):
+def test_with_telegram_and_with_legacy_bot_is_rejected(install_root):
     result = run_setup(install_root, "--with-telegram", "--with-legacy-bot")
 
     assert result.returncode == 2
-    assert "alternatives" in result.stderr
+    assert "--with-legacy-bot has been removed" in result.stderr
     assert docker_log(install_root) == ""
 
 

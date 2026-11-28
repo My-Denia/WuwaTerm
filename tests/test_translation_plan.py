@@ -461,7 +461,7 @@ def test_en_zh_auto_retry_ignores_hostile_failure_reason(tmp_path: Path, monkeyp
 def test_provider_profile_propagates_across_sync_async_and_protected_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from wuwaterm.telegram_html import protect_telegram_html
+    from wuwaterm.protected_text import ProtectedStructure, ProtectedText
 
     db_path = _make_db(tmp_path)
     configure_llm(monkeypatch, semantic_enabled=False)
@@ -490,15 +490,17 @@ def test_provider_profile_propagates_across_sync_async_and_protected_paths(
         llm_transport=httpx.MockTransport(handler),
     )
     try:
-        protected = protect_telegram_html("<b>你好世界</b>")
+        protected = ProtectedText(
+            ("", "你好世界", ""),
+            (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+        )
         omit_translator.translate("你好世界", to_chinese=False)
-        omit_translator.translate_protected(protected.neutral, to_chinese=False)
-        omit_translator.translate_html("<b>你好世界</b>", to_chinese=False)
+        omit_translator.translate_protected(protected, to_chinese=False)
         asyncio.run(omit_translator.translate_async("你好世界", to_chinese=False))
         asyncio.run(
-            omit_translator.translate_protected_async(protected.neutral, to_chinese=False)
+            omit_translator.translate_protected_async(protected, to_chinese=False)
         )
-        assert len(captured) == 5
+        assert len(captured) == 4
         for body in captured:
             assert "thinking" not in body
             assert "reasoning_effort" not in body

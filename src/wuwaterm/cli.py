@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+import sys
 
 from .builder import build_database, build_database_atomic
 from .constants import DEFAULT_SOURCE_PROFILE_NAME, source_profile_choices
@@ -12,8 +12,19 @@ from .db import category_counts, connect
 from .lookup import TermService
 from .sentence import SentenceTranslator, resolve_provider_profile_from_env
 
+RETIRED_BOT_MESSAGE = (
+    "error: the legacy inline Telegram bot (`wuwaterm bot`) has been retired "
+    "from WuwaTerm Core; use the standalone My-Denia/WuwaTerm-Telegram "
+    "product instead (or roll back to v0.16.0 if you still need the inline bot)"
+)
+
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if raw_argv and raw_argv[0] == "bot":
+        print(RETIRED_BOT_MESSAGE, file=sys.stderr)
+        return 64
+
     parser = argparse.ArgumentParser(prog="wuwaterm")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -46,10 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     p_sentence.add_argument("text")
     p_sentence.add_argument("--db", required=True)
 
-    p_bot = sub.add_parser("bot")
-    p_bot.add_argument("--db", default="data/terms.db")
-
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     if args.command == "refresh-data":
         path = refresh_data(args.dest, profile_name=args.profile)
@@ -82,18 +90,6 @@ def main(argv: list[str] | None = None) -> int:
                 provider_profile=resolve_provider_profile_from_env(),
             ).translate(args.text)
         )
-        return 0
-    if args.command == "bot":
-        try:
-            from .bot import run_bot
-        except ModuleNotFoundError as exc:
-            if exc.name != "telegram":
-                raise
-            parser.error(
-                "the bot command requires the Telegram extra; "
-                "install wuwaterm[telegram]"
-            )
-        run_bot(Path(args.db))
         return 0
     parser.error("unhandled command")
     return 2

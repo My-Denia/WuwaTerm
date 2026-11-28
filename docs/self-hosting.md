@@ -11,9 +11,12 @@ not a prerequisite for anything below.
 
 You get a dictionary-first Wuthering Waves terminology service: exact
 Chinese-to-English term lookup and the reverse, plus dictionary-guided sentence
-translation in both directions with the official terms supplied to the model, reachable through a Telegram bot, a versioned
-HTTP API, or both. An exact dictionary hit returns the official string
-byte-for-byte and never calls a model.
+translation in both directions with the official terms supplied to the model,
+served by Core's versioned HTTP API (`wuwaterm-api`) and consumable by
+optional standalone products ([WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web),
+[WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows), and
+[WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)). An exact
+dictionary hit returns the official string byte-for-byte and never calls a model.
 
 You still have to do these things yourself, because this project cannot do them
 for you:
@@ -22,7 +25,8 @@ for you:
   upstream data repository pinned in `src/wuwaterm/constants.py`. It is never
   distributed — not in a release, not in a container image. A fresh install has
   no database until you build one.
-- **Bring your own Telegram bot token**, if you want the bot surface.
+- **Bring your own Telegram bot token**, if you also deploy the standalone
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) product.
 - **Bring your own OpenAI-compatible endpoint**, if you want sentence
   translation. Exact dictionary lookups work without it; see
   [With no model configured](#with-no-model-configured) for exactly what a
@@ -53,8 +57,9 @@ Either path works; pick one.
 
 Optional, for either path:
 
-- A **Telegram bot token** if you want the bot. Create the bot with Telegram's
-  own BotFather; this project has no part in that step.
+- A **Telegram bot token** if you also deploy standalone
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram). Create
+  the bot with Telegram's own BotFather; this project has no part in that step.
 - An **OpenAI-compatible endpoint** (base URL, API key, model name) if you want
   sentence translation.
 
@@ -117,13 +122,13 @@ checkout of any earlier tag passes the release it lacks explicitly:
 WUWATERM_WEB_VERSION=v0.7.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
-For the source path, create the environment with the Bot, API, and builder
+For the source path, create the environment with the API and builder
 extras. This supports every source-path command in this guide:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e ".[telegram,api,build]"
+.venv/bin/python -m pip install -e ".[api,build]"
 ```
 
 If the first line fails with `ensurepip is not available`, this host's Python
@@ -135,18 +140,18 @@ system package at all:
 
 ```bash
 uv venv --seed .venv
-.venv/bin/python -m pip install -e ".[telegram,api,build]"
+.venv/bin/python -m pip install -e ".[api,build]"
 ```
 
 Either way the environment ends up at `.venv/` and every later command in this
 document works unchanged.
 
-The base install (`pip install -e .`) provides the shared core. The `telegram`
-extra installs the Bot's Telegram SDK; `api` carries FastAPI and uvicorn; and
-`build` carries what the data build needs. A fresh API-only environment can
-install `.[api,build]` for the API and local data build without the Telegram
-SDK. For the combined Bot and API runtime without data-build tooling, install
-`.[telegram,api]`.
+The base install (`pip install -e .`) provides the shared core; `api` carries
+FastAPI and uvicorn; and `build` carries what the data build needs. For the API
+runtime without data-build tooling, install `.[api]`. The legacy inline bot and
+`wuwaterm[telegram]` extra were retired from Core after `v0.16.0` (use
+standalone [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)
+for Telegram).
 
 ## One Command: `deploy/setup.sh`
 
@@ -161,7 +166,6 @@ around it. From the checkout:
 ./deploy/setup.sh --with-windows                                       # 3. Core + Windows pairing
 ./deploy/setup.sh --with-telegram                                      # 4. Core + Telegram (HTTP mode)
 ./deploy/setup.sh --with-all --web-origin https://wuwaterm.example     # 5. Core + Web + Telegram + Windows
-./deploy/setup.sh --with-legacy-bot                                    # deprecated: the inline bot in this checkout
 ./deploy/setup.sh --status                                             # what is installed, its data version, health
 ./deploy/setup.sh --check                                              # same, exit non-zero when the API is not ready
 ```
@@ -176,10 +180,10 @@ What it does, in this order:
 2. Refuses to continue when the model settings (`WUWATERM_OPENAI_BASE_URL`,
    `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`) are empty, and requires
    `TELEGRAM_BOT_TOKEN` only when a Telegram surface is requested
-   (`--with-telegram`, `--telegram-dir`, or `--with-legacy-bot`; re-runs of
-   `--with-telegram` reuse an existing `state-telegram/telegram.env`). No bot
-   is started otherwise, so an API-only installation cannot fall into a restart
-   loop.
+   (`--with-telegram` or `--telegram-dir`; re-runs of `--with-telegram` reuse
+   an existing `state-telegram/telegram.env`). The legacy `--with-legacy-bot`
+   flag and inline `wuwaterm-bot` service have been retired from Core (roll
+   back to `v0.16.0` if still needed).
 3. Pulls the official GHCR images for the declared version unless
    `--build-local` is given, and builds `data/terms.db` when it is missing:
    `refresh-data` → `build-db --atomic` on a candidate → `verify-db` → promote.
@@ -278,9 +282,10 @@ to `GET /` (or `/<prefix>`), expects the session cookie, then sends
 underscores or hyphens, and the same value belongs in the proxy's
 `proxy_set_header X-WuwaTerm-Edge "..."` directive.
 
-The in-process owner-private layer described later in
-[The owner-private web presentation layer](web-presentation-layer.md) is a
-different surface and is not installed by this flag.
+The legacy in-process owner-private web layer described in
+[The owner-private web presentation layer](web-presentation-layer.md) has been
+retired from Core after `v0.16.0` and is replaced by standalone `WuwaTerm-Web`
+via `--with-web`.
 
 The script does not do TLS, reverse-proxy authentication, the Telegram token,
 or the model key for you. Those are the inputs described in
@@ -290,11 +295,10 @@ The bot token belongs in the Telegram product's own `.env`, not in this one.
 ## The Telegram Surface Is Its Own Product
 
 The bot is [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram),
-released from its own repository. This checkout still carries an inline bot
-(`wuwaterm-bot`), and through v0.8.0 `--with-telegram` started that one. It no
-longer does: the released product is the supported bot, so the first-install
-entry routes there instead of installing a different program behind the same
-name.
+released from its own repository. Core previously carried a legacy inline bot
+(`wuwaterm-bot`) through release `v0.16.0` (and through `v0.8.0` `--with-telegram`
+started that one); it has since been retired from Core, and the released
+standalone product is the supported bot.
 
 **What the product's own install looks like.** It is a container built from
 two verified wheels: its own release wheel and the Core wheel its
@@ -332,22 +336,22 @@ Docker context with `scripts/prepare_docker_context.py`, then
 reports both: `telegram` is the product's container and `legacy bot` is the
 inline one.
 
-**The inline bot is deprecated, not removed.** This Compose file still starts
-it when you name `wuwaterm`, because `deploy/product-update.sh` resolves
-installed services with `compose config`, and a service behind a profile is
-invisible to that. What changed is the install entry: `./deploy/setup.sh`
-starts no bot by default, and `--with-legacy-bot` is the only flag that starts
-this one. `deploy/vps-update.sh` names the services it acts on, so an existing
-installation keeps updating as before.
+**The legacy inline bot has been retired from Core.** `deploy/docker-compose.yml`
+no longer defines `wuwaterm` (`wuwaterm-bot`), `deploy/setup.sh --with-legacy-bot`
+is rejected, and `wuwaterm bot` / `entrypoint.sh bot` exits `64` with migration
+guidance. Roll back to Core tag `v0.16.0` if you still need the inline bot.
+`deploy/setup.sh --status` continues to detect any leftover `wuwaterm-bot`
+container on the host, and `deploy/vps-update.sh` manages `wuwaterm-api` only
+(refusing if a legacy `wuwaterm-bot` is still running).
 
-**Upgrading an installation that runs the inline bot.** Stop it first: two
+**Migrating an older installation that ran the inline bot.** Stop it first: two
 pollers with one token fight over updates.
 
 ```bash
-# 1. stop the deprecated inline bot
-docker compose -f deploy/docker-compose.yml stop wuwaterm
+# 1. stop the retired inline bot container
+docker stop wuwaterm-bot
 
-# 2. prepare the product checkout from this installation
+# 2. prepare the standalone product checkout from this installation
 ./deploy/setup.sh --with-telegram --telegram-dir /path/to/WuwaTerm-Telegram
 
 # 3. follow the printed steps inside that checkout, then start it
@@ -378,11 +382,11 @@ before the first start. The variables are documented inline in the file; these
 are the ones that decide whether each surface works at all.
 
 **Nothing in this project reads that file for you on the source path.** Compose
-loads it for the container services through its own `env_file` directive, but
+loads it for `wuwaterm-api` through its own `env_file` directive, but
 the command-line entry points read the process environment directly — there is
 no dotenv loader anywhere in this codebase. So on the source path, export it
-into the shell you start a service from, or the bot will fail to start for want
-of a token and the API will quietly run on its defaults:
+into the shell you start the API from, or `wuwaterm-api` will quietly run on
+its defaults:
 
 ```bash
 set -a
@@ -399,32 +403,32 @@ equivalents elsewhere parse the file as data rather than executing it, which is
 also how Compose reads it for the container path. Either way, the variables have
 to reach the process; nothing in this project puts them there.
 
-If you run both surfaces on the source path, do not export one file into both:
-[Start The Service](#start-the-service) shows how to give each process only its
-own secrets, which is what the Compose file already does for the container path.
+If you also run standalone `WuwaTerm-Telegram` on the same host, keep its
+credentials in its own `.env` file rather than sharing one environment file
+across processes.
 
-**For the Telegram bot:** these belong in the *product's* `.env`, in its own
-checkout — not in this one. `--telegram-dir` writes the ones that overlap from
-the `.env` here; `TELEGRAM_BOT_TOKEN` is the one you still have to add if it is
-not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
+**For the standalone Telegram bot (`WuwaTerm-Telegram`):** these belong in the
+*product's* `.env`, in its own checkout — not in Core's `.env`. `--telegram-dir`
+copies overlapping keys from `.env` here when preparing a standalone checkout;
+`TELEGRAM_BOT_TOKEN` is the one you still have to add if it is not present yet.
 
 | variable | why it matters |
 | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Without it the bot cannot start. |
-| `OWNER_USER_ID` | Who may use the bot in a private chat. Empty means private chat rejects everyone, which is the fail-closed default. |
-| `WUWATERM_STATE_DIR` | Where `chat_settings.json` and the channel reply index live. The example file sets it to `state`, and that is what the rest of this document assumes. It is **not** what an unset variable does: with nothing set, those two files fall back to sitting beside the database instead, which is the pre-`state/` layout and would put them where the backup section does not look. Leave the example's value in place. Under the product's Compose file those two paths are inside its own `state/`. |
+| `TELEGRAM_BOT_TOKEN` | Required by standalone `WuwaTerm-Telegram` to start. |
+| `OWNER_USER_ID` | Who may use standalone `WuwaTerm-Telegram` in a private chat. Empty means private chat rejects everyone, which is the fail-closed default. |
+| `WUWATERM_STATE_DIR` | Where standalone `WuwaTerm-Telegram` stores `chat_settings.json` and `channel_replies.json` inside its own `state/` directory (in Core's historical `v0.16.0` inline bot, an unset variable fell back beside `terms.db`). |
 
-**For the HTTP API:**
+**For the Core HTTP API (`wuwaterm-api`):**
 
 | variable | why it matters |
 | --- | --- |
 | `WUWATERM_DB_PATH` | The terminology database the service reads. Default `data/terms.db`. |
 | `WUWATERM_API_KNOWLEDGE_DB_PATH` | Optional companion read-only entity knowledge database bound to `terms.db`'s revision (enables `knowledge-retrieval-v1` and `POST /v1/knowledge/query`). Leave empty or commented out to run dictionary-only mode; missing or revision-mismatched files degrade safely without blocking API startup. Under Compose, point at the read-only `/app/data` mount (for example `/app/data/knowledge.db`). |
 | `WUWATERM_API_PORT` | The loopback port. Default `8788`. Under Compose the bind address itself is fixed in the Compose file and is deliberately not an environment knob. |
-| `WUWATERM_API_STATE_DIR` | Where the device credential store lives. Default `state-api`, a **sibling** of the bot's state directory and never a child of it, because the bot mounts its own state directory writable. |
-| `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS` defaults to `90` s, leaving headroom above Core's `45` s LLM and `75` s semantic timeouts while Web BFF and Windows clients default to `100` s; see [timeout ladder](privacy-and-llm.md#llm-configuration)). They are not shared with the bot; the documented worst case is the sum of the two processes. |
+| `WUWATERM_API_STATE_DIR` | Where the device credential store (`devices.db`) lives. Default `state-api`, kept separate from any legacy or standalone Telegram `state/` directory. |
+| `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS` defaults to `90` s, leaving headroom above Core's `45` s LLM and `75` s semantic timeouts while Web BFF and Windows clients default to `100` s; see [timeout ladder](privacy-and-llm.md#llm-configuration)). They are per process and not shared with standalone `WuwaTerm-Telegram`; if both share one upstream LLM account, the worst case is the sum of the processes. |
 
-**For sentence translation (optional, shared by both surfaces):**
+**For sentence translation (optional):**
 `WUWATERM_OPENAI_BASE_URL`, `WUWATERM_OPENAI_API_KEY`, `WUWATERM_OPENAI_MODEL`,
 plus the timeout and concurrency bounds beside them, optional provider profile
 settings (`WUWATERM_PROVIDER_PROFILE` / `WUWATERM_PROVIDER_CAPABILITIES_JSON`,
@@ -480,20 +484,14 @@ server without the switch, which a test pins. It is a hint, not a finding:
 nothing appears in a response body, and a pair with no candidate is prompted
 exactly as before.
 
-**For the owner-private web layer (optional, off by default):**
-`WUWATERM_API_WEB_ENABLED`, `WUWATERM_API_WEB_DEVICE_TOKEN`,
-`WUWATERM_API_WEB_EDGE_SECRET`, `WUWATERM_API_WEB_SESSION_TTL_SECONDS`,
-`WUWATERM_API_WEB_MAX_SESSIONS`. Leave `WUWATERM_API_WEB_ENABLED` unset unless
-you have read [The owner-private web presentation layer](web-presentation-layer.md):
-the layer expects a reverse proxy in front of it that both authenticates the
-visitor and injects the edge marker, and it refuses every request that arrives
-without that marker. With the switch off there is no route and no
-sub-application at all.
-
-Note where those values land: if one environment file feeds several processes,
-the web variables reach processes that have no web surface. The Compose file in
-this repository blanks all three in the bot service for exactly that reason. If
-you deploy some other way, reproduce that.
+**Legacy in-process Python Web UI (retired):** The old `/wuwaterm-web`
+in-process Python Web UI (`WUWATERM_API_WEB_*`) has been removed from Core; use
+the standalone `My-Denia/WuwaTerm-Web` workbench (`./deploy/setup.sh --with-web`)
+instead, or roll back to `v0.16.0`. Existing `.env` files with
+`WUWATERM_API_WEB_ENABLED` unset, empty, or falsey (`0`/`false`/`no`/`off`)
+continue to start `wuwaterm-api` cleanly; any truthy or unrecognised value
+fails closed on `wuwaterm-api serve` with `ApiConfigError` (see
+[The owner-private web presentation layer](web-presentation-layer.md)).
 
 ## Build The Terminology Database
 
@@ -560,64 +558,29 @@ is running — stop it first, or use the transactional updater described in
 the data build, readiness wait and first device credential. The rest of this
 section is the explicit path, and the reference for what the script runs.
 
-**Container path.** Name the service you want. Both are ordinary services in
-the Compose file, so a bare `up -d` starts both — and a bot with no token would
-then fail and be restarted forever by its restart policy on an API-only
-installation:
+**Container path.** Start the Core API service:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
-docker compose -f deploy/docker-compose.yml up -d wuwaterm
-docker compose -f deploy/docker-compose.yml up -d wuwaterm wuwaterm-api
 ```
 
-The three lines are alternatives: the API alone, the deprecated inline bot
-alone, or both. This Compose file is not the first-install entry —
-`./deploy/setup.sh` is, and it starts no bot unless you ask for the deprecated
-one — but an operator who runs `up -d` by hand chooses both surfaces here.
+`deploy/docker-compose.yml` defines `wuwaterm-api` (plus `wuwaterm-builder`
+under `profiles: ["builder"]`). The legacy inline `wuwaterm` (`wuwaterm-bot`)
+service has been retired from Core after `v0.16.0`; use `./deploy/setup.sh --with-telegram`
+for standalone `WuwaTerm-Telegram`.
 
-**Source path**, one process each — and they are two long-running processes,
-not two lines of one script. Start each in its own terminal, or put each under
-a process supervisor; run in one shell, the second command waits for the first
-to exit.
+**Source path:** Core runs the HTTP API service directly:
 
 ```bash
-.venv/bin/python -m wuwaterm.cli bot --db data/terms.db
-.venv/bin/python -m wuwaterm_api.cli serve
-```
-
-**Give each process only its own secrets.** One `.env` exported into one shell
-puts every value into both processes: the bot would hold the web layer's device
-token and edge marker, and the API would hold the Telegram token, the owner id
-and the bot's log-redaction key — none of which either one uses. That is not a
-detail of taste; it is what the Compose file already does for you, blanking
-three variables in the bot service and five in the API service, and a source
-installation has to reproduce it. Two ways, both fine:
-
-Separate files, one per process — `.env.bot` and `.env.api`, each at mode 600,
-each holding only what that process needs (the shared ones — the database path,
-the data directory, the model settings — appear in both):
-
-```bash
-( set -a; . ./.env.bot; set +a; exec .venv/bin/python -m wuwaterm.cli bot --db data/terms.db )
-( set -a; . ./.env.api; set +a; exec .venv/bin/python -m wuwaterm_api.cli serve )
-```
-
-Or one file, with the other process's variables unset at the point of launch —
-the same list Compose blanks:
-
-```bash
-( set -a; . ./.env; set +a
-  unset WUWATERM_API_WEB_ENABLED WUWATERM_API_WEB_DEVICE_TOKEN WUWATERM_API_WEB_EDGE_SECRET
-  exec .venv/bin/python -m wuwaterm.cli bot --db data/terms.db )
-
 ( set -a; . ./.env; set +a
   unset TELEGRAM_BOT_TOKEN TELEGRAM_TEST_CHAT_ID OWNER_USER_ID WUWATERM_REDACTION_SECRET WUWATERM_API_DEVICE_DB_PATH
   exec .venv/bin/python -m wuwaterm_api.cli serve )
 ```
 
-A supervisor unit does the same with its own environment-file directive: point
-each unit at its own file, or at the shared one plus that unit's unsets.
+Standalone `WuwaTerm-Telegram` and `WuwaTerm-Web` run in their own processes
+with their own environment files (Core's legacy inline `wuwaterm bot` command
+is retired and exits `64`). A supervisor unit should point `wuwaterm-api` at
+its own environment file or unset non-API variables as shown above.
 
 The API binds `127.0.0.1` and port `8788` unless you say otherwise, and it
 refuses to bind a non-loopback address. Check it:
@@ -848,7 +811,7 @@ docker pull ghcr.io/my-denia/wuwaterm:v0.4.0
 docker pull ghcr.io/my-denia/wuwaterm-builder:v0.4.0
 ```
 
-To use them, point the runtime services at the pulled image instead of the
+To use them, point `wuwaterm-api` at the pulled image instead of the
 locally built one. The Compose file already reads the runtime reference from an
 environment variable:
 
@@ -857,9 +820,8 @@ WUWATERM_RUNTIME_IMAGE=ghcr.io/my-denia/wuwaterm:v0.4.0 \
   docker compose -f deploy/docker-compose.yml up -d --no-build wuwaterm-api
 ```
 
-Name the service here for the same reason as above: it names the surface being
-upgraded, and it is what starts the deprecated inline bot when you actually
-want it. Substitute `wuwaterm` for the bot alone, or list both.
+Name `wuwaterm-api` explicitly so Compose upgrades the Core API service using
+the pulled image.
 
 **That variable has to survive the command.** Set only on that one line, it is
 gone from the next one — and every later Compose command, including a restart
@@ -885,8 +847,8 @@ WUWATERM_BUILDER_IMAGE=ghcr.io/my-denia/wuwaterm-builder:v0.4.0
 ```
 
 **Or set both at once with the shipped overlay.**
-`deploy/docker-compose.ghcr.yml` sets nothing but the three `image:` fields,
-from one variable:
+`deploy/docker-compose.ghcr.yml` sets nothing but the two `image:` fields
+(`wuwaterm-api` and `wuwaterm-builder`), from one variable:
 
 ```bash
 WUWATERM_IMAGE_TAG=v0.4.0 docker compose \
@@ -927,7 +889,7 @@ previous release's builder code, which is exactly what a release that moves the
 pin or the schema version breaks:
 
 ```bash
-docker compose -f deploy/docker-compose.yml build wuwaterm wuwaterm-api
+docker compose -f deploy/docker-compose.yml build wuwaterm-api
 docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-builder
 ```
 
@@ -935,7 +897,7 @@ docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-bui
 into the virtual environment rather than only restarting:
 
 ```bash
-.venv/bin/python -m pip install -e ".[telegram,api,build]"
+.venv/bin/python -m pip install -e ".[api,build]"
 ```
 
 Then rebuild and re-verify the data before restarting, because a release can
@@ -950,16 +912,16 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 On the source path the same three steps are the source-path build commands from
 [Build The Terminology Database](#build-the-terminology-database).
 
-Stop the services, promote the verified candidate over `data/terms.db`, start
-again — on the source path that means starting the two processes again, in
-their own terminals or under their supervisor — and re-check `/readyz`. Take
+Stop the service, promote the verified candidate over `data/terms.db`, start
+again — on the source path that means starting the API process again, in
+its terminal or under its supervisor — and re-check `/readyz`. Take
 the backup below first: promotion is the one step in this document that
 overwrites something.
 
 An installation old enough to predate the separate `state/` and `state-api/`
-directories needs a one-time state migration rather than a restart; that path,
-including the requirement to stop the old runtime first, is the state-migration
-section of [Deployment](deployment.md).
+directories (from historical `v0.16.0` and earlier inline-bot deployments)
+needs a one-time state migration; see the historical state-migration section of
+[Deployment](deployment.md).
 
 ## Backup And Restore
 
@@ -968,7 +930,7 @@ Five things are worth backing up, and one is not.
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
-| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. A standalone Telegram product keeps the same two files in its own `state/`; they are what carries group permissions and channel replies across, so back that directory up too. |
+| `state/` | Historical inline-bot (`v0.16.0`) or standalone `WuwaTerm-Telegram` settings and channel reply index (`chat_settings.json`, `channel_replies.json`). Plain JSON; copy it while the bot is stopped. Core API itself does not read or write `state/`. When standalone `WuwaTerm-Telegram` is deployed, back up its own `state/` directory (with `sudo` if created by a root container user). |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
 | `state-web/` | The self-hosted Web workbench, installed by `--with-web`. `web.env` holds the runtime mode, the external origin, the URL prefix and the `X-WuwaTerm-Edge` secret; `device.token` is the Core API device credential the Web process presents; `web.port` is the port it was started on. Two `0600` files in a `0700` directory, so the copy needs the privileges they were written with. Carry them over or the new host loses its edge gate and has to recreate the Web device. |
 | `state-web/data/pool.sqlite3` | The Web workbench's shared quota pool — the only database under `state-web/`, also in write-ahead-log mode and written by the Web process. Same choice as the credential store: stop the Web container, or take an online backup. |
@@ -1012,7 +974,7 @@ rm -f backup/devices.db.new
 **The container path offers no interpreter of its own for this.** Its
 requirements promise Docker and Compose and nothing else; the Python that runs
 this service lives inside the image, and the runtime entrypoint accepts only
-`bot`, `api` and `device` — it refuses an arbitrary command by design. A
+`api` and `device` — it refuses `bot` and arbitrary commands by design. A
 one-shot container can still reach that interpreter if you override the
 entrypoint and mount a destination yourself (`docker compose run --rm
 --entrypoint python -v "$PWD/backup:/backup" wuwaterm-api -c ...` with the
@@ -1059,8 +1021,8 @@ runtime image selects no unprivileged user, so the API process creates
 directory keeps the DIRECTORY yours, but not the database inside it. Run the
 backup with the same privileges the container has — `sudo` on the host — or
 give the store a matching non-root owner. Reaching for a one-shot container of
-the API service instead does not work: its entrypoint accepts `bot`, `api` and
-`device` and refuses anything else, on purpose. The source path, where the API
+the API service instead does not work: its entrypoint accepts `api` and
+`device` and refuses `bot` and anything else, on purpose. The source path, where the API
 runs as you, needs none of that.
 
 Verify a restored credential store by a business count — `device list` should
@@ -1136,46 +1098,50 @@ the state back where it was:
    started on. Point the reverse proxy at the port `./deploy/setup.sh --status`
    reports, and re-check it when the Web package changes.
 
-On an API-only install there is nothing in `state/` to restore: that directory
-belongs to the bot process, and a bot that never ran wrote nothing into it. On
+On a Core API-only install there is nothing in `state/` to restore: that
+directory belonged to the retired inline bot (or lives in standalone
+`WuwaTerm-Telegram`'s own checkout), and Core API never writes to it. On
 the source path it will usually not exist at all; on the container path it
-exists and is **empty**, because the build step above pre-creates it along with
-the other bind mounts. Either way, restore `.env` and `state-api/` and skip it —
-an absent or empty `state/` on an API-only install is the expected state, not a
-missing backup.
+may exist and be **empty**. Either way, restore `.env` and `state-api/` and
+skip it — an absent or empty `state/` on a Core API install is the expected
+state, not a missing backup.
 
 ## Rollback
 
 Stop what is running — `docker compose -f deploy/docker-compose.yml down` on
-the container path, or stop the two processes on the source path — then take
+the container path, or stop the API process on the source path — then take
 the source back and rebuild the runtime for the path you are on:
 
 ```bash
 git checkout vPREVIOUS
-docker compose -f deploy/docker-compose.yml build wuwaterm wuwaterm-api
+docker compose -f deploy/docker-compose.yml build wuwaterm-api
 docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-builder
 ```
 
 ```bash
-.venv/bin/python -m pip install -e ".[telegram,api,build]"
+.venv/bin/python -m pip install -e ".[api,build]"
 ```
+
+*(If rolling back specifically to `v0.16.0` or earlier to restore the retired
+inline `wuwaterm` bot, include `wuwaterm` in the Compose build and the
+historical `telegram` extra in the source install.)*
 
 The first block is the container path, the second the source path. The builder
 is named here for the same reason as in the upgrade above: it is behind a
 profile, a bare build skips it, and the database you are about to rebuild at
 the previous tag's pin has to be built by that tag's builder code.
-Restore `state/`, `state-api/` and, when the Web workbench is installed,
-`state-web/` from the backup taken before the upgrade, rebuild and verify the
-database at that tag's pin, then start and re-check `/readyz`. Rolling the
-source back without rolling the database back is the mistake to avoid: the
-schema version travels with the source.
+Restore `state-api/` (plus `state/` if restoring legacy/standalone Telegram and
+`state-web/` when the Web workbench is installed) from the backup taken before
+the upgrade, rebuild and verify the database at that tag's pin, then start and
+re-check `/readyz`. Rolling the source back without rolling the database back
+is the mistake to avoid: the schema version travels with the source.
 
 ## Troubleshooting
 
 | symptom | likely cause | what to do |
 | --- | --- | --- |
-| Bot starts and answers nothing | `TELEGRAM_BOT_TOKEN` empty, wrong, or revoked | Check the process log for the startup failure. The token is read from `.env`; a wrong token fails at startup rather than silently. |
-| Bot answers in a private chat to nobody | `OWNER_USER_ID` unset | Empty means private chat rejects everyone, on purpose. Set it, or use the bot in a group. |
+| Standalone `WuwaTerm-Telegram` starts and answers nothing | `TELEGRAM_BOT_TOKEN` empty, wrong, or revoked in the Telegram product's `.env` | Check the standalone Telegram container log for the startup failure. Core's legacy `wuwaterm bot` command is retired and exits `64`. |
+| Standalone `WuwaTerm-Telegram` answers in a private chat to nobody | `OWNER_USER_ID` unset in the Telegram product's `.env` | Empty means private chat rejects everyone, on purpose. Set it in standalone `WuwaTerm-Telegram`, or use the bot in a group. |
 | `/readyz` returns `503` | The terminology database is missing or unreadable | Confirm `WUWATERM_DB_PATH` points at a file that exists and that the process can read; build it if it does not. |
 | `verify-db` fails on a fresh build | The upstream checkout is not the pinned commit, or its version-provenance file does not say the expected version | This is fail-closed by design. Re-run `refresh-data`; if it still fails, the profile in `src/wuwaterm/constants.py` and the upstream repository have diverged and the pin has to be updated deliberately, not worked around. |
 | `refresh-data` fails | Same fail-closed check, or the fetch from the upstream repository failed or was interrupted | Read the message: it names which check failed. A network failure part-way through **does** leave a partial `data/wutheringdata/` behind, and re-running the same command **resumes** that checkout instead of starting over — that is deliberate, and it is why a retry after a transient failure is usually fast. A partial directory is still never consumed as data: `build-db` re-runs the same provenance inspection and refuses a checkout that is not at the pinned commit with the expected version file. |
@@ -1183,7 +1149,7 @@ schema version travels with the source.
 | `403` with `forbidden` from `/v1` | The device has the wrong scopes | `translate` admits `POST /v1/translations`, `POST /v1/reviews`, `POST /v1/semantic-reviews` and `POST /v1/structure-checks`; `meta` admits `GET /v1/terms` and `GET /v1/meta`. Issue a device with both. |
 | `429` with `rate_limited` | Two different bounds answer with this code. One is the per-device request limiter. The other is credential-verification admission: verification is deliberately expensive, so a bounded number of them may run at once and a request that finds every slot taken is refused **before** it is authenticated | If the completion record for that request carries no device principal, it was refused at verification admission and raising `WUWATERM_API_RATE_LIMIT_PER_MINUTE` will not help — raise `WUWATERM_API_AUTH_MAX_CONCURRENCY`, or reduce how many unauthenticated requests arrive at once. If it does name a device, it is the per-device limiter. |
 | `503` with `llm_unavailable` | No model configured, or the model call failed or timed out | If you configured none, this is the documented behaviour. If you did, check the endpoint, the key and `WUWATERM_API_LLM_TIMEOUT_SECONDS`. |
-| `503` with `llm_budget_exhausted` | The per-minute model call budget for that process | Raise `WUWATERM_API_LLM_CALLS_PER_MINUTE`, or wait. Budgets are per process and are not shared between the bot and the API. |
+| `503` with `llm_budget_exhausted` | The per-minute model call budget for `wuwaterm-api` | Raise `WUWATERM_API_LLM_CALLS_PER_MINUTE`, or wait. Budgets are per process and are not shared with standalone `WuwaTerm-Telegram` or other external processes. |
 | `503` with `knowledge_unavailable` | No companion `knowledge.db` is mounted (`WUWATERM_API_KNOWLEDGE_DB_PATH` unset or file missing), or `knowledge.db`'s `terms_db_revision` does not match the active `terms.db` | Verify the companion database with `python scripts/verify_knowledge_db.py data/knowledge.db --terms-db data/terms.db` and rebuild `knowledge.db` against the current `terms.db` when revisions diverge. |
 | The API will not start: bind error | `WUWATERM_API_BIND` set to something that is not a numeric loopback address | It is refused on purpose. Bind loopback and publish through a TLS terminator. |
 | The API will not start: port in use | Something else holds the port | Change `WUWATERM_API_PORT`, and change the reverse proxy target with it. |

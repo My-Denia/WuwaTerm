@@ -40,12 +40,12 @@ body:
       label: Which surface
       description: Where the wrong behaviour appears. Pick the one closest to it.
       options:
-        - Public beta Site
-        - Telegram bot
         - HTTP API (/v1)
-        - Private web presentation layer
-        - Windows desktop client
+        - Core library / CLI
         - Data build (dictionary from upstream game data)
+        - Standalone Web / Public beta Site (My-Denia/WuwaTerm-Web)
+        - Standalone Telegram bot (My-Denia/WuwaTerm-Telegram)
+        - Windows desktop client (My-Denia/WuwaTerm-Windows)
         - Not sure
     validations:
       required: true
@@ -57,7 +57,7 @@ body:
       description: For self-hosting, give the operating system, Python version, and installation method. For the public beta Site, give the operating system and browser version.
       placeholder: |
         Public beta: Windows 11, Firefox 142
-        Self-hosted: Ubuntu 24.04, Python 3.12.7, source (uv sync --locked --extra dev --extra telegram)
+        Self-hosted: Ubuntu 24.04, Python 3.12.7, source (uv sync --locked --extra api --extra dev)
     validations:
       required: true
 

@@ -61,6 +61,8 @@ def load_config(raw: bytes) -> dict[str, Any]:
     for key in ("source_floor", "manuscript_milestone", "optional_telegram_milestone",
                 "public_interface_milestone", "last_legacy_source"):
         _sha(config.get(key), key)
+    if config.get("retired_telegram_milestone") is not None:
+        _sha(config["retired_telegram_milestone"], "retired_telegram_milestone")
     consumers = config.get("consumers")
     jobs = config.get("jobs")
     _require(isinstance(consumers, dict) and isinstance(jobs, dict), "missing consumers or jobs")
@@ -162,6 +164,15 @@ def _blob(source: str, path: str) -> str:
     return _git("show", f"{source}:{path}")
 
 
+def _has_blob(source: str, path: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{source}:{path}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def _has_telegram(requirements: Any) -> bool:
     _require(isinstance(requirements, list) and all(isinstance(item, str) for item in requirements),
              "invalid project dependency metadata")
@@ -179,8 +190,12 @@ def resolve(source: str, config: dict[str, Any]) -> dict[str, Any]:
     _require(_git("cat-file", "-t", source).strip() == "commit", "source is not a commit")
     floor = config["source_floor"]
     last = config["last_legacy_source"]
+    retired_milestone = config.get("retired_telegram_milestone")
     milestones = [floor, config["manuscript_milestone"], config["optional_telegram_milestone"],
                   config["public_interface_milestone"], last]
+    if retired_milestone is not None:
+        _require(retired_milestone != last, "invalid control milestone ancestry")
+        milestones.append(retired_milestone)
     for left, right in zip(milestones, milestones[1:]):
         _require(_ancestor(left, right), "invalid control milestone ancestry")
     _require(_ancestor(floor, source), "source predates or is disconnected from the supported floor")
@@ -211,12 +226,32 @@ def resolve(source: str, config: dict[str, Any]) -> dict[str, Any]:
         for extra in ("dev", "api", "build"):
             _require(isinstance(extras.get(extra), list) and bool(extras[extra]), f"missing {extra} extra")
         base_telegram = _has_telegram(project["dependencies"])
-        if optional:
-            _require(not base_telegram and _has_telegram(extras.get("telegram")),
+        has_telegram_extra = "telegram" in extras
+        if not optional:
+            telegram_mode = "bundled"
+            _require(base_telegram and not has_telegram_extra,
+                     "source does not have the expected base Telegram metadata")
+        elif epoch == "legacy":
+            telegram_mode = "optional"
+            _require(not base_telegram and has_telegram_extra and _has_telegram(extras["telegram"]),
                      "source does not have the expected optional Telegram metadata")
         else:
-            _require(base_telegram and "telegram" not in extras,
-                     "source does not have the expected base Telegram metadata")
+            if retired_milestone is not None:
+                telegram_mode = "retired" if _ancestor(retired_milestone, source) else "optional"
+            elif not base_telegram and not has_telegram_extra and not _has_blob(source, "src/wuwaterm/bot.py"):
+                telegram_mode = "retired"
+            else:
+                telegram_mode = "optional"
+            if telegram_mode == "retired":
+                _require(not base_telegram and not has_telegram_extra,
+                         "source does not have the expected retired Telegram metadata")
+                _require(not _has_blob(source, "src/wuwaterm/bot.py"),
+                         "retired Telegram source must not ship src/wuwaterm/bot.py")
+                _require(not _has_blob(source, "src/wuwaterm_api/web/app.py"),
+                         "retired Telegram source must not ship src/wuwaterm_api/web/app.py")
+            else:
+                _require(not base_telegram and has_telegram_extra and _has_telegram(extras["telegram"]),
+                         "source does not have the expected optional Telegram metadata")
     except (KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError("invalid source dependency metadata") from exc
 
@@ -242,7 +277,8 @@ def resolve(source: str, config: dict[str, Any]) -> dict[str, Any]:
     jobs = config["jobs"]
     return {
         "source_epoch": epoch,
-        "telegram_optional": optional,
+        "telegram_mode": telegram_mode,
+        "telegram_optional": telegram_mode == "optional",
         "public_interface_smoke": public_smoke,
         "manuscript_interop": manuscript,
         "web_repository": consumers["web_repository"],

@@ -64,8 +64,11 @@ takes no details, and it carries a required acknowledgement that you have put
 none there. Everything about the finding waits for the private channel.
 
 A useful report says what an attacker gains, what access they need to start,
-which surface it goes through (public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), Telegram bot,
-HTTP API, private web layer, desktop client, or the data build), and the
+which surface it goes through (Core HTTP API under `/v1`, Core library/CLI, the
+data build, deployment tooling, or — in their own repositories —
+[WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web),
+[WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram), or
+[WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows)), and the
 smallest sequence that shows it.
 
 ## What Not To Put In A Report
@@ -91,10 +94,16 @@ for you — the redaction is yours to do.
 
 In scope:
 
-- The code in this repository: the Telegram bot, the HTTP API under `/v1`, the
-  owner-private web presentation layer, the data-build scripts, and the packaging
-  and deployment material under `deploy/`. The independent [Web](https://github.com/My-Denia/WuwaTerm-Web)
-  and [Windows](https://github.com/My-Denia/WuwaTerm-Windows) repositories maintain their own source and security reporting guidance.
+- The code in this repository: the protocol-neutral Core library/CLI, the HTTP
+  API under `/v1`, the data-build scripts, and the packaging and deployment
+  material under `deploy/`. [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)
+  maintains its own `SECURITY.md` and security reporting guidance; until
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) and
+  [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) publish their
+  own private vulnerability reporting policies, report security vulnerabilities
+  in those products through this repository's private advisory form above (the
+  legacy inline Telegram bot and in-process Python Web UI were retired from Core
+  after `v0.16.0`).
 - The deployment guidance this project publishes, when following it as written
   leaves an instance exposed. A wrong instruction is a defect worth reporting.
 
@@ -151,12 +160,13 @@ it:
   the token is `wtd1.` plus that device id plus the secret the operator supplied
   — so the secret has to be kept at the moment it is generated. Nothing recovers
   it from the store afterwards.
-- The web presentation layer is off by default and is owner-private when on. It
-  is not a public front end and turning it on does not make it one.
-- The public beta Site in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web) is a separate Hosted proxy. It is not the
-  in-process web layer. Application code does not authenticate the visitor;
-  the Worker holds a device token that can spend `/v1` quota. See
-  [Public Beta Site](docs/sites.md).
+- The legacy in-process Python Web UI (`/wuwaterm-web`) has been retired from
+  Core after `v0.16.0`; setting `WUWATERM_API_WEB_ENABLED` to any truthy or
+  unrecognised value fails closed on startup. Standalone Web deployments
+  (self-hosted workbench and the anonymous public beta Site) live in
+  [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web): on the public beta
+  Site, application code does not authenticate the visitor and the Worker holds
+  a device token that can spend `/v1` quota. See [Public Beta Site](docs/sites.md).
 - Nothing in this repository distributes generated databases, upstream game
   text, or runtime state. If your deployment is committing any of those, that is
   a local misconfiguration. `python scripts/validate.py` catches most of it —

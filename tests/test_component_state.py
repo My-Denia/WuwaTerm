@@ -544,9 +544,41 @@ def test_canonical_reader_binding_covers_artifact_and_legacy_images() -> None:
 
 # --------------------------------------------------- schema-5 native state leaves
 
+_LEGACY_BOT_STUB = """import os
+from pathlib import Path
+
+def _same_state_path(left: Path, right: Path) -> bool:
+    return left.resolve(strict=False) == right.resolve(strict=False)
+
+def _state_file_path(db_path, *, filename: str, explicit_path, label: str) -> Path:
+    db_parent = Path(db_path).resolve(strict=False).parent
+    legacy = db_parent / filename
+    state_dir = os.getenv("WUWATERM_STATE_DIR", "").strip()
+    target = Path(state_dir).expanduser() / filename if state_dir else None
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        if target is not None and (
+            _same_state_path(explicit, legacy) or _same_state_path(explicit, target)
+        ):
+            return target
+        return explicit
+    if not state_dir:
+        return legacy
+    return target
+"""
+
+
+def _write_legacy_bot_stub(root: Path) -> Path:
+    pkg = root / "_legacy_site" / "wuwaterm"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "bot.py").write_text(_LEGACY_BOT_STUB, encoding="utf-8")
+    return pkg.parent
+
+
 def _legacy_plan(db: Path, state_dir: Path | None) -> dict:
     """Run the unselected legacy image's own read-only path resolver."""
-    source = Path(state.__file__).resolve().parents[1] / "src"
+    source = _write_legacy_bot_stub(db.parent.parent)
     code = "import sys; sys.path.insert(0, " + repr(str(source)) + ")\n" + state._LEGACY_PLAN_CODE
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
     if state_dir is not None:
@@ -686,7 +718,8 @@ def test_legacy_plan_keeps_an_explicit_path_outside_the_state_dir(tmp_path: Path
     (data / "chat_settings.json").write_bytes(b'{"public":{},"allowed":[1]}')
     chosen = custom / "chat_settings.json"
     chosen.write_bytes(b'{"public":{},"allowed":[1]}')
-    code = "import sys; sys.path.insert(0, " + repr(str(Path(state.__file__).resolve().parents[1] / "src")) + ")\n"
+    stub_site = _write_legacy_bot_stub(tmp_path)
+    code = "import sys; sys.path.insert(0, " + repr(str(stub_site)) + ")\n"
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
            "WUWATERM_STATE_DIR": str(state_dir), "WUWATERM_SETTINGS_PATH": str(chosen)}
     result = subprocess.run([sys.executable, "-I", "-B", "-c", code + state._LEGACY_PLAN_CODE,

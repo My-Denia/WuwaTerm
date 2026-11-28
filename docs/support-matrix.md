@@ -48,8 +48,10 @@ identifies the Core release. The desktop warns about an unsupported API version
 on a status refresh rather than refusing the response. The API snapshot is [OpenAPI](api/openapi.json).
 Windows and Web product CI own full manuscript file interoperability.
 
-The owner-private Web and public beta have separate presentation boundaries;
-see [Web Presentation Layer](web-presentation-layer.md) and [Public Beta Site](sites.md).
+The legacy in-process Python Web UI (`/wuwaterm-web`) has been retired from Core
+(roll back to `v0.16.0` if needed); both self-hosted private Web and the
+anonymous public beta are now served by standalone [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
+See [Web Presentation Layer](web-presentation-layer.md) and [Public Beta Site](sites.md).
 
 ## Public beta Site
 
@@ -60,17 +62,15 @@ see [Web Presentation Layer](web-presentation-layer.md) and [Public Beta Site](s
 | Public service status | Best-effort anonymous beta at <https://wuwaterm.denia-official.chatgpt.site>; no account and no SLA, fixed-availability promise or per-visitor fairness guarantee |
 | Not in `scripts/validate.py` | by design; the server matrix does not install Node |
 | Visitor authentication | **none in application code.** Crawler `noindex` is not an ACL |
-| Relation to `/wuwaterm-web` | different process, different auth, different docs |
+| Legacy `/wuwaterm-web` | Retired from Core (available through `v0.16.0`); use standalone `WuwaTerm-Web` |
 
 ## Telegram
 
-| | |
-| --- | --- |
-| Library | `python-telegram-bot` 22.x (`>=22.7,<23`) |
-| Delivery | long polling |
-
-Long polling is a decision with a record, not an accident of setup:
-[ADR 0003](adr/0003-long-polling-not-webhook.md).
+The legacy inline Telegram bot and `wuwaterm[telegram]` extra have been retired
+from Core (available through `v0.16.0`). Telegram bot support lives in the
+standalone [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram)
+product (`python-telegram-bot`, long polling — see
+[ADR 0003](adr/0003-long-polling-not-webhook.md)).
 
 ## Game data
 

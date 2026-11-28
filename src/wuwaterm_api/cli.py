@@ -30,9 +30,8 @@ from .settings import (
     validate_log_level,
     validate_loopback_bind,
     validate_port,
+    validate_retired_web_setting,
     validate_serve_numeric_settings,
-    validate_web_enabled,
-    validate_web_limits,
 )
 
 LOGGER = logging.getLogger("wuwaterm_api")
@@ -121,13 +120,9 @@ def _serve(args: argparse.Namespace) -> int:
     # has somewhere to go. Validated on this path for the same reason the bind
     # is: a mistyped level must not be able to block `device revoke`.
     configure_logging(validate_log_level(settings.log_level))
-    # Same class, same placement, and for the same reason: the web switch is a
-    # serve-time setting, so a typo in it refuses HERE rather than from
-    # from_env(). Reading it strictly there made `device revoke` fail whenever
-    # WUWATERM_API_WEB_ENABLED was misspelled, which gated revoking a
-    # compromised credential on the spelling of a presentation-layer flag.
-    validate_web_enabled(settings.web_enabled_raw)
-    validate_web_limits(settings.web_session_ttl_raw, settings.web_max_sessions_raw)
+    # Fail closed on serve if an old .env still tries to enable the retired
+    # in-process Python Web UI, without blocking `device revoke`.
+    validate_retired_web_setting(settings.retired_web_enabled_raw)
     # The loopback guard lives HERE, on the only path that binds a socket — not
     # in from_env, which every operator subcommand calls: `device revoke` must
     # never be blocked by serve-time network configuration. Both the configured

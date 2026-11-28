@@ -916,8 +916,8 @@ and game-data pin. Verify downloads with `sha256sum -c SHA256SUMS`.
 Windows packages are released separately.
 
 Container images built from the same commit, with their digests:
-`ghcr.io/my-denia/wuwaterm` (runtime, which serves the Telegram bot and the
-HTTP API) and `ghcr.io/my-denia/wuwaterm-builder` (which fetches the pinned
+`ghcr.io/my-denia/wuwaterm` (runtime, which serves the Core HTTP API)
+and `ghcr.io/my-denia/wuwaterm-builder` (which fetches the pinned
 upstream data and builds and verifies the terminology database). The runtime
 image needs a locally built `terms.db` and the builder image is what builds it,
 which is why both are published. They save the local image build and do not
@@ -936,8 +936,8 @@ databases, generated TextMap files, or Wuthering Waves game data.
 - Release artifacts remain self-hosting inputs. The separate anonymous public
   beta is at https://wuwaterm.denia-official.chatgpt.site; it uses one shared,
   first-come pool and has no SLA or per-visitor fairness guarantee.
-- Live Telegram operation requires maintainer-provided credentials and chat
-  configuration.
+- Live Telegram operation belongs to the standalone `WuwaTerm-Telegram`
+  product and requires maintainer-provided credentials and chat configuration.
 - Free-text sentence translation requires an external OpenAI-compatible
   endpoint.
 - The HTTP API serves operator-registered devices; there is no public

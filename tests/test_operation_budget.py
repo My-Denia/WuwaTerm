@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
-import logging
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -14,6 +11,8 @@ from wuwaterm.application import (
     KIND_ERROR,
     MarkupTranslation,
     OperationExecutionBudget,
+    ProtectedStructure,
+    ProtectedText,
     SemanticReviewJob,
     TranslationContext,
     TranslationJob,
@@ -21,31 +20,10 @@ from wuwaterm.application import (
     semantic_review_async,
     translate_request_async,
 )
-from wuwaterm.bot import (
-    ADMIN_CACHE_KEY,
-    CHANNEL_REPLY_INDEX_KEY,
-    CHAT_SETTINGS_KEY,
-    CONFIG_KEY,
-    RATE_LIMITER_KEY,
-    AdminStatusCache,
-    BotConfig,
-    ChannelReplyIndex,
-    PerChatRateLimiter,
-    REJECT_LIMITER_KEY,
-    SERVICE_KEY,
-    TRANSLATOR_KEY,
-)
-from wuwaterm.channel import _translate_channel_input, channel_post_handler
 from wuwaterm.llm_transport import LLMTranslationError
-from wuwaterm.lookup import TermService
 from wuwaterm.request_trace import current as current_trace, reset as reset_trace, start as start_trace
 from wuwaterm.sentence import SentenceTranslator
-from wuwaterm.settings import ChatSettings
-from wuwaterm.telegram_text import split_telegram_text
-from wuwaterm.translation_policy import (
-    HTML_CONTENT_FAILURE_REASONS,
-    LLM_INPUT_CHAR_LIMIT,
-)
+from wuwaterm.translation_policy import HTML_CONTENT_FAILURE_REASONS
 
 
 SMALL_PARAGRAPH_SOURCE = "The title line.\n\nFirst body line.\nSecond body line."
@@ -177,15 +155,19 @@ def test_my483_translate_request_html_fallback_plus_en_zh_auto_timeout_caps_at_t
     async def markup_translator(
         markup: str, *, to_chinese: bool, before_llm_call=None
     ) -> MarkupTranslation:
+        protected = ProtectedText(
+            ("", "One short English line.", ""),
+            (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+        )
         try:
-            translated = await translator.translate_html_async(
-                markup, to_chinese=to_chinese, before_llm_call=before_llm_call
+            translated = await translator.translate_protected_async(
+                protected, to_chinese=to_chinese, before_llm_call=before_llm_call
             )
         except LLMTranslationError as exc:
             if exc.reason in HTML_CONTENT_FAILURE_REASONS:
                 return MarkupTranslation(fallback_to_plain=True)
             return MarkupTranslation(message=exc.user_message, error_code="llm_unavailable")
-        return MarkupTranslation(text=translated)
+        return MarkupTranslation(text=translated.render())
 
     start_trace()
     try:
@@ -252,172 +234,6 @@ def test_my483_shared_budget_stops_paragraph_repair_after_html_fallback(
     assert len(posts) == 1
     assert budget.calls_used == 1
     assert result == MERGED_PARAGRAPH_ANSWER
-
-
-def test_my483_channel_html_fallback_and_plain_reservation_alignment(
-    monkeypatch, sample_db
-):
-    _set_llm_env(monkeypatch, thinking_en_zh="auto")
-
-    # 1. Direct _translate_channel_input: HTML fail -> plain fallback -> auto timeout <= 2 POSTs.
-    html_posts: list[dict] = []
-    html_translator = SentenceTranslator(
-        sample_db,
-        llm_transport=_mock_transport(
-            ["broken without tags", httpx.ReadTimeout("slow")],
-            html_posts,
-        ),
-    )
-    try:
-        with pytest.raises(LLMTranslationError) as caught:
-            asyncio.run(
-                _translate_channel_input(
-                    html_translator,
-                    "Short English channel text.",
-                    "<b>Short English channel text.</b>",
-                    to_chinese=True,
-                    before_llm_call=None,
-                    allow_plain_fallback=True,
-                )
-            )
-        assert caught.value.reason == "timeout"
-        assert caught.value.failure_stage == "plain-fallback"
-        assert len(html_posts) == 2
-    finally:
-        asyncio.run(html_translator.aclose())
-
-    # 2. channel_post_handler plain text (required_calls=1) + auto timeout:
-    # must stay at 1 POST and never raise ChannelAdmission RuntimeError.
-    plain_posts: list[dict] = []
-    plain_translator = SentenceTranslator(
-        sample_db,
-        llm_transport=_mock_transport([httpx.ReadTimeout("slow")], plain_posts),
-    )
-    config = BotConfig(
-        rate_limit_per_minute=10,
-        owner_user_id=11,
-        channel_autotranslate=True,
-        channel_llm_calls_per_minute=10,
-    )
-    chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
-    chat_settings.allow(-2001)
-    message = SimpleNamespace(
-        message_id=5010,
-        text="This is a plain English channel announcement.",
-        caption=None,
-        text_html="",
-        caption_html="",
-        sender_chat=SimpleNamespace(id=-3001, type="channel"),
-        is_automatic_forward=True,
-        date=datetime.now(timezone.utc),
-        edit_date=None,
-        replies=[],
-    )
-    update = SimpleNamespace(
-        update_id=9001,
-        effective_message=message,
-        effective_chat=SimpleNamespace(id=-2001, type="supergroup"),
-        effective_user=None,
-    )
-    context = SimpleNamespace(
-        args=[],
-        bot=SimpleNamespace(),
-        application=SimpleNamespace(
-            bot_data={
-                SERVICE_KEY: TermService(sample_db),
-                TRANSLATOR_KEY: plain_translator,
-                CONFIG_KEY: config,
-                RATE_LIMITER_KEY: PerChatRateLimiter(limit=10),
-                REJECT_LIMITER_KEY: PerChatRateLimiter(limit=10),
-                ADMIN_CACHE_KEY: AdminStatusCache(),
-                CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(ttl_seconds=3600),
-                CHAT_SETTINGS_KEY: chat_settings,
-            }
-        ),
-    )
-
-    try:
-        asyncio.run(channel_post_handler(update, context))
-    finally:
-        asyncio.run(plain_translator.aclose())
-
-    assert len(plain_posts) == 1
-
-
-def test_long_split_channel_post_with_html_text_blocks_timeout_fallback_leak(
-    monkeypatch, sample_db, caplog
-):
-    _set_llm_env(monkeypatch, thinking_en_zh="auto")
-    part1 = ("Chunk one English paragraph. " * 45).strip()
-    part2 = ("Chunk two English paragraph. " * 45).strip()
-    long_plain = f"{part1}\n\n{part2}"
-    assert len(long_plain) > LLM_INPUT_CHAR_LIMIT
-    assert len(split_telegram_text(long_plain, limit=LLM_INPUT_CHAR_LIMIT)) == 2
-
-    posts: list[dict] = []
-    translator = SentenceTranslator(
-        sample_db,
-        llm_transport=_mock_transport(
-            [httpx.ReadTimeout("slow"), "should never steal chunk 2 token"],
-            posts,
-        ),
-    )
-    config = BotConfig(
-        rate_limit_per_minute=10,
-        owner_user_id=11,
-        channel_autotranslate=True,
-        channel_llm_calls_per_minute=10,
-    )
-    chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
-    chat_settings.allow(-2002)
-    message = SimpleNamespace(
-        message_id=5011,
-        text=long_plain,
-        caption=None,
-        text_html=f"<b>{long_plain}</b>",
-        caption_html="",
-        sender_chat=SimpleNamespace(id=-3002, type="channel"),
-        is_automatic_forward=True,
-        date=datetime.now(timezone.utc),
-        edit_date=None,
-        replies=[],
-    )
-    update = SimpleNamespace(
-        update_id=9002,
-        effective_message=message,
-        effective_chat=SimpleNamespace(id=-2002, type="supergroup"),
-        effective_user=None,
-    )
-    context = SimpleNamespace(
-        args=[],
-        bot=SimpleNamespace(),
-        application=SimpleNamespace(
-            bot_data={
-                SERVICE_KEY: TermService(sample_db),
-                TRANSLATOR_KEY: translator,
-                CONFIG_KEY: config,
-                RATE_LIMITER_KEY: PerChatRateLimiter(limit=10),
-                REJECT_LIMITER_KEY: PerChatRateLimiter(limit=10),
-                ADMIN_CACHE_KEY: AdminStatusCache(),
-                CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(ttl_seconds=3600),
-                CHAT_SETTINGS_KEY: chat_settings,
-            }
-        ),
-    )
-
-    with caplog.at_level(logging.INFO):
-        try:
-            asyncio.run(channel_post_handler(update, context))
-        finally:
-            asyncio.run(translator.aclose())
-
-    assert len(posts) == 1
-    assert any(
-        "stage=llm reason=timeout" in rec.message for rec in caplog.records
-    )
-    assert not any(
-        "reason=operation_budget" in rec.message for rec in caplog.records
-    )
 
 
 def test_long_plain_text_respects_call_cap_cancel_deadline_and_task_cancel(

@@ -1699,6 +1699,34 @@ def test_invalid_runtime_config_and_interpreter_rejected(tmp_path: Path) -> None
         fx_interp.seal(layers)
 
 
+@pytest.mark.parametrize("cmd", [["api"], ["bot"]])
+def test_wuwaterm_api_runtime_config_accepts_api_and_legacy_bot_cmd(
+    tmp_path: Path, cmd: list[str]
+) -> None:
+    """wuwaterm-api accepts current CMD ["api"] and historical sealed CMD ["bot"]."""
+    fx = Fixture(tmp_path / f"cmd_{cmd[0]}")
+    verified = fx.seal(config_extra={"Cmd": cmd})
+    assert verified.bundle["product"] == "wuwaterm-api"
+
+    expected_id = verified.bundle["oci"]["config_digest"]
+    inspected = {
+        "Id": expected_id,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [entry["diff_id"] for entry in verified.bundle["oci"]["layers"]],
+        },
+        "Os": verified.bundle["oci"]["platform"]["os"],
+        "Architecture": verified.bundle["oci"]["platform"]["architecture"],
+        "Config": {
+            "WorkingDir": "/app",
+            "Entrypoint": ["/entrypoint.sh"],
+            "Cmd": cmd,
+            "Labels": {"org.opencontainers.image.revision": verified.bundle["source"]["commit"]},
+        },
+    }
+    assert art.verify_inspected_graph(inspected, verified.bundle, expected_id) == expected_id
+
+
 _PRECOMPUTED_311_PYC: dict[tuple[str, bytes], bytes] = {
     ("/app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py", b"def f(x):\n    return x + 1\n"): (
         b'\xa7\r\r\n\x00\x00\x00\x00\x00\x00\x00\x00\x1b\x00\x00\x00\xe3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00d\x00\x84\x00Z\x00d\x01S\x00)\x02c\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\xf3\x0c\x00\x00\x00\x97\x00|\x00d\x01z\x00\x00\x00S\x00)\x02N\xe9\x01\x00\x00\x00\xa9\x00)\x01\xda\x01xs\x01\x00\x00\x00 \xfa</app/.venv/lib/python3.11/site-packages/wuwaterm/__init__.py\xda\x01fr\x07\x00\x00\x00\x01\x00\x00\x00s\x0b\x00\x00\x00\x80\x00\xd8\x0b\x0c\x88q\x895\x80L\xf3\x00\x00\x00\x00N)\x01r\x07\x00\x00\x00r\x04\x00\x00\x00r\x08\x00\x00\x00r\x06\x00\x00\x00\xfa\x08<module>r\t\x00\x00\x00\x01\x00\x00\x00s\x1e\x00\x00\x00\xf0\x03\x01\x01\x01\xf0\x02\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11\xf0\x00\x01\x01\x11r\x08\x00\x00\x00'

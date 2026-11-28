@@ -163,16 +163,15 @@ All database checks above target the candidate. They do not promote or replace
 `data/terms.db`; production promotion belongs to the transactional deployment
 workflow after every candidate gate passes.
 
-## Live Telegram Smoke
+## Live Telegram Smoke (Standalone Product / Historical Core)
 
-Live Telegram smoke is owner-gated. If `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_TEST_CHAT_ID` are not supplied, only the live smoke criterion is
-blocked; offline handler tests still validate the bot code.
-
-`scripts/deploy_smoke.py` is a deployment reachability check, not a polling
-handler E2E test. It verifies `getMe`, and when `TELEGRAM_TEST_CHAT_ID` is set
-it sends one diagnostic message without printing the token or chat id. A real
-handler E2E still requires observing the bot's reply from Telegram.
+The legacy inline Telegram bot has been retired from WuwaTerm Core after
+`v0.16.0`; handler tests and live Telegram smoke for active bot deployments
+live in standalone [My-Denia/WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram).
+Live Telegram smoke is owner-gated. `scripts/deploy_smoke.py` (retained as a
+standalone reachability helper) verifies `getMe`, and when
+`TELEGRAM_TEST_CHAT_ID` is set sends one diagnostic message without printing
+the token or chat id; it is not a polling handler E2E test.
 
 `check_repo_hygiene.py` is narrower than its name suggests and **is not a secret scanner**.
 
@@ -246,7 +245,7 @@ machine (see [Deployment](deployment.md)).
 At `INFO`, the default, the HTTP adapter writes one **completion record** per
 HTTP request — a line containing `request complete` — to standard error when it
 is started by `wuwaterm-api serve`. That is the stream the standard library's
-default handler uses, and the one the bot's records already go to. Raising the
+default handler uses. Raising the
 level drops those records, and correlation with them.
 
 HTTP is the whole of what this service speaks: it declares no WebSocket route.
@@ -276,7 +275,6 @@ The server test suite is unsupported on a native Windows host. The following com
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -U pip
-.venv\Scripts\python -m pip install -e ".[dev,telegram]"
-$env:TELEGRAM_BOT_TOKEN="..."
+.venv\Scripts\python -m pip install -e ".[api,dev]"
 $env:WUWATERM_DB_PATH="data\terms.db"
 ```

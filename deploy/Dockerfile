@@ -20,9 +20,9 @@ FROM python-base AS runtime
 ARG SOURCE_COMMIT=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 
-# The runtime image serves both inbound surfaces from one build, so it carries
-# the telegram and api extras. The data-build toolchain stays out of it entirely.
-RUN uv sync --locked --no-dev --no-editable --extra telegram --extra api --no-cache \
+# The runtime image serves the Core HTTP API. The data-build toolchain stays out
+# of it entirely.
+RUN uv sync --locked --no-dev --no-editable --extra api --no-cache \
     && python -c "from pathlib import Path; import shutil; [shutil.rmtree(p) for p in Path('/app/.venv').rglob('__pycache__') if p.is_dir()]" \
     && rm -f /usr/local/bin/uv /usr/local/bin/uvx
 
@@ -40,7 +40,7 @@ RUN python -I -B /app/scripts/install_probe.py --product core --dist wuwaterm \
     --extra-file /entrypoint.sh --out /usr/local/share/wuwaterm/install-probe.json
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["bot"]
+CMD ["api"]
 
 
 FROM python-base AS builder

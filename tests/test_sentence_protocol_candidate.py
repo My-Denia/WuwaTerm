@@ -5,10 +5,17 @@ import json
 import httpx
 import pytest
 
-from wuwaterm.application import build_translator
+from wuwaterm.application import ProtectedStructure, ProtectedText, build_translator
 from wuwaterm.sentence import SentenceTranslator, LLMTranslationError
 from wuwaterm_api.app import create_app
 from wuwaterm_api.settings import ApiSettings
+
+
+def _protected(text: str) -> ProtectedText:
+    return ProtectedText(
+        ("", text, ""),
+        (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+    )
 
 
 @pytest.mark.parametrize("to_chinese,html_mode", [(True, False), (False, False), (True, True), (False, True)])
@@ -33,15 +40,16 @@ def test_api_protocol_opt_in_preserves_other_payloads(monkeypatch, sample_db, tm
     monkeypatch.setattr(httpx, "AsyncClient", client)
     app = create_app(ApiSettings(db_path=sample_db, device_db_path=tmp_path / "devices.db"))
     default = build_translator(sample_db)
-    source = "Use Echo now." if to_chinese else "现在使用声骸。"
-    if html_mode:
-        source = f"<b>{source}</b>"
+    plain = "Use Echo now." if to_chinese else "现在使用声骸。"
+    source = _protected(plain) if html_mode else plain
 
     async def run():
         for translator in (default, app.state.translator):
             try:
-                method = translator.translate_html_async if html_mode else translator.translate_async
-                await method(source, to_chinese=to_chinese)
+                if html_mode:
+                    await translator.translate_protected_async(source, to_chinese=to_chinese)
+                else:
+                    await translator.translate_async(source, to_chinese=to_chinese)
             finally:
                 await translator._close_llm_client()
 
@@ -158,19 +166,22 @@ def test_public_translation_entries_preserve_default_payloads(
         return client_type(**kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", client)
-    source = "Use Echo now." if to_chinese else "现在使用声骸。"
-    if html_mode:
-        source = f"<b>{source}</b>"
+    plain = "Use Echo now." if to_chinese else "现在使用声骸。"
+    source = _protected(plain) if html_mode else plain
     for enabled in (False, True):
         translator = SentenceTranslator(sample_db, en_zh_protocol=enabled)
         if sync:
-            method = translator.translate_html if html_mode else translator.translate
-            method(source, to_chinese=to_chinese)
+            if html_mode:
+                translator.translate_protected(source, to_chinese=to_chinese)
+            else:
+                translator.translate(source, to_chinese=to_chinese)
         else:
             async def run():
                 try:
-                    method = translator.translate_html_async if html_mode else translator.translate_async
-                    await method(source, to_chinese=to_chinese)
+                    if html_mode:
+                        await translator.translate_protected_async(source, to_chinese=to_chinese)
+                    else:
+                        await translator.translate_async(source, to_chinese=to_chinese)
                 finally:
                     await translator._close_llm_client()
             asyncio.run(run())

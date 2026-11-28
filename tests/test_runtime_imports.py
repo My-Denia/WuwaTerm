@@ -23,7 +23,7 @@ def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 builtins.__import__ = blocked_import
 
-for module in ("wuwaterm.lookup", "wuwaterm.sentence", "wuwaterm.bot", "wuwaterm.cli"):
+for module in ("wuwaterm.lookup", "wuwaterm.sentence", "wuwaterm.application", "wuwaterm.cli", "wuwaterm_api.app"):
     importlib.import_module(module)
 """
     env = os.environ.copy()

@@ -33,7 +33,7 @@ from wuwaterm.db import connect, create_database
 from wuwaterm.lookup import TermService
 from wuwaterm.normalize import normalize_text
 from wuwaterm.sentence import SentenceTranslator
-from wuwaterm.telegram_html import protect_telegram_html
+from wuwaterm.protected_text import ProtectedStructure, ProtectedText
 
 BRAND_ZH = "飞讯摆件"
 BRAND_EN = "WavesLine Decor"
@@ -371,23 +371,27 @@ def test_version_title_references_and_locks_while_html_stays_raw_exact(
     assert en_locked.locked_text == f"Version 3.7 {placeholder} is coming."
     assert VERSION_ZH in en_locked.restore(en_locked.locked_text, to_en=False)
 
-    # Telegram HTML is not prepared, so its raw U+FF0C text node matches the
-    # raw dictionary surface exactly. An ASCII-comma variant inside HTML has
-    # no NFKC candidate by design (protected text keeps exact matching): that
-    # is a stated source boundary, not full coverage.
-    raw_html = protect_telegram_html(f"<b>全新3.7版本「{VERSION_ZH}」即将开启！</b>")
+    # Protected text is not prepared, so its raw U+FF0C segment matches the
+    # raw dictionary surface exactly. An ASCII-comma variant inside protected
+    # text has no NFKC candidate by design (protected text keeps exact
+    # matching): that is a stated source boundary, not full coverage.
+    raw_protected = ProtectedText(
+        ("", f"全新3.7版本「{VERSION_ZH}」即将开启！", ""),
+        (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+    )
     raw_locked = translator._lock_protected_terms_with_references(
-        raw_html.neutral, to_chinese=False
+        raw_protected, to_chinese=False
     )
     assert (VERSION_ZH, VERSION_ZH, VERSION_EN, "core_term") in {
         ref.as_tuple() for ref in raw_locked.references
     }
 
-    ascii_html = protect_telegram_html(
-        "<b>全新3.7版本「镜锁妄世,心照红尘」即将开启！</b>"
+    ascii_protected = ProtectedText(
+        ("", "全新3.7版本「镜锁妄世,心照红尘」即将开启！", ""),
+        (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
     )
     ascii_locked = translator._lock_protected_terms_with_references(
-        ascii_html.neutral, to_chinese=False
+        ascii_protected, to_chinese=False
     )
     assert ascii_locked.references == ()
 

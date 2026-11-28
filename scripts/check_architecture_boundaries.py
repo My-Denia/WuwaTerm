@@ -11,21 +11,21 @@ Intended layers (must stay aligned with docs/architecture.md):
                    semantic_review_contract, single_char_context,
                    skill_references, term_classification, term_matching,
                    term_preparation, termbase, text_spans
-  domain+LLM:      sentence (three lazy Telegram compatibility bridges only),
+  domain+LLM:      sentence,
                    provider_capabilities (declarative provider capability profiles
                    and reasoning effort mappings),
                    translation_plan (immutable plan, policy, provider profile,
                    request/operation identity),
                    llm_transport (HTTP transport for chat completions),
                    semantic_review (semantic-review-v1 engine)
-  application:     application  (protocol-neutral command/API/web pipeline;
+  application:     application  (protocol-neutral API/CLI pipeline;
                    must not import any presentation module, the Telegram SDK,
                    or builder modules)
-  shared policy:   translation_policy, runtime_keys, constants,
+  shared policy:   translation_policy, constants,
                    exclusion_metadata (strict builder-metadata parsers)
-  presentation:    bot, channel, telegram_html, telegram_text
-  local state:     settings, channel_reply_index, channel_reply_schema,
-                   channel_runtime, logging_utils, request_trace
+  presentation:    (retired; Telegram bot lives in WuwaTerm-Telegram and Web
+                   lives in WuwaTerm-Web)
+  local state:     logging_utils, request_trace
   storage:         db  (lazy build_pinyin only inside write helpers)
   builder:         builder, data_source, build_pinyin, knowledge_builder
   bootstrap:       cli  (may wire runtime and builder entrypoints)
@@ -194,15 +194,11 @@ PURE_MATCHING_FORBIDDEN_STORAGE = frozenset(
 # imports none of them.
 APPLICATION = frozenset({"application"})
 SHARED = frozenset(
-    {"translation_policy", "runtime_keys", "constants", "exclusion_metadata"}
+    {"translation_policy", "constants", "exclusion_metadata"}
 )
-PRESENTATION = frozenset({"bot", "channel", "telegram_html", "telegram_text"})
+PRESENTATION: frozenset[str] = frozenset()
 LOCAL_STATE = frozenset(
     {
-        "settings",
-        "channel_reply_index",
-        "channel_reply_schema",
-        "channel_runtime",
         "logging_utils",
         "request_trace",
     }
@@ -213,7 +209,7 @@ BOOTSTRAP = frozenset({"cli"})
 
 # Modules that must never depend on Telegram presentation or the Bot SDK.
 NO_TELEGRAM_PRESENTATION = (
-    DOMAIN_CORE | DOMAIN_LLM | APPLICATION | SHARED | LOCAL_STATE | STORAGE | BUILDER
+    DOMAIN_CORE | DOMAIN_LLM | APPLICATION | SHARED | LOCAL_STATE | STORAGE | BUILDER | BOOTSTRAP
 )
 
 # Modules that must never pull builder-only graph into the bot edge.
@@ -489,37 +485,6 @@ def _is_type_checking_test(test: ast.expr) -> bool:
 
 def _is_telegram_sdk(name: str) -> bool:
     return name == "telegram" or name.startswith("telegram.")
-
-
-def _sentence_legacy_bridge_lines(path: Path) -> set[int]:
-    """Allow only specific lazy imports inside the old forwarding methods."""
-    allowed = {
-        "_restore_html": "restore_html",
-        "translate_html": "translate_html",
-        "translate_html_async": "translate_html_async",
-    }
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    lines: set[int] = set()
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name != "SentenceTranslator":
-            continue
-        for method in node.body:
-            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            expected = allowed.get(method.name)
-            if expected is None:
-                continue
-            for statement in method.body:
-                if (
-                    isinstance(statement, ast.ImportFrom)
-                    and statement.level == 1
-                    and statement.module == "telegram_html"
-                    and len(statement.names) == 1
-                    and statement.names[0].name == expected
-                    and statement.names[0].asname is None
-                ):
-                    lines.add(statement.lineno)
-    return lines
 
 
 def _api_wuwaterm_imports(path: Path) -> list[tuple[str, int]]:
@@ -1284,14 +1249,9 @@ def check() -> list[str]:
         }
 
         if name in NO_TELEGRAM_PRESENTATION:
-            # Fail closed on type-only edges too: only channel has a documented
-            # TYPE_CHECKING exception for BotConfig (handled below separately).
-            legacy_lines = _sentence_legacy_bridge_lines(path) if name == "sentence" else set()
             bad_pres = sorted({
-                imported for imported, _type_only, lineno in events
-                if imported in PRESENTATION and not (
-                    name == "sentence" and imported == "telegram_html" and lineno in legacy_lines
-                )
+                imported for imported, _type_only, _lineno in events
+                if imported in PRESENTATION
             })
             if bad_pres:
                 failures.append(

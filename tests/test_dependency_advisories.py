@@ -345,7 +345,7 @@ def test_the_bootstrap_blind_spot_is_printed_and_does_not_block(tmp_path, capsys
     assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
     output = capsys.readouterr().out
     assert "PASSED" in output
-    assert "7 locked requirements apply to this platform" in output
+    assert f"{len(gate.REQUIRED_PINS) + 2} locked requirements apply to this platform" in output
     assert "packaging 26.3, setuptools 84.2.1" in output
     assert "::warning title=Dependency audit::" in output
 
@@ -358,7 +358,7 @@ def test_a_pin_for_another_platform_is_not_a_gap(tmp_path, capsys):
 
     assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
     output = capsys.readouterr().out
-    assert "5 locked requirements apply to this platform; 1 select another one" in output
+    assert f"{len(gate.REQUIRED_PINS)} locked requirements apply to this platform; 1 select another one" in output
     assert "colorama" not in output
 
 
@@ -395,7 +395,7 @@ def test_a_sentinel_pin_is_counted_even_with_an_excluding_marker(tmp_path, capsy
 
     assert gate.main([str(report), "--export", str(export)], fetch=Osv()) == 0
     output = capsys.readouterr().out
-    assert "4 locked requirements apply to this platform; 1 select another one" in output
+    assert f"{len(gate.REQUIRED_PINS) - 1} locked requirements apply to this platform; 1 select another one" in output
 
 
 def test_the_export_sentinel_matches_the_workflow():

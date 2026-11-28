@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import builtins
 import os
 from pathlib import Path
 import subprocess
 import sys
-
-import pytest
 
 from wuwaterm.cli import main
 
@@ -66,29 +63,17 @@ def test_build_db_without_atomic_uses_regular_builder(monkeypatch):
     assert calls == [("data-dir", "terms.db", None)]
 
 
-def test_bot_command_calls_bot_with_requested_database(monkeypatch):
-    calls = []
-    monkeypatch.setattr("wuwaterm.bot.run_bot", calls.append)
+def test_bot_command_exits_64_with_retirement_guidance(capsys):
+    assert main(["bot"]) == 64
+    err = capsys.readouterr().err
+    assert "WuwaTerm-Telegram" in err
+    assert "v0.16.0" in err
 
-    assert main(["bot"]) == 0
-    assert main(["bot", "--db", "custom.db"]) == 0
-    assert calls == [Path("data/terms.db"), Path("custom.db")]
-
-
-def test_bot_command_preserves_unrelated_import_errors(monkeypatch):
-    real_import = builtins.__import__
-
-    def broken_bot_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "bot" and level == 1:
-            raise ModuleNotFoundError("broken dependency", name="broken_dependency")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", broken_bot_import)
-    with pytest.raises(ModuleNotFoundError, match="broken dependency"):
-        main(["bot"])
+    assert main(["bot", "--db", "custom.db"]) == 64
+    assert "WuwaTerm-Telegram" in capsys.readouterr().err
 
 
-def test_cli_without_telegram_still_looks_up_terms_and_explains_bot_extra(sample_db):
+def test_cli_without_telegram_still_looks_up_terms_and_reports_bot_retired(sample_db):
     script = """
 import builtins
 import sys
@@ -125,10 +110,10 @@ raise SystemExit(main(sys.argv[1:]))
     assert lookup.returncode == 0, lookup.stderr
     assert "Jinhsi" in lookup.stdout
 
-    help_result = run_cli("bot", "--help")
+    help_result = run_cli("--help")
     assert help_result.returncode == 0, help_result.stderr
-    assert "--db" in help_result.stdout
+    assert "bot" not in help_result.stdout
 
     bot = run_cli("bot")
-    assert bot.returncode == 2
-    assert "wuwaterm[telegram]" in bot.stderr
+    assert bot.returncode == 64
+    assert "WuwaTerm-Telegram" in bot.stderr

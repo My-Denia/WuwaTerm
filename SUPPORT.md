@@ -61,19 +61,28 @@ A good share of what gets asked is already documented:
   runtime and builder split, reading the request log.
 - [docs/validation.md](docs/validation.md) — how to check an installation with
   `python scripts/validate.py`.
-- [docs/telegram-behavior.md](docs/telegram-behavior.md) — what the bot does and
-  does not respond to.
+- [docs/telegram-behavior.md](docs/telegram-behavior.md) — retirement notice
+  for the legacy inline bot (retired after `v0.16.0`) and pointer to standalone
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram).
 - [docs/privacy-and-llm.md](docs/privacy-and-llm.md) — what leaves the host and
   when.
 - [docs/sites.md](docs/sites.md) — the anonymous public beta, shared quota,
   Hosted/VPS trust boundary, privacy limits and current service caveats.
-- [docs/web-presentation-layer.md](docs/web-presentation-layer.md) — the
-  owner-private web layer, which is off by default.
+- [docs/web-presentation-layer.md](docs/web-presentation-layer.md) — historical
+  (`v0.16.0`) reference for the retired in-process Python Web UI; active Web
+  deployments live in [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web).
 - [docs/data-refresh.md](docs/data-refresh.md) — refreshing the dictionary from
   upstream game data.
-- [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) — desktop use, builds, and issues.
+- [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web),
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram), and
+  [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) — standalone
+  Web, Telegram, and Windows product guides and issue trackers.
 
-Desktop-specific bugs and feature requests belong in [WuwaTerm-Windows issues](https://github.com/My-Denia/WuwaTerm-Windows/issues); API and Core defects belong here.
+Product-specific bugs and feature requests belong in their own repositories
+([WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/issues),
+[WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram/issues),
+[WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/issues)); API
+and Core defects belong here.
 
 ## What To Include In A Report
 
@@ -83,8 +92,9 @@ acted on:
 - **Version, tag, or observation time** — for the public beta Site, give the
   date and approximate UTC time you observed the problem; for self-hosting,
   give the release tag or commit you are running.
-- **Which surface**: the public beta Site, Telegram bot, HTTP API, private web
-  layer, desktop client, or data build.
+- **Which surface**: HTTP API (`/v1`), Core library/CLI, data build, deployment
+  scripts, or (for issues in standalone repositories) Web workbench / public
+  beta Site, Telegram bot, or Windows desktop client.
 - **Environment or browser**: for the public beta Site, give the operating
   system and browser version; for self-hosting, give the operating system,
   Python version, and whether you installed from source or run the containers.

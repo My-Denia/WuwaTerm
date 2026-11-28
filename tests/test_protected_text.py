@@ -136,61 +136,98 @@ def test_neutral_public_path_uses_visible_context_and_preserves_structure(sample
     assert "Opaque placeholders represent source structure" in payload["messages"][0]["content"]
 
 
-def test_synchronous_public_and_legacy_paths_use_the_real_model_request(sample_db, model_server):
+def test_synchronous_public_path_uses_the_real_model_request(sample_db, model_server):
     translator = build_translator(sample_db)
     source = ProtectedText(("Use ", "Echo", " now."), (ProtectedStructure("["), ProtectedStructure("]")))
     assert translator.translate_protected(source, to_chinese=True).render() == "Use [声骸] now."
-    assert translator.translate_html("<b>椿</b> joins.") == "<b>Camellya</b> joins."
+    bold = ProtectedText(("", "椿", " joins."), (ProtectedStructure("<b>"), ProtectedStructure("</b>")))
+    assert translator.translate_protected(bold).render() == "<b>Camellya</b> joins."
     assert len(model_server.requests) == 2
 
 
 @pytest.mark.parametrize(
     ("source", "to_chinese", "expected"),
     [
-        ('<a href="https://example.invalid/camellya">camellya</a> &amp; <b>Resonators</b>', True,
-         '<a href="https://example.invalid/camellya">椿</a> &amp; <b>共鸣者</b>'),
-        ('&#39321;<b>椿</b> 和 <i>声</i>骸。', False, '&#39321;<b>椿</b> 和 <i>声</i>骸。'),
-        ('<b>椿</b>加入队伍。 <a href="https://example.invalid/椿">声骸</a>', False,
-         '<b>Camellya</b>加入队伍。 <a href="https://example.invalid/椿">Echo</a>'),
-        ('<b>Echo</b>s and <i>Resonators</i> arrive.', True,
-         '<b>Echo</b>s and <i>共鸣者</i> arrive.'),
-        ('>  <b>Echo</b>\n', True, '>  <b>声骸</b>'),
+        (
+            ProtectedText(
+                ("", "camellya", " ", " ", "Resonators", ""),
+                (
+                    ProtectedStructure('<a href="https://example.invalid/camellya">'),
+                    ProtectedStructure("</a>"),
+                    ProtectedStructure("&amp;", "&"),
+                    ProtectedStructure("<b>"),
+                    ProtectedStructure("</b>"),
+                ),
+            ),
+            True,
+            '<a href="https://example.invalid/camellya">椿</a> &amp; <b>共鸣者</b>',
+        ),
+        (
+            ProtectedText(
+                ("", "", "椿", " 和 ", "声", "骸。"),
+                (
+                    ProtectedStructure("&#39321;", "香"),
+                    ProtectedStructure("<b>"),
+                    ProtectedStructure("</b>"),
+                    ProtectedStructure("<i>"),
+                    ProtectedStructure("</i>"),
+                ),
+            ),
+            False,
+            '&#39321;<b>椿</b> 和 <i>声</i>骸。',
+        ),
+        (
+            ProtectedText(
+                ("", "椿", "加入队伍。 ", "声骸", ""),
+                (
+                    ProtectedStructure("<b>"),
+                    ProtectedStructure("</b>"),
+                    ProtectedStructure('<a href="https://example.invalid/椿">'),
+                    ProtectedStructure("</a>"),
+                ),
+            ),
+            False,
+            '<b>Camellya</b>加入队伍。 <a href="https://example.invalid/椿">Echo</a>',
+        ),
+        (
+            ProtectedText(
+                ("", "Echo", "s and ", "Resonators", " arrive."),
+                (
+                    ProtectedStructure("<b>"),
+                    ProtectedStructure("</b>"),
+                    ProtectedStructure("<i>"),
+                    ProtectedStructure("</i>"),
+                ),
+            ),
+            True,
+            '<b>Echo</b>s and <i>共鸣者</i> arrive.',
+        ),
+        (
+            ProtectedText(
+                (">  ", "Echo", "\n"),
+                (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+            ),
+            True,
+            '>  <b>声骸</b>',
+        ),
     ],
 )
-def test_real_http_html_compatibility(sample_db, model_server, source, to_chinese, expected):
+def test_real_http_protected_text_roundtrip(sample_db, model_server, source, to_chinese, expected):
     translator = build_translator(sample_db)
 
     async def run():
         try:
-            return await translator.translate_html_async(source, to_chinese=to_chinese)
+            return (await translator.translate_protected_async(source, to_chinese=to_chinese)).render()
         finally:
             await translator.aclose()
 
     assert asyncio.run(run()) == expected
     assert len(model_server.requests) == 1
     assert "href=" not in model_server.requests[0]["messages"][1]["content"]
-    if source.startswith(">"):
+    if source.visible_segments[0].startswith(">"):
         # Model input bypasses preparation; the existing response reader
         # intentionally strips leading/trailing whitespace from model output.
         assert model_server.requests[0]["messages"][1]["content"].endswith("\n")
-
-
-@pytest.mark.parametrize("mode", ["missing", "duplicate", "reordered", "unknown", "tag", "entity"])
-def test_legacy_html_rejects_corruption_and_added_valid_markup(sample_db, model_server, mode):
-    model_server.mode = mode
-    translator = build_translator(sample_db)
-
-    async def run():
-        try:
-            return await translator.translate_html_async("<b>椿</b> joins.")
-        finally:
-            await translator.aclose()
-
-    with pytest.raises(LLMTranslationError) as failure:
-        asyncio.run(run())
-    assert failure.value.reason == "html_integrity"
-    assert failure.value.diagnostic.reason == "html_integrity"
-    assert len(model_server.requests) == 1
 
 
 @pytest.mark.parametrize("mode", ["missing", "duplicate", "reordered", "unknown"])
@@ -216,10 +253,11 @@ def test_neutral_integrity_has_neutral_reason(sample_db, model_server, mode):
 def test_empty_and_corrupt_term_responses_remain_content_failures(sample_db, model_server, mode):
     model_server.mode = mode
     translator = build_translator(sample_db)
+    source = ProtectedText(("", "Echo", " joins."), (ProtectedStructure("<b>"), ProtectedStructure("</b>")))
 
     async def run():
         try:
-            await translator.translate_html_async("<b>Echo</b> joins.", to_chinese=True)
+            await translator.translate_protected_async(source, to_chinese=True)
         finally:
             await translator.aclose()
 
@@ -258,10 +296,14 @@ def test_guarded_markup_rechecks_after_shared_slot_before_http(sample_db, model_
 
         async def markup_hook(markup, *, to_chinese, before_llm_call):
             hook_entered.set()
-            text = await translator.translate_html_async(
-                markup, to_chinese=to_chinese, before_llm_call=before_llm_call
+            protected = ProtectedText(
+                ("", "Echo", " in this field."),
+                (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
             )
-            return MarkupTranslation(text=text)
+            result = await translator.translate_protected_async(
+                protected, to_chinese=to_chinese, before_llm_call=before_llm_call
+            )
+            return MarkupTranslation(text=result.render())
 
         first = asyncio.create_task(translator.translate_protected_async(ProtectedText(("first request",))))
         assert await asyncio.to_thread(model_server.first_started.wait, 5)
@@ -359,7 +401,7 @@ def test_guarded_legacy_hook_fails_closed_and_internal_typeerror_is_not_retried(
 def test_html_content_fallback_rechecks_guard_before_plain_request(
     sample_db, model_server, revoke_after_markup
 ):
-    model_server.mode = "tag"
+    model_server.mode = "missing"
     service = build_term_service(sample_db)
     translator = build_translator(sample_db)
     checks = []
@@ -370,15 +412,19 @@ def test_html_content_fallback_rechecks_guard_before_plain_request(
             raise LLMTranslationError("blocked", reason="authorization_changed_before_llm")
 
     async def markup(markup, *, to_chinese, before_llm_call):
+        protected = ProtectedText(
+            ("", "Echo", " in this field."),
+            (ProtectedStructure("<b>"), ProtectedStructure("</b>")),
+        )
         try:
-            text = await translator.translate_html_async(
-                markup, to_chinese=to_chinese, before_llm_call=before_llm_call
+            result = await translator.translate_protected_async(
+                protected, to_chinese=to_chinese, before_llm_call=before_llm_call
             )
         except LLMTranslationError as exc:
-            assert exc.reason == "html_integrity"
+            assert exc.reason == "protected_text_integrity"
             model_server.mode = "identity"
             return MarkupTranslation(fallback_to_plain=True)
-        return MarkupTranslation(text=text)
+        return MarkupTranslation(text=result.render())
 
     async def run():
         try:

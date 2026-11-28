@@ -166,8 +166,18 @@ PLAIN_CASES = (
     ("p9_zh_en_topic", "椿姐配队攻略\n\n共鸣者椿姐和今汐一起出发，椿姐很强。", False, "empty"),
 )
 HTML_CASES = (
-    ("h1_zh_en", "<b>欢迎椿</b>来到今州，红椿蕊开了。椿姐和声骸", False),
-    ("h2_en_zh", "Camellya <b>Jinhsi</b> 红椿蕊", True),
+    (
+        "h1_zh_en",
+        ("", "欢迎椿", "来到今州，红椿蕊开了。椿姐和声骸"),
+        ("<b>", "</b>"),
+        False,
+    ),
+    (
+        "h2_en_zh",
+        ("Camellya ", "Jinhsi", " 红椿蕊"),
+        ("<b>", "</b>"),
+        True,
+    ),
 )
 
 
@@ -217,7 +227,11 @@ def _default_path_snapshot(sample_db, monkeypatch) -> dict[str, object]:
             "operation_sha256": op.operation_sha256,
         }
 
-    for name, html, to_chinese in HTML_CASES:
+    for name, visible_segments, tags, to_chinese in HTML_CASES:
+        protected_case = ProtectedText(
+            visible_segments,
+            tuple(ProtectedStructure(tag) for tag in tags),
+        )
         calls: list[dict] = []
 
         def echo(request, calls=calls):
@@ -230,9 +244,15 @@ def _default_path_snapshot(sample_db, monkeypatch) -> dict[str, object]:
 
         html_translator = SentenceTranslator(sample_db, llm_transport=httpx.MockTransport(echo))
 
-        async def run(html_translator=html_translator, html=html, to_chinese=to_chinese):
+        async def run(
+            html_translator=html_translator,
+            protected=protected_case,
+            to_chinese=to_chinese,
+        ):
             try:
-                return await html_translator.translate_html_async(html, to_chinese=to_chinese)
+                return await html_translator.translate_protected_async(
+                    protected, to_chinese=to_chinese
+                )
             finally:
                 await html_translator.aclose()
 

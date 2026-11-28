@@ -2,64 +2,16 @@
 # release checkout <base>/releases/rN keeps its state in <base>, which
 # deploy/vps-update.sh and the tools it runs select with WUWATERM_STATE_ROOT.
 services:
-  # The inline bot this repository still carries. It is DEPRECATED: the
-  # supported Telegram surface is the standalone WuwaTerm-Telegram product,
-  # which owns its own repository, release, Compose file and state.
-  #
-  # It stays an ordinary service here because deploy/product-update.sh resolves
-  # installed services with `compose config` and `compose config --hash`, and a
-  # service behind a profile is invisible to both (`no such service: disabled`),
-  # which would break adoption and updates of an installation that runs it. So
-  # the defaults are enforced where the install entry is: ./deploy/setup.sh no
-  # longer starts this service, and --with-legacy-bot is the explicit way to.
-  # A bare `docker compose up -d` still starts it; name the service you mean.
-  wuwaterm:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      target: runtime
-      args:
-        SOURCE_COMMIT: ${SOURCE_COMMIT:-unknown}
-    image: ${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}
-    container_name: wuwaterm-bot
-    restart: unless-stopped
-    network_mode: host
-    env_file:
-      - ${WUWATERM_STATE_ROOT:-..}/.env
-    environment:
-      WUWATERM_DB_PATH: /app/data/terms.db
-      WUWATERM_STATE_DIR: /app/state
-      WUWATERM_SETTINGS_PATH: /app/state/chat_settings.json
-      WUWATERM_CHANNEL_REPLY_INDEX_PATH: /app/state/channel_replies.json
-      # Both services read the SAME ../.env, so the web presentation layer's
-      # credentials would otherwise be expanded into this process too - a bot
-      # that has no web surface would be holding the web device token and the
-      # edge marker. `environment` overrides `env_file`, so blanking them here
-      # keeps those secrets in the one process that needs them. Empty is also
-      # the safe value: the boolean reader treats an empty string as unset and
-      # returns the default, which is off.
-      WUWATERM_API_WEB_ENABLED: ""
-      WUWATERM_API_WEB_DEVICE_TOKEN: ""
-      WUWATERM_API_WEB_EDGE_SECRET: ""
-    volumes:
-      - ${WUWATERM_STATE_ROOT:-..}/data:/app/data:ro
-      - ${WUWATERM_STATE_ROOT:-..}/state:/app/state
-    command: ["bot"]
-
-  # Same image, same read-only terminology database, separate process and
-  # separate writable state. It binds loopback only, so the host gains no new
-  # public surface of its own; a desktop client reaches it through the
-  # configured secure endpoint the deployment publishes, and every /v1
-  # operation authenticates the caller's device credential regardless of how
-  # the network path is arranged. The three routes that answer without a
-  # credential - GET /healthz, GET /readyz, GET /openapi.json - are public by
-  # design, so whether they should be reachable from outside the host is part
-  # of the endpoint decision, not something this service enforces.
-  #
-  # Its state directory is a SIBLING of the bot's, not a child: the bot mounts
-  # the whole of ../state read-write, so a child directory would have handed
-  # the bot process read-write access to the credential store and defeated the
-  # separation this service exists to have.
+  # Core HTTP API service reading the read-only terminology database with its
+  # own writable device-credential state directory. It binds loopback only, so
+  # the host gains no new public surface of its own; standalone clients
+  # (WuwaTerm-Web, WuwaTerm-Windows, WuwaTerm-Telegram) reach it over loopback
+  # or through the configured secure endpoint, and every /v1 operation
+  # authenticates the caller's device credential regardless of how the network
+  # path is arranged. The three routes that answer without a credential -
+  # GET /healthz, GET /readyz, GET /openapi.json - are public by design, so
+  # whether they should be reachable from outside the host is part of the
+  # endpoint decision, not something this service enforces.
   wuwaterm-api:
     build:
       context: ..
@@ -109,14 +61,14 @@ services:
       # not in an environment file an operator edits in a hurry.
       WUWATERM_API_BIND: 127.0.0.1
       WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8788}
-      # The bot's credentials are not this process' business. env_file carries
-      # the shared model settings; these are blanked so a compromise or a stray
-      # environment dump here cannot yield the chat token or owner id.
+      # Defense in depth: blank legacy Telegram credentials that may remain in an
+      # upgraded .env so a compromise or stray environment dump here cannot yield
+      # an old chat token or owner id.
       TELEGRAM_BOT_TOKEN: ""
       TELEGRAM_TEST_CHAT_ID: ""
       OWNER_USER_ID: ""
-      # Keys the bot's log redaction, and only the bot's. An environment dump
-      # here would otherwise hand over the key that hashes its chat ids.
+      # Defense in depth: blank the legacy Telegram log-redaction secret if left
+      # over in an upgraded .env.
       WUWATERM_REDACTION_SECRET: ""
       # Pin the credential store to the mounted volume: this override would
       # otherwise win over WUWATERM_API_STATE_DIR and let a one-off container
