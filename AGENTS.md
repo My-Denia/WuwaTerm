@@ -85,16 +85,20 @@ an instruction to change the pull request. Answer it in the thread.
 ## Project Facts
 
 - GitHub repo `My-Denia/WuwaTerm`. WuwaTerm is a dictionary-first official
-  Wuthering Waves term service: one protocol-neutral application layer,
-  Telegram and versioned HTTP API adapters, an owner-private in-process web UI
-  (off by default), and an independent Windows desktop client that consumes the API
-  with no translation logic.
+  Wuthering Waves term service: the Core repo provides the protocol-neutral
+  application layer, versioned `/v1` HTTP API, dictionary/knowledge-base
+  builders, and deployment tooling. Independent consumers—`My-Denia/WuwaTerm-Web`
+  (Web), `My-Denia/WuwaTerm-Windows` (Windows desktop), and
+  `My-Denia/WuwaTerm-Telegram` (Telegram bot)—are maintained separately and
+  consume Core. The legacy inline Telegram bot and in-process Python Web UI are
+  retired (last available in historical `v0.16.0`).
 - Since 2026-11-01 the public Web lives in `My-Denia/WuwaTerm-Web`; this
   repository no longer tracks `site/`. `contracts/web-ref.txt` pins the
   external consumer for metadata and label contract CI. Windows packaging lives
   in WuwaTerm-Windows, independent of backend `release.yml`. This is source
   organization, not evidence of a new release or production deployment.
-- Long-running services are `wuwaterm-bot` and `wuwaterm-api`; the builder is
+- The long-running Core service is `wuwaterm-api` (`wuwaterm-bot` is retired and
+  replaced by standalone `My-Denia/WuwaTerm-Telegram`); the builder is
   on-demand. Production uses a locally built runtime image, not GHCR. Reverify
   live release and deploy state before acting.
 

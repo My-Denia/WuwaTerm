@@ -18,6 +18,8 @@ concurrency:
 permissions:
   contents: read
 
+cache-mode: none
+
 jobs:
   source:
     name: Resolve source
