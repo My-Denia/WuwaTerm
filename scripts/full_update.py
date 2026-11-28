@@ -395,8 +395,17 @@ def _parse_env_var(env_path: Path, key: str) -> str | None:
         if name.strip() != key:
             continue
         value = raw_value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1].strip()
+        if value and value[0] in ("'", '"'):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end != -1:
+                trailing = value[end + 1 :].strip()
+                if not trailing or trailing.startswith("#"):
+                    value = value[1:end].strip()
+        elif value.startswith("#"):
+            value = ""
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
         result = value
     return result
 
@@ -405,12 +414,17 @@ def resolve_knowledge_db_relpath(root: Path | None = None) -> str | None:
     """Determine whether companion ``knowledge.db`` is managed and return its relative path.
 
     Active when ``.env`` sets ``WUWATERM_API_KNOWLEDGE_DB_PATH`` (pointing under
-    ``/app/data/...`` or ``data/...``) or when ``data/knowledge.db`` already exists.
-    Returns ``None`` when neither holds so single-DB hosts stay 100% unchanged.
+    ``/app/data/...`` or ``data/...``), or when the key is unset in ``.env`` and
+    ``data/knowledge.db`` already exists. An explicit empty assignment
+    (``WUWATERM_API_KNOWLEDGE_DB_PATH=``) disables management even if a file
+    remains on disk. Returns ``None`` when disabled so single-DB hosts stay
+    100% unchanged.
     """
     base = ROOT if root is None else root
     raw = _parse_env_var(base / ".env", "WUWATERM_API_KNOWLEDGE_DB_PATH")
-    if raw:
+    if raw is not None:
+        if not raw:
+            return None
         if raw.startswith("/app/data/"):
             relpath = "data/" + raw[len("/app/data/") :]
         elif raw.startswith("data/"):

@@ -258,6 +258,18 @@ def test_resolve_kb_path_env_existing_file_and_confinement(tmp_path: Path):
     env_file.write_text('export WUWATERM_API_KNOWLEDGE_DB_PATH="/app/data/knowledge.db"\n')
     assert full_update.resolve_knowledge_db_relpath(root) == "data/knowledge.db"
 
+    # Unquoted value with Docker Compose-style trailing inline comment is stripped.
+    env_file.write_text("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db # companion kb\n")
+    assert full_update.resolve_knowledge_db_relpath(root) == "data/knowledge.db"
+
+    # Explicit empty assignment disables companion management even if data/knowledge.db exists.
+    (root / "data" / "knowledge.db").write_bytes(b"kb")
+    env_file.write_text("WUWATERM_API_KNOWLEDGE_DB_PATH=\n")
+    assert full_update.resolve_knowledge_db_relpath(root) is None
+    env_file.write_text("WUWATERM_API_KNOWLEDGE_DB_PATH= # explicitly disabled\n")
+    assert full_update.resolve_knowledge_db_relpath(root) is None
+    (root / "data" / "knowledge.db").unlink()
+
     # Paths outside /app/data/, pointing to terms.db, or escaping via .. are refused.
     for bad in (
         "/tmp/knowledge.db",

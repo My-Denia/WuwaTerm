@@ -1032,11 +1032,13 @@ wrote the journal is not necessarily `current`. Before any stop the updater:
    then proves the builder container has none of the runtime secret variables;
 3. refreshes source data, builds a unique candidate, and runs the strong DB
    verifier against that candidate; when `.env` sets
-   `WUWATERM_API_KNOWLEDGE_DB_PATH` (under `/app/data/...`) or
-   `data/knowledge.db` already exists, it also builds and verifies a companion
-   `knowledge.candidate.db` bound to that exact `terms.candidate.db` revision
-   via `wuwaterm-builder build-kb --atomic` and `verify-kb` before stopping any
-   container;
+   `WUWATERM_API_KNOWLEDGE_DB_PATH` (under `/app/data/...` or `data/...`) or
+   the key is unset in `.env` and `data/knowledge.db` already exists, it also
+   builds and verifies a companion `data/candidates/knowledge.<id>.db` bound to
+   that exact `data/candidates/terms.<id>.db` revision via
+   `wuwaterm-builder build-kb --atomic` and `verify-kb` before stopping any
+   container (explicitly setting `WUWATERM_API_KNOWLEDGE_DB_PATH=` in `.env`
+   leaves companion management off even if a file remains on disk);
 4. builds an immutable `wuwaterm-runtime:<source-commit>` image and verifies its
    `org.opencontainers.image.revision` label.
 
@@ -1083,11 +1085,15 @@ and prunes nothing, and a prune that fails warns without failing the deployment.
 Rolling back to the previous release needs the database as it was before the
 deployment that made the current release. That is the snapshot that deployment
 wrote, and its manifest `.deployments/<source-commit>.json` names it in
-`backup_path`. It was the newest snapshot when it was written, and only a later
-successful deployment prunes, which is also the one that replaces the current
-release, so the snapshot a rollback needs is always kept. The `backup_path` of
-an older manifest can name a snapshot that has since been removed; nothing
-reads it for recovery.
+`backup_path`. When companion `knowledge.db` is enabled, restore
+`knowledge_database.backup_path` alongside `backup_path` in the same stop
+window (or remove a newly created `knowledge.db` when
+`knowledge_database.backup_path` is `"none"`) so a manual rollback never leaves
+a new `knowledge.db` paired with an old `terms.db`. It was the newest snapshot
+when it was written, and only a later successful deployment prunes, which is
+also the one that replaces the current release, so the snapshot a rollback
+needs is always kept. The `backup_path` of an older manifest can name a
+snapshot that has since been removed; nothing reads it for recovery.
 
 ### Interrupted full updates
 
@@ -1098,6 +1104,10 @@ serving-binding mutation. The record at `.deployments/.full-transaction.json`
 
 - the old and new database SHA-256 preimages, the backup path, and the
   backup hash recorded in its filename;
+- when companion `knowledge.db` is active, an optional `knowledge_db` block
+  recording its host-relative path, old and new SHA-256 preimages, backup path
+  (or `"none"` when none existed before), candidate path
+  (`data/candidates/knowledge.<id>.db`), and bound `terms_db_revision`;
 - the old commit pointer and its immutable manifest;
 - each serving surface's observed image id, reference and running state,
   plus the per-surface rollback tags created for this transaction;
@@ -1121,7 +1131,9 @@ Recovery runs from the release that wrote the journal, which is not
 necessarily `current`. Invoke that release's own script by its absolute path:
 the path is the binding, so the command needs no environment and works in a
 fresh shell. The explicit recovery entry classifies the host by what is
-actually observed — pointer, live database hash, manifest, and both
+actually observed — pointer, live database hash (plus companion `knowledge.db`
+hash and `terms_db_revision` when the journal carries `knowledge_db`),
+manifest, and both
 containers' image ids/references/running states — never by the journal's phase
 marker alone:
 
@@ -1129,7 +1141,9 @@ marker alone:
 sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
 ```
 
-- Observed NEW binding complete (pointer, database, manifest, and every
+- Observed NEW binding complete (pointer, database, optional companion
+  `knowledge.db` hash and `terms_db_revision` when recorded in `knowledge_db`,
+  manifest, and every
   surface in the state this transaction recorded for it: a running one on the
   target image id and reference, a stopped one still stopped and carrying that
   binding, an absent one still absent): the transaction is confirmed and the
@@ -1138,7 +1152,10 @@ sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
   instead of keeping a journal that only a manual recovery could clear.
 - Observed OLD binding: the recorded previous binding is restored — known
   surfaces are quiesced and verified stopped first, the recorded backup is
-  re-hashed before any copy and re-verified after promotion, only surfaces
+  re-hashed before any copy and re-verified after promotion (restoring both
+  `terms.db` and companion `knowledge.db` together when `knowledge_db` is
+  present, or removing a newly promoted `knowledge.db` when its recorded
+  `old_sha256` was null), only surfaces
   that were recorded running come back, each on its own recorded image,
   and the old binding is verified from observation before the record is
   cleared.
@@ -1147,8 +1164,10 @@ sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
   a known incomplete binding can return to the recorded old state only through
   the same full admissibility preflight. Pointer equality alone never decides
   that recovery succeeded. Unobservable/unsafe states still refuse.
-- Anything else — unknown pointer, unknown live database, a distinct new pointer with
-  old or missing services, missing or modified backup, unconfined recorded
+- Anything else — unknown pointer, unknown live database or companion
+  `knowledge.db`, a distinct new pointer with
+  old or missing services, missing or modified backup (for either database),
+  unconfined recorded
   paths, schema/type drift, tool fingerprint mismatch — is reported
   unresolved, changes nothing further, and KEEPS the record, so recovery is
   reentrant. A missing live database is restored from the recorded verified
