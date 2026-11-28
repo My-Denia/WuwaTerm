@@ -422,7 +422,7 @@ def _load_workloads(
                             break
         real_multitext = bool(bulk_lines)
 
-    if len(bulk_lines) < bulk_target:
+    if not real_multitext:
         seed_lines = [p for p, _ in base_pairs] + [short_zh]
         while len(bulk_lines) < bulk_target:
             bulk_lines.append(seed_lines[len(bulk_lines) % len(seed_lines)])

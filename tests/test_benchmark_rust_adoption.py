@@ -232,3 +232,43 @@ def test_benchmark_quick_with_stubbed_native_kernel(
     assert report["product_workflows"]["short_50"]["single_request_e2e_native_p50_ms"] is not None
     assert report["product_workflows"]["manuscript_batch"]["total_with_native_ms"] is not None
     assert report["product_workflows"]["bulk_corpus_scan"]["native_ac_scan_ms"] is not None
+
+
+def test_benchmark_small_real_multitext_is_not_padded_with_synthetic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WUWATERM_DISABLE_NATIVE_KERNEL", "1")
+    from wuwaterm import native_kernel
+
+    native_kernel.reset_native_kernel_cache()
+    mt_path = tmp_path / "wutheringdata" / "Textmaps" / "zh-Hans" / "multi_text" / "MultiText.json"
+    mt_path.parent.mkdir(parents=True)
+    mt_path.write_text(
+        json.dumps(
+            [
+                {"Id": "1", "Content": "在黑海岸开启声骸技能。"},
+                {"Id": "2", "Content": "   "},
+                {"Id": "3", "Content": "今州城共鸣者集结。"},
+                {"Id": "4", "Content": "共鸣解放测试。"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        report = bench_mod.run_benchmark(
+            quick=True,
+            data_dir=tmp_path,
+            wasm_path=tmp_path / "missing.wasm",
+            wheel_path=None,
+            warmup=1,
+            iterations=2,
+        )
+    finally:
+        native_kernel.reset_native_kernel_cache()
+
+    assert report["environment"]["real_multitext_available"] is True
+    bulk = report["product_workflows"]["bulk_corpus_scan"]
+    assert bulk["source"] == "real_multitext"
+    assert bulk["line_count"] == 3
