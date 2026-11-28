@@ -647,6 +647,26 @@ if [ -e "$candidate_path" ]; then
   exit 1
 fi
 
+kb_path="$(python3 scripts/full_update.py resolve-kb)"
+kb_enabled=0
+kb_candidate_path=""
+kb_candidate_container_path=""
+old_kb_present=0
+old_kb_hash=""
+kb_backup="none"
+if [ -n "$kb_path" ]; then
+  kb_enabled=1
+  kb_candidate_path="data/candidates/knowledge.$deployment_id.db"
+  kb_candidate_container_path="/app/data/candidates/knowledge.$deployment_id.db"
+  if [ -e "$kb_candidate_path" ]; then
+    echo "refusing to overwrite existing knowledge candidate: $kb_candidate_path" >&2
+    exit 1
+  fi
+  if [ -f "$kb_path" ]; then
+    old_kb_present=1
+  fi
+fi
+
 old_pointer_present=0
 old_pointer=""
 pointer_backup=""
@@ -783,6 +803,18 @@ if [ "$old_db_present" -eq 1 ]; then
     /app/data/terms.db "$candidate_container_path" --json \
     > "$backup_dir/db-diff.$deployment_id.json"
 fi
+if [ "$kb_enabled" -eq 1 ]; then
+  compose run --rm \
+    -e "WUWATERM_DB_PATH=$candidate_container_path" \
+    -e "WUWATERM_KNOWLEDGE_DB_PATH=$kb_candidate_container_path" \
+    wuwaterm-builder build-kb --atomic
+  fail_if build_kb
+  compose run --rm \
+    -e "WUWATERM_DB_PATH=$candidate_container_path" \
+    -e "WUWATERM_KNOWLEDGE_DB_PATH=$kb_candidate_container_path" \
+    wuwaterm-builder verify-kb
+  fail_if verify_kb
+fi
 fail_if verify
 
 SOURCE_COMMIT="$source_commit" WUWATERM_RUNTIME_IMAGE="$new_image_ref" \
@@ -817,6 +849,26 @@ if [ "$old_db_present" -eq 1 ]; then
   fi
 else
   db_backup="none"
+fi
+if [ "$kb_enabled" -eq 1 ]; then
+  if [ "$old_kb_present" -eq 1 ]; then
+    old_kb_hash="$(sha256sum "$kb_path" | awk '{print $1}')"
+    kb_backup="$backup_dir/knowledge.$deployment_id.$old_kb_hash.db"
+    kb_backup_tmp="$kb_path.backup.$deployment_id"
+    if [ -e "$kb_backup" ] || [ -e "$kb_backup_tmp" ]; then
+      echo "refusing to overwrite an existing knowledge database backup" >&2
+      exit 1
+    fi
+    cp -p "$kb_path" "$kb_backup_tmp"
+    python3 scripts/deployment_manifest.py durable-replace \
+      --source "$kb_backup_tmp" --destination "$kb_backup"
+    if [ "$(sha256sum "$kb_backup" | awk '{print $1}')" != "$old_kb_hash" ]; then
+      echo "knowledge database backup verification failed" >&2
+      exit 1
+    fi
+  else
+    kb_backup="none"
+  fi
 fi
 fail_if backup
 
@@ -904,6 +956,22 @@ rollback_on_failure() {
         db_binding_restored=0
       fi
     fi
+    if [ "$kb_enabled" -eq 1 ]; then
+      if [ "$old_kb_present" -eq 1 ]; then
+        if [ ! -f "$kb_path" ] || \
+          [ "$(sha256sum "$kb_path" | awk '{print $1}')" != "$old_kb_hash" ]; then
+          echo "warning: old knowledge database content was not restored" >&2
+          rollback_failed=1
+          db_binding_restored=0
+        fi
+      else
+        if [ -e "$kb_path" ] || [ -L "$kb_path" ]; then
+          echo "warning: promoted knowledge database still exists after rollback" >&2
+          rollback_failed=1
+          db_binding_restored=0
+        fi
+      fi
+    fi
   fi
 
   if [ "$pointer_published" -eq 1 ]; then
@@ -987,26 +1055,54 @@ trap rollback_on_failure EXIT
 # be down while it is replaced. The old DB snapshot is durable and every
 # preimage is recorded BEFORE the first serving-binding mutation, exactly as
 # the journal's design requires.
-python3 scripts/full_update.py prepare \
-  --transaction-id "$deployment_id" \
-  --source-commit "$source_commit" \
-  --old-pointer-present "$old_pointer_present" \
-  --old-pointer "$old_pointer" \
-  --db-backup "$db_backup" \
-  --old-db-sha "${old_db_hash:-none}" \
-  --candidate-path "$candidate_path" \
-  --old-image-id none \
-  --old-api-image-id "${old_api_image_id:-none}" \
-  --old-ref none \
-  --old-api-ref "${old_api_ref:-none}" \
-  --old-bot-running false \
-  --old-api-running "$old_api_running" \
-  --rollback-image-ref "$rollback_image_ref" \
-  --rollback-api-image-ref "$rollback_api_image_ref" \
-  --target-image-ref "$new_image_ref" \
-  --target-image-id "$image_id" \
-  --target-image-digest "$image_digest" \
-  --target-image-revision "$image_revision"
+if [ "$kb_enabled" -eq 1 ]; then
+  new_kb_hash="$(sha256sum "$kb_candidate_path" | awk '{print $1}')"
+  python3 scripts/full_update.py prepare \
+    --transaction-id "$deployment_id" \
+    --source-commit "$source_commit" \
+    --old-pointer-present "$old_pointer_present" \
+    --old-pointer "$old_pointer" \
+    --db-backup "$db_backup" \
+    --old-db-sha "${old_db_hash:-none}" \
+    --candidate-path "$candidate_path" \
+    --kb-path "$kb_path" \
+    --kb-backup "$kb_backup" \
+    --old-kb-sha "${old_kb_hash:-none}" \
+    --kb-candidate-path "$kb_candidate_path" \
+    --old-image-id none \
+    --old-api-image-id "${old_api_image_id:-none}" \
+    --old-ref none \
+    --old-api-ref "${old_api_ref:-none}" \
+    --old-bot-running false \
+    --old-api-running "$old_api_running" \
+    --rollback-image-ref "$rollback_image_ref" \
+    --rollback-api-image-ref "$rollback_api_image_ref" \
+    --target-image-ref "$new_image_ref" \
+    --target-image-id "$image_id" \
+    --target-image-digest "$image_digest" \
+    --target-image-revision "$image_revision"
+else
+  python3 scripts/full_update.py prepare \
+    --transaction-id "$deployment_id" \
+    --source-commit "$source_commit" \
+    --old-pointer-present "$old_pointer_present" \
+    --old-pointer "$old_pointer" \
+    --db-backup "$db_backup" \
+    --old-db-sha "${old_db_hash:-none}" \
+    --candidate-path "$candidate_path" \
+    --old-image-id none \
+    --old-api-image-id "${old_api_image_id:-none}" \
+    --old-ref none \
+    --old-api-ref "${old_api_ref:-none}" \
+    --old-bot-running false \
+    --old-api-running "$old_api_running" \
+    --rollback-image-ref "$rollback_image_ref" \
+    --rollback-api-image-ref "$rollback_api_image_ref" \
+    --target-image-ref "$new_image_ref" \
+    --target-image-id "$image_id" \
+    --target-image-digest "$image_digest" \
+    --target-image-revision "$image_revision"
+fi
 # The transition is recorded BEFORE the command, for the same reason
 # db_promoted is: a stop that fails partway must still arm rollback.
 runtime_stopped=1
@@ -1014,6 +1110,11 @@ compose stop wuwaterm-api
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
   --source "$candidate_path" --destination "$db_path"
+if [ "$kb_enabled" -eq 1 ]; then
+  mkdir -p "$(dirname "$kb_path")"
+  python3 scripts/deployment_manifest.py durable-replace \
+    --source "$kb_candidate_path" --destination "$kb_path"
+fi
 python3 scripts/full_update.py phase promoted
 
 # Freeze and validate the legacy state only while the old runtime is stopped.
@@ -1077,6 +1178,19 @@ while time.monotonic() < deadline:
     time.sleep(1.0)
 sys.exit('api readiness never reported ok: ' + last)"
 fi
+if [ "$kb_enabled" -eq 1 ]; then
+  live_kb_hash="$(sha256sum "$kb_path" | awk '{print $1}')"
+  if [ "$live_kb_hash" != "$new_kb_hash" ]; then
+    echo "live knowledge database hash mismatch after promotion" >&2
+    exit 1
+  fi
+  # Run full verify-kb inside wuwaterm-builder so FTS5 trigram checks do not
+  # depend on how the host system's SQLite library was compiled.
+  compose run --rm \
+    -e "WUWATERM_DB_PATH=/app/data/terms.db" \
+    -e "WUWATERM_KNOWLEDGE_DB_PATH=/app/$kb_path" \
+    wuwaterm-builder verify-kb >/dev/null
+fi
 fail_if smoke
 
 # Read back what the host actually has before anything is certified. A
@@ -1133,25 +1247,51 @@ elif [ -n "$old_api_image_id" ]; then
 fi
 api_surface_state="$(surface_state wuwaterm-api "$api_expected")"
 
-python3 scripts/deployment_manifest.py create \
-  --path "$manifest_path" \
-  --source-commit "$source_commit" \
-  --image-ref "$new_image_ref" \
-  --image-id "$image_id" \
-  --image-digest "$image_digest" \
-  --image-revision "$image_revision" \
-  --db "$db_path" \
-  --backup-path "$db_backup" \
-  --deployment-utc "$deployment_utc"
+if [ "$kb_enabled" -eq 1 ]; then
+  python3 scripts/deployment_manifest.py create \
+    --path "$manifest_path" \
+    --source-commit "$source_commit" \
+    --image-ref "$new_image_ref" \
+    --image-id "$image_id" \
+    --image-digest "$image_digest" \
+    --image-revision "$image_revision" \
+    --db "$db_path" \
+    --backup-path "$db_backup" \
+    --kb "$kb_path" \
+    --kb-display-path "$kb_path" \
+    --kb-backup-path "$kb_backup" \
+    --deployment-utc "$deployment_utc"
+else
+  python3 scripts/deployment_manifest.py create \
+    --path "$manifest_path" \
+    --source-commit "$source_commit" \
+    --image-ref "$new_image_ref" \
+    --image-id "$image_id" \
+    --image-digest "$image_digest" \
+    --image-revision "$image_revision" \
+    --db "$db_path" \
+    --backup-path "$db_backup" \
+    --deployment-utc "$deployment_utc"
+fi
 fail_if manifest
 # The image id certified here is the one every running surface was just read
 # back on; `$image_id` IS that value, and the read-back above proved it.
-python3 scripts/deployment_manifest.py verify \
-  --path "$manifest_path" \
-  --source-commit "$source_commit" \
-  --image-id "$image_id" \
-  --image-digest "$image_digest" \
-  --db "$db_path"
+if [ "$kb_enabled" -eq 1 ]; then
+  python3 scripts/deployment_manifest.py verify \
+    --path "$manifest_path" \
+    --source-commit "$source_commit" \
+    --image-id "$image_id" \
+    --image-digest "$image_digest" \
+    --db "$db_path" \
+    --kb "$kb_path"
+else
+  python3 scripts/deployment_manifest.py verify \
+    --path "$manifest_path" \
+    --source-commit "$source_commit" \
+    --image-id "$image_id" \
+    --image-digest "$image_digest" \
+    --db "$db_path"
+fi
 python3 scripts/full_update.py phase published
 
 pointer_published=1
@@ -1163,6 +1303,10 @@ python3 scripts/full_update.py phase committed
 fail_if pointer
 
 db_hash="$(sha256sum "$db_path" | awk '{print $1}')"
+kb_hash=""
+if [ "$kb_enabled" -eq 1 ]; then
+  kb_hash="$(sha256sum "$kb_path" | awk '{print $1}')"
+fi
 runtime_stopped=0
 trap - EXIT
 # Success drops the durable record only through the module's observed
@@ -1184,6 +1328,9 @@ if [ -n "$old_image_id" ]; then
 fi
 echo "deployment image digest: $image_digest"
 echo "deployment database sha256: $db_hash"
+if [ "$kb_enabled" -eq 1 ]; then
+  echo "deployment knowledge database sha256: $kb_hash"
+fi
 echo "deployment manifest: $manifest_path"
 echo "deployment timestamp: $deployment_utc"
 if [ -n "$release_name" ]; then

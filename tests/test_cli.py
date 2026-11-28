@@ -63,6 +63,92 @@ def test_build_db_without_atomic_uses_regular_builder(monkeypatch):
     assert calls == [("data-dir", "terms.db", None)]
 
 
+def test_build_kb_atomic_flag_routes_to_atomic_builder(monkeypatch, capsys):
+    from wuwaterm.knowledge_builder import KnowledgeBuildStats
+
+    calls = []
+
+    def fake_build_kb(*_args, **_kwargs):
+        raise AssertionError("non-atomic kb builder should not be used")
+
+    def fake_build_kb_atomic(
+        data_dir, db_path, *, terms_db_path=None, profile_name=None
+    ):
+        calls.append((data_dir, db_path, terms_db_path, profile_name))
+        return KnowledgeBuildStats(
+            entities=12,
+            aliases=4,
+            contexts=8,
+            relations=5,
+            short_ngrams=3,
+            fts_rows=16,
+        )
+
+    monkeypatch.setattr("wuwaterm.cli.build_knowledge_database", fake_build_kb)
+    monkeypatch.setattr(
+        "wuwaterm.cli.build_knowledge_database_atomic", fake_build_kb_atomic
+    )
+
+    assert (
+        main(
+            [
+                "build-kb",
+                "--data-dir",
+                "data-dir",
+                "--db",
+                "knowledge.db",
+                "--terms-db",
+                "terms.db",
+                "--profile",
+                "arikatsu",
+                "--atomic",
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [("data-dir", "knowledge.db", "terms.db", "arikatsu")]
+    out = capsys.readouterr().out
+    assert "built 12 entities" in out
+    assert "4 aliases" in out
+    assert "knowledge.db" in out
+
+
+def test_build_kb_without_atomic_uses_regular_builder(monkeypatch):
+    from wuwaterm.knowledge_builder import KnowledgeBuildStats
+
+    calls = []
+
+    def fake_build_kb(data_dir, db_path, *, terms_db_path=None, profile_name=None):
+        calls.append((data_dir, db_path, terms_db_path, profile_name))
+        return KnowledgeBuildStats(1, 0, 0, 0, 0, 1)
+
+    def fake_build_kb_atomic(*_args, **_kwargs):
+        raise AssertionError("atomic kb builder should not be used")
+
+    monkeypatch.setattr("wuwaterm.cli.build_knowledge_database", fake_build_kb)
+    monkeypatch.setattr(
+        "wuwaterm.cli.build_knowledge_database_atomic", fake_build_kb_atomic
+    )
+
+    assert (
+        main(
+            [
+                "build-kb",
+                "--data-dir",
+                "data-dir",
+                "--db",
+                "knowledge.db",
+                "--terms-db",
+                "terms.db",
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [("data-dir", "knowledge.db", "terms.db", None)]
+
+
 def test_bot_command_exits_64_with_retirement_guidance(capsys):
     assert main(["bot"]) == 64
     err = capsys.readouterr().err

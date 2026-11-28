@@ -139,7 +139,7 @@ The Compose file has two image roles across two services:
   [API resource settings on an adopted deployment](#api-resource-settings-on-an-adopted-deployment).
 - `wuwaterm-builder` builds the `builder` target (under `profiles: ["builder"]`).
   It has the data-build toolchain, mounts `data/` writable, and runs
-  `refresh-data`, `build-db`, and `verify-db`.
+  `refresh-data`, `build-db`, `verify-db`, `build-kb`, and `verify-kb`.
 
 The runtime image accepts `api` and `device`, refuses `bot` (retired after
 `v0.16.0`) and data-builder commands (exit 64), and ships without the
@@ -162,6 +162,15 @@ export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
+# Optional companion knowledge.db bound to the same terms.candidate.db revision:
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder build-kb --atomic
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder verify-kb
 ```
 
 Do not move this candidate over `data/terms.db` manually. The transactional
@@ -1022,50 +1031,69 @@ wrote the journal is not necessarily `current`. Before any stop the updater:
 2. rebuilds the mutable local builder image from that exact clean checkout,
    then proves the builder container has none of the runtime secret variables;
 3. refreshes source data, builds a unique candidate, and runs the strong DB
-   verifier against that candidate;
+   verifier against that candidate; when `.env` sets
+   `WUWATERM_API_KNOWLEDGE_DB_PATH` (under `/app/data/...` or `data/...`) or
+   the key is unset in `.env` and `data/knowledge.db` already exists, it also
+   builds and verifies a companion `data/candidates/knowledge.<id>.db` bound to
+   that exact `data/candidates/terms.<id>.db` revision via
+   `wuwaterm-builder build-kb --atomic` and `verify-kb` before stopping any
+   container (explicitly setting `WUWATERM_API_KNOWLEDGE_DB_PATH=` in `.env`
+   leaves companion management off even if a file remains on disk);
 4. builds an immutable `wuwaterm-runtime:<source-commit>` image and verifies its
    `org.opencontainers.image.revision` label.
 
-It then snapshots the old database and commit pointer, tags the old image for
-rollback, stops the runtime, promotes the candidate, validates/migrates state,
-starts the exact validated image, and runs `scripts/deploy_smoke.py` with
-diagnostic message sending explicitly disabled. Only after smoke and running
+It then snapshots the old database (and old companion `knowledge.db` when
+active) and commit pointer, tags the old image for
+rollback, stops the runtime, promotes the candidate (both `terms.db` and
+companion `knowledge.db` together when active), validates/migrates state,
+starts the exact validated image, verifies `/readyz` (and live `knowledge.db`
+hash and `terms_db_revision` match against `terms.db` when active). Only after
+readiness, companion verification, and running
 image-ID checks pass does it create and read back
 `.deployments/<source-commit>.json`, then atomically publish `.deploy_commit`;
 `current` is switched and old releases are pruned after that.
 The manifest contains source commit, image ref/ID/digest/revision, DB SHA-256,
-DB source profile/commit/game/resource/changelist, deployment UTC, and backup
-path. It is mode read-only and never overwritten with different content.
+DB source profile/commit/game/resource/changelist, deployment UTC, backup
+path, and (when a companion knowledge base is active) an optional
+`knowledge_database` block recording its `path`, `sha256`,
+`terms_db_revision`, and `backup_path` under the same `schema_version`. It is
+mode read-only and never overwritten with different content.
 Re-running the same source commit is accepted only when its image and database
 binding is byte-for-byte identical; a different rebuild must use a new source
 commit instead of deleting or rewriting the historical manifest.
 
 Any post-promotion state/start/smoke/manifest/pointer failure restores the old
-DB, recreates the runtime from the tagged old image, and restores or removes
-the commit pointer. Rollback image tags and manifests are retained.
+DB (and old companion `knowledge.db`, or removes a newly promoted one when none
+existed before), recreates the runtime from the tagged old image, and restores
+or removes the commit pointer. Rollback image tags and manifests are retained.
 
 `data/deployment-backups` keeps the newest five snapshots. A snapshot is the
 files of one full deployment, all named by its deployment id
 `<YYYYmmddTHHMMSSZ>-<pid>`: `terms.<id>.<sha256>.db` (the database it
-replaced), `db-diff.<id>.json` and `<id>.deploy_commit` (the pointer it
-replaced). After a full deployment has committed, `deploy/backup-retention.sh`
-removes the files of every older snapshot, one `backup retention: removed
-<path>` line each, and always keeps the snapshot that deployment just wrote.
-Newest means the later time in the id, then the larger pid as a number; file
-mtimes are never read. Only those three name forms are ever removed: any other
-file, a symlink or a directory in that directory is left alone. A failed or
-rolled-back deployment prunes nothing (its own snapshot stays until a later
-success pushes it out), `--runtime-only` writes no snapshot and prunes nothing,
-and a prune that fails warns without failing the deployment.
+replaced), `knowledge.<id>.<sha256>.db` (the companion knowledge database it
+replaced, when active), `db-diff.<id>.json` and `<id>.deploy_commit` (the
+pointer it replaced). After a full deployment has committed,
+`deploy/backup-retention.sh` removes the files of every older snapshot, one
+`backup retention: removed <path>` line each, and always keeps the snapshot
+that deployment just wrote. Newest means the later time in the id, then the
+larger pid as a number; file mtimes are never read. Only those four name forms
+are ever removed: any other file, a symlink or a directory in that directory is
+left alone. A failed or rolled-back deployment prunes nothing (its own snapshot
+stays until a later success pushes it out), `--runtime-only` writes no snapshot
+and prunes nothing, and a prune that fails warns without failing the deployment.
 
 Rolling back to the previous release needs the database as it was before the
 deployment that made the current release. That is the snapshot that deployment
 wrote, and its manifest `.deployments/<source-commit>.json` names it in
-`backup_path`. It was the newest snapshot when it was written, and only a later
-successful deployment prunes, which is also the one that replaces the current
-release, so the snapshot a rollback needs is always kept. The `backup_path` of
-an older manifest can name a snapshot that has since been removed; nothing
-reads it for recovery.
+`backup_path`. When companion `knowledge.db` is enabled, restore
+`knowledge_database.backup_path` alongside `backup_path` in the same stop
+window (or remove a newly created `knowledge.db` when
+`knowledge_database.backup_path` is `"none"`) so a manual rollback never leaves
+a new `knowledge.db` paired with an old `terms.db`. It was the newest snapshot
+when it was written, and only a later successful deployment prunes, which is
+also the one that replaces the current release, so the snapshot a rollback
+needs is always kept. The `backup_path` of an older manifest can name a
+snapshot that has since been removed; nothing reads it for recovery.
 
 ### Interrupted full updates
 
@@ -1076,6 +1104,10 @@ serving-binding mutation. The record at `.deployments/.full-transaction.json`
 
 - the old and new database SHA-256 preimages, the backup path, and the
   backup hash recorded in its filename;
+- when companion `knowledge.db` is active, an optional `knowledge_db` block
+  recording its host-relative path, old and new SHA-256 preimages, backup path
+  (or `"none"` when none existed before), candidate path
+  (`data/candidates/knowledge.<id>.db`), and bound `terms_db_revision`;
 - the old commit pointer and its immutable manifest;
 - each serving surface's observed image id, reference and running state,
   plus the per-surface rollback tags created for this transaction;
@@ -1099,7 +1131,9 @@ Recovery runs from the release that wrote the journal, which is not
 necessarily `current`. Invoke that release's own script by its absolute path:
 the path is the binding, so the command needs no environment and works in a
 fresh shell. The explicit recovery entry classifies the host by what is
-actually observed — pointer, live database hash, manifest, and both
+actually observed — pointer, live database hash (plus companion `knowledge.db`
+hash and `terms_db_revision` when the journal carries `knowledge_db`),
+manifest, and both
 containers' image ids/references/running states — never by the journal's phase
 marker alone:
 
@@ -1107,7 +1141,9 @@ marker alone:
 sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
 ```
 
-- Observed NEW binding complete (pointer, database, manifest, and every
+- Observed NEW binding complete (pointer, database, optional companion
+  `knowledge.db` hash and `terms_db_revision` when recorded in `knowledge_db`,
+  manifest, and every
   surface in the state this transaction recorded for it: a running one on the
   target image id and reference, a stopped one still stopped and carrying that
   binding, an absent one still absent): the transaction is confirmed and the
@@ -1116,7 +1152,10 @@ sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
   instead of keeping a journal that only a manual recovery could clear.
 - Observed OLD binding: the recorded previous binding is restored — known
   surfaces are quiesced and verified stopped first, the recorded backup is
-  re-hashed before any copy and re-verified after promotion, only surfaces
+  re-hashed before any copy and re-verified after promotion (restoring both
+  `terms.db` and companion `knowledge.db` together when `knowledge_db` is
+  present, or removing a newly promoted `knowledge.db` when its recorded
+  `old_sha256` was null), only surfaces
   that were recorded running come back, each on its own recorded image,
   and the old binding is verified from observation before the record is
   cleared.
@@ -1125,8 +1164,10 @@ sh /opt/wuwaterm/releases/rN/deploy/vps-update.sh --recover-full
   a known incomplete binding can return to the recorded old state only through
   the same full admissibility preflight. Pointer equality alone never decides
   that recovery succeeded. Unobservable/unsafe states still refuse.
-- Anything else — unknown pointer, unknown live database, a distinct new pointer with
-  old or missing services, missing or modified backup, unconfined recorded
+- Anything else — unknown pointer, unknown live database or companion
+  `knowledge.db`, a distinct new pointer with
+  old or missing services, missing or modified backup (for either database),
+  unconfined recorded
   paths, schema/type drift, tool fingerprint mismatch — is reported
   unresolved, changes nothing further, and KEEPS the record, so recovery is
   reentrant. A missing live database is restored from the recorded verified

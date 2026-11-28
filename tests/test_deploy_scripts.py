@@ -53,6 +53,17 @@ def test_vps_update_uses_builder_service_for_data_commands():
     assert "wuwaterm-builder refresh-data" in text
     assert "wuwaterm-builder build-db --atomic" in text
     assert "wuwaterm-builder verify-db" in text
+    assert "wuwaterm-builder build-kb --atomic" in text
+    assert "wuwaterm-builder verify-kb" in text
+    assert "python3 scripts/verify_knowledge_db.py" not in text
+    readyz_pos = text.index("/readyz")
+    post_kb_verify_pos = text.index(
+        '-e "WUWATERM_DB_PATH=/app/data/terms.db" \\\n'
+        '    -e "WUWATERM_KNOWLEDGE_DB_PATH=/app/$kb_path" \\\n'
+        "    wuwaterm-builder verify-kb",
+        readyz_pos,
+    )
+    assert post_kb_verify_pos > readyz_pos
     assert "scripts/verify_exact_hits.py" in text
     assert "scripts/verify_seed_terms.py" in text
     assert "scripts/diff_terms_db.py" in text
@@ -306,6 +317,8 @@ def test_runtime_entrypoint_forwards_api_arguments():
         ["refresh-data", "--help"],
         ["build-db", "--atomic", "--help"],
         ["verify-db", "--help"],
+        ["build-kb", "--atomic", "--help"],
+        ["verify-kb", "--help"],
     ],
 )
 def test_builder_entrypoint_forwards_extra_arguments_to_subcommands(args):
@@ -707,6 +720,7 @@ def _make_deploy_harness(tmp_path):
         "scripts/full_update.py",
         "scripts/validate_state_file.py",
         "scripts/verify_db.py",
+        "scripts/verify_knowledge_db.py",
     ):
         shutil.copy2(ROOT / relative, root / relative)
     runtime_helper = ROOT / "scripts" / "runtime_update.py"
@@ -858,6 +872,53 @@ def _make_deploy_harness(tmp_path):
         "c.execute('DELETE FROM terms WHERE category = \\\'item\\\''); "
         "c.commit()\" \"$candidate\"\n"
         "    fi\n"
+        "    ;;\n"
+        "  *'build-kb --atomic'*)\n"
+        "    terms_cand=''\n"
+        "    kb_cand=''\n"
+        "    for arg in \"$@\"; do\n"
+        "      case \"$arg\" in\n"
+        "        WUWATERM_DB_PATH=*) terms_cand=${arg#WUWATERM_DB_PATH=} ;;\n"
+        "        WUWATERM_KNOWLEDGE_DB_PATH=*) kb_cand=${arg#WUWATERM_KNOWLEDGE_DB_PATH=} ;;\n"
+        "      esac\n"
+        "    done\n"
+        "    terms_cand=$FAKE_DEPLOY_ROOT/data/${terms_cand#/app/data/}\n"
+        "    kb_cand=$FAKE_DEPLOY_ROOT/data/${kb_cand#/app/data/}\n"
+        "    if [ -f \"$FAKE_DEPLOY_ROOT/data/candidate-kb-seed.db\" ]; then\n"
+        "      cp \"$FAKE_DEPLOY_ROOT/data/candidate-kb-seed.db\" \"$kb_cand\"\n"
+        "    else\n"
+        "      PYTHONPATH=\"$FAKE_DEPLOY_ROOT/src\" python3 -c \""
+        "import sys; "
+        "from wuwaterm.data_source import SourceProvenance; "
+        "from wuwaterm.knowledge_builder import EntitySpec, create_knowledge_database; "
+        "from wuwaterm.knowledge_db import compute_terms_db_revision; "
+        "create_knowledge_database(sys.argv[2], "
+        "entities=[EntitySpec(entity_id='resonator:1603', entity_type='resonator', "
+        "source_file='BinData/role/roleinfo.json', source_id='1603', zh='椿', en='Camellya')], "
+        "aliases=[], contexts=[], relations=[], "
+        "terms_db_revision=compute_terms_db_revision(sys.argv[1]), "
+        "source_provenance=SourceProvenance(profile='arikatsu', "
+        "repo_url='https://example.invalid/wutheringdata.git', commit='0'*40, "
+        "game_version='3.7.0', resource_version='3.7.8', changelist='1'))"
+        "\" \"$terms_cand\" \"$kb_cand\"\n"
+        "    fi\n"
+        "    ;;\n"
+        "  *'verify-kb'*)\n"
+        "    terms_cand=''\n"
+        "    kb_cand=''\n"
+        "    for arg in \"$@\"; do\n"
+        "      case \"$arg\" in\n"
+        "        WUWATERM_DB_PATH=*) terms_cand=${arg#WUWATERM_DB_PATH=} ;;\n"
+        "        WUWATERM_KNOWLEDGE_DB_PATH=*) kb_cand=${arg#WUWATERM_KNOWLEDGE_DB_PATH=} ;;\n"
+        "      esac\n"
+        "    done\n"
+        "    if [ \"${FAKE_POST_PROMOTE_VERIFY_KB_FAIL:-0}\" = 1 ] && [ \"$terms_cand\" = '/app/data/terms.db' ]; then\n"
+        "      echo 'injected post-promote verify-kb failure' >&2\n"
+        "      exit 1\n"
+        "    fi\n"
+        "    terms_cand=$FAKE_DEPLOY_ROOT/data/${terms_cand#/app/data/}\n"
+        "    kb_cand=$FAKE_DEPLOY_ROOT/data/${kb_cand#/app/data/}\n"
+        "    python3 \"$FAKE_DEPLOY_ROOT/scripts/verify_knowledge_db.py\" \"$kb_cand\" --terms-db \"$terms_cand\"\n"
         "    ;;\n"
         "  *'verify-db'*)\n"
         "    candidate=''\n"
@@ -2099,7 +2160,7 @@ def test_vps_update_preserves_knowledge_db_path_in_env(
     deploy_harness, fail_step: str | None, expected_rc: int
 ):
     """Normal upgrades and rollbacks must leave WUWATERM_API_KNOWLEDGE_DB_PATH in .env intact."""
-    root, env, _old_hash, _new_hash = deploy_harness
+    root, env, old_hash, new_hash = deploy_harness
     env_file = root / ".env"
     original = env_file.read_text(encoding="utf-8")
     updated = original + "WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n"
@@ -2112,5 +2173,17 @@ def test_vps_update_preserves_knowledge_db_path_in_env(
 
     assert result.returncode == expected_rc, result.stdout + result.stderr
     assert env_file.read_text(encoding="utf-8") == updated
+    live_terms = root / "data" / "terms.db"
+    live_kb = root / "data" / "knowledge.db"
+    if fail_step is None:
+        assert hashlib.sha256(live_terms.read_bytes()).hexdigest() == new_hash
+        assert live_kb.is_file()
+        manifest = json.loads(
+            (root / ".deployments" / f"{NEW_COMMIT}.json").read_text(encoding="utf-8")
+        )
+        assert manifest["knowledge_database"]["path"] == "data/knowledge.db"
+    else:
+        assert hashlib.sha256(live_terms.read_bytes()).hexdigest() == old_hash
+        assert not live_kb.exists()
 
 

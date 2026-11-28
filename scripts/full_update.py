@@ -59,6 +59,7 @@ from typing import Any
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT))
+sys.path.insert(0, str(CODE_ROOT / "src"))
 sys.dont_write_bytecode = True
 
 from scripts import deployment_admission  # noqa: E402
@@ -67,9 +68,14 @@ from scripts.deployment_manifest import (  # noqa: E402
     durable_remove,
     durable_replace,
     publish_commit_pointer,
+    read_kb_terms_db_revision,
     sha256_file,
     verify_commit_pointer,
     verify_manifest,
+)
+from wuwaterm.knowledge_db import (  # noqa: E402
+    KnowledgeBaseError,
+    compute_terms_db_revision,
 )
 
 # Where data/, .deployments/ and .deploy_commit live: the checkout itself, or
@@ -83,6 +89,12 @@ TRANSACTION_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9]+$")
 CANDIDATE_RE = re.compile(r"^data/candidates/terms\.([0-9]{8}T[0-9]{6}Z-[0-9]+)\.db$")
 BACKUP_RE = re.compile(
     r"^data/deployment-backups/terms\.([0-9]{8}T[0-9]{6}Z-[0-9]+)\.([0-9a-f]{64})\.db$"
+)
+KB_CANDIDATE_RE = re.compile(
+    r"^data/candidates/knowledge\.([0-9]{8}T[0-9]{6}Z-[0-9]+)\.db$"
+)
+KB_BACKUP_RE = re.compile(
+    r"^data/deployment-backups/knowledge\.([0-9]{8}T[0-9]{6}Z-[0-9]+)\.([0-9a-f]{64})\.db$"
 )
 MANIFEST_RE = re.compile(r"^\.deployments/([0-9a-f]{40})\.json$")
 ROLLBACK_REF_RE = re.compile(r"^wuwaterm-runtime:rollback-([0-9]{8}T[0-9]{6}Z-[0-9]+)$")
@@ -131,6 +143,16 @@ JOURNAL_KEYS = {
     "tool_hash",
     "updated_utc",
 }
+OPTIONAL_JOURNAL_KEYS = {"knowledge_db"}
+KB_JOURNAL_KEYS = {
+    "path",
+    "old_sha256",
+    "new_sha256",
+    "backup_path",
+    "candidate_path",
+    "terms_db_revision",
+}
+_KB_FORBIDDEN_SUBDIRS = frozenset({"candidates", "deployment-backups", "wutheringdata"})
 
 # Machine-readable recovery outcome. `deploy/vps-update.sh` settles the
 # `current` link from this, so it is printed on stdout and only after the
@@ -332,6 +354,135 @@ def _surface_ref(value: object) -> str | None:
     return value
 
 
+def _validate_kb_relpath(value: object, *, error_code: str = "invalid_full_journal") -> str:
+    """Validate a host-relative companion ``knowledge.db`` path under ``data/``."""
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 200
+        or any(ch.isspace() or ord(ch) < 32 for ch in value)
+        or not value.startswith("data/")
+    ):
+        raise FullUpdateError(error_code)
+    parts = value.split("/")
+    if len(parts) < 2 or any(part in ("", ".", "..") for part in parts):
+        raise FullUpdateError(error_code)
+    if value == "data/terms.db" or parts[1] in _KB_FORBIDDEN_SUBDIRS:
+        raise FullUpdateError(error_code)
+    if any(value.endswith(suffix) for suffix in ("-wal", "-shm", "-journal")):
+        raise FullUpdateError(error_code)
+    return value
+
+
+def _parse_env_var(env_path: Path, key: str) -> str | None:
+    """Read a single key from a ``.env`` file as plain data without shell evaluation."""
+    if env_path.is_symlink() or not env_path.is_file():
+        return None
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        raise FullUpdateError("invalid_kb_path") from None
+    result: str | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        if name.strip() != key:
+            continue
+        value = raw_value.strip()
+        if value and value[0] in ("'", '"'):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end != -1:
+                trailing = value[end + 1 :].strip()
+                if not trailing or trailing.startswith("#"):
+                    value = value[1:end].strip()
+        elif value.startswith("#"):
+            value = ""
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+        result = value
+    return result
+
+
+def resolve_knowledge_db_relpath(root: Path | None = None) -> str | None:
+    """Determine whether companion ``knowledge.db`` is managed and return its relative path.
+
+    Active when ``.env`` sets ``WUWATERM_API_KNOWLEDGE_DB_PATH`` (pointing under
+    ``/app/data/...`` or ``data/...``), or when the key is unset in ``.env`` and
+    ``data/knowledge.db`` already exists. An explicit empty assignment
+    (``WUWATERM_API_KNOWLEDGE_DB_PATH=``) disables management even if a file
+    remains on disk. Returns ``None`` when disabled so single-DB hosts stay
+    100% unchanged.
+    """
+    base = ROOT if root is None else root
+    raw = _parse_env_var(base / ".env", "WUWATERM_API_KNOWLEDGE_DB_PATH")
+    if raw is not None:
+        if not raw:
+            return None
+        if raw.startswith("/app/data/"):
+            relpath = "data/" + raw[len("/app/data/") :]
+        elif raw.startswith("data/"):
+            relpath = raw
+        else:
+            raise FullUpdateError("invalid_kb_path")
+        relpath = _validate_kb_relpath(relpath, error_code="invalid_kb_path")
+    else:
+        default_kb = base / "data" / "knowledge.db"
+        if (base / "data").is_symlink() or default_kb.is_symlink():
+            raise FullUpdateError("invalid_kb_path")
+        if not default_kb.exists():
+            return None
+        if not default_kb.is_file():
+            raise FullUpdateError("invalid_kb_path")
+        relpath = "data/knowledge.db"
+
+    current = base.resolve()
+    for part in relpath.split("/"):
+        current = current / part
+        if current.is_symlink():
+            raise FullUpdateError("invalid_kb_path")
+    if current.exists() and not current.is_file():
+        raise FullUpdateError("invalid_kb_path")
+    return relpath
+
+
+def _validate_kb_journal(kb: object, transaction_id: str) -> dict[str, Any]:
+    if type(kb) is not dict or set(kb) != KB_JOURNAL_KEYS:
+        raise FullUpdateError("invalid_full_journal")
+    _validate_kb_relpath(kb["path"], error_code="invalid_full_journal")
+    kb_backup = kb["backup_path"]
+    old_kb_sha = kb["old_sha256"]
+    if type(kb_backup) is not str:
+        raise FullUpdateError("invalid_full_journal")
+    if kb_backup == "none":
+        if old_kb_sha is not None:
+            raise FullUpdateError("invalid_full_journal")
+    else:
+        if type(old_kb_sha) is not str or not SHA256_RE.fullmatch(old_kb_sha):
+            raise FullUpdateError("invalid_full_journal")
+        match = KB_BACKUP_RE.fullmatch(kb_backup)
+        if match is None or match.group(1) != transaction_id or match.group(2) != old_kb_sha:
+            raise FullUpdateError("invalid_full_journal")
+    if type(kb["new_sha256"]) is not str or not SHA256_RE.fullmatch(kb["new_sha256"]):
+        raise FullUpdateError("invalid_full_journal")
+    if type(kb["terms_db_revision"]) is not str or not SHA256_RE.fullmatch(
+        kb["terms_db_revision"]
+    ):
+        raise FullUpdateError("invalid_full_journal")
+    if type(kb["candidate_path"]) is not str:
+        raise FullUpdateError("invalid_full_journal")
+    cand_match = KB_CANDIDATE_RE.fullmatch(kb["candidate_path"])
+    if cand_match is None or cand_match.group(1) != transaction_id:
+        raise FullUpdateError("invalid_full_journal")
+    return kb
+
+
 def _validate_journal(payload: object) -> dict[str, Any]:
     """Strict journal validation: exact keys, exact types, coupled invariants.
 
@@ -341,7 +492,9 @@ def _validate_journal(payload: object) -> dict[str, Any]:
     confinement can be decided before anything is touched.
     """
 
-    if type(payload) is not dict or set(payload) != JOURNAL_KEYS:
+    if type(payload) is not dict or not (
+        JOURNAL_KEYS <= set(payload) <= (JOURNAL_KEYS | OPTIONAL_JOURNAL_KEYS)
+    ):
         raise FullUpdateError("invalid_full_journal")
     if type(payload["schema_version"]) is not int or (
         payload["schema_version"] != JOURNAL_SCHEMA_VERSION
@@ -435,6 +588,8 @@ def _validate_journal(payload: object) -> dict[str, Any]:
         raise FullUpdateError("invalid_full_journal") from None
     if parsed.tzinfo is None:
         raise FullUpdateError("invalid_full_journal")
+    if "knowledge_db" in payload:
+        _validate_kb_journal(payload["knowledge_db"], transaction_id)
     return payload
 
 
@@ -648,6 +803,55 @@ def _live_db_state(journal: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _live_kb_state(journal: dict[str, Any]) -> str:
+    """Live companion ``knowledge.db`` classification when tracked by ``journal``."""
+    kb_info = journal["knowledge_db"]
+    data_dir = ROOT / "data"
+    if data_dir.is_symlink():
+        return "unknown"
+    try:
+        path = _confined(kb_info["path"])
+    except FullUpdateError:
+        return "unknown"
+    if path.is_symlink():
+        return "unknown"
+    if any(
+        path.with_name(path.name + suffix).exists()
+        or path.with_name(path.name + suffix).is_symlink()
+        for suffix in ("-wal", "-shm", "-journal")
+    ):
+        return "unknown"
+    if not path.exists():
+        return "absent"
+    if not path.is_file():
+        return "unknown"
+    try:
+        digest = sha256_file(path)
+    except OSError:
+        return "unknown"
+    old_match = kb_info["old_sha256"] is not None and digest == kb_info["old_sha256"]
+    new_match = digest == kb_info["new_sha256"]
+    if old_match and new_match:
+        return "both"
+    if old_match:
+        return "old"
+    if new_match:
+        return "new"
+    return "unknown"
+
+
+def _verify_kb_revision_binding(
+    db_path: Path, kb_path: Path, expected_revision: str, *, error_code: str
+) -> None:
+    try:
+        kb_rev = read_kb_terms_db_revision(kb_path, immutable=True)
+        terms_rev = compute_terms_db_revision(db_path, immutable=True)
+    except (ManifestError, KnowledgeBaseError, OSError):
+        raise FullUpdateError(error_code) from None
+    if kb_rev != expected_revision or terms_rev != expected_revision:
+        raise FullUpdateError(error_code)
+
+
 def _classify(journal: dict[str, Any]) -> str:
     """Which side of the transaction the OBSERVED host is on.
 
@@ -702,6 +906,18 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
     db_path = ROOT / "data" / "terms.db"
     if _live_db_state(journal) not in ("new", "both"):
         raise FullUpdateError("full_recovery_unresolved")
+    kb_path: Path | None = None
+    if "knowledge_db" in journal:
+        if _live_kb_state(journal) not in ("new", "both"):
+            raise FullUpdateError("full_recovery_unresolved")
+        kb_info = journal["knowledge_db"]
+        kb_path = _confined(kb_info["path"])
+        _verify_kb_revision_binding(
+            db_path,
+            kb_path,
+            kb_info["terms_db_revision"],
+            error_code="full_recovery_unresolved",
+        )
     manifest_path = _confined(journal["new_manifest_path"])
     if not manifest_path.is_file():
         raise FullUpdateError("full_recovery_unresolved")
@@ -713,6 +929,7 @@ def _verify_new_binding(journal: dict[str, Any]) -> None:
             image_digest=journal["target_image_digest"],
             db_path=db_path,
             immutable=True,
+            kb_path=kb_path,
         )
     except ManifestError:
         raise FullUpdateError("full_recovery_unresolved") from None
@@ -775,6 +992,12 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
     expected_db_state = "old" if journal["old_db_sha256"] is not None else "absent"
     if db_state not in (expected_db_state, "both"):
         raise FullUpdateError("full_recovery_unresolved")
+    if "knowledge_db" in journal:
+        kb_info = journal["knowledge_db"]
+        kb_state = _live_kb_state(journal)
+        expected_kb_state = "old" if kb_info["old_sha256"] is not None else "absent"
+        if kb_state not in (expected_kb_state, "both"):
+            raise FullUpdateError("full_recovery_unresolved")
     if journal["old_pointer_present"]:
         manifest_path = _confined(journal["old_manifest_path"])
         if not manifest_path.is_file():
@@ -783,6 +1006,19 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
         # immutable manifest identifies its own image; neither service order
         # nor running state may substitute a different verification key.
         verify_id = _preflight_old_manifest(journal, manifest_path)
+        old_kb_path: Path | None = None
+        try:
+            old_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise FullUpdateError("full_recovery_unresolved") from None
+        if isinstance(old_payload, dict) and "knowledge_database" in old_payload:
+            old_kb_section = old_payload.get("knowledge_database")
+            if not isinstance(old_kb_section, dict):
+                raise FullUpdateError("full_recovery_unresolved")
+            old_kb_rel = _validate_kb_relpath(
+                old_kb_section.get("path"), error_code="full_recovery_unresolved"
+            )
+            old_kb_path = _confined(old_kb_rel)
         try:
             if journal["old_db_sha256"] is not None:
                 verify_manifest(
@@ -792,6 +1028,7 @@ def _verify_old_binding(journal: dict[str, Any]) -> None:
                     image_digest=None,
                     db_path=ROOT / "data" / "terms.db",
                     immutable=True,
+                    kb_path=old_kb_path,
                 )
         except (ManifestError, OSError, ValueError, KeyError, TypeError):
             raise FullUpdateError("full_recovery_unresolved") from None
@@ -851,6 +1088,15 @@ def _certify_published_binding() -> str:
         reference = image["ref"]
         if type(reference) is not str or not reference:
             raise ValueError
+        kb_path: Path | None = None
+        if "knowledge_database" in payload:
+            kb_section = payload["knowledge_database"]
+            if type(kb_section) is not dict:
+                raise ValueError
+            kb_rel = _validate_kb_relpath(
+                kb_section.get("path"), error_code="full_recovery_unresolved"
+            )
+            kb_path = _confined(kb_rel)
         verify_manifest(
             manifest_path,
             source_commit=value,
@@ -858,6 +1104,7 @@ def _certify_published_binding() -> str:
             image_digest=None,
             db_path=ROOT / "data" / "terms.db",
             immutable=True,
+            kb_path=kb_path,
         )
     except (OSError, ValueError, KeyError, TypeError, ManifestError):
         raise FullUpdateError("full_recovery_unresolved") from None
@@ -892,6 +1139,18 @@ def _preflight_journal_paths(journal: dict[str, Any]) -> None:
                 raise FullUpdateError("full_recovery_backup_missing")
         except OSError:
             raise FullUpdateError("full_recovery_backup_missing") from None
+    if "knowledge_db" in journal:
+        kb_info = journal["knowledge_db"]
+        _confined(kb_info["path"])
+        if kb_info["old_sha256"] is not None:
+            kb_backup = _confined(kb_info["backup_path"])
+            if not kb_backup.is_file():
+                raise FullUpdateError("full_recovery_backup_missing")
+            try:
+                if sha256_file(kb_backup) != kb_info["old_sha256"]:
+                    raise FullUpdateError("full_recovery_backup_missing")
+            except OSError:
+                raise FullUpdateError("full_recovery_backup_missing") from None
     if journal["old_pointer_present"]:
         manifest = _confined(journal["old_manifest_path"])
         if not manifest.is_file():
@@ -935,6 +1194,15 @@ def _preflight_old_manifest(journal: dict[str, Any], path: Path) -> str:
         )
     ):
         raise FullUpdateError("full_recovery_unresolved")
+    if "knowledge_database" in payload and "knowledge_db" in journal:
+        old_kb_section = payload.get("knowledge_database")
+        kb_info = journal["knowledge_db"]
+        if (
+            not isinstance(old_kb_section, dict)
+            or kb_info["old_sha256"] is None
+            or old_kb_section.get("sha256") != kb_info["old_sha256"]
+        ):
+            raise FullUpdateError("full_recovery_unresolved")
     return _image_id(image["id"])
 
 
@@ -989,6 +1257,13 @@ def _preflight_old_side(journal: dict[str, Any]) -> None:
     _preflight_journal_paths(journal)
     if _live_db_state(journal) not in ("old", "new", "both", "absent"):
         raise FullUpdateError("full_recovery_unresolved")
+    if "knowledge_db" in journal and _live_kb_state(journal) not in (
+        "old",
+        "new",
+        "both",
+        "absent",
+    ):
+        raise FullUpdateError("full_recovery_unresolved")
     for service in SERVICES:
         state = _container_state(CONTAINERS[service])
         _assert_admissible_surface(journal, service, state)
@@ -998,34 +1273,34 @@ def _preflight_old_side(journal: dict[str, Any]) -> None:
                 raise FullUpdateError("full_recovery_unresolved")
 
 
-def _restore_database(journal: dict[str, Any]) -> None:
-    """The ONE verified database restoration, shared by explicit recovery
-    and the shell's EXIT rollback (``restore-db``): the recorded backup is
-    hashed BEFORE any copy, the temporary copy is verified BEFORE it can
-    replace the live file, and the promoted file is re-verified after.
-    Any failure leaves the live database exactly as it was."""
-
-    db_path = ROOT / "data" / "terms.db"
-    db_state = _live_db_state(journal)
-    if journal["old_db_sha256"] is not None:
-        backup = _confined(journal["db_backup"])
+def _restore_single_file(
+    *,
+    target_path: Path,
+    live_state: str,
+    old_sha: str | None,
+    backup_rel: str,
+    transaction_id: str,
+) -> None:
+    if old_sha is not None:
+        backup = _confined(backup_rel)
         if not backup.is_file():
             raise FullUpdateError("full_recovery_backup_missing")
         try:
-            if sha256_file(backup) != journal["old_db_sha256"]:
+            if sha256_file(backup) != old_sha:
                 raise FullUpdateError("full_recovery_backup_missing")
         except OSError:
             raise FullUpdateError("full_recovery_backup_missing") from None
-        if db_state not in ("old", "new", "both", "absent"):
+        if live_state not in ("old", "new", "both", "absent"):
             # A live database this journal cannot name is unknown state:
             # it is left exactly as it is for an operator decision.
             raise FullUpdateError("full_recovery_unresolved")
-        if db_state in ("new", "absent"):
+        if live_state in ("new", "absent"):
             # "new" is the interrupted promotion; "absent" is a host that
             # lost the file before recovery ran. "both" needs no copy: the
             # live bytes already equal the recorded old preimage.
-            temporary = db_path.with_name(
-                f"{db_path.name}.recovery-{journal['transaction_id']}.tmp"
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target_path.with_name(
+                f"{target_path.name}.recovery-{transaction_id}.tmp"
             )
             if temporary.exists() or temporary.is_symlink():
                 durable_remove(temporary)
@@ -1034,20 +1309,75 @@ def _restore_database(journal: dict[str, Any]) -> None:
             except OSError:
                 raise FullUpdateError("full_recovery_restore_failed") from None
             try:
-                if sha256_file(temporary) != journal["old_db_sha256"]:
+                if sha256_file(temporary) != old_sha:
                     raise FullUpdateError("full_recovery_restore_failed")
-                durable_replace(temporary, db_path)
-                if sha256_file(db_path) != journal["old_db_sha256"]:
+                durable_replace(temporary, target_path)
+                if sha256_file(target_path) != old_sha:
                     raise FullUpdateError("full_recovery_restore_failed")
             except OSError:
                 raise FullUpdateError("full_recovery_restore_failed") from None
     else:
-        if db_state == "new":
-            durable_remove(db_path)
-            if db_path.exists() or db_path.is_symlink():
+        if live_state == "new":
+            durable_remove(target_path)
+            if target_path.exists() or target_path.is_symlink():
                 raise FullUpdateError("full_recovery_restore_failed")
-        elif db_state not in ("absent",):
+        elif live_state not in ("absent",):
             raise FullUpdateError("full_recovery_unresolved")
+
+
+def _restore_database(journal: dict[str, Any]) -> None:
+    """The ONE verified database restoration, shared by explicit recovery
+    and the shell's EXIT rollback (``restore-db``): the recorded backup is
+    hashed BEFORE any copy, the temporary copy is verified BEFORE it can
+    replace the live file, and the promoted file is re-verified after.
+    When a companion ``knowledge.db`` is tracked by the transaction, both
+    databases are checked for admissibility before either file is touched
+    and restored together. Any failure leaves untouched files intact."""
+
+    db_path = ROOT / "data" / "terms.db"
+    db_state = _live_db_state(journal)
+    if journal["old_db_sha256"] is not None:
+        if db_state not in ("old", "new", "both", "absent"):
+            raise FullUpdateError("full_recovery_unresolved")
+    elif db_state not in ("new", "absent"):
+        raise FullUpdateError("full_recovery_unresolved")
+
+    kb_path: Path | None = None
+    kb_state = "absent"
+    kb_info: dict[str, Any] | None = None
+    if "knowledge_db" in journal:
+        kb_info = journal["knowledge_db"]
+        kb_path = _confined(kb_info["path"])
+        kb_state = _live_kb_state(journal)
+        if kb_info["old_sha256"] is not None:
+            if kb_state not in ("old", "new", "both", "absent"):
+                raise FullUpdateError("full_recovery_unresolved")
+            kb_backup = _confined(kb_info["backup_path"])
+            if not kb_backup.is_file():
+                raise FullUpdateError("full_recovery_backup_missing")
+            try:
+                if sha256_file(kb_backup) != kb_info["old_sha256"]:
+                    raise FullUpdateError("full_recovery_backup_missing")
+            except OSError:
+                raise FullUpdateError("full_recovery_backup_missing") from None
+        elif kb_state not in ("new", "absent"):
+            raise FullUpdateError("full_recovery_unresolved")
+
+    _restore_single_file(
+        target_path=db_path,
+        live_state=db_state,
+        old_sha=journal["old_db_sha256"],
+        backup_rel=journal["db_backup"],
+        transaction_id=journal["transaction_id"],
+    )
+    if kb_info is not None and kb_path is not None:
+        _restore_single_file(
+            target_path=kb_path,
+            live_state=kb_state,
+            old_sha=kb_info["old_sha256"],
+            backup_rel=kb_info["backup_path"],
+            transaction_id=journal["transaction_id"],
+        )
 
 
 def _restore_nonrunning_surface(journal: dict[str, Any], service: str) -> None:
@@ -1182,6 +1512,13 @@ def _clear_journal(journal: dict[str, Any]) -> None:
             durable_remove(candidate)
     except FullUpdateError:
         pass
+    if "knowledge_db" in journal:
+        try:
+            kb_candidate = _confined(journal["knowledge_db"]["candidate_path"])
+            if kb_candidate.exists() or kb_candidate.is_symlink():
+                durable_remove(kb_candidate)
+        except FullUpdateError:
+            pass
     durable_remove(_journal_path())
 
 
@@ -1193,6 +1530,14 @@ def _load_manifest_payload(path: Path) -> dict[str, Any]:
     if type(payload) is not dict:
         raise FullUpdateError("invalid_full_journal")
     return payload
+
+
+def cmd_resolve_kb(_args: argparse.Namespace) -> int:
+    _require_held_lock()
+    relpath = resolve_knowledge_db_relpath()
+    if relpath is not None:
+        print(relpath)
+    return 0
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -1228,6 +1573,23 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         raise FullUpdateError("invalid_full_journal")
     if CANDIDATE_RE.fullmatch(args.candidate_path) is None:
         raise FullUpdateError("invalid_full_journal")
+
+    kb_args = (args.kb_path, args.kb_backup, args.old_kb_sha, args.kb_candidate_path)
+    kb_enabled = any(item is not None for item in kb_args)
+    kb_journal: dict[str, Any] | None = None
+    if kb_enabled:
+        if any(item is None for item in kb_args):
+            raise FullUpdateError("invalid_full_journal")
+        kb_relpath = _validate_kb_relpath(args.kb_path, error_code="invalid_full_journal")
+        old_kb_sha: str | None = None if args.old_kb_sha == "none" else args.old_kb_sha
+        if old_kb_sha is not None and not SHA256_RE.fullmatch(old_kb_sha):
+            raise FullUpdateError("invalid_full_journal")
+        if (args.kb_backup == "none") != (old_kb_sha is None):
+            raise FullUpdateError("invalid_full_journal")
+        if args.kb_backup != "none" and KB_BACKUP_RE.fullmatch(args.kb_backup) is None:
+            raise FullUpdateError("invalid_full_journal")
+        if KB_CANDIDATE_RE.fullmatch(args.kb_candidate_path) is None:
+            raise FullUpdateError("invalid_full_journal")
 
     parsed_surfaces: list[tuple[str | None, str | None, bool]] = []
     for image_arg, ref_arg, running_arg in (
@@ -1281,6 +1643,34 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         if sha256_file(backup) != old_db_sha:
             raise FullUpdateError("backup_verification_failed")
 
+    if kb_enabled:
+        _confined(kb_relpath)
+        kb_candidate = _confined(args.kb_candidate_path)
+        if not kb_candidate.is_file():
+            raise FullUpdateError("invalid_full_journal")
+        try:
+            terms_rev = compute_terms_db_revision(candidate, immutable=True)
+            kb_rev = read_kb_terms_db_revision(kb_candidate, immutable=True)
+        except (ManifestError, KnowledgeBaseError, OSError):
+            raise FullUpdateError("kb_revision_mismatch") from None
+        if kb_rev != terms_rev:
+            raise FullUpdateError("kb_revision_mismatch")
+        new_kb_sha = sha256_file(kb_candidate)
+        if args.kb_backup != "none":
+            kb_backup_file = _confined(args.kb_backup)
+            if not kb_backup_file.is_file():
+                raise FullUpdateError("backup_verification_failed")
+            if sha256_file(kb_backup_file) != old_kb_sha:
+                raise FullUpdateError("backup_verification_failed")
+        kb_journal = {
+            "path": kb_relpath,
+            "old_sha256": old_kb_sha,
+            "new_sha256": new_kb_sha,
+            "backup_path": args.kb_backup,
+            "candidate_path": args.kb_candidate_path,
+            "terms_db_revision": terms_rev,
+        }
+
     new_manifest = _confined(f".deployments/{source_commit}.json")
     if new_manifest.exists() or new_manifest.is_symlink():
         if not new_manifest.is_file():
@@ -1298,6 +1688,17 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             or image.get("revision") != source_commit
             or database.get("sha256") != new_db_sha
         ):
+            raise FullUpdateError("manifest_binding_mismatch")
+        if kb_journal is not None:
+            manifest_kb = payload.get("knowledge_database")
+            if (
+                not isinstance(manifest_kb, dict)
+                or manifest_kb.get("path") != kb_journal["path"]
+                or manifest_kb.get("sha256") != kb_journal["new_sha256"]
+                or manifest_kb.get("terms_db_revision") != kb_journal["terms_db_revision"]
+            ):
+                raise FullUpdateError("manifest_binding_mismatch")
+        elif "knowledge_database" in payload:
             raise FullUpdateError("manifest_binding_mismatch")
 
     journal: dict[str, Any] = {
@@ -1330,6 +1731,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         "tool_hash": _tool_hash(),
         "updated_utc": _now_utc(),
     }
+    if kb_journal is not None:
+        journal["knowledge_db"] = kb_journal
     _validate_journal(journal)
     _write_journal_atomic(journal)
     print("full transaction journal prepared")
@@ -1347,10 +1750,25 @@ def cmd_phase(args: argparse.Namespace) -> int:
     if args.phase == "promoted":
         if _live_db_state(journal) not in ("new", "both"):
             raise FullUpdateError("promoted_db_mismatch")
+        if "knowledge_db" in journal:
+            if _live_kb_state(journal) not in ("new", "both"):
+                raise FullUpdateError("promoted_kb_mismatch")
+            kb_info = journal["knowledge_db"]
+            _verify_kb_revision_binding(
+                ROOT / "data" / "terms.db",
+                _confined(kb_info["path"]),
+                kb_info["terms_db_revision"],
+                error_code="promoted_kb_mismatch",
+            )
     elif args.phase == "published":
         manifest_path = _confined(journal["new_manifest_path"])
         if not manifest_path.is_file():
             raise FullUpdateError("manifest_binding_mismatch")
+        kb_path = (
+            _confined(journal["knowledge_db"]["path"])
+            if "knowledge_db" in journal
+            else None
+        )
         try:
             verify_manifest(
                 manifest_path,
@@ -1359,6 +1777,7 @@ def cmd_phase(args: argparse.Namespace) -> int:
                 image_digest=journal["target_image_digest"],
                 db_path=ROOT / "data" / "terms.db",
                 immutable=True,
+                kb_path=kb_path,
             )
         except ManifestError:
             raise FullUpdateError("manifest_binding_mismatch") from None
@@ -1574,6 +1993,10 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--db-backup", required=True)
     prepare.add_argument("--old-db-sha", required=True)
     prepare.add_argument("--candidate-path", required=True)
+    prepare.add_argument("--kb-path", default=None)
+    prepare.add_argument("--kb-backup", default=None)
+    prepare.add_argument("--old-kb-sha", default=None)
+    prepare.add_argument("--kb-candidate-path", default=None)
     prepare.add_argument("--old-image-id", required=True)
     prepare.add_argument("--old-api-image-id", required=True)
     prepare.add_argument("--old-ref", required=True)
@@ -1598,6 +2021,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("check")
     commands.add_parser("published")
     commands.add_parser("pointer")
+    commands.add_parser("resolve-kb")
 
     args = parser.parse_args(argv)
     global _settle_result
@@ -1621,6 +2045,7 @@ def main(argv: list[str] | None = None) -> int:
         "check": cmd_check,
         "published": cmd_published,
         "pointer": cmd_pointer,
+        "resolve-kb": cmd_resolve_kb,
     }
     try:
         return handlers[args.command](args)
