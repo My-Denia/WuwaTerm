@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -979,3 +980,253 @@ def test_zero_cost_core_inplace_upgrade_replacement_across_three_client_shapes(
         assert DOMAIN_KNOWLEDGE_HEADER in sys_text, f"client #{idx} missing KB block"
         assert "Midnight Rangers" in sys_text
         assert "Glacio" in sys_text
+
+
+def test_knowledge_query_filters_categories_before_top_k_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """40 entities sharing an alias must not crowd out the 40th entity's category."""
+    disable_llm(monkeypatch)
+    terms_db = tmp_path / "terms.db"
+    kb_path = tmp_path / "knowledge.db"
+    rev = _create_terms_db(terms_db)
+
+    entities: list[EntitySpec] = []
+    aliases: list[AliasSpec] = []
+    for idx in range(39):
+        entity_id = f"item:{idx:03d}"
+        entities.append(
+            EntitySpec(
+                entity_id,
+                "item",
+                "BinData/item.json",
+                str(idx),
+                f"共鸣核心{idx:02d}",
+                f"Resonance Core {idx:02d}",
+                "official_authoritative",
+                f"Shared alias distractor item {idx:02d}.",
+            )
+        )
+        aliases.append(
+            AliasSpec(
+                entity_id,
+                "星环共鸣",
+                "zh",
+                "shared_alias",
+                "official_authoritative",
+            )
+        )
+    # 40th entity sorts last by entity_id and trust tier, with the target category.
+    target_id = "zzz_rare_boss:999"
+    entities.append(
+        EntitySpec(
+            target_id,
+            "boss",
+            "BinData/boss.json",
+            "999",
+            "星环共鸣体",
+            "Astral Ring Resonant",
+            "community_curated",
+            "Target boss sitting past the first 39 shared-alias distractors.",
+        )
+    )
+    aliases.append(
+        AliasSpec(
+            target_id,
+            "星环共鸣",
+            "zh",
+            "shared_alias",
+            "community_curated",
+        )
+    )
+    create_knowledge_database(
+        kb_path,
+        entities=entities,
+        aliases=aliases,
+        contexts=[],
+        relations=[],
+        terms_db_revision=rev,
+        source_provenance=_test_provenance(),
+    )
+
+    settings = build_settings(tmp_path, terms_db, knowledge_db_path=kb_path)
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    _, meta_token = issue_device(store, "meta reader", [SCOPE_META])
+    app = create_app(settings, device_store=store)
+
+    # Alias-channel hit past 39 higher-ranked distractors with top_k=1.
+    resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "星环共鸣", "top_k": 1, "categories": ["boss"]},
+            headers=bearer(meta_token),
+        )
+    )
+    assert resp.status_code == 200, resp.text
+    hits = resp.json()["hits"]
+    assert len(hits) == 1
+    assert hits[0]["entity_id"] == target_id
+    assert hits[0]["entity_type"] == "boss"
+    assert hits[0]["en"] == "Astral Ring Resonant"
+    assert hits[0]["lock_eligible"] is False
+
+    # FTS5-channel gloss/surface match past 39 distractors with top_k=1.
+    fts_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "Resonant", "top_k": 1, "categories": ["boss"]},
+            headers=bearer(meta_token),
+        )
+    )
+    assert fts_resp.status_code == 200, fts_resp.text
+    fts_hits = fts_resp.json()["hits"]
+    assert len(fts_hits) == 1
+    assert fts_hits[0]["entity_id"] == target_id
+
+
+def test_missing_required_table_and_query_error_withdraw_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    disable_llm(monkeypatch)
+    terms_db = tmp_path / "terms.db"
+    rev = _create_terms_db(terms_db)
+
+    # 1. Missing required retrieval table (`kb_aliases` dropped): rejected at open/status,
+    # never advertised as knowledge-retrieval-v1, and /v1/knowledge/query returns 503.
+    broken_dir = tmp_path / "missing_table_case"
+    broken_dir.mkdir()
+    broken_kb = broken_dir / "knowledge.db"
+    _create_knowledge_db(broken_kb, terms_db_revision=rev)
+    with closing(sqlite3.connect(broken_kb)) as conn:
+        conn.execute("DROP TABLE kb_aliases")
+        conn.commit()
+
+    broken_settings = build_settings(broken_dir, terms_db, knowledge_db_path=broken_kb)
+    broken_store = DeviceStore(broken_settings.device_db_path)
+    broken_store.initialize()
+    _, broken_token = issue_device(broken_store, "meta reader", [SCOPE_META])
+    broken_app = create_app(broken_settings, device_store=broken_store)
+
+    assert broken_app.state.knowledge_runtime.status(broken_app.state.term_service).available is False
+    broken_caps = run(
+        call(broken_app, "GET", "/v1/capabilities", headers=bearer(broken_token))
+    )
+    assert broken_caps.status_code == 200
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in broken_caps.json()["capabilities"]
+
+    broken_meta = run(
+        call(
+            broken_app,
+            "GET",
+            "/v1/meta",
+            headers={**bearer(broken_token), "X-WuwaTerm-Meta-Features": "capabilities-v1"},
+        )
+    )
+    assert broken_meta.status_code == 200
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in broken_meta.json()["capabilities"]
+
+    broken_query = run(
+        call(
+            broken_app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "夜归"},
+            headers=bearer(broken_token),
+        )
+    )
+    assert broken_query.status_code == 503
+    assert broken_query.json()["error"]["code"] == ERROR_KNOWLEDGE_UNAVAILABLE
+
+    # 2. Runtime SQLite query error closes reader and withdraws knowledge-retrieval-v1
+    # until the underlying knowledge.db file changes.
+    live_dir = tmp_path / "query_error_case"
+    live_dir.mkdir()
+    live_kb = live_dir / "knowledge.db"
+    _create_knowledge_db(live_kb, terms_db_revision=rev)
+
+    live_settings = build_settings(live_dir, terms_db, knowledge_db_path=live_kb)
+    live_store = DeviceStore(live_settings.device_db_path)
+    live_store.initialize()
+    _, live_token = issue_device(live_store, "meta reader", [SCOPE_META])
+    live_app = create_app(live_settings, device_store=live_store)
+
+    # Healthy initially.
+    caps_before = run(
+        call(live_app, "GET", "/v1/capabilities", headers=bearer(live_token))
+    )
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL in caps_before.json()["capabilities"]
+
+    # Inject a persistent SQLite query failure on the cached reader.
+    cached_reader = live_app.state.knowledge_runtime._reader
+    assert cached_reader is not None
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("simulated corrupt b-tree")
+
+    monkeypatch.setattr(cached_reader, "query", _boom)
+
+    failed_query = run(
+        call(
+            live_app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "夜归"},
+            headers=bearer(live_token),
+        )
+    )
+    assert failed_query.status_code == 503
+    assert failed_query.json()["error"]["code"] == ERROR_KNOWLEDGE_UNAVAILABLE
+
+    # Capability must now be withdrawn immediately on both /v1/capabilities and opt-in /v1/meta.
+    assert live_app.state.knowledge_runtime.status(live_app.state.term_service).available is False
+    caps_after = run(
+        call(live_app, "GET", "/v1/capabilities", headers=bearer(live_token))
+    )
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps_after.json()["capabilities"]
+    meta_after = run(
+        call(
+            live_app,
+            "GET",
+            "/v1/meta",
+            headers={**bearer(live_token), "X-WuwaTerm-Meta-Features": "capabilities-v1"},
+        )
+    )
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in meta_after.json()["capabilities"]
+
+    # Replacing knowledge.db with a fresh valid file clears the failure and restores capability.
+    _create_knowledge_db(
+        live_kb,
+        terms_db_revision=rev,
+        extra_entities=(
+            EntitySpec(
+                "location:septimont",
+                "location",
+                "BinData/area.json",
+                "299",
+                "七丘",
+                "Septimont",
+                "official_authoritative",
+                "Arena city-state.",
+            ),
+        ),
+    )
+    caps_recovered = run(
+        call(live_app, "GET", "/v1/capabilities", headers=bearer(live_token))
+    )
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL in caps_recovered.json()["capabilities"]
+    recovered_query = run(
+        call(
+            live_app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "七丘"},
+            headers=bearer(live_token),
+        )
+    )
+    assert recovered_query.status_code == 200
+    assert any(hit["en"] == "Septimont" for hit in recovered_query.json()["hits"])

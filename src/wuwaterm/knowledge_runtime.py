@@ -109,6 +109,7 @@ class KnowledgeRuntime:
         self._reader_revision: str | None = None
         self._reader_stat: tuple[int, int, int, int, int] | None = None
         self._knowledge_revision: str | None = None
+        self._failed_key: tuple[str, tuple[int, int, int, int, int]] | None = None
         self._warned_key: tuple[object, ...] | None = None
 
     @property
@@ -146,6 +147,13 @@ class KnowledgeRuntime:
             self._warned_key = key
             self._logger.warning(message)
 
+    def _mark_query_failed_locked(self) -> None:
+        revision = self._reader_revision
+        stat_key = self._reader_stat
+        self._close_locked()
+        if revision is not None and stat_key is not None:
+            self._failed_key = (revision, stat_key)
+
     def _resolve_reader_locked(
         self, service: TermService
     ) -> tuple[KnowledgeBaseReader | None, KnowledgeBaseStatus]:
@@ -164,6 +172,7 @@ class KnowledgeRuntime:
             stat_key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
         except OSError:
             self._close_locked()
+            self._failed_key = None
             self._warn_once_locked(
                 ("missing", expected_revision),
                 "companion knowledge database is missing; degrading to dictionary-only mode",
@@ -172,6 +181,12 @@ class KnowledgeRuntime:
                 available=False,
                 terms_db_revision=expected_revision,
                 reason="missing",
+            )
+        if self._failed_key == (expected_revision, stat_key):
+            return None, KnowledgeBaseStatus(
+                available=False,
+                terms_db_revision=expected_revision,
+                reason="unreadable",
             )
         if (
             self._reader is not None
@@ -193,6 +208,7 @@ class KnowledgeRuntime:
             )
             kb_revision = _file_sha256(kb_path)
         except KnowledgeBaseRevisionMismatchError:
+            self._failed_key = None
             self._warn_once_locked(
                 ("revision_mismatch", expected_revision, stat_key),
                 "companion knowledge database terms_db_revision mismatch; "
@@ -209,6 +225,7 @@ class KnowledgeRuntime:
                     reader.close()
                 except Exception:
                     pass
+            self._failed_key = None
             self._warn_once_locked(
                 ("unreadable", expected_revision, stat_key),
                 "companion knowledge database could not be opened read-only; "
@@ -223,6 +240,7 @@ class KnowledgeRuntime:
         self._reader_revision = expected_revision
         self._reader_stat = stat_key
         self._knowledge_revision = kb_revision
+        self._failed_key = None
         self._warned_key = None
         return reader, KnowledgeBaseStatus(
             available=True,
@@ -271,8 +289,10 @@ class KnowledgeRuntime:
                     max_scalars=max_scalars,
                 )
             except (KnowledgeBaseError, sqlite3.Error):
+                failed_rev = self._reader_revision
+                self._mark_query_failed_locked()
                 self._warn_once_locked(
-                    ("query_error", self._reader_revision),
+                    ("query_error", failed_rev),
                     "companion knowledge database query failed; degrading to dictionary-only mode",
                 )
                 return ()
@@ -323,22 +343,19 @@ class KnowledgeRuntime:
             reader, kb_status = self._resolve_reader_locked(service)
             if reader is None or not kb_status.available or kb_status.knowledge_revision is None:
                 raise KnowledgeUnavailableError("domain knowledge base is unavailable")
-            fetch_candidates = max(top_k * 8, 32) if category_filter is not None else top_k
-            fetch_scalars = (
-                max(fetch_candidates * 240, 4800)
-                if category_filter is not None
-                else max(top_k * 240, 1200)
-            )
             try:
                 raw_hits = reader.query(
                     cleaned,
+                    categories=category_filter,
                     use_graph=True,
-                    max_candidates=fetch_candidates,
-                    max_scalars=fetch_scalars,
+                    max_candidates=top_k,
+                    max_scalars=max(top_k * 240, 1200),
                 )
             except (KnowledgeBaseError, sqlite3.Error):
+                failed_rev = self._reader_revision
+                self._mark_query_failed_locked()
                 self._warn_once_locked(
-                    ("query_error", self._reader_revision),
+                    ("query_error", failed_rev),
                     "companion knowledge database query failed; degrading to dictionary-only mode",
                 )
                 raise KnowledgeUnavailableError(

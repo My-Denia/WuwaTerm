@@ -387,12 +387,16 @@ def select_domain_knowledge_candidates(
     *,
     locked_surfaces: Collection[str] = (),
     reference_surfaces: Collection[str] = (),
+    categories: Collection[str] | None = None,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     max_scalars: int = DEFAULT_MAX_SCALARS,
 ) -> tuple[DomainKnowledgeCandidate, ...]:
     """Filter and budget-truncate domain knowledge candidates deterministically.
 
     Enforcement rules:
+    - When ``categories`` is provided, filters by ``candidate.entity_type``
+      before applying ``max_candidates`` or ``max_scalars`` truncation so
+      non-matching categories can never crowd out requested categories.
     - Rejects any candidate conflicting with ``locked_surfaces`` or
       ``reference_surfaces`` (either by normalized surface/zh/en equality or
       when every normalized occurrence in ``text`` is already covered by a
@@ -410,6 +414,11 @@ def select_domain_knowledge_candidates(
       Unicode scalars across all returned candidates.
     """
     if not text or max_candidates <= 0 or max_scalars <= 0:
+        return ()
+    allowed_categories: frozenset[str] | None = (
+        frozenset(categories) if categories is not None else None
+    )
+    if allowed_categories is not None and not allowed_categories:
         return ()
 
     norm_index = build_normalized_index(text)
@@ -437,6 +446,11 @@ def select_domain_knowledge_candidates(
     for candidate in ordered:
         if len(selected) >= max_candidates or used_scalars >= max_scalars:
             break
+        if (
+            allowed_categories is not None
+            and candidate.entity_type not in allowed_categories
+        ):
+            continue
         if candidate.entity_id in seen_entities:
             continue
 
