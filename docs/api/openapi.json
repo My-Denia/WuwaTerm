@@ -170,6 +170,215 @@
         "title": "HealthResponseBody",
         "type": "object"
       },
+      "KnowledgeErrorDetailBody": {
+        "properties": {
+          "code": {
+            "description": "Enumerated failure classification for /v1/knowledge/query.",
+            "enum": [
+              "unauthorized",
+              "forbidden",
+              "rate_limited",
+              "payload_too_large",
+              "invalid_request",
+              "input_too_long",
+              "llm_unavailable",
+              "llm_budget_exhausted",
+              "knowledge_unavailable",
+              "internal"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Short operator-facing text.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "KnowledgeErrorDetailBody",
+        "type": "object"
+      },
+      "KnowledgeErrorResponseBody": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/KnowledgeErrorDetailBody"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "title": "KnowledgeErrorResponseBody",
+        "type": "object"
+      },
+      "KnowledgeHitBody": {
+        "additionalProperties": false,
+        "properties": {
+          "context_gloss": {
+            "title": "Context Gloss",
+            "type": "string"
+          },
+          "en": {
+            "title": "En",
+            "type": "string"
+          },
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "lock_eligible": {
+            "const": false,
+            "default": false,
+            "title": "Lock Eligible",
+            "type": "boolean"
+          },
+          "retrieval_channel": {
+            "enum": [
+              "lexical_alias",
+              "short_ngram",
+              "fts5_trigram",
+              "dense_semantic",
+              "graph_neighbor"
+            ],
+            "title": "Retrieval Channel",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "source_surface": {
+            "title": "Source Surface",
+            "type": "string"
+          },
+          "trust_tier": {
+            "enum": [
+              "official_authoritative",
+              "official_derived",
+              "community_curated"
+            ],
+            "title": "Trust Tier",
+            "type": "string"
+          },
+          "zh": {
+            "title": "Zh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "source_surface",
+          "zh",
+          "en",
+          "entity_type",
+          "trust_tier",
+          "retrieval_channel",
+          "score",
+          "context_gloss"
+        ],
+        "title": "KnowledgeHitBody",
+        "type": "object"
+      },
+      "KnowledgeQueryRequestBody": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional list of entity_type categories to restrict hits to.",
+            "title": "Categories"
+          },
+          "mode": {
+            "default": "lexical",
+            "description": "Retrieval mode (`lexical`, or `hybrid` when `hybrid-rag-v1` is advertised).",
+            "enum": [
+              "lexical",
+              "hybrid"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "query": {
+            "description": "Plain-text query for read-only domain knowledge retrieval (1..500 characters).",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "top_k": {
+            "default": 5,
+            "description": "Maximum number of soft background candidates to return (1..10).",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "KnowledgeQueryRequestBody",
+        "type": "object"
+      },
+      "KnowledgeQueryResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeHitBody"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "knowledge_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Knowledge Revision",
+            "type": "string"
+          },
+          "mode_used": {
+            "enum": [
+              "lexical",
+              "hybrid"
+            ],
+            "title": "Mode Used",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "knowledge_revision",
+          "mode_used",
+          "hits"
+        ],
+        "title": "KnowledgeQueryResponseBody",
+        "type": "object"
+      },
       "MetaResponseBody": {
         "properties": {
           "api_version": {
@@ -1784,15 +1993,22 @@
             "type": "array"
           },
           "retrieval_mode": {
-            "default": "off",
-            "description": "Reserved domain knowledge retrieval mode (`off`, `lexical`, or `hybrid`). Non-`off` values require the corresponding server capability.",
-            "enum": [
-              "off",
-              "lexical",
-              "hybrid"
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "off",
+                  "lexical",
+                  "hybrid"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Retrieval Mode",
-            "type": "string"
+            "description": "Optional domain knowledge retrieval mode (`auto`, `off`, `lexical`, or `hybrid`). Omitted or null defaults to `auto`, using a mounted and revision-matched companion knowledge database when available. Explicit `lexical` or `hybrid` values require the corresponding server capability.",
+            "title": "Retrieval Mode"
           }
         },
         "title": "TranslationContextBody",
@@ -2560,6 +2776,133 @@
         "summary": "Read Dictionary",
         "tags": [
           "dictionary"
+        ]
+      }
+    },
+    "/v1/knowledge/query": {
+      "post": {
+        "description": "Read-only companion domain knowledge retrieval (`knowledge-retrieval-v1`).\n\nRequires the `meta` scope. Every returned hit is soft background context\n(`lock_eligible: false`) and never creates a mandatory term lock. Returns\n`503 knowledge_unavailable` when no revision-matched companion\n`knowledge.db` is active, and `400 invalid_request` if `mode: \"hybrid\"`\nis requested when `hybrid-rag-v1` is not enabled.",
+        "operationId": "create_knowledge_query_v1_knowledge_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeQueryRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeQueryResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeErrorResponseBody"
+                }
+              }
+            },
+            "description": "The companion knowledge base is unavailable (`knowledge_unavailable`) or a credential-store dependency is temporarily unavailable (`internal`). Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Knowledge Query",
+        "tags": [
+          "knowledge"
         ]
       }
     },

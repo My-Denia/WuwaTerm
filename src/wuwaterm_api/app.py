@@ -47,6 +47,7 @@ from wuwaterm.application import (
     CAPABILITY_KNOWLEDGE_RETRIEVAL,
     ERROR_FORBIDDEN,
     ERROR_INPUT_TOO_LONG,
+    ERROR_KNOWLEDGE_UNAVAILABLE,
     ERROR_LLM_UNAVAILABLE,
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
@@ -87,6 +88,7 @@ from wuwaterm.application import (
     STRUCTURE_CHECKS,
     STRUCTURE_RULES,
     ContextBefore,
+    KnowledgeUnavailableError,
     LLMFailureDiagnostic,
     LlmCallBudget,
     Precedent,
@@ -100,6 +102,7 @@ from wuwaterm.application import (
     StructureCheckSegment,
     StructureSpan,
     TranslationJob,
+    build_knowledge_runtime,
     build_term_service,
     build_translator,
     check_structure,
@@ -108,6 +111,7 @@ from wuwaterm.application import (
     lookup_terms,
     probe_database,
     project_review_report,
+    query_domain_knowledge,
     review_pair,
     semantic_review_async,
     service_capabilities,
@@ -908,11 +912,13 @@ class TranslationContextBody(BaseModel):
         max_length=SEMANTIC_MAX_PRECEDENTS,
         description="Human choices made elsewhere in the same manuscript.",
     )
-    retrieval_mode: Literal[KNOWLEDGE_RETRIEVAL_MODES] = Field(  # type: ignore[valid-type]
-        default="off",
+    retrieval_mode: Literal[KNOWLEDGE_RETRIEVAL_MODES] | None = Field(  # type: ignore[valid-type]
+        default=None,
         description=(
-            "Reserved domain knowledge retrieval mode (`off`, `lexical`, or "
-            "`hybrid`). Non-`off` values require the corresponding server capability."
+            "Optional domain knowledge retrieval mode (`auto`, `off`, `lexical`, or "
+            "`hybrid`). Omitted or null defaults to `auto`, using a mounted and "
+            "revision-matched companion knowledge database when available. Explicit "
+            "`lexical` or `hybrid` values require the corresponding server capability."
         ),
     )
 
@@ -954,8 +960,84 @@ def _translation_context(body: TranslationContextBody | None) -> TranslationCont
     return TranslationContext(
         before=before,
         precedents=_precedents(body.precedents),
-        retrieval_mode=body.retrieval_mode,
+        retrieval_mode=body.retrieval_mode or "auto",
     )
+
+
+# --------------------------------------------------------------------------
+# Domain knowledge query (knowledge-retrieval-v1, read-only)
+# --------------------------------------------------------------------------
+
+KnowledgeTrustTier = Literal[
+    "official_authoritative",
+    "official_derived",
+    "community_curated",
+]
+KnowledgeRetrievalChannel = Literal[
+    "lexical_alias",
+    "short_ngram",
+    "fts5_trigram",
+    "dense_semantic",
+    "graph_neighbor",
+]
+
+
+class KnowledgeQueryRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Plain-text query for read-only domain knowledge retrieval (1..500 characters).",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Maximum number of soft background candidates to return (1..10).",
+    )
+    mode: Literal["lexical", "hybrid"] = Field(
+        default="lexical",
+        description="Retrieval mode (`lexical`, or `hybrid` when `hybrid-rag-v1` is advertised).",
+    )
+    categories: list[str] | None = Field(
+        default=None,
+        max_length=32,
+        description="Optional list of entity_type categories to restrict hits to.",
+    )
+
+    @model_validator(mode="after")
+    def validate_query_payload(self) -> "KnowledgeQueryRequestBody":
+        if not self.query.strip():
+            raise ValueError("query must not be blank")
+        if _has_isolated_surrogate(self.query):
+            raise ValueError("query contains an isolated surrogate")
+        if self.categories is not None:
+            for item in self.categories:
+                if not item.strip() or _has_isolated_surrogate(item):
+                    raise ValueError("categories contains an invalid entry")
+        return self
+
+
+class KnowledgeHitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entity_id: str
+    source_surface: str
+    zh: str
+    en: str
+    entity_type: str
+    trust_tier: KnowledgeTrustTier
+    retrieval_channel: KnowledgeRetrievalChannel
+    score: float
+    context_gloss: str
+    lock_eligible: Literal[False] = False
+
+
+class KnowledgeQueryResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    knowledge_revision: str = Field(pattern=_HEX64_PATTERN)
+    mode_used: Literal["lexical", "hybrid"]
+    hits: list[KnowledgeHitBody]
 
 
 class SemanticReviewRequestBody(BaseModel):
@@ -1204,6 +1286,32 @@ class ErrorResponseBody(BaseModel):
     request_id: str
 
 
+KnowledgeErrorCode = Literal[
+    "unauthorized",
+    "forbidden",
+    "rate_limited",
+    "payload_too_large",
+    "invalid_request",
+    "input_too_long",
+    "llm_unavailable",
+    "llm_budget_exhausted",
+    "knowledge_unavailable",
+    "internal",
+]
+
+
+class KnowledgeErrorDetailBody(BaseModel):
+    code: KnowledgeErrorCode = Field(
+        description="Enumerated failure classification for /v1/knowledge/query."
+    )
+    message: str = Field(description="Short operator-facing text.")
+
+
+class KnowledgeErrorResponseBody(BaseModel):
+    error: KnowledgeErrorDetailBody
+    request_id: str
+
+
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorResponseBody, "description": "Invalid request"},
     401: {"model": ErrorResponseBody, "description": "Missing or invalid credential"},
@@ -1228,6 +1336,18 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
             "Request exceeded the server time budget. Classified as `internal`:"
             " the enumerated code set is closed, so the HTTP status is what"
             " distinguishes a timeout from a genuine 500."
+        ),
+    },
+}
+
+KNOWLEDGE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **ERROR_RESPONSES,
+    503: {
+        "model": KnowledgeErrorResponseBody,
+        "description": (
+            "The companion knowledge base is unavailable (`knowledge_unavailable`) "
+            "or a credential-store dependency is temporarily unavailable (`internal`). "
+            "Retryable."
         ),
     },
 }
@@ -2296,16 +2416,21 @@ def create_app(
                 if closer is not None:
                     await closer()
             finally:
-                term_closer = getattr(app.state.term_service, "close", None)
+                kb_closer = getattr(app.state.knowledge_runtime, "close", None)
                 try:
-                    if term_closer is not None:
-                        term_closer()
+                    if kb_closer is not None:
+                        kb_closer()
                 finally:
-                    # Drop anything still queued and join the workers that already
-                    # started, off the loop so the shutdown does not block it.
-                    await asyncio.to_thread(
-                        app.state.auth_pool.shutdown, True, cancel_futures=True
-                    )
+                    term_closer = getattr(app.state.term_service, "close", None)
+                    try:
+                        if term_closer is not None:
+                            term_closer()
+                    finally:
+                        # Drop anything still queued and join the workers that already
+                        # started, off the loop so the shutdown does not block it.
+                        await asyncio.to_thread(
+                            app.state.auth_pool.shutdown, True, cancel_futures=True
+                        )
 
     app = FastAPI(
         title="wuwaterm API",
@@ -2329,7 +2454,20 @@ def create_app(
         timeout=resolved.llm_timeout_seconds,
         max_concurrency=resolved.llm_max_concurrency,
         en_zh_protocol=True,
+        knowledge_db_path=resolved.knowledge_db_path,
     )
+    resolved_kb_path = (
+        resolved.knowledge_db_path
+        if resolved.knowledge_db_path is not None
+        else getattr(app.state.translator, "knowledge_db_path", None)
+    )
+    app.state.knowledge_runtime = build_knowledge_runtime(
+        resolved_kb_path, logger=LOGGER
+    )
+    if resolved_kb_path is not None:
+        # Validate once at startup so missing or revision-mismatched files log a
+        # sanitized warning immediately and degrade safely without blocking serve.
+        app.state.knowledge_runtime.status(app.state.term_service)
     app.state.rate_limiter = SlidingWindowRateLimiter(
         limit=resolved.rate_limit_per_minute
     )
@@ -2468,6 +2606,14 @@ def _register_error_handlers(app: FastAPI) -> None:
         )
 
 
+def _current_capabilities(app: FastAPI) -> tuple[str, ...]:
+    kb_status = app.state.knowledge_runtime.status(app.state.term_service)
+    return service_capabilities(
+        knowledge_retrieval_available=kb_status.available,
+        hybrid_rag_available=False,
+    )
+
+
 def _register_routes(app: FastAPI) -> None:
     prefix = f"/{API_VERSION}"
 
@@ -2541,10 +2687,13 @@ def _register_routes(app: FastAPI) -> None:
         """Translate plain text or protected visible segments through the shared pipeline."""
         state = request.app.state
         forced_to_chinese = None if body.to is None else body.to == "zh"
-        if body.context is not None and body.context.retrieval_mode != "off":
-            caps = service_capabilities()
+        requested_retrieval_mode = (
+            body.context.retrieval_mode if body.context is not None else None
+        )
+        if requested_retrieval_mode in ("lexical", "hybrid"):
+            caps = await asyncio.to_thread(_current_capabilities, request.app)
             if (
-                body.context.retrieval_mode == "lexical"
+                requested_retrieval_mode == "lexical"
                 and CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps
             ):
                 raise ApiError(
@@ -2552,7 +2701,7 @@ def _register_routes(app: FastAPI) -> None:
                     f"{CAPABILITY_KNOWLEDGE_RETRIEVAL} capability is not enabled",
                 )
             if (
-                body.context.retrieval_mode == "hybrid"
+                requested_retrieval_mode == "hybrid"
                 and (
                     CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps
                     or CAPABILITY_HYBRID_RAG not in caps
@@ -2758,8 +2907,9 @@ def _register_routes(app: FastAPI) -> None:
         }
         headers: dict[str, str] = {PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION}
         if META_FEATURE_CAPABILITIES in features:
+            caps = await asyncio.to_thread(_current_capabilities, request.app)
             payload["protocol_version"] = int(PROTOCOL_VERSION)
-            payload["capabilities"] = list(service_capabilities())
+            payload["capabilities"] = list(caps)
             payload["limits"] = {
                 "translation_max_chars": LLM_INPUT_CHAR_LIMIT,
                 "long_text_max_chars": request.app.state.settings.long_text_input_limit,
@@ -2906,13 +3056,83 @@ def _register_routes(app: FastAPI) -> None:
         this path answers 404, which a client treats as no optional
         capabilities. `/v1/meta` is unchanged.
         """
+        caps = await asyncio.to_thread(_current_capabilities, request.app)
         return JSONResponse(
             content={
                 "api_version": API_VERSION,
-                "capabilities": list(service_capabilities()),
+                "capabilities": list(caps),
                 "request_id": _request_id(request),
             },
             headers={PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION},
+        )
+
+    @app.post(
+        f"{prefix}/knowledge/query",
+        response_model=KnowledgeQueryResponseBody,
+        tags=["knowledge"],
+        responses=KNOWLEDGE_ERROR_RESPONSES,
+    )
+    async def create_knowledge_query(
+        request: Request,
+        body: KnowledgeQueryRequestBody,
+        device: Annotated[Device, Depends(require_scope(SCOPE_META))],
+    ) -> KnowledgeQueryResponseBody:
+        """Read-only companion domain knowledge retrieval (`knowledge-retrieval-v1`).
+
+        Requires the `meta` scope. Every returned hit is soft background context
+        (`lock_eligible: false`) and never creates a mandatory term lock. Returns
+        `503 knowledge_unavailable` when no revision-matched companion
+        `knowledge.db` is active, and `400 invalid_request` if `mode: "hybrid"`
+        is requested when `hybrid-rag-v1` is not enabled.
+        """
+        if body.mode == "hybrid":
+            raise ApiError(
+                ERROR_INVALID_REQUEST,
+                f"{CAPABILITY_HYBRID_RAG} capability is not enabled",
+            )
+        await _require_active_device(request, device)
+        try:
+            result = await asyncio.to_thread(
+                query_domain_knowledge,
+                request.app.state.term_service,
+                request.app.state.knowledge_runtime,
+                body.query,
+                top_k=body.top_k,
+                mode=body.mode,
+                categories=body.categories,
+                hybrid_rag_available=False,
+            )
+        except KnowledgeUnavailableError:
+            raise ApiError(ERROR_KNOWLEDGE_UNAVAILABLE)
+        except ValueError as exc:
+            raise ApiError(ERROR_INVALID_REQUEST, str(exc))
+        LOGGER.info(
+            "knowledge query device=%s mode=%s hits=%s request_id=%s",
+            redact_id(device.device_id),
+            result.mode_used,
+            len(result.hits),
+            _request_id(request),
+        )
+        await _require_active_device(request, device, serve_on_store_error=True)
+        return KnowledgeQueryResponseBody(
+            request_id=_request_id(request),
+            knowledge_revision=result.knowledge_revision,
+            mode_used=result.mode_used,
+            hits=[
+                KnowledgeHitBody(
+                    entity_id=item.entity_id,
+                    source_surface=item.source_surface,
+                    zh=item.zh,
+                    en=item.en,
+                    entity_type=item.entity_type,
+                    trust_tier=item.trust_tier,
+                    retrieval_channel=item.retrieval_channel,
+                    score=item.score,
+                    context_gloss=item.context_gloss,
+                    lock_eligible=False,
+                )
+                for item in result.hits
+            ],
         )
 
     @app.post(
