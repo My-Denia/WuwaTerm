@@ -259,6 +259,28 @@ differs from the previous record, so run the refresh again after fixing the
 cause. If the command was interrupted, run `recover --transaction-id <id>`
 with the ID that `inspect` reports, then run the refresh again.
 
+### Companion `knowledge.db` check on `product-update.sh full-update`
+
+When an adopted host runs `deploy/product-update.sh --root <root> full-update --candidate-db <candidate>`
+with an installed `wuwaterm-api` container whose live environment sets
+`WUWATERM_API_KNOWLEDGE_DB_PATH`, preparation inspects the mapped host companion
+database before writing any transaction journal or stopping containers:
+
+- If `WUWATERM_API_KNOWLEDGE_DB_PATH` is unset or empty (single-DB deployment),
+  the check is a no-op and existing behaviour is unchanged.
+- If the companion `knowledge.db` exists as a regular file without symlinks or
+  SQLite sidecars and its `terms_db_revision` matches the candidate `terms.db`,
+  preparation proceeds normally.
+- If the companion `knowledge.db` is missing, unreadable, unmappable, or its
+  `terms_db_revision` does not match the candidate `terms.db`, preparation fails
+  closed before creating a journal (and discards its owned candidate copy). Two
+  exits are supported on an adopted host:
+  1. Build and place a matching `knowledge.db` first with
+     `wuwaterm build-kb --terms-db <candidate>` and re-run `full-update`, or
+  2. Pass `--allow-knowledge-degrade` to `full-update` to print a warning and
+     proceed; `wuwaterm-api` then degrades safely to dictionary-only mode until
+     a matching `knowledge.db` is installed.
+
 ## HTTP Adapter Service
 
 `wuwaterm-api` serves the versioned HTTP surface documented by

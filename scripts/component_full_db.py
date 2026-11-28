@@ -28,6 +28,10 @@ class FullDatabaseError(RuntimeError):
     """A DB preimage or owned copy could not be safely established."""
 
 
+class CompanionKnowledgeError(FullDatabaseError):
+    """Companion knowledge.db is incompatible with the candidate terms.db."""
+
+
 # One owned copy is staged under this prefix and published by rename, so a
 # refused preparation can name exactly its own leftovers.
 _COPY_PREFIX = ".component-full-copy-"
@@ -558,3 +562,131 @@ def prepare_stage(root: Path, candidate: dict[str, Any], live_path: Path, transa
         raise
     except (manifest.ManifestError, OSError, KeyError, TypeError, ValueError) as exc:
         raise FullDatabaseError("database promotion stage could not be prepared") from exc
+
+
+def _extract_env_value(raw_env: Any, key: str) -> str | None:
+    """Read one key from Docker's ``Config.Env`` list without exposing other entries."""
+    if raw_env is None:
+        return None
+    if type(raw_env) is not list:
+        raise ValueError("container environment is invalid")
+    found: str | None = None
+    for entry in raw_env:
+        if type(entry) is not str or "=" not in entry:
+            raise ValueError("container environment is invalid")
+        name, val = entry.split("=", 1)
+        if name == key:
+            found = val
+    return found
+
+
+def verify_companion_knowledge_compatibility(
+    actual: dict[str, Any],
+    candidate_path: Path,
+    *,
+    allow_degrade: bool = False,
+    container_env: list[str] | None = None,
+) -> None:
+    """Verify companion ``knowledge.db`` against the candidate ``terms.db`` before mutation.
+
+    Reads ``WUWATERM_API_KNOWLEDGE_DB_PATH`` from the observed API container's real
+    environment (``observe._inspect(...)["Config"]["Env"]``). Single-DB deployments
+    (unset or empty) return immediately without touching disk. When configured, maps
+    the container path via ``component_observe.resolve_bind_path`` and checks that the
+    companion database is a regular file with no sidecars/symlinks whose recorded
+    ``terms_db_revision`` matches ``candidate_path``.
+    """
+    import posixpath  # noqa: PLC0415
+    import component_observe as observe  # noqa: PLC0415
+
+    src_dir = str(CODE_ROOT / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    repo_root = str(CODE_ROOT)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    import deployment_manifest  # noqa: PLC0415
+    from wuwaterm.knowledge_db import KnowledgeBaseError, compute_terms_db_revision  # noqa: PLC0415
+
+    def _handle_incompatibility(reason: str) -> None:
+        if allow_degrade:
+            print(
+                f"component full-update: warning: companion knowledge.db check failed ({reason}); "
+                "continuing because --allow-knowledge-degrade was passed "
+                "(wuwaterm-api will degrade safely to dictionary-only mode until a matching "
+                "knowledge.db is installed).",
+                file=sys.stderr,
+            )
+            return
+        raise CompanionKnowledgeError(
+            f"companion knowledge.db is incompatible with the candidate terms.db ({reason}); "
+            "either (1) build and place a matching knowledge.db first with "
+            "`wuwaterm build-kb --terms-db <candidate>` and re-run `full-update`, or "
+            "(2) pass `--allow-knowledge-degrade` to proceed with dictionary-only degradation"
+        )
+
+    raw_env = (
+        container_env
+        if container_env is not None
+        else observe._inspect(actual["container"]["id"])["Config"].get("Env")
+    )
+    raw_kb_path = _extract_env_value(raw_env, "WUWATERM_API_KNOWLEDGE_DB_PATH")
+    if raw_kb_path is None or not raw_kb_path.strip():
+        return
+
+    kb_container_path = raw_kb_path.strip()
+    if (
+        len(kb_container_path) > 4096
+        or "\\" in kb_container_path
+        or kb_container_path.startswith("~")
+        or any(part in (".", "..") for part in kb_container_path.split("/"))
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in kb_container_path)
+    ):
+        _handle_incompatibility("configured WUWATERM_API_KNOWLEDGE_DB_PATH is invalid")
+        return
+
+    if not kb_container_path.startswith("/"):
+        working_dir = actual["recipe"].get("working_dir") or "/"
+        kb_container_path = posixpath.normpath(posixpath.join(working_dir, kb_container_path))
+
+    try:
+        kb_host_str = observe.resolve_bind_path(
+            actual["recipe"], kb_container_path, writable=False
+        )
+    except observe.ObservationError:
+        _handle_incompatibility(
+            "configured WUWATERM_API_KNOWLEDGE_DB_PATH cannot be mapped to a host bind path"
+        )
+        return
+
+    kb_host_path = Path(kb_host_str)
+    try:
+        kb_revision = deployment_manifest.read_kb_terms_db_revision(
+            kb_host_path, immutable=True
+        )
+    except deployment_manifest.ManifestError as exc:
+        detail = str(exc)
+        if "missing" in detail:
+            reason = "companion knowledge.db file is missing"
+        elif "symlink" in detail:
+            reason = "companion knowledge.db must not be a symlink"
+        elif "sidecar" in detail:
+            reason = "companion knowledge.db has SQLite sidecar files"
+        elif "schema version" in detail:
+            reason = "companion knowledge.db schema version mismatch"
+        else:
+            reason = "companion knowledge.db is unreadable or corrupt"
+        _handle_incompatibility(reason)
+        return
+
+    try:
+        candidate_revision = compute_terms_db_revision(candidate_path, immutable=True)
+    except (KnowledgeBaseError, OSError) as exc:
+        raise FullDatabaseError("candidate terms.db revision cannot be computed") from exc
+
+    if kb_revision != candidate_revision:
+        _handle_incompatibility(
+            f"terms_db_revision mismatch "
+            f"(knowledge.db={kb_revision[:12]}, candidate={candidate_revision[:12]})"
+        )

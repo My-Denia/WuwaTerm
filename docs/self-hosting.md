@@ -187,7 +187,17 @@ What it does, in this order:
 3. Pulls the official GHCR images for the declared version unless
    `--build-local` is given, and builds `data/terms.db` when it is missing:
    `refresh-data` → `build-db --atomic` on a candidate → `verify-db` → promote.
-   An existing database is kept untouched.
+   An existing `data/terms.db` is kept untouched. When `.env` explicitly sets
+   `WUWATERM_API_KNOWLEDGE_DB_PATH` (under `/app/data/...` or `data/...`),
+   `setup.sh` runs a second idempotent stage: if the target companion file
+   already exists, it verifies it against `data/terms.db` via
+   `wuwaterm-builder verify-kb` and reuses it on pass; if it is missing or
+   fails verification (for example after a `terms.db` revision change), it
+   refreshes `data/wutheringdata` if absent, builds `/app/data/knowledge.candidate.db`
+   with `build-kb --atomic`, verifies it with `verify-kb`, and atomically moves
+   it into place. Leaving `WUWATERM_API_KNOWLEDGE_DB_PATH` unset or explicitly
+   empty (`WUWATERM_API_KNOWLEDGE_DB_PATH=`) skips this stage completely, even
+   if a leftover `data/knowledge.db` exists on disk.
 4. Starts `wuwaterm-api`, waits for `/readyz`, and issues one
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
@@ -201,6 +211,7 @@ What it does, in this order:
    `--telegram-package`, it issues a dedicated `telegram` device token
    (`state-telegram/device.token`, mode `0600`), writes
    `state-telegram/telegram.env` (mode `0600`) with
+   `WUWATERM_CORE_MODE=http`,
    `WUWATERM_CORE_API_URL=http://127.0.0.1:<api_port>`,
    `WUWATERM_CORE_API_TOKEN` and `TELEGRAM_BOT_TOKEN`, verifies the release
    `image.oci.tar` against `SHA256SUMS` (and `contracts/products.json`, or a
@@ -423,7 +434,7 @@ copies overlapping keys from `.env` here when preparing a standalone checkout;
 | variable | why it matters |
 | --- | --- |
 | `WUWATERM_DB_PATH` | The terminology database the service reads. Default `data/terms.db`. |
-| `WUWATERM_API_KNOWLEDGE_DB_PATH` | Optional companion read-only entity knowledge database bound to `terms.db`'s revision (enables `knowledge-retrieval-v1` and `POST /v1/knowledge/query`). Leave empty or commented out to run dictionary-only mode; missing or revision-mismatched files degrade safely without blocking API startup. Under Compose, point at the read-only `/app/data` mount (for example `/app/data/knowledge.db`). |
+| `WUWATERM_API_KNOWLEDGE_DB_PATH` | Optional companion read-only entity knowledge database bound to `terms.db`'s revision (enables `knowledge-retrieval-v1` and `POST /v1/knowledge/query`). Leave empty or commented out to run dictionary-only mode; missing or revision-mismatched files degrade safely without blocking API startup. Under Compose, point at the read-only `/app/data` mount (for example `/app/data/knowledge.db`); when configured in `.env`, `deploy/setup.sh` automatically verifies or builds and promotes the companion database against `data/terms.db`. |
 | `WUWATERM_API_PORT` | The loopback port. Default `8788`. Under Compose the bind address itself is fixed in the Compose file and is deliberately not an environment knob. |
 | `WUWATERM_API_STATE_DIR` | Where the device credential store (`devices.db`) lives. Default `state-api`, kept separate from any legacy or standalone Telegram `state/` directory. |
 | `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS` defaults to `90` s, leaving headroom above Core's `45` s LLM and `75` s semantic timeouts while Web BFF and Windows clients default to `100` s; see [timeout ladder](privacy-and-llm.md#llm-configuration)). They are per process and not shared with standalone `WuwaTerm-Telegram`; if both share one upstream LLM account, the worst case is the sum of the processes. |
