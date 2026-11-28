@@ -96,13 +96,14 @@ In scope:
 
 - The code in this repository: the protocol-neutral Core library/CLI, the HTTP
   API under `/v1`, the data-build scripts, and the packaging and deployment
-  material under `deploy/`. The independent
-  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram),
-  [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web), and
-  [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) repositories
-  maintain their own source and security reporting guidance (the legacy inline
-  Telegram bot and in-process Python Web UI were retired from Core after
-  `v0.16.0`).
+  material under `deploy/`. [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web)
+  maintains its own `SECURITY.md` and security reporting guidance; until
+  [WuwaTerm-Telegram](https://github.com/My-Denia/WuwaTerm-Telegram) and
+  [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows) publish their
+  own private vulnerability reporting policies, report security vulnerabilities
+  in those products through this repository's private advisory form above (the
+  legacy inline Telegram bot and in-process Python Web UI were retired from Core
+  after `v0.16.0`).
 - The deployment guidance this project publishes, when following it as written
   leaves an instance exposed. A wrong instruction is a defect worth reporting.
 
