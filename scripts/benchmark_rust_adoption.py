@@ -169,6 +169,14 @@ def _resolve_pyo3_so() -> Path | None:
     return None
 
 
+_SUBPROCESS_RSS_EXPR = (
+    "(next((int(l.split()[1]) / 1024.0 for l in p.read_text().splitlines() "
+    "if l.startswith('VmRSS:')), None) if p.is_file() else None) "
+    "or (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / "
+    "(1024.0 * 1024.0 if sys.platform == 'darwin' else 1024.0))"
+)
+
+
 def _measure_python_cold_import(stmt: str, *, runs: int) -> dict[str, float]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(SRC_DIR)
@@ -178,11 +186,8 @@ def _measure_python_cold_import(stmt: str, *, runs: int) -> dict[str, float]:
         "t0 = time.perf_counter(); "
         f"{stmt}; "
         "dt = (time.perf_counter() - t0) * 1000.0; "
-        "rss = 0.0; "
         "p = Path('/proc/self/status'); "
-        "rss = next((int(l.split()[1])/1024.0 for l in p.read_text().splitlines() if l.startswith('VmRSS:')), "
-        "resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0) if p.is_file() else "
-        "resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0; "
+        f"rss = {_SUBPROCESS_RSS_EXPR}; "
         "print(json.dumps({'ms': dt, 'rss_mib': rss}))"
     )
     times: list[float] = []
@@ -202,6 +207,93 @@ def _measure_python_cold_import(stmt: str, *, runs: int) -> dict[str, float]:
         "median_ms": round(statistics.median(times), 3),
         "p95_ms": round(_percentile(sorted(times), 0.95), 3),
         "rss_mib": round(statistics.median(rss_vals), 2),
+    }
+
+
+def _measure_isolated_ac_build(
+    mode: str,
+    *,
+    db_path: Path | None,
+    runs: int,
+) -> dict[str, Any]:
+    """Measure AC build time and RSS delta in a clean subprocess without MultiText heap churn."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC_DIR)
+    if db_path is not None and db_path.is_file():
+        setup_stmt = (
+            "from wuwaterm.lookup import TermService; "
+            "from wuwaterm.term_matching import exact_lockable_sources; "
+            f"lockable = exact_lockable_sources(TermService({str(db_path)!r}).entries()); "
+            "surfaces = [s for s, _ in lockable]"
+        )
+    else:
+        setup_stmt = (
+            "import sys; "
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+            "from benchmark_rust_adoption import _synthetic_surfaces; "
+            "lockable = _synthetic_surfaces(2000); "
+            "surfaces = [s for s, _ in lockable]"
+        )
+
+    if mode == "python_only":
+        build_stmt = (
+            "from wuwaterm.term_matching import TermSpanMatcher; "
+            "_m = TermSpanMatcher.build(lockable, include_plural=False)"
+        )
+    elif mode == "native_only":
+        build_stmt = (
+            "from wuwaterm import native_kernel; "
+            "assert native_kernel.native_kernel_available(); "
+            "_s = native_kernel.TermScanner(surfaces, prefer_native=True)"
+        )
+    elif mode == "coexisting_both":
+        build_stmt = (
+            "from wuwaterm import native_kernel; "
+            "from wuwaterm.term_matching import TermSpanMatcher; "
+            "assert native_kernel.native_kernel_available(); "
+            "_m = TermSpanMatcher.build(lockable, include_plural=False); "
+            "_s = native_kernel.TermScanner(surfaces, prefer_native=True)"
+        )
+    else:
+        raise ValueError(f"unsupported AC build mode: {mode}")
+
+    code = (
+        "import json, resource, sys, time; "
+        "from pathlib import Path; "
+        f"{setup_stmt}; "
+        "p = Path('/proc/self/status'); "
+        f"rss_before = {_SUBPROCESS_RSS_EXPR}; "
+        "t0 = time.perf_counter(); "
+        f"{build_stmt}; "
+        "dt = (time.perf_counter() - t0) * 1000.0; "
+        f"rss_after = {_SUBPROCESS_RSS_EXPR}; "
+        "print(json.dumps({'ms': dt, 'rss_before_mib': rss_before, "
+        "'rss_after_mib': rss_after, 'rss_delta_mib': max(0.0, rss_after - rss_before)}))"
+    )
+    times: list[float] = []
+    before_vals: list[float] = []
+    after_vals: list[float] = []
+    delta_vals: list[float] = []
+    for _ in range(runs):
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(proc.stdout.strip())
+        times.append(float(payload["ms"]))
+        before_vals.append(float(payload["rss_before_mib"]))
+        after_vals.append(float(payload["rss_after_mib"]))
+        delta_vals.append(float(payload["rss_delta_mib"]))
+    return {
+        "available": True,
+        "isolated_subprocess": True,
+        "build_ms": round(statistics.median(times), 3),
+        "rss_before_mib": round(statistics.median(before_vals), 2),
+        "rss_after_mib": round(statistics.median(after_vals), 2),
+        "rss_delta_mib": round(statistics.median(delta_vals), 2),
     }
 
 
@@ -712,26 +804,39 @@ def run_benchmark(
     else:
         pyo3_cold = {"available": False, "reason": "_wuwaterm_text_kernel not installed"}
 
-    rss_before_py_ac = _current_rss_mib()
-    t0 = time.perf_counter()
-    py_matcher = TermSpanMatcher.build(lockable, include_plural=False)
-    py_ac_build_ms = round((time.perf_counter() - t0) * 1000.0, 3)
-    py_ac_rss_delta = round(max(0.0, _current_rss_mib() - rss_before_py_ac), 2)
+    db_path = resolved_data / "cjk-census-3.7.db" if resolved_data is not None else None
+    ac_build_runs = 2 if quick else 3
+    py_ac_isolated = _measure_isolated_ac_build(
+        "python_only", db_path=db_path, runs=ac_build_runs
+    )
+    py_ac_build_ms = float(py_ac_isolated["build_ms"])
+    py_ac_rss_delta = float(py_ac_isolated["rss_delta_mib"])
 
+    py_matcher = TermSpanMatcher.build(lockable, include_plural=False)
     py_scanner = native_kernel.TermScanner(surfaces, prefer_native=False)
 
     native_scanner: native_kernel.TermScanner | None = None
     native_matcher: _NativeBackedSpanMatcher | None = None
+    native_ac_isolated: dict[str, Any] = {
+        "available": False,
+        "reason": "_wuwaterm_text_kernel not installed",
+    }
+    coexisting_ac_isolated: dict[str, Any] = {
+        "available": False,
+        "reason": "_wuwaterm_text_kernel not installed",
+    }
     native_ac_build_ms: float | None = None
     native_ac_rss_delta: float | None = None
     if native_available:
-        rss_before_nat_ac = _current_rss_mib()
-        t0 = time.perf_counter()
-        native_scanner = native_kernel.TermScanner(surfaces, prefer_native=True)
-        native_ac_build_ms = round((time.perf_counter() - t0) * 1000.0, 3)
-        native_ac_rss_delta = round(
-            max(0.0, _current_rss_mib() - rss_before_nat_ac), 2
+        native_ac_isolated = _measure_isolated_ac_build(
+            "native_only", db_path=db_path, runs=ac_build_runs
         )
+        coexisting_ac_isolated = _measure_isolated_ac_build(
+            "coexisting_both", db_path=db_path, runs=ac_build_runs
+        )
+        native_ac_build_ms = float(native_ac_isolated["build_ms"])
+        native_ac_rss_delta = float(native_ac_isolated["rss_delta_mib"])
+        native_scanner = native_kernel.TermScanner(surfaces, prefer_native=True)
         native_matcher = _NativeBackedSpanMatcher(lockable, native_scanner)
 
     # 2. FFI Boundary Micro-Call Overhead across payload sizes
@@ -1171,6 +1276,11 @@ def run_benchmark(
             "ac_build_python_rss_delta_mib": py_ac_rss_delta,
             "ac_build_native_ms": native_ac_build_ms,
             "ac_build_native_rss_delta_mib": native_ac_rss_delta,
+            "ac_build_isolated": {
+                "python_only": py_ac_isolated,
+                "native_only": native_ac_isolated,
+                "coexisting_both": coexisting_ac_isolated,
+            },
             "wasm_load_kernel": (
                 wasm_bench.get("cold_start")
                 if wasm_bench.get("available")
@@ -1244,8 +1354,14 @@ def format_markdown(report: dict[str, Any]) -> str:
     def _fmt_ratio(val: float | None) -> str:
         return f"{val}x" if val is not None else "-"
 
+    coex_info = cold["ac_build_isolated"]["coexisting_both"]
+    coex_str = (
+        f"; coexisting both +{coex_info['rss_delta_mib']} MiB"
+        if coex_info.get("available")
+        else ""
+    )
     lines.append(
-        f"- AC build (`{env['dictionary_surfaces']}` surfaces): Python `{cold['ac_build_python_ms']} ms` (+{cold['ac_build_python_rss_delta_mib']} MiB), PyO3 `{_fmt_ms(cold['ac_build_native_ms'])}` (RSS delta `{cold['ac_build_native_rss_delta_mib'] if cold['ac_build_native_rss_delta_mib'] is not None else '-'} MiB`)"
+        f"- AC build (`{env['dictionary_surfaces']}` surfaces, isolated): Python `{cold['ac_build_python_ms']} ms` (+{cold['ac_build_python_rss_delta_mib']} MiB), PyO3 `{_fmt_ms(cold['ac_build_native_ms'])}` (+{cold['ac_build_native_rss_delta_mib'] if cold['ac_build_native_rss_delta_mib'] is not None else '-'} MiB){coex_str}"
     )
 
     lines.extend(

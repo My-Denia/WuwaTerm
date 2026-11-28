@@ -48,6 +48,15 @@ def _assert_schema_complete(data: dict[str, object]) -> None:
     assert "python_baseline" in cold
     assert "python_text_spans_import" in cold
     assert "pyo3_module_import" in cold
+    ac_iso = cold["ac_build_isolated"]
+    assert isinstance(ac_iso, dict)
+    for key in ("python_only", "native_only", "coexisting_both"):
+        assert key in ac_iso
+    py_iso = ac_iso["python_only"]
+    assert py_iso["available"] is True
+    assert py_iso["isolated_subprocess"] is True
+    assert py_iso["rss_delta_mib"] >= 0.0
+    assert py_iso["build_ms"] >= 0.0
 
     ffi = data["ffi_boundary"]
     assert isinstance(ffi, list)
@@ -189,6 +198,18 @@ def test_benchmark_quick_with_stubbed_native_kernel(
         bench_mod,
         "_measure_python_cold_import",
         lambda stmt, runs: {"median_ms": 1.0, "p95_ms": 1.0, "rss_mib": 12.0},
+    )
+    monkeypatch.setattr(
+        bench_mod,
+        "_measure_isolated_ac_build",
+        lambda mode, db_path, runs: {
+            "available": True,
+            "isolated_subprocess": True,
+            "build_ms": 2.0,
+            "rss_before_mib": 12.0,
+            "rss_after_mib": 14.0,
+            "rss_delta_mib": 2.0,
+        },
     )
     monkeypatch.setattr(bench_mod, "_resolve_pyo3_so", lambda: None)
 
