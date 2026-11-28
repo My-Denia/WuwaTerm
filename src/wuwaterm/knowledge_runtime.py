@@ -186,6 +186,7 @@ class KnowledgeRuntime:
                 reason="ok",
             )
         self._close_locked()
+        reader: KnowledgeBaseReader | None = None
         try:
             reader = KnowledgeBaseReader(
                 kb_path, expected_terms_db_revision=expected_revision
@@ -203,6 +204,11 @@ class KnowledgeRuntime:
                 reason="revision_mismatch",
             )
         except (KnowledgeBaseError, sqlite3.Error, OSError):
+            if reader is not None:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
             self._warn_once_locked(
                 ("unreadable", expected_revision, stat_key),
                 "companion knowledge database could not be opened read-only; "

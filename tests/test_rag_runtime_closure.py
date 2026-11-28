@@ -783,6 +783,29 @@ def test_protected_async_rag_injection_isolation_and_ordinary_word_guards(
             )
         )
         assert DOMAIN_KNOWLEDGE_HEADER in app_captured[-1]["messages"][0]["content"]
+
+        # Direct core-layer check: hit-capable CJK terms inside ProtectedStructure.original
+        # must NEVER enter retrieval or prompt even when calling translate_protected_async directly.
+        markup_only_hit = ProtectedText(
+            ("", "今天天气不错。", ""),
+            (
+                ProtectedStructure(original="<b data-tag='椿' title='夜归'>", visible_context=""),
+                ProtectedStructure(original="</b>", visible_context=""),
+            ),
+        )
+        app_captured.clear()
+        asyncio.run(
+            tr_kb_app.translate_protected_async(
+                markup_only_hit, to_chinese=False, retrieval_mode="auto"
+            )
+        )
+        direct_sys = app_captured[-1]["messages"][0]["content"]
+        direct_user = app_captured[-1]["messages"][1]["content"]
+        assert DOMAIN_KNOWLEDGE_HEADER not in direct_sys
+        assert "Camellya" not in direct_sys
+        assert "Midnight Rangers" not in direct_sys
+        assert "data-tag" not in direct_sys
+        assert "data-tag" not in direct_user
     finally:
         asyncio.run(tr_no_kb_app.aclose())
         asyncio.run(tr_kb_app.aclose())

@@ -419,6 +419,7 @@ not here yet. The inline bot (`--with-legacy-bot`) reads them from this `.env`.
 | variable | why it matters |
 | --- | --- |
 | `WUWATERM_DB_PATH` | The terminology database the service reads. Default `data/terms.db`. |
+| `WUWATERM_API_KNOWLEDGE_DB_PATH` | Optional companion read-only entity knowledge database bound to `terms.db`'s revision (enables `knowledge-retrieval-v1` and `POST /v1/knowledge/query`). Leave empty or commented out to run dictionary-only mode; missing or revision-mismatched files degrade safely without blocking API startup. Under Compose, point at the read-only `/app/data` mount (for example `/app/data/knowledge.db`). |
 | `WUWATERM_API_PORT` | The loopback port. Default `8788`. Under Compose the bind address itself is fixed in the Compose file and is deliberately not an environment knob. |
 | `WUWATERM_API_STATE_DIR` | Where the device credential store lives. Default `state-api`, a **sibling** of the bot's state directory and never a child of it, because the bot mounts its own state directory writable. |
 | `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, `WUWATERM_API_LLM_CALLS_PER_MINUTE`, `WUWATERM_API_MAX_BODY_BYTES`, `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` | Per-process admission and spending bounds (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS` defaults to `90` s, leaving headroom above Core's `45` s LLM and `75` s semantic timeouts while Web BFF and Windows clients default to `100` s; see [timeout ladder](privacy-and-llm.md#llm-configuration)). They are not shared with the bot; the documented worst case is the sum of the two processes. |
@@ -777,8 +778,8 @@ Every failure uses one envelope:
 ```
 
 The codes are `unauthorized`, `forbidden`, `rate_limited`, `payload_too_large`,
-`invalid_request`, `input_too_long`, `llm_unavailable`, `llm_budget_exhausted`
-and `internal`.
+`invalid_request`, `input_too_long`, `llm_unavailable`, `llm_budget_exhausted`,
+`knowledge_unavailable` and `internal`.
 
 ### With no model configured
 
@@ -1183,6 +1184,7 @@ schema version travels with the source.
 | `429` with `rate_limited` | Two different bounds answer with this code. One is the per-device request limiter. The other is credential-verification admission: verification is deliberately expensive, so a bounded number of them may run at once and a request that finds every slot taken is refused **before** it is authenticated | If the completion record for that request carries no device principal, it was refused at verification admission and raising `WUWATERM_API_RATE_LIMIT_PER_MINUTE` will not help — raise `WUWATERM_API_AUTH_MAX_CONCURRENCY`, or reduce how many unauthenticated requests arrive at once. If it does name a device, it is the per-device limiter. |
 | `503` with `llm_unavailable` | No model configured, or the model call failed or timed out | If you configured none, this is the documented behaviour. If you did, check the endpoint, the key and `WUWATERM_API_LLM_TIMEOUT_SECONDS`. |
 | `503` with `llm_budget_exhausted` | The per-minute model call budget for that process | Raise `WUWATERM_API_LLM_CALLS_PER_MINUTE`, or wait. Budgets are per process and are not shared between the bot and the API. |
+| `503` with `knowledge_unavailable` | No companion `knowledge.db` is mounted (`WUWATERM_API_KNOWLEDGE_DB_PATH` unset or file missing), or `knowledge.db`'s `terms_db_revision` does not match the active `terms.db` | Verify the companion database with `python scripts/verify_knowledge_db.py data/knowledge.db --terms-db data/terms.db` and rebuild `knowledge.db` against the current `terms.db` when revisions diverge. |
 | The API will not start: bind error | `WUWATERM_API_BIND` set to something that is not a numeric loopback address | It is refused on purpose. Bind loopback and publish through a TLS terminator. |
 | The API will not start: port in use | Something else holds the port | Change `WUWATERM_API_PORT`, and change the reverse proxy target with it. |
 | The desktop client says the endpoint is unreachable | The base address, the certificate, or the proxy route | The client verifies certificates and that cannot be turned off. Check the base address resolves to a real route under the prefix, not to the site root. |
