@@ -3,7 +3,7 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.17.0 - 2026-11-28
 
 ### Breaking / Retired Legacy Adapters
 
@@ -12,12 +12,13 @@ does not distribute generated game data or generated SQLite databases.
   `settings.py`, `runtime_keys.py`, `telegram_html.py`, `telegram_text.py`),
   the `SentenceTranslator` HTML compatibility bridges, the `wuwaterm[telegram]`
   extra (`python-telegram-bot`), the `services.wuwaterm` (`wuwaterm-bot`)
-  Compose service, and `deploy/setup.sh --with-legacy-bot`. Protocol-neutral
-  `src/wuwaterm/protected_text.py` and `src/wuwaterm/normalize.py` remain in
-  Core. Running `wuwaterm bot` or `entrypoint.sh bot` now exits `64` with
-  migration guidance pointing to standalone `My-Denia/WuwaTerm-Telegram`.
+  Compose service, and `deploy/setup.sh --with-legacy-bot` (#365).
+  Protocol-neutral `src/wuwaterm/protected_text.py` and
+  `src/wuwaterm/normalize.py` remain in Core. Running `wuwaterm bot` or
+  `entrypoint.sh bot` now exits `64` with migration guidance pointing to
+  standalone `My-Denia/WuwaTerm-Telegram`.
 - Retire the legacy in-process Python private Web UI (`src/wuwaterm_api/web/`
-  and `/wuwaterm-web` mount). To prevent silent degradation on upgrade,
+  and `/wuwaterm-web` mount) (#365). To prevent silent degradation on upgrade,
   `wuwaterm-api serve` and `create_app()` now fail closed with `ApiConfigError`
   when `WUWATERM_API_WEB_ENABLED` is truthy or unrecognised (while silently
   ignoring unset, empty, or falsey `0`/`false`/`no`/`off` values and never
@@ -26,21 +27,121 @@ does not distribute generated game data or generated SQLite databases.
 - Update `deploy/Dockerfile` (`--extra api`, `CMD ["api"]`),
   `deploy/entrypoint.sh` (default `api`), `deploy/docker-compose*.yml`,
   `deploy/env.example`, `.env.example`, `scripts/ci_source_epoch.py` (3-state
-  `telegram_mode`: `bundled` / `optional` / `retired`), architecture boundary
-  guards, package artifact audits, dependency audit sentinels, and GitHub
-  Actions workflows.
+  `telegram_mode`: `bundled` / `optional` / `retired`, with
+  `retired_telegram_milestone` pinned to `fcc113a3` in #369), architecture
+  boundary guards, package artifact audits, dependency audit sentinels, and
+  GitHub Actions workflows (#365, #369).
 - Preserve read-only compatibility for historical schema 2/3 deployment
   manifests and legacy container state-migration journals (`product_manifest.py`,
   `component_state_journal.py`, `component_state_copy_v4.py`) as well as
-  `deploy/setup.sh --status` detection of leftover `wuwaterm-bot` containers.
+  `deploy/setup.sh --status` detection of leftover `wuwaterm-bot` containers
+  (#365).
 - Update `docs/telegram-behavior.md` (resolving `MY-360` by removing the
   outdated 2,000-character independent chunking claim and redirecting to
   `My-Denia/WuwaTerm-Telegram`), `docs/web-presentation-layer.md`,
   `docs/architecture.md`, `docs/deployment.md`, `docs/self-hosting.md`,
   `docs/products.md`, `docs/support-matrix.md`, `README.md`, and
-  `README.zh-CN.md`.
+  `README.zh-CN.md` (#365).
 - **Rollback:** Deployments that still require the retired inline Telegram bot
   or in-process Python Web UI should pin or roll back to Core tag `v0.16.0`.
+
+### Core Engine & HTTP API
+
+- Add Aho-Corasick multi-pattern term scanning, a unified
+  `DictionarySnapshot` view, and SQLite WAL cache consistency for dictionary
+  lookups and matching (#354).
+- Add an exact-parity fuzzy candidate pruning index for dictionary lookup
+  (#362).
+- Extract the CJK lexicon resource into `src/wuwaterm/cjk_words.txt` and
+  lazy-load `_WORDS` (`MY-79`, #353).
+- Add provider capability effort mapping (`WUWATERM_PROVIDER_PROFILE` /
+  `WUWATERM_PROVIDER_CAPABILITIES_JSON`), dynamic reasoning effort strategy
+  (`auto` scaling up to `WUWATERM_TRANSLATION_THINKING_AUTO_MAX_EFFORT`), and
+  cancellation metadata (#356).
+- Add stable service contract extensions, capability negotiation, and opt-in
+  translation extensions on the `/v1` HTTP API, including conditional
+  long-text limits in OpenAPI `TranslationRequestBody` (#360).
+- Filter lexicon noise, error placeholders, and cooking staples in the
+  dictionary builder while preserving official non-CJK terms and speaker
+  lookup order (#358).
+- Add an optional shared Rust text kernel workspace (core, PyO3, WASM) with an
+  optional Python adapter and document the product-level Rust/PyO3/WASM
+  adoption study and end-to-end benchmarks (#355, #368).
+
+### Companion Entity Knowledge Base (`knowledge.db`) & RAG
+
+- Add the optional companion `knowledge.db` SQLite knowledge base, lexical RAG
+  index, `wuwaterm build-kb` / `scripts/verify_knowledge_db.py`, and database
+  isolation gate (#359).
+- Wire `knowledge.db` soft recall, 1-hop entity graph traversal, pluggable
+  vector retrieval, offline vector builder, and CPU ONNX benchmarks (#363,
+  #364).
+- Fix ONNX encoder `pad_id` auto-resolution, `last_token` pooling, `cls`
+  first-valid-token selection, `bge-m3` 1024-dim default, and real-corpus CPU
+  benchmarking (#366).
+- Wire the companion `knowledge.db` runtime (`WUWATERM_API_KNOWLEDGE_DB_PATH`),
+  protected retrieval, shared `KnowledgeRuntime` lifecycle, `POST /v1/knowledge/query`,
+  `knowledge-retrieval-v1` capability advertising, and isolated
+  `knowledge_unavailable` (HTTP `503`) error responses (#367, #370). When
+  `WUWATERM_API_KNOWLEDGE_DB_PATH` is unset, missing, or revision-mismatched
+  against `terms.db`, `wuwaterm-api` degrades safely to dictionary-only mode
+  without blocking startup.
+
+### Deployment, Installer & Dual-DB Lifecycle
+
+- Decouple upgrade scripts from the retired inline bot and expand the
+  `deploy/setup.sh` client matrix (`--with-telegram` HTTP Core orchestration
+  against `wuwaterm-api`, `--with-windows` token/pairing output, and
+  `--with-all` isolated per-client tokens and state directories) (#361).
+- Unify `terms.db` and companion `knowledge.db` into a single consistent
+  update lifecycle across `deploy/vps-update.sh`, `scripts/full_update.py`,
+  `deploy/setup.sh`, and `deploy/product-update.sh full-update`, including
+  preserving `WUWATERM_API_KNOWLEDGE_DB_PATH` in Compose, verifying candidate
+  `knowledge.db` against `terms.db` before atomic promotion, rejecting symlinked
+  `.env` / target paths when configured, and failing closed when leftover
+  SQLite sidecar files (`-wal`, `-shm`, `-journal`) exist beside the target
+  path (#370, #371, #372).
+- Update `deploy/setup.sh` default consumer versions to Telegram `v0.7.0`
+  (first release with pure HTTP Core mode `WUWATERM_CORE_MODE=http`), Web
+  `v0.8.0`, and Windows `v0.10.0`, and clean up stale pre-`v0.7.0` Telegram
+  HTTP-mode error messages.
+
+### Release Manifest, Contract Pins & Records
+
+- Add the `scripts/check_release_manifest.py` release manifest drift gate into
+  `scripts/validate.py` and converge `contracts/products.json` with
+  `pyproject.toml`, `docs/api/openapi.json`, client pins, and `docs/products.md`
+  (#357).
+- Update `contracts/products.json`, `docs/products.md`, `docs/self-hosting.md`,
+  `docs/support-matrix.md`, `docs/release-checklist.md`, `README.md`, and
+  `README.zh-CN.md` to record published Telegram `v0.7.0` (`56f8bbee`, pinning
+  Core `v0.16.0`), Web `v0.8.0` (`c3c64e07`, self-hosted bundles only — not
+  deployed to public Sites), and Windows `v0.10.0` (`866b6c4e`), and move Core
+  CI client pins (`contracts/web-ref.txt`, `contracts/windows-ref.txt`, and
+  `contracts/ci-source-epochs.json`) to Web `v0.8.0` and Windows `v0.10.0` while
+  archiving the prior `v0.7.0` / `v0.9.0` pins in `historical_split_pins`.
+
+### Upgrade & Compatibility
+
+- **Legacy inline bot / Python Web UI removal:** Hosts still running the inline
+  `wuwaterm-bot` container or `WUWATERM_API_WEB_ENABLED=1` must migrate to
+  standalone `My-Denia/WuwaTerm-Telegram` (`>= v0.7.0` for HTTP mode via
+  `./deploy/setup.sh --with-telegram`) and `My-Denia/WuwaTerm-Web` (`--with-web`)
+  before upgrading, or stay on Core `v0.16.0`.
+- **Dictionary rebuild recommended:** Pinned upstream game data (`9218d612`,
+  `3.7.0 / 3.7.8 / 8975829`) and SQLite schema `2` are unchanged, so existing
+  schema-2 `terms.db` files remain readable, but `#358` updates dictionary
+  builder filtering; run a full `build-db` rebuild (or full data update) to
+  pick up the cleaner lexicon.
+- **Companion `knowledge.db` is opt-in:** Leave `WUWATERM_API_KNOWLEDGE_DB_PATH`
+  unset or empty to stay in single-DB dictionary mode. When enabled, build and
+  promote `knowledge.db` together with `terms.db` so `terms_db_revision` stays
+  matched.
+- `docs/api/openapi.json` updates `info.version` to `0.17.0` alongside the
+  additive `/v1/knowledge/query` and translation-extension schemas.
+- `contracts/products.json` keeps Core's recorded published snapshot at
+  `v0.16.0` (`8565b48b`) until Core `v0.17.0` is published and its real asset
+  and GHCR digests are recorded in a follow-up snapshot PR.
 
 ## 0.16.0 - 2026-11-27
 

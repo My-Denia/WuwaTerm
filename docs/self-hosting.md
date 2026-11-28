@@ -89,9 +89,10 @@ install describable later.
 A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10, and a
 clone of the v0.9.1 tag those of Telegram v0.3.0, which pins Core v0.9.0,
 because each Core release records its Telegram tag in `contracts/products.json`
-and `deploy/setup.sh` takes the recorded tag. `main` and the `v0.16.0` tag record Telegram
-`v0.6.1`, and the `v0.15.0`, `v0.14.1` and `v0.14.0` tags record Telegram
-`v0.6.0` (both pin Core `v0.13.0`). The `v0.13.0`
+and `deploy/setup.sh` takes the recorded tag. `main` records Telegram `v0.7.0`
+(which pins Core `v0.16.0` and adds pure HTTP Core mode), the `v0.16.0` tag
+records Telegram `v0.6.1`, and the `v0.15.0`, `v0.14.1` and `v0.14.0` tags
+record Telegram `v0.6.0` (both pin Core `v0.13.0`). The `v0.13.0`
 tag was frozen before `v0.6.0` was
 published, so it records `v0.5.0` (which pins Core `v0.12.0`). The `v0.10.2`,
 `v0.10.3`, `v0.11.0`, and `v0.12.0` tags were frozen before `v0.5.0` was
@@ -100,7 +101,7 @@ published, so they record `v0.4.1` (which pins Core `v0.10.1`), and the
 explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.6.1 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.7.0 ./deploy/setup.sh --with-telegram
 ```
 
 The v0.10.0 tag was frozen even earlier and still names v0.3.1, the release the
@@ -110,7 +111,7 @@ The variable names a published tag; there is no `latest`.
 
 The Web release also defaults to the one the checkout records: a clone of the
 v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and the
-v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.7.0,
+v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.8.0,
 the v0.16.0 tag records Web v0.6.0, the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0, the
 v0.14.0 tag records Web v0.4.5, the v0.13.0 tag records Web v0.4.4, the
 v0.10.3, v0.11.0 and v0.12.0 tags record
@@ -119,7 +120,7 @@ v0.10.2 tags record Web v0.4.1, which reads and writes manuscript v4, so a
 checkout of any earlier tag passes the release it lacks explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.7.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.8.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 For the source path, create the environment with the API and builder
@@ -195,19 +196,20 @@ What it does, in this order:
    fails verification (for example after a `terms.db` revision change), it
    refreshes `data/wutheringdata` if absent, builds `/app/data/knowledge.candidate.db`
    with `build-kb --atomic`, verifies it with `verify-kb`, and atomically moves
-   it into place. Leaving `WUWATERM_API_KNOWLEDGE_DB_PATH` unset or explicitly
+   it into place. Stage 2 refuses to reuse or promote the companion database if
+   leftover SQLite sidecar files (`-wal`, `-shm`, `-journal`) exist beside the
+   target path. Leaving `WUWATERM_API_KNOWLEDGE_DB_PATH` unset or explicitly
    empty (`WUWATERM_API_KNOWLEDGE_DB_PATH=`) skips this stage completely, even
    if a leftover `data/knowledge.db` exists on disk.
 4. Starts `wuwaterm-api`, waits for `/readyz`, and issues one
    `translate,meta` device token into `state-api/first-device.token` (mode
    `0600`) when the credential store is empty. No token is printed.
 5. `--with-telegram` orchestrates standalone `WuwaTerm-Telegram` in HTTP mode
-   against the shared Core API (**requires `>= v0.7.0`** — no published release
-   includes the HTTP Core backend yet; the latest published release is
-   `v0.6.1`, which is the current default in `contracts/products.json` and
-   fails closed unless you pass an explicit compatible `--telegram-package` or
-   deploy `v0.6.1` via `--telegram-dir <checkout>` and `WuwaTerm-Telegram`'s
-   own `deploy/docker-compose.yml`). For `>= v0.7.0` (once published) or
+   against the shared Core API (**requires `>= v0.7.0`**, which is now the
+   default in `contracts/products.json` on `main`; older releases such as
+   `v0.6.1` have no HTTP backend and fail closed unless you pass a compatible
+   `--telegram-package` or deploy them via `--telegram-dir <checkout>` and
+   `WuwaTerm-Telegram`'s own `deploy/docker-compose.yml`). For `>= v0.7.0` or
    `--telegram-package`, it issues a dedicated `telegram` device token
    (`state-telegram/device.token`, mode `0600`), writes
    `state-telegram/telegram.env` (mode `0600`) with
@@ -224,8 +226,8 @@ What it does, in this order:
    `--telegram-dir <checkout>` if you instead want the legacy checkout-prep
    path that copies `data/terms.db` and prints manual wheel-build steps.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
-   tag this checkout's `contracts/products.json` records (`v0.6.1` on `main` and
-   the `v0.16.0` tag,
+   tag this checkout's `contracts/products.json` records (`v0.7.0` on `main`,
+   `v0.6.1` on the `v0.16.0` tag,
    `v0.6.0` on the `v0.15.0`, `v0.14.1` and `v0.14.0` tags,
    `v0.5.0` on the `v0.13.0` tag, `v0.4.1` on the `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags,
    `v0.4.0` on the `v0.10.1` tag,
@@ -329,12 +331,14 @@ library from its pinned wheel, so the API and the bot are independent: one
 host can run the API for the Windows client and the Web workbench while the
 bot runs somewhere else, as long as each has the database.
 
-**What `--with-telegram` does.** It resolves the product, prints its install
-steps with this installation's paths filled in, and starts nothing. Add
-`--telegram-dir <checkout>` — a clone at the release tag,
-`git clone --branch v0.6.1 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
-— and the script also copies `data/terms.db` into that checkout, creates its
-`state/` at mode `0700`, and writes its `.env` at mode `0600` from this one.
+**What `--with-telegram` does.** By default it orchestrates standalone
+`WuwaTerm-Telegram` (`v0.7.0`+) in pure HTTP Core mode against `wuwaterm-api`
+(step 5 above). Add `--telegram-dir <checkout>` — a clone at the release tag,
+`git clone --branch v0.7.0 --depth 1 https://github.com/My-Denia/WuwaTerm-Telegram.git`
+— if you instead want the legacy checkout-prep path that starts no bot here,
+copies `data/terms.db` into that checkout, creates its `state/` at mode `0700`,
+writes its `.env` at mode `0600` from this one, and prints its manual
+wheel-build steps.
 Only the bot's settings travel: the token, the owner id, the model settings and
 the channel/rate/rejection keys. This installation's API and Web credentials
 stay where they are, and the product's Compose file blanks them anyway.

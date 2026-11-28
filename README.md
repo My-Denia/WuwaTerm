@@ -96,7 +96,9 @@ from Core (roll back to `v0.16.0` if you still need them).
 
 A clone of the Core v0.9.0 tag prints the install steps of Telegram v0.2.10
 and a clone of the v0.9.1 tag those of Telegram v0.3.0 (which pins Core
-v0.9.0), the release each tag records. `main` and the `v0.16.0` tag record Telegram v0.6.1, and the
+v0.9.0), the release each tag records. `main` records Telegram v0.7.0 (pinning
+Core v0.16.0 and adding pure HTTP Core mode), the `v0.16.0` tag records
+Telegram v0.6.1, and the
 `v0.15.0`, `v0.14.1` and `v0.14.0` tags record Telegram v0.6.0 (both pin Core
 v0.13.0); the `v0.13.0` tag records Telegram v0.5.0 (pinning Core v0.12.0); the
 historical `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags record Telegram
@@ -106,7 +108,7 @@ A checkout of those earlier tags can either run from `main` or pass the newer
 release explicitly:
 
 ```bash
-WUWATERM_TELEGRAM_VERSION=v0.6.1 ./deploy/setup.sh --with-telegram
+WUWATERM_TELEGRAM_VERSION=v0.7.0 ./deploy/setup.sh --with-telegram
 ```
 
 The v0.10.0 tag predates both and still names v0.3.1, which is what the v0.9.2
@@ -117,14 +119,14 @@ The variable always names a published tag, never `latest`.
 The Web option also defaults to the release the checkout records: a clone of
 the Core v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and
 the v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web
-v0.7.0, the v0.16.0 tag records Web v0.6.0, the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0,
+v0.8.0, the v0.16.0 tag records Web v0.6.0, the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0,
 the v0.14.0 tag records Web v0.4.5, the v0.13.0 tag records Web v0.4.4, the
 v0.10.3, v0.11.0 and v0.12.0 tags record Web v0.4.3, and the v0.10.1 and
 v0.10.2 tags record Web v0.4.1, so a checkout of any earlier tag
 passes the release it lacks explicitly:
 
 ```bash
-WUWATERM_WEB_VERSION=v0.7.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
+WUWATERM_WEB_VERSION=v0.8.0 ./deploy/setup.sh --with-web --web-origin https://wuwaterm.example
 ```
 
 The [self-hosting guide](docs/self-hosting.md) explains what each step does and
@@ -133,7 +135,7 @@ source), about 2 GB of disk for the upstream data, and your own Telegram bot
 token and OpenAI-compatible endpoint if you want those features. The Web
 option installs the published
 [WuwaTerm-Web](https://github.com/My-Denia/WuwaTerm-Web/releases) package this
-checkout records (v0.7.0 on `main`, v0.6.0 in the v0.16.0 tag, v0.5.1 in the v0.15.0 tag, v0.5.0 in the
+checkout records (v0.8.0 on `main`, v0.6.0 in the v0.16.0 tag, v0.5.1 in the v0.15.0 tag, v0.5.0 in the
 v0.14.1 tag, v0.4.5 in the v0.14.0 tag, v0.4.4 in the v0.13.0 tag, v0.4.3 in the
 v0.10.3, v0.11.0 and v0.12.0 tags, v0.4.1 on the v0.10.1 and v0.10.2 tags, v0.3.1 in the v0.10.0, v0.9.1 and
 v0.9.2 tags, v0.2.0 on the v0.9.0 tag), verifies it against the release checksums,
@@ -141,7 +143,7 @@ and needs the HTTPS origin your proxy serves (`--web-origin`).
 
 ### Windows client
 
-Download the portable package from [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest) (`v0.9.0` is the latest release). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
+Download the portable package from [WuwaTerm-Windows](https://github.com/My-Denia/WuwaTerm-Windows/releases/latest) (`v0.10.0` is the latest release). The [Windows repository](https://github.com/My-Denia/WuwaTerm-Windows) owns the guide, source, builds, releases and desktop issues. The unsigned package can trigger Windows SmartScreen. It connects to a server through the device-token-protected API.
 
 ### Telegram bot
 

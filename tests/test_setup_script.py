@@ -467,7 +467,7 @@ def test_with_telegram_orchestrates_core_and_http_mode_container(install_root):
     assert mode_of(tg_env) == 0o600
 
 
-def test_with_telegram_and_with_all_fail_closed_on_default_v061(install_root):
+def test_with_telegram_and_with_all_fail_closed_on_older_v061(install_root):
     (install_root / "contracts").mkdir()
     shutil.copy2(ROOT / "contracts" / "products.json", install_root / "contracts" / "products.json")
     write_env(install_root, telegram_token="123456:stub-tg-secret")
@@ -475,13 +475,17 @@ def test_with_telegram_and_with_all_fail_closed_on_default_v061(install_root):
         install_root / "web-package", "manifest-root.json", WEB_ROOT_MANIFEST
     )
 
-    tg_only = run_setup(install_root, "--with-telegram", "--no-adopt")
+    tg_only = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={"WUWATERM_TELEGRAM_VERSION": "v0.6.1"},
+    )
     assert tg_only.returncode == 1
     assert "v0.6.1 does not include the HTTP Core backend" in tg_only.stderr
-    assert "No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1)" in tg_only.stderr
+    assert "latest is v0.6.1" not in tg_only.stderr
     assert ">= v0.7.0" in tg_only.stderr
     assert "--telegram-dir" in tg_only.stderr
-    assert "Pass WUWATERM_TELEGRAM_VERSION=v0.7.0" not in tg_only.stderr
     assert not (install_root / "data" / "terms.db").exists()
     assert not (install_root / "curl.log").exists()
     assert "run -d --name wuwaterm-telegram" not in docker_log(install_root)
@@ -494,6 +498,7 @@ def test_with_telegram_and_with_all_fail_closed_on_default_v061(install_root):
         "--web-package",
         str(web_pkg),
         "--no-adopt",
+        env={"WUWATERM_TELEGRAM_VERSION": "v0.6.1"},
     )
     assert with_all.returncode == 1
     assert "v0.6.1 does not include the HTTP Core backend" in with_all.stderr
@@ -1937,11 +1942,11 @@ def test_release_defaults_match_the_recorded_snapshot_and_the_guide():
     constants = _constants()
     recorded = _recorded_tags()
     recommended = _recommended_tags()
-    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.6.1"
+    assert constants["DEFAULT_TELEGRAM_VERSION"] == recorded["telegram"] == "v0.7.0"
     assert recommended["telegram"] == recorded["telegram"].lstrip("v")
-    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.7.0"
+    assert constants["DEFAULT_WEB_VERSION"] == recorded["web"] == "v0.8.0"
     assert recommended["web"] == recorded["web"]
-    assert constants["DEFAULT_WINDOWS_VERSION"] == recorded["windows"] == "v0.9.0"
+    assert constants["DEFAULT_WINDOWS_VERSION"] == recorded["windows"] == "v0.10.0"
 
 
 def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
@@ -1954,16 +1959,28 @@ def test_the_recorded_snapshot_supplies_the_telegram_release(install_root):
     result = run_setup(install_root, "--telegram-dir", str(product), "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.6.1" in result.stdout
-    assert "wuwaterm_telegram-0.6.1-py3-none-any.whl" in result.stdout
+    assert "release v0.7.0" in result.stdout
+    assert "wuwaterm_telegram-0.7.0-py3-none-any.whl" in result.stdout
 
-    # In default HTTP-mode orchestration, v0.6.1 fails closed before network access
-    # because the HTTP Core backend requires >= v0.7.0.
+    # In default HTTP-mode orchestration, the recorded v0.7.0 release resolves
+    # its SHA256SUMS URL, while explicitly pinning an older release (< v0.7.0)
+    # still fails closed before network access.
     (install_root / "curl.log").unlink()
-    http_result = run_setup(install_root, "--with-telegram", "--no-adopt")
-    assert http_result.returncode == 1
-    assert "v0.6.1 does not include the HTTP Core backend" in http_result.stderr
+    older_result = run_setup(
+        install_root,
+        "--with-telegram",
+        "--no-adopt",
+        env={"WUWATERM_TELEGRAM_VERSION": "v0.6.1"},
+    )
+    assert older_result.returncode == 1
+    assert "v0.6.1 does not include the HTTP Core backend" in older_result.stderr
     assert not (install_root / "curl.log").exists()
+
+    default_http = run_setup(install_root, "--with-telegram", "--no-adopt")
+    assert default_http.returncode == 1
+    assert "/releases/download/v0.7.0/SHA256SUMS" in (install_root / "curl.log").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
@@ -1973,7 +1990,7 @@ def test_without_the_snapshot_the_constant_names_the_same_tag(install_root):
     result = run_setup(install_root, "--telegram-dir", str(product), "--no-adopt")
 
     assert result.returncode == 0, result.stderr
-    assert "release v0.6.1" in result.stdout
+    assert "release v0.7.0" in result.stdout
 
 
 @pytest.mark.parametrize(("version", "expected"), [

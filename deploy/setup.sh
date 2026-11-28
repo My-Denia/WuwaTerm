@@ -75,9 +75,10 @@ add any combination of client surfaces.
                         and HTTPS reverse-proxy pairing instructions from
                         contracts/products.json.
   --with-telegram       Also orchestrate standalone WuwaTerm-Telegram in HTTP
-                        mode against Core (requires >= v0.7.0 or an explicit
-                        compatible --telegram-package; v0.6.1 has no HTTP
-                        backend and fails closed): issues a dedicated telegram
+                        mode against Core (requires >= v0.7.0, default v0.7.0,
+                        or an explicit compatible --telegram-package; older
+                        releases such as v0.6.1 have no HTTP backend and fail
+                        closed): issues a dedicated telegram
                         device token (state-telegram/device.token, mode 0600),
                         writes state-telegram/telegram.env (mode 0600) with
                         WUWATERM_CORE_MODE=http, WUWATERM_CORE_API_URL and
@@ -125,14 +126,14 @@ unset or empty, single-DB behaviour is unchanged. Missing or revision-mismatched
 knowledge.db at API runtime degrades safely to dictionary-only mode without
 blocking wuwaterm-api startup.
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release tag to install
-(default: the tag contracts/products.json of this checkout records, v0.6.1 here;
+(default: the tag contracts/products.json of this checkout records, v0.7.0 here;
 the script's own constant when that file is absent).
 WUWATERM_WEB_VERSION picks the WuwaTerm-Web release the Web install downloads:
-v0.7.0, the current published release, or latest (default: the tag
-contracts/products.json records, v0.7.0 here; the script's own constant when
+v0.8.0, the current published release, or latest (default: the tag
+contracts/products.json records, v0.8.0 here; the script's own constant when
 that file is absent).
 WUWATERM_WINDOWS_VERSION selects the WuwaTerm-Windows release tag named in
-pairing instructions (default: the tag contracts/products.json records, v0.9.0
+pairing instructions (default: the tag contracts/products.json records, v0.10.0
 here; the script's own constant when that file is absent).
 EOF
 }
@@ -455,7 +456,7 @@ validate_config() {
     if [ "$with_windows" = 1 ]; then
         case "$windows_product_release" in
             v[0-9]*) ;;
-            *) fail "WUWATERM_WINDOWS_VERSION must look like v0.9.0, not: $windows_product_release" ;;
+            *) fail "WUWATERM_WINDOWS_VERSION must look like v0.10.0, not: $windows_product_release" ;;
         esac
     fi
 }
@@ -699,9 +700,9 @@ windows_product_repo=https://github.com/My-Denia/WuwaTerm-Windows
 # snapshot and docs/products.md points readers at it, so when that file can be
 # read its release tags ARE the default: a release bump then lands in one place
 # instead of three. The constants stay for a checkout or a host without python3.
-DEFAULT_TELEGRAM_VERSION=v0.6.1
-DEFAULT_WEB_VERSION=v0.7.0
-DEFAULT_WINDOWS_VERSION=v0.9.0
+DEFAULT_TELEGRAM_VERSION=v0.7.0
+DEFAULT_WEB_VERSION=v0.8.0
+DEFAULT_WINDOWS_VERSION=v0.10.0
 
 recorded_product_tag() {
     [ -f "$code_root/contracts/products.json" ] || return 1
@@ -1113,7 +1114,7 @@ resolve_telegram_package() {
     if [ -n "$telegram_package" ]; then
         if [ -n "${WUWATERM_TELEGRAM_VERSION:-}" ] \
             && ! telegram_version_supports_http "$telegram_product_release"; then
-            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). HTTP Core orchestration requires >= v0.7.0 (default $DEFAULT_TELEGRAM_VERSION); unset WUWATERM_TELEGRAM_VERSION or pass a release >= v0.7.0, or use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml for older releases"
         fi
     elif [ -z "${WUWATERM_TELEGRAM_VERSION:-}" ] \
         && [ "$tg_cached_ver" = "local-package" ] \
@@ -1126,7 +1127,7 @@ resolve_telegram_package() {
         return 0
     else
         if ! telegram_version_supports_http "$telegram_product_release"; then
-            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). No published WuwaTerm-Telegram release includes the HTTP Core backend yet (latest is v0.6.1); use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml today, pass --telegram-package <path> with a compatible OCI archive, or pass WUWATERM_TELEGRAM_VERSION=<version> once a release >= v0.7.0 is published"
+            fail "WuwaTerm-Telegram $telegram_product_release does not include the HTTP Core backend (WUWATERM_CORE_API_URL / WUWATERM_CORE_API_TOKEN). HTTP Core orchestration requires >= v0.7.0 (default $DEFAULT_TELEGRAM_VERSION); unset WUWATERM_TELEGRAM_VERSION or pass a release >= v0.7.0, pass --telegram-package <path> with a compatible OCI archive, or use --telegram-dir <checkout> with WuwaTerm-Telegram's own deploy/docker-compose.yml for older releases"
         fi
     fi
     mkdir -p "$tg_state" "$tg_state/state"
