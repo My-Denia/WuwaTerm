@@ -1184,7 +1184,12 @@ if [ "$kb_enabled" -eq 1 ]; then
     echo "live knowledge database hash mismatch after promotion" >&2
     exit 1
   fi
-  python3 scripts/verify_knowledge_db.py "$kb_path" --terms-db "$db_path" >/dev/null
+  # Run full verify-kb inside wuwaterm-builder so FTS5 trigram checks do not
+  # depend on how the host system's SQLite library was compiled.
+  compose run --rm \
+    -e "WUWATERM_DB_PATH=/app/data/terms.db" \
+    -e "WUWATERM_KNOWLEDGE_DB_PATH=/app/$kb_path" \
+    wuwaterm-builder verify-kb >/dev/null
 fi
 fail_if smoke
 

@@ -152,6 +152,10 @@ def _augment_harness_with_kb(
         "        WUWATERM_KNOWLEDGE_DB_PATH=*) kb_cand=${arg#WUWATERM_KNOWLEDGE_DB_PATH=} ;;\n"
         "      esac\n"
         "    done\n"
+        "    if [ \"${FAKE_POST_PROMOTE_VERIFY_KB_FAIL:-0}\" = 1 ] && [ \"$terms_cand\" = '/app/data/terms.db' ]; then\n"
+        "      echo 'injected post-promote verify-kb failure' >&2\n"
+        "      exit 1\n"
+        "    fi\n"
         "    terms_cand=$FAKE_DEPLOY_ROOT/data/${terms_cand#/app/data/}\n"
         "    kb_cand=$FAKE_DEPLOY_ROOT/data/${kb_cand#/app/data/}\n"
         "    python3 \"$FAKE_DEPLOY_ROOT/scripts/verify_knowledge_db.py\" \"$kb_cand\" --terms-db \"$terms_cand\"\n"
@@ -311,6 +315,17 @@ def test_vps_update_unified_promote_updates_terms_and_kb_and_records_manifest(
     counts, meta = verify_knowledge_database(live_kb, terms_db_path=root / "data" / "terms.db")
     assert counts and meta["terms_db_revision"] == ctx["new_rev"]
 
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    verify_kb_calls = [line for line in docker_lines if "wuwaterm-builder verify-kb" in line]
+    assert len(verify_kb_calls) == 2, verify_kb_calls
+    assert "WUWATERM_DB_PATH=/app/data/candidates/terms." in verify_kb_calls[0]
+    assert (
+        "WUWATERM_DB_PATH=/app/data/terms.db" in verify_kb_calls[1]
+        and "WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.db" in verify_kb_calls[1]
+    )
+    actions_text = (root / "actions.log").read_text(encoding="utf-8")
+    assert "python3 scripts/verify_knowledge_db.py" not in actions_text
+
     manifest_path = root / ".deployments" / f"{NEW_COMMIT}.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
@@ -402,6 +417,27 @@ def test_vps_update_post_promote_failure_rolls_back_both_terms_and_kb(
     result = _run_vps_update(root, env)
 
     assert result.returncode == 97, result.stdout + result.stderr
+    assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == ctx["old_db_hash"]
+    assert hashlib.sha256(live_kb.read_bytes()).hexdigest() == ctx["old_kb_hash"]
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    assert not (root / JOURNAL_RELPATH).exists()
+    verify_knowledge_database(live_kb, terms_db_path=root / "data" / "terms.db")
+
+
+def test_vps_update_post_promote_builder_verify_kb_failure_rolls_back_both(
+    tmp_path: Path,
+):
+    ctx = _augment_harness_with_kb(tmp_path, enable_in_env=True, seed_old_kb=True)
+    root: Path = ctx["root"]  # type: ignore[assignment]
+    env: dict[str, str] = dict(ctx["env"])  # type: ignore[arg-type]
+    live_kb: Path = ctx["live_kb"]  # type: ignore[assignment]
+    env["FAKE_POST_PROMOTE_VERIFY_KB_FAIL"] = "1"
+
+    result = _run_vps_update(root, env)
+
+    assert result.returncode != 0
+    assert "injected post-promote verify-kb failure" in result.stderr
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == ctx["old_db_hash"]
     assert hashlib.sha256(live_kb.read_bytes()).hexdigest() == ctx["old_kb_hash"]
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"

@@ -53,6 +53,17 @@ def test_vps_update_uses_builder_service_for_data_commands():
     assert "wuwaterm-builder refresh-data" in text
     assert "wuwaterm-builder build-db --atomic" in text
     assert "wuwaterm-builder verify-db" in text
+    assert "wuwaterm-builder build-kb --atomic" in text
+    assert "wuwaterm-builder verify-kb" in text
+    assert "python3 scripts/verify_knowledge_db.py" not in text
+    readyz_pos = text.index("/readyz")
+    post_kb_verify_pos = text.index(
+        '-e "WUWATERM_DB_PATH=/app/data/terms.db" \\\n'
+        '    -e "WUWATERM_KNOWLEDGE_DB_PATH=/app/$kb_path" \\\n'
+        "    wuwaterm-builder verify-kb",
+        readyz_pos,
+    )
+    assert post_kb_verify_pos > readyz_pos
     assert "scripts/verify_exact_hits.py" in text
     assert "scripts/verify_seed_terms.py" in text
     assert "scripts/diff_terms_db.py" in text
