@@ -89,10 +89,11 @@ install describable later.
 A clone of the v0.9.0 tag prints the install steps of Telegram v0.2.10, and a
 clone of the v0.9.1 tag those of Telegram v0.3.0, which pins Core v0.9.0,
 because each Core release records its Telegram tag in `contracts/products.json`
-and `deploy/setup.sh` takes the recorded tag. `main` records Telegram `v0.7.0`
-(which pins Core `v0.16.0` and adds pure HTTP Core mode), the `v0.16.0` tag
-records Telegram `v0.6.1`, and the `v0.15.0`, `v0.14.1` and `v0.14.0` tags
-record Telegram `v0.6.0` (both pin Core `v0.13.0`). The `v0.13.0`
+and `deploy/setup.sh` takes the recorded tag. `main` and the `v0.17.0` tag
+record Telegram `v0.7.0` (which pins Core `v0.16.0` and adds pure HTTP Core
+mode), the `v0.16.0` tag records Telegram `v0.6.1`, and the `v0.15.0`,
+`v0.14.1` and `v0.14.0` tags record Telegram `v0.6.0` (both Telegram `v0.6.1`
+and `v0.6.0` pin Core `v0.13.0`). The `v0.13.0`
 tag was frozen before `v0.6.0` was
 published, so it records `v0.5.0` (which pins Core `v0.12.0`). The `v0.10.2`,
 `v0.10.3`, `v0.11.0`, and `v0.12.0` tags were frozen before `v0.5.0` was
@@ -111,7 +112,8 @@ The variable names a published tag; there is no `latest`.
 
 The Web release also defaults to the one the checkout records: a clone of the
 v0.9.0 tag installs Web v0.2.0, which rejects manuscript v3 files, and the
-v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` records Web v0.8.0,
+v0.9.1, v0.9.2 and v0.10.0 tags record Web v0.3.1. `main` and the `v0.17.0` tag
+record Web v0.8.0,
 the v0.16.0 tag records Web v0.6.0, the v0.15.0 tag records Web v0.5.1, the v0.14.1 tag records Web v0.5.0, the
 v0.14.0 tag records Web v0.4.5, the v0.13.0 tag records Web v0.4.4, the
 v0.10.3, v0.11.0 and v0.12.0 tags record
@@ -206,7 +208,7 @@ What it does, in this order:
    `0600`) when the credential store is empty. No token is printed.
 5. `--with-telegram` orchestrates standalone `WuwaTerm-Telegram` in HTTP mode
    against the shared Core API (**requires `>= v0.7.0`**, which is now the
-   default in `contracts/products.json` on `main`; older releases such as
+   default in `contracts/products.json` on `main` and the `v0.17.0` tag; older releases such as
    `v0.6.1` have no HTTP backend and fail closed unless you pass a compatible
    `--telegram-package` or deploy them via `--telegram-dir <checkout>` and
    `WuwaTerm-Telegram`'s own `deploy/docker-compose.yml`). For `>= v0.7.0` or
@@ -226,7 +228,8 @@ What it does, in this order:
    `--telegram-dir <checkout>` if you instead want the legacy checkout-prep
    path that copies `data/terms.db` and prints manual wheel-build steps.
    `WUWATERM_TELEGRAM_VERSION` names another release tag. The default is the
-   tag this checkout's `contracts/products.json` records (`v0.7.0` on `main`,
+   tag this checkout's `contracts/products.json` records (`v0.7.0` on `main`
+   and the `v0.17.0` tag,
    `v0.6.1` on the `v0.16.0` tag,
    `v0.6.0` on the `v0.15.0`, `v0.14.1` and `v0.14.0` tags,
    `v0.5.0` on the `v0.13.0` tag, `v0.4.1` on the `v0.10.2`, `v0.10.3`, `v0.11.0` and `v0.12.0` tags,
