@@ -81,13 +81,36 @@
       "repository": "https://github.com/My-Denia/WuwaTerm",
       "responsibility": "Shared dictionary, translation and review logic, HTTP API, data builder and validation, and common deployment and recovery tools.",
       "main": {
-        "commit": "8565b48b628addb6a01569cee00503f1547077c8",
-        "tree": "553e4312309c1d9d6d340e508f49bfab6b9b1a07",
+        "commit": "ca8984c85ec38c52758a683da7865b1dc42aca61",
+        "tree": "77019a510ae9e005041280fb5dc98d0ade89166d",
         "status": "success",
-        "status_note": "The v0.16.0 release source (#352, chore(release): prepare Core 0.16.0), which is also this repository's main baseline when this snapshot was recorded. ci.yml main push run 46024212081 and Dependency audit run 46024211552 passed on this commit; release.yml (dry_run=false) run 46028904470 built the v0.16.0 release, and after public release publication the release event triggered promote-images run 46029422614 to tag the images."
+        "status_note": "The v0.17.0 release source (#373, chore(release): prepare Core 0.17.0), which is also this repository's main baseline when this snapshot was recorded. ci.yml main push run 46130575594 passed on this commit; release.yml dry_run=true run 46131747294 and dry_run=false run 46131881547 succeeded to build v0.17.0, and after public release publication the release event triggered promote-images run 46132156426 to tag the images as v0.17.0 and 0.17."
       },
-      "source_version": "0.16.0",
+      "source_version": "0.17.0",
       "release": {
+        "version": "0.17.0",
+        "tag": "v0.17.0",
+        "status": "released",
+        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.17.0",
+        "published_at": "2026-11-28T09:48:02Z",
+        "source_commit": "ca8984c85ec38c52758a683da7865b1dc42aca61",
+        "source_tree": "77019a510ae9e005041280fb5dc98d0ade89166d",
+        "assets": [
+          "wuwaterm-0.17.0-py3-none-any.whl",
+          "wuwaterm-0.17.0.tar.gz",
+          "release-manifest.json",
+          "SHA256SUMS"
+        ],
+        "asset_sha256": {
+          "wuwaterm-0.17.0-py3-none-any.whl": "fd48e8f10eb411c150628c1d1c83f57e9e3fdcc37152889f42f23ebdb27fbf02",
+          "wuwaterm-0.17.0.tar.gz": "2f2646b0b4fd51c924ee07e6430bb405c09b2b6588784459721df5c96cc14f29",
+          "release-manifest.json": "865d010715beb5ff6d590f296fd95be90cb8e922e19fe8242e8cde1ee18f3f03",
+          "SHA256SUMS": "6374e99cd1e44565680743a253cd9ccaccef2a802f559887ae2168d95739c5f7"
+        },
+        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-28T09:44:45Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:7ce73b00fb9abf9b68d999cf6aad18ff4b78fae99a8abf7256b6d5e136e4c948 and builder sha256:80bb52911161fbfb6329c2569c7217e2bc189eea440316b257afde67c9244660. Both were first pushed under sha-ca8984c and promoted to v0.17.0 and 0.17 after publication.",
+        "note": "v0.17.0 retires the legacy inline Telegram bot (wuwaterm-bot, wuwaterm[telegram], --with-legacy-bot) and in-process Python Web UI (/wuwaterm-web, failing closed on truthy WUWATERM_API_WEB_ENABLED; roll back to v0.16.0 if still needed) (#365, #369), adds Aho-Corasick scanning, unified DictionarySnapshot, WAL cache consistency, exact-parity fuzzy pruning, lazy CJK lexicon loading, provider capability effort mapping, stable /v1 service contract extensions, lexicon noise filtering and the optional shared Rust text kernel workspace (#353, #354, #355, #356, #358, #360, #362, #368), adds the optional companion knowledge.db SQLite knowledge base, protected retrieval, shared KnowledgeRuntime lifecycle and POST /v1/knowledge/query (knowledge-retrieval-v1) (#359, #363, #364, #366, #367, #370), unifies terms.db and companion knowledge.db into one update lifecycle and expands deploy/setup.sh (--with-telegram HTTP mode, --with-windows, --with-all) (#361, #370, #371, #372), and adds the release manifest drift gate while converging consumer pins and defaults to Telegram v0.7.0, Web v0.8.0 and Windows v0.10.0 (#357, #373). On source_commit ca8984c8, ci.yml main push run 46130575594, release.yml dry_run=true run 46131747294, release.yml dry_run=false run 46131881547 and release-triggered promote-images run 46132156426 all succeeded. Published assets: wuwaterm-0.17.0-py3-none-any.whl (611,369 bytes), wuwaterm-0.17.0.tar.gz (596,320 bytes), release-manifest.json (861 bytes), SHA256SUMS (188 bytes)."
+      },
+      "previous_release": {
         "version": "0.16.0",
         "tag": "v0.16.0",
         "status": "released",
@@ -108,30 +131,7 @@
           "SHA256SUMS": "a9d1a77dee4e77dc7095ffb2971c0d24032b7f8f0d340ad4b4ca4041b6e2289f"
         },
         "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T15:53:53Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:c7fef726bf1f1019f8c22363f18a800801fa68c55cd5a2185214672b857d69c9 and builder sha256:4ca8a9a88b2d20d749b1680b3b11161fb1b333e1c2427269325552b6bba0db45. Both were first pushed under sha-8565b48 and promoted after publication.",
-        "note": "v0.16.0 adds GET /v1/dictionary (DictionaryIdentityResponseBody, scoped to SCOPE_META) and advertises dictionary-identity-v1 in GET /v1/capabilities (#351, MY-491), records the v0.15.0 / v0.6.0 / v0.8.0 / v0.6.1 snapshot (#350), and updates ADR 0023, CHANGELOG.md, docs/api/openapi.json (info.version 0.16.0), pyproject.toml and uv.lock (#352). All experimental and candidate flags stay off by default, and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged, so v0.14.x and v0.15.0 hosts keep their terms.db and upgrade with --runtime-only. On source_commit 8565b48b, ci.yml main push run 46024212081 and Dependency audit run 46024211552 passed; release.yml (dry_run=false) run 46028904470 and release-triggered promote-images run 46029422614 succeeded. Published assets: wuwaterm-0.16.0-py3-none-any.whl (589,987 bytes), wuwaterm-0.16.0.tar.gz (572,642 bytes), release-manifest.json (861 bytes), SHA256SUMS (188 bytes)."
-      },
-      "previous_release": {
-        "version": "0.15.0",
-        "tag": "v0.15.0",
-        "status": "released",
-        "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.15.0",
-        "published_at": "2026-11-27T07:51:03Z",
-        "source_commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
-        "source_tree": "6d48c25b3849256595e8fbfba39d5b9463a3638d",
-        "assets": [
-          "wuwaterm-0.15.0-py3-none-any.whl",
-          "wuwaterm-0.15.0.tar.gz",
-          "release-manifest.json",
-          "SHA256SUMS"
-        ],
-        "asset_sha256": {
-          "wuwaterm-0.15.0-py3-none-any.whl": "339952666807d75c1b734d31b6f5d42301ef297ea6f9afbb65bdbec813f879cf",
-          "wuwaterm-0.15.0.tar.gz": "2c54d87a6f342c402ea34b1f2751fdaf43a835e0e1444bac2f80b40c14fe3028",
-          "release-manifest.json": "8216022ef272a6b5ce8fd13ba70255db1d2c208188e773d0950d911d291f2c68",
-          "SHA256SUMS": "90d014647f0c48ce6eaade69b85e33d7d5e7895e6cee11afc0162cf8c01c817c"
-        },
-        "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T07:48:39Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:ef1cdfd519eeb7e44bf988dd87fa3b6e9fe2a67c131f740d13212f33e11d84d3 and builder sha256:a93c3988bf59faa44488011ea2acd820b7fc4a9d3aafda8a54e0305ea7bcf5d9. Both were first pushed under sha-122870b and promoted to v0.15.0 and 0.15 after publication; the historical version tags were retained.",
-        "note": "v0.15.0 adds opt-in, default-off review, translation-memory and engine candidates on top of v0.14.1 (#344, #345, #346, #347, #348, #349). #344 extracts attribution-candidates-v1 (src/wuwaterm/attribution_candidates.py), gates the semantic-review hint behind WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS (default off), and adds ADR 0023 and ADR 0024; #347 refines ADR 0023 TM freshness and context_exact rules and passes prepared_scalars into RequestPolicy.paragraph_repair_thinking_mode; #345 adds opt-in, default-off engine candidates C1 (wuwaterm-termbase-v1), C3 (DocumentAnchor) and C4 (WUWATERM_TRANSLATION_THINKING_ZH_EN=auto behind zh_en_auto_thinking=False); #346 records the v0.14.1, v0.5.1 and v0.7.1 releases and moves the CI client pins; #348 adds H3 Protocol Revision (d) --expected-model binding and bindings.tools_sha256 receipt verification; #349 prepares release 0.15.0. All experimental and candidate flags stay off by default, docs/api/openapi.json differs from v0.14.1 only in info.version (0.15.0), and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged from v0.14.1, so v0.14.x hosts keep their terms.db and upgrade with --runtime-only. On source_commit 122870b1, ci.yml main push run 45959452344, CodeQL run 45959452198 and Dependency audit run 45959452110 passed; release.yml (dry_run=false) run 45961013922 created the v0.15.0 release draft, and after public release publication the release event triggered promote-images run 45961311451 to tag the images. All four published assets (wuwaterm-0.15.0-py3-none-any.whl 589,060 bytes, wuwaterm-0.15.0.tar.gz 571,769 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) are published with the digests above."
+        "note": "v0.16.0 adds GET /v1/dictionary (DictionaryIdentityResponseBody, scoped to SCOPE_META) and advertises dictionary-identity-v1 in GET /v1/capabilities (#351, MY-491), records the v0.15.0 / v0.6.0 / v0.8.0 / v0.6.1 snapshot (#350), and updates ADR 0023, CHANGELOG.md, docs/api/openapi.json (info.version 0.16.0), pyproject.toml and uv.lock (#352). All experimental and candidate flags stay off by default, and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged, so v0.14.x and v0.15.0 hosts keep their terms.db and upgrade with --runtime-only. On source_commit 8565b48b, ci.yml main push run 46024212081 and Dependency audit run 46024211552 passed; release.yml (dry_run=false) run 46028904470 and release-triggered promote-images run 46029422614 succeeded. Published assets: wuwaterm-0.16.0-py3-none-any.whl (589,987 bytes), wuwaterm-0.16.0.tar.gz (572,642 bytes), release-manifest.json (861 bytes), SHA256SUMS (188 bytes). Kept as history after v0.17.0; v0.16.0 is also the final release carrying the legacy inline Telegram bot and in-process Python Web UI."
       },
       "candidate_source": {
         "branch": "feat/product-delivery-and-contextual-terms",
@@ -150,14 +150,37 @@
         "status": "superseded_ci_artifact",
         "note": "A CI artifact of an earlier candidate checkout, recorded before the release; it is not the published 0.7.0 wheel."
       },
-      "adoption": "not_deployed",
-      "adoption_note": "Production VPS API wuwaterm-api still runs r15 (Core v0.14.1, .deploy_commit 1949f8ddf9c81dfd02b2bbea59bc8799d4943728, locally built image wuwaterm-runtime:1949f8d..., verified 2026-11-26); Core v0.16.0 (8565b48) is published and has not yet been deployed to the production VPS. On r15, /openapi.json reports info.version 0.14.1, /healthz and /readyz answer 200, /v1/capabilities answers 401 without a device token, HostConfig.MemoryReservation is 100663296 (96 MiB), OomScoreAdj is -500, system.slice keeps memory.low 134217728 (128 MiB), RestartCount is 0, .env keeps mode 0600 (7b50817a...), data/terms.db keeps sha256 9ddee819..., and rollback point r14 (2737530, Core v0.14.0) is retained.",
-      "transition": "The observed Core source still contains the legacy Telegram and private Python Web adapters; retirement depends on usable successors.",
+      "adoption": "deployed",
+      "adoption_note": "Production VPS API wuwaterm-api is deployed at Core v0.17.0 (.deploy_commit ca8984c85ec38c52758a683da7865b1dc42aca61, verified 2026-11-28): /openapi.json reports info.version 0.17.0, /readyz answers 200, terms.db serves 11,832 entries and companion knowledge.db serves 3,076 entities in a single shared KnowledgeRuntime. Previously ran r15 (Core v0.14.1, 1949f8ddf9c81dfd02b2bbea59bc8799d4943728).",
+      "transition": "The legacy inline Telegram bot and in-process Python Web UI were retired in Core v0.17.0 (#365); standalone WuwaTerm-Telegram and WuwaTerm-Web are the supported successors (roll back to v0.16.0 if the retired adapters are still required).",
       "instructions": [
-        "https://github.com/My-Denia/WuwaTerm/blob/8565b48b628addb6a01569cee00503f1547077c8/docs/self-hosting.md",
-        "https://github.com/My-Denia/WuwaTerm/blob/8565b48b628addb6a01569cee00503f1547077c8/docs/data-refresh.md"
+        "https://github.com/My-Denia/WuwaTerm/blob/ca8984c85ec38c52758a683da7865b1dc42aca61/docs/self-hosting.md",
+        "https://github.com/My-Denia/WuwaTerm/blob/ca8984c85ec38c52758a683da7865b1dc42aca61/docs/data-refresh.md"
       ],
       "archived_releases": [
+        {
+          "version": "0.15.0",
+          "tag": "v0.15.0",
+          "status": "released",
+          "url": "https://github.com/My-Denia/WuwaTerm/releases/tag/v0.15.0",
+          "published_at": "2026-11-27T07:51:03Z",
+          "source_commit": "122870b1eb20195f4e790c2899e0fa6d73bbb020",
+          "source_tree": "6d48c25b3849256595e8fbfba39d5b9463a3638d",
+          "assets": [
+            "wuwaterm-0.15.0-py3-none-any.whl",
+            "wuwaterm-0.15.0.tar.gz",
+            "release-manifest.json",
+            "SHA256SUMS"
+          ],
+          "asset_sha256": {
+            "wuwaterm-0.15.0-py3-none-any.whl": "339952666807d75c1b734d31b6f5d42301ef297ea6f9afbb65bdbec813f879cf",
+            "wuwaterm-0.15.0.tar.gz": "2c54d87a6f342c402ea34b1f2751fdaf43a835e0e1444bac2f80b40c14fe3028",
+            "release-manifest.json": "8216022ef272a6b5ce8fd13ba70255db1d2c208188e773d0950d911d291f2c68",
+            "SHA256SUMS": "90d014647f0c48ce6eaade69b85e33d7d5e7895e6cee11afc0162cf8c01c817c"
+          },
+          "manifest_note": "The release manifest records the source commit, built_utc 2026-11-27T07:48:39Z, the pinned upstream data revision (arikatsu, 9218d612, 3.7.0 / 3.7.8 / 8975829) and image digests: runtime sha256:ef1cdfd519eeb7e44bf988dd87fa3b6e9fe2a67c131f740d13212f33e11d84d3 and builder sha256:a93c3988bf59faa44488011ea2acd820b7fc4a9d3aafda8a54e0305ea7bcf5d9. Both were first pushed under sha-122870b and promoted to v0.15.0 and 0.15 after publication; the historical version tags were retained.",
+          "note": "v0.15.0 adds opt-in, default-off review, translation-memory and engine candidates on top of v0.14.1 (#344, #345, #346, #347, #348, #349). #344 extracts attribution-candidates-v1 (src/wuwaterm/attribution_candidates.py), gates the semantic-review hint behind WUWATERM_SEMANTIC_REVIEW_ATTRIBUTION_HINTS (default off), and adds ADR 0023 and ADR 0024; #347 refines ADR 0023 TM freshness and context_exact rules and passes prepared_scalars into RequestPolicy.paragraph_repair_thinking_mode; #345 adds opt-in, default-off engine candidates C1 (wuwaterm-termbase-v1), C3 (DocumentAnchor) and C4 (WUWATERM_TRANSLATION_THINKING_ZH_EN=auto behind zh_en_auto_thinking=False); #346 records the v0.14.1, v0.5.1 and v0.7.1 releases and moves the CI client pins; #348 adds H3 Protocol Revision (d) --expected-model binding and bindings.tools_sha256 receipt verification; #349 prepares release 0.15.0. All experimental and candidate flags stay off by default, docs/api/openapi.json differs from v0.14.1 only in info.version (0.15.0), and SQLite schema 2, data pin 9218d612 (3.7.0 / 3.7.8 / 8975829), terms.db contents, wuwaterm-cjk-matcher-v11 and the thinking defaults (omit / disabled) are unchanged from v0.14.1, so v0.14.x hosts keep their terms.db and upgrade with --runtime-only. On source_commit 122870b1, ci.yml main push run 45959452344, CodeQL run 45959452198 and Dependency audit run 45959452110 passed; release.yml (dry_run=false) run 45961013922 created the v0.15.0 release draft, and after public release publication the release event triggered promote-images run 45961311451 to tag the images. All four published assets (wuwaterm-0.15.0-py3-none-any.whl 589,060 bytes, wuwaterm-0.15.0.tar.gz 571,769 bytes, release-manifest.json 861 bytes, SHA256SUMS 188 bytes) are published with the digests above. Kept as history after v0.16.0; the release and its assets are still published."
+        },
         {
           "version": "0.14.1",
           "tag": "v0.14.1",
@@ -222,7 +245,7 @@
         },
         "note": "v0.7.0 upgrades core-lock.json to published Core 0.16.0 (wheel SHA-256 5343448bae10b9f88f686b81936b680f9ea68dfa6690f12957929204d191d628, core_source_commit 8565b48b628addb6a01569cee00503f1547077c8, declared compatibility exact; OCI index sha256:cda1ecd83c15e6426bda44f678b0417833cc38d2aed8d0aaf24ab23205b7750d, manifest sha256:8d5a35bba3591c9b987b2e74d73f49febf36311355d105f6ee8d51b2f21958a0, config sha256:30648b63d548565b2653dbdc8021b93fa1918ff351960f0d6137e842a878053a, built by release run 46123586030). Changes since v0.6.1 (#51, #52, #53): Core >=0.16.0 service decoupling, linked-channel rich HTML preservation with cross-segment TranslationContext, deterministic structure-check-v1 output checks, bounded recoverable ChannelTaskQueue retry queue (#51); pure HTTP Core mode decoupled from local terms.db with fail-closed WUWATERM_CORE_MODE (#52); #53 bumps wuwaterm-telegram to 0.7.0. Asset sizes: wuwaterm_telegram-0.7.0-py3-none-any.whl 145,266 bytes, wuwaterm_telegram-0.7.0.tar.gz 339,397 bytes, bundle.json 20,209 bytes, image.oci.tar 52,412,416 bytes, install-probe.json 14,640 bytes, source.tar 1,628,160 bytes, SHA256SUMS 524 bytes."
       },
-      "adoption": "not_deployed",
+      "adoption": "deployed",
       "compatibility": {
         "core_package_version": "0.16.0",
         "core_wheel_sha256": "5343448bae10b9f88f686b81936b680f9ea68dfa6690f12957929204d191d628",
@@ -263,7 +286,7 @@
         },
         "note": "v0.6.1 keeps core-lock.json pinned to published Core 0.13.0 (wheel SHA-256 cdf7ee4444c115e21458cd70510c71a69403ea333cd0c123400f9b2268b4ed6c, core_source_commit e5b7f1a84d04deb5795296b1a652e13c4e9fd1a8, declared compatibility exact; OCI index sha256:cf75203ca688f92f147cf281f9c118231e66c3fdef8b67f427c83ae0d90f4c47, manifest sha256:b2e177acea2122b03a0bcf98d3987b75d86906c3207a39eaa0ce89b071f99579, config sha256:ef18bfacbe2a041b1630c562303912bed33d0c3e3aa603f0ce18bfe4a84a53b1, built by release run 45933964205). Changes since v0.6.0 (#49, #50): harden HTML parse fallback in bot and review_bot, guard channel language threshold check on non-empty stripped pipeline_plain, serialize per-job /review callbacks and snapshot accepted state, prevent user_id=None identity collisions, and restore the summary footer on back-button edits; #50 bumps wuwaterm-telegram to 0.6.1. Asset sizes: wuwaterm_telegram-0.6.1-py3-none-any.whl 110,185 bytes, wuwaterm_telegram-0.6.1.tar.gz 275,598 bytes, bundle.json 19,286 bytes, image.oci.tar 52,073,472 bytes, install-probe.json 13,717 bytes, source.tar 1,300,480 bytes, SHA256SUMS 524 bytes. Kept as history after v0.7.0; v0.6.1 and earlier remain published."
       },
-      "adoption_note": "v0.7.0 is published and is now this Core checkout's installer default for deploy/setup.sh --with-telegram, but has not yet been deployed to the owner VPS. Production VPS container wuwaterm-telegram still runs standalone Telegram 0.6.1 on Core 0.13.0 (upgraded on 2026-11-27 from v0.6.0 c4f6a81 to v0.6.1 f1fe528 using image wuwaterm-telegram:v0.6.1 / local 806d423f..., operations health ready, RestartCount 0, .env mode 0600, data/terms.db sha256 9ddee819... unchanged, sanitized log scan 0 errors, state backup and pre-0.6.1 rollback image tag retained).",
+      "adoption_note": "Production VPS container wuwaterm-telegram is deployed on the official Telegram v0.7.0 OCI image (56f8bbee0bf2d8496f3b4e900aa6e454e97b848f, verified 2026-11-28), switched from v0.6.1 to pure HTTP Core mode (core_mode=http, poll_checked=true) targeting Core 0.17.0. v0.7.0 is also this Core checkout's and Core v0.17.0's installer default for deploy/setup.sh --with-telegram.",
       "archived_releases": [
         {
           "version": "0.6.0",
@@ -630,6 +653,6 @@
     "core_tests_web": "c3c64e07d67c64adedaa551e53e1b0e31a898e0e",
     "core_tests_windows": "866b6c4efc0730e19b70a2d35bbc4ecd8612af47",
     "web_tests_core": "2737530187f1e1c3a6b8758de357c8d32d21dfc7",
-    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.8.0 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.10.0 tag commit, which carries manuscript v5 and names Core commit b7abb953b8e997328344064e85c9db28f55f40aa and Web commit 6cd0a7c5 in contracts/sources.json; the Web-to-Core pin stays on Core v0.14.0 (27375301) because Web v0.8.0 did not move contracts/backend-ref.txt. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). Note that the Core v0.16.0 tag itself (8565b48b) pinned Web v0.6.0 (eed5d30e) and Windows v0.8.0 (97c659e2), and commits 77eb78eb..02c731e8 pinned Web v0.7.0 (df0a4d0c) and Windows v0.9.0 (e6835f38); this preparation commit moves contracts/web-ref.txt, contracts/windows-ref.txt and the split revisions in contracts/ci-source-epochs.json to Web v0.8.0 (c3c64e07) and Windows v0.10.0 (866b6c4e)."
+    "note": "These repository pins identify the specified contract-test inputs, not a guarantee for arbitrary version pairs. The Web pin is the Web v0.8.0 tag commit, which carries manuscript v5 and the wuwaterm-workbench-state-cases-v1 cases; the Windows pin is the Windows v0.10.0 tag commit, which carries manuscript v5 and names Core commit b7abb953b8e997328344064e85c9db28f55f40aa and Web commit 6cd0a7c5 in contracts/sources.json; the Web-to-Core pin stays on Core v0.14.0 (27375301) because Web v0.8.0 did not move contracts/backend-ref.txt. The API to Web contract job also checks out the Windows commit named by the pinned Web's own contracts/windows-ref.txt (31fe402e316540039cdbdddfbdef6f25fa31abac, a source commit, not a Windows release). Note that the Core v0.16.0 tag itself (8565b48b) pinned Web v0.6.0 (eed5d30e) and Windows v0.8.0 (97c659e2), and commits 77eb78eb..02c731e8 pinned Web v0.7.0 (df0a4d0c) and Windows v0.9.0 (e6835f38); the Core v0.17.0 tag (ca8984c8) and main pin Web v0.8.0 (c3c64e07) and Windows v0.10.0 (866b6c4e) across contracts/web-ref.txt, contracts/windows-ref.txt and contracts/ci-source-epochs.json."
   }
 }
