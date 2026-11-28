@@ -41,6 +41,18 @@ case "$*" in
       ln -sf /etc/passwd "$STUB_ROOT/data/knowledge.candidate.db"
     else
       printf '%s\\n' "${STUB_KB_BUILD_CONTENT:-built-kb}" > "$STUB_ROOT/data/knowledge.candidate.db"
+    fi
+    if [ "${STUB_KB_BUILD_WRITE_CANDIDATE_SIDECARS:-0}" = 1 ]; then
+      printf 'cand-wal\\n' > "$STUB_ROOT/data/knowledge.candidate.db-wal"
+      printf 'cand-shm\\n' > "$STUB_ROOT/data/knowledge.candidate.db-shm"
+      printf 'cand-journal\\n' > "$STUB_ROOT/data/knowledge.candidate.db-journal"
+    fi
+    if [ -n "${STUB_KB_DROP_DEST_SIDECAR:-}" ]; then
+      if [ "${STUB_KB_DROP_DEST_SIDECAR_DANGLING:-0}" = 1 ]; then
+        ln -sf "$STUB_ROOT/data/nonexistent-sidecar-target" "$STUB_ROOT/$STUB_KB_DROP_DEST_SIDECAR"
+      else
+        printf 'leftover-sidecar\\n' > "$STUB_ROOT/$STUB_KB_DROP_DEST_SIDECAR"
+      fi
     fi ;;
   *"verify-kb"*)
     case "$*" in
@@ -2271,3 +2283,115 @@ def test_symlinked_env_preserves_single_db_baseline_and_rejects_configured_kb(in
     assert ".env must not be a symlink" in refused.stderr
     assert "wuwaterm-builder" not in docker_log(install_root)
     assert "up -d" not in docker_log(install_root)
+
+
+@pytest.mark.parametrize(
+    ("sidecar_suffix", "dangling_symlink"),
+    [
+        ("-wal", False),
+        ("-shm", False),
+        ("-journal", False),
+        ("-wal", True),
+    ],
+)
+def test_configured_knowledge_destination_sidecars_fail_closed_before_reuse_or_build(
+    install_root, sidecar_suffix, dangling_symlink
+):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    kb_path = data_dir / "knowledge.db"
+    kb_path.write_text("previous-kb", encoding="utf-8")
+    sidecar_path = data_dir / f"knowledge.db{sidecar_suffix}"
+    if dangling_symlink:
+        sidecar_path.symlink_to(data_dir / "missing-sidecar-target")
+    else:
+        sidecar_path.write_text("leftover-sidecar", encoding="utf-8")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "sidecar" in result.stderr.lower()
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert f"data/knowledge.db{sidecar_suffix}" in result.stderr
+    assert kb_path.read_text(encoding="utf-8") == "previous-kb"
+    assert sidecar_path.is_symlink() if dangling_symlink else sidecar_path.exists()
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+def test_configured_knowledge_orphan_destination_sidecar_blocks_initial_build(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    wal_path = data_dir / "knowledge.db-wal"
+    wal_path.write_text("orphan-wal", encoding="utf-8")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "data/knowledge.db-wal" in result.stderr
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert wal_path.exists()
+    assert not (data_dir / "knowledge.db").exists()
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+@pytest.mark.parametrize(
+    ("sidecar_suffix", "dangling_symlink"),
+    [
+        ("-wal", False),
+        ("-shm", False),
+        ("-journal", False),
+        ("-wal", True),
+    ],
+)
+def test_configured_knowledge_sidecar_before_promote_rejects_and_cleans_candidate(
+    install_root, sidecar_suffix, dangling_symlink
+):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    kb_path = data_dir / "knowledge.db"
+    kb_path.write_text("previous-kb", encoding="utf-8")
+    (data_dir / "wutheringdata").mkdir()
+
+    result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={
+            "STUB_KB_EXISTING_VERIFY_FAIL": "1",
+            "STUB_KB_BUILD_CONTENT": "rebuilt-kb",
+            "STUB_KB_BUILD_WRITE_CANDIDATE_SIDECARS": "1",
+            "STUB_KB_DROP_DEST_SIDECAR": f"data/knowledge.db{sidecar_suffix}",
+            "STUB_KB_DROP_DEST_SIDECAR_DANGLING": "1" if dangling_symlink else "0",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "sidecar" in result.stderr.lower()
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert f"data/knowledge.db{sidecar_suffix}" in result.stderr
+    assert kb_path.read_text(encoding="utf-8") == "previous-kb"
+    sidecar_path = data_dir / f"knowledge.db{sidecar_suffix}"
+    assert sidecar_path.is_symlink() if dangling_symlink else sidecar_path.exists()
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate_file = data_dir / f"knowledge.candidate.db{suffix}"
+        assert not candidate_file.exists()
+        assert not candidate_file.is_symlink()
+    log = docker_log(install_root)
+    assert "wuwaterm-builder build-kb --atomic" in log
+    assert "up -d" not in log

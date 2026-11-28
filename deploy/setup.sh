@@ -526,6 +526,33 @@ ensure_builder_image() {
     builder_ready=1
 }
 
+cleanup_kb_candidate() {
+    [ -n "${kb_candidate_host:-}" ] || return 0
+    rm -f \
+        "$kb_candidate_host" \
+        "${kb_candidate_host}-wal" \
+        "${kb_candidate_host}-shm" \
+        "${kb_candidate_host}-journal"
+}
+
+reject_kb_destination_sidecars() {
+    kb_found_sidecars=
+    for kb_sc_suffix in -wal -shm -journal; do
+        kb_sc_path="${kb_host_path}${kb_sc_suffix}"
+        if [ -e "$kb_sc_path" ] || [ -L "$kb_sc_path" ]; then
+            if [ -n "$kb_found_sidecars" ]; then
+                kb_found_sidecars="${kb_found_sidecars}, ${kb_relpath}${kb_sc_suffix}"
+            else
+                kb_found_sidecars="${kb_relpath}${kb_sc_suffix}"
+            fi
+        fi
+    done
+    if [ -n "$kb_found_sidecars" ]; then
+        cleanup_kb_candidate
+        fail "refusing to reuse or promote $kb_relpath while leftover SQLite sidecar file(s) exist ($kb_found_sidecars); stop any writer process and safely checkpoint or recover the database before retrying"
+    fi
+}
+
 build_data() {
     builder_ready=0
     data_refreshed=0
@@ -550,8 +577,10 @@ build_data() {
     fi
 
     # Stage 2: optional companion knowledge database (only when explicitly configured in .env).
+    kb_candidate_host=
     resolve_knowledge_db_path || fail "$kb_path_error"
     [ "$kb_configured" = 1 ] || return 0
+    reject_kb_destination_sidecars
     ensure_builder_image
     if [ -f "$kb_host_path" ]; then
         if compose run --rm \
@@ -571,37 +600,38 @@ build_data() {
         data_refreshed=1
     fi
     kb_candidate_host="$code_root/data/knowledge.candidate.db"
-    rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+    cleanup_kb_candidate
     if ! compose run --rm \
         -e WUWATERM_DB_PATH=/app/data/terms.db \
         -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
         wuwaterm-builder build-kb --atomic; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "the builder failed to build $kb_relpath"
     fi
     if ! compose run --rm \
         -e WUWATERM_DB_PATH=/app/data/terms.db \
         -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
         wuwaterm-builder verify-kb; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "the built candidate for $kb_relpath failed verify-kb against data/terms.db"
     fi
     if [ -L "$kb_candidate_host" ] || [ ! -f "$kb_candidate_host" ]; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "the builder did not produce a regular file at data/knowledge.candidate.db"
     fi
     if ! resolve_knowledge_db_path; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "$kb_path_error"
     fi
     kb_parent=$(dirname -- "$kb_host_path")
     mkdir -p "$kb_parent"
     if [ -L "$kb_parent" ] || [ -L "$kb_host_path" ] || { [ -e "$kb_host_path" ] && [ ! -f "$kb_host_path" ]; }; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "refusing to promote companion knowledge database across unsafe target: $kb_relpath"
     fi
+    reject_kb_destination_sidecars
     if ! mv -f "$kb_candidate_host" "$kb_host_path"; then
-        rm -f "$kb_candidate_host" "$kb_candidate_host-wal" "$kb_candidate_host-shm" "$kb_candidate_host-journal"
+        cleanup_kb_candidate
         fail "could not promote data/knowledge.candidate.db to $kb_relpath"
     fi
     printf 'setup: %s is in place.\n' "$kb_relpath"
