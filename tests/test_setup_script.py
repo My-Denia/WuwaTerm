@@ -32,6 +32,41 @@ case "$*" in
     printf 'scopes: translate,meta\\n'
     printf 'created_at: 2026-01-01T00:00:00Z\\n' ;;
   *"build-db"*) : > "$STUB_ROOT/data/terms.candidate.db" ;;
+  *"build-kb"*)
+    if [ "${STUB_KB_BUILD_FAIL:-0}" = 1 ]; then
+      printf 'Error: simulated build-kb failure\\n' >&2
+      exit 1
+    fi
+    if [ "${STUB_KB_BUILD_SYMLINK:-0}" = 1 ]; then
+      ln -sf /etc/passwd "$STUB_ROOT/data/knowledge.candidate.db"
+    else
+      printf '%s\\n' "${STUB_KB_BUILD_CONTENT:-built-kb}" > "$STUB_ROOT/data/knowledge.candidate.db"
+    fi
+    if [ "${STUB_KB_BUILD_WRITE_CANDIDATE_SIDECARS:-0}" = 1 ]; then
+      printf 'cand-wal\\n' > "$STUB_ROOT/data/knowledge.candidate.db-wal"
+      printf 'cand-shm\\n' > "$STUB_ROOT/data/knowledge.candidate.db-shm"
+      printf 'cand-journal\\n' > "$STUB_ROOT/data/knowledge.candidate.db-journal"
+    fi
+    if [ -n "${STUB_KB_DROP_DEST_SIDECAR:-}" ]; then
+      if [ "${STUB_KB_DROP_DEST_SIDECAR_DANGLING:-0}" = 1 ]; then
+        ln -sf "$STUB_ROOT/data/nonexistent-sidecar-target" "$STUB_ROOT/$STUB_KB_DROP_DEST_SIDECAR"
+      else
+        printf 'leftover-sidecar\\n' > "$STUB_ROOT/$STUB_KB_DROP_DEST_SIDECAR"
+      fi
+    fi ;;
+  *"verify-kb"*)
+    case "$*" in
+      *knowledge.candidate.db*)
+        if [ "${STUB_KB_CANDIDATE_VERIFY_FAIL:-0}" = 1 ]; then
+          printf 'Error: simulated candidate verify-kb failure\\n' >&2
+          exit 1
+        fi ;;
+      *)
+        if [ "${STUB_KB_EXISTING_VERIFY_FAIL:-0}" = 1 ]; then
+          printf 'Error: simulated existing verify-kb failure\\n' >&2
+          exit 1
+        fi ;;
+    esac ;;
   "load -i "*)
     if [ "${STUB_TELEGRAM_LOAD_FAIL:-0}" = 1 ]; then
       printf 'Error: simulated load failure\\n' >&2
@@ -368,9 +403,9 @@ def test_with_telegram_orchestrates_core_and_http_mode_container(install_root):
     tg_env = tg_root / "telegram.env"
     assert mode_of(tg_env) == 0o600
     values = env_values(tg_env)
+    assert values["WUWATERM_CORE_MODE"] == "http"
     assert values["WUWATERM_CORE_API_URL"] == "http://127.0.0.1:8788"
     assert values["WUWATERM_CORE_API_TOKEN"] == tg_token
-    assert "WUWATERM_CORE_MODE" not in values
     assert "WUWATERM_API_BASE_URL" not in values
     assert "WUWATERM_API_DEVICE_TOKEN" not in values
     assert values["TELEGRAM_BOT_TOKEN"] == "123456:stub-tg-secret"
@@ -515,11 +550,11 @@ def test_with_telegram_v070_release_orchestrates_and_invalidates_cache_on_versio
     assert (tg_root / "image.version").read_text(encoding="utf-8").strip() == "v0.7.0"
     assert (tg_root / "image.ref").read_text(encoding="utf-8").strip() == "wuwaterm-telegram:v0.7.0"
     values = env_values(tg_root / "telegram.env")
+    assert values["WUWATERM_CORE_MODE"] == "http"
     assert values["WUWATERM_CORE_API_URL"] == "http://127.0.0.1:8788"
     assert values["WUWATERM_CORE_API_TOKEN"] == (tg_root / "device.token").read_text(
         encoding="utf-8"
     ).strip()
-    assert "WUWATERM_CORE_MODE" not in values
     log = docker_log(install_root)
     assert "--label org.wuwaterm.managed-by=setup.sh" in log
     assert "--label com.docker.compose.service=wuwaterm-telegram" not in log
@@ -2000,3 +2035,363 @@ def test_an_unusable_web_version_is_refused(install_root, version):
     assert result.returncode == 1
     assert "WUWATERM_WEB_VERSION must be latest or a tag like v0.3.0" in result.stderr
     assert not (install_root / "data" / "terms.db").exists()
+
+
+# ------------------------------------------------------------ companion knowledge.db
+
+@pytest.mark.parametrize(
+    "kb_env_line",
+    [
+        "",
+        "#WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n",
+        "WUWATERM_API_KNOWLEDGE_DB_PATH=\n",
+        "WUWATERM_API_KNOWLEDGE_DB_PATH= # explicitly disabled\n",
+    ],
+)
+def test_unconfigured_or_empty_knowledge_path_skips_kb_even_with_leftover_file(
+    install_root, kb_env_line
+):
+    write_env(install_root)
+    if kb_env_line:
+        with (install_root / ".env").open("a", encoding="utf-8") as handle:
+            handle.write(kb_env_line)
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+    (install_root / "data" / "knowledge.db").write_text("leftover-kb", encoding="utf-8")
+
+    result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={"STUB_KB_EXISTING_VERIFY_FAIL": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = docker_log(install_root)
+    assert "wuwaterm-builder" not in log
+    assert "refresh-data" not in log
+    assert "build-kb" not in log
+    assert "verify-kb" not in log
+    assert (install_root / "data" / "knowledge.db").read_text(encoding="utf-8") == "leftover-kb"
+    assert "knowledge:    data/knowledge.db present (" in result.stdout
+    assert "not configured)" in result.stdout
+
+
+def test_configured_knowledge_path_builds_and_verifies_on_first_install(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/kb/custom.db # companion kb\n"
+        )
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    assert (install_root / "data" / "terms.db").is_file()
+    target = install_root / "data" / "kb" / "custom.db"
+    assert target.is_file()
+    assert not target.is_symlink()
+    assert target.read_text(encoding="utf-8").strip() == "built-kb"
+    assert not (install_root / "data" / "knowledge.candidate.db").exists()
+    log = docker_log(install_root)
+    # Single refresh-data shared across Stage 1 and Stage 2 on a fresh install.
+    assert log.count("wuwaterm-builder refresh-data") == 1
+    assert (
+        "-e WUWATERM_DB_PATH=/app/data/terms.db "
+        "-e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db "
+        "wuwaterm-builder build-kb --atomic"
+    ) in log
+    assert (
+        "-e WUWATERM_DB_PATH=/app/data/terms.db "
+        "-e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db "
+        "wuwaterm-builder verify-kb"
+    ) in log
+    assert "knowledge:    data/kb/custom.db present (" in result.stdout
+    assert ", configured)" in result.stdout
+
+
+def test_configured_knowledge_path_reuses_verified_existing_file(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write('export WUWATERM_API_KNOWLEDGE_DB_PATH="/app/data/knowledge.db"\n')
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+    (install_root / "data" / "knowledge.db").write_text("verified-kb", encoding="utf-8")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 0, result.stderr
+    log = docker_log(install_root)
+    assert (
+        "-e WUWATERM_DB_PATH=/app/data/terms.db "
+        "-e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.db "
+        "wuwaterm-builder verify-kb"
+    ) in log
+    assert "refresh-data" not in log
+    assert "build-kb" not in log
+    assert (install_root / "data" / "knowledge.db").read_text(encoding="utf-8") == "verified-kb"
+
+
+@pytest.mark.parametrize("has_upstream", [False, True])
+def test_configured_knowledge_path_rebuilds_when_existing_fails_verify(
+    install_root, has_upstream
+):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=data/knowledge.db\n")
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+    (install_root / "data" / "knowledge.db").write_text("stale-kb", encoding="utf-8")
+    if has_upstream:
+        (install_root / "data" / "wutheringdata").mkdir()
+
+    result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={
+            "STUB_KB_EXISTING_VERIFY_FAIL": "1",
+            "STUB_KB_BUILD_CONTENT": "rebuilt-kb",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = docker_log(install_root)
+    assert (
+        "-e WUWATERM_DB_PATH=/app/data/terms.db "
+        "-e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.db "
+        "wuwaterm-builder verify-kb"
+    ) in log
+    assert ("wuwaterm-builder refresh-data" in log) is (not has_upstream)
+    assert "wuwaterm-builder build-kb --atomic" in log
+    assert (install_root / "data" / "knowledge.db").read_text(encoding="utf-8").strip() == "rebuilt-kb"
+    assert not (install_root / "data" / "knowledge.candidate.db").exists()
+
+
+def test_configured_knowledge_candidate_failure_cleans_up_and_keeps_existing(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+    (install_root / "data" / "knowledge.db").write_text("previous-kb", encoding="utf-8")
+    (install_root / "data" / "wutheringdata").mkdir()
+
+    result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={
+            "STUB_KB_EXISTING_VERIFY_FAIL": "1",
+            "STUB_KB_CANDIDATE_VERIFY_FAIL": "1",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "failed verify-kb" in result.stderr
+    assert not (install_root / "data" / "knowledge.candidate.db").exists()
+    assert (install_root / "data" / "knowledge.db").read_text(encoding="utf-8") == "previous-kb"
+
+    # A builder that drops a symlink at knowledge.candidate.db is also refused and cleaned up.
+    sym_result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={
+            "STUB_KB_EXISTING_VERIFY_FAIL": "1",
+            "STUB_KB_BUILD_SYMLINK": "1",
+        },
+    )
+    assert sym_result.returncode == 1
+    assert "regular file" in sym_result.stderr
+    assert not (install_root / "data" / "knowledge.candidate.db").exists()
+    assert not (install_root / "data" / "knowledge.candidate.db").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "/etc/passwd",
+        "/tmp/knowledge.db",
+        "knowledge.db",
+        "/app/data/../etc/passwd",
+        "data/../terms.db",
+        "data/./knowledge.db",
+        "data/terms.db",
+        "/app/data/terms.db",
+        "/app/data/knowledge.candidate.db",
+        "/app/data/candidates/knowledge.db",
+        "/app/data/deployment-backups/knowledge.db",
+        "/app/data/wutheringdata/knowledge.db",
+        "/app/data/knowledge.db-wal",
+        "/app/data/knowledge.db-shm",
+        "/app/data/knowledge.db-journal",
+        '"/app/data/with space.db"',
+    ],
+)
+def test_invalid_knowledge_path_fails_closed_before_docker_work(install_root, bad_value):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write(f"WUWATERM_API_KNOWLEDGE_DB_PATH={bad_value}\n")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "WUWATERM_API_KNOWLEDGE_DB_PATH" in result.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+def test_symlink_knowledge_path_fails_closed_before_docker_work(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    (install_root / "data").mkdir()
+    real_file = install_root / "outside.db"
+    real_file.write_text("outside", encoding="utf-8")
+    (install_root / "data" / "knowledge.db").symlink_to(real_file)
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "symlink" in result.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+def test_symlinked_env_preserves_single_db_baseline_and_rejects_configured_kb(install_root):
+    real_env = install_root / ".env.target"
+    real_env.write_text(
+        "WUWATERM_OPENAI_BASE_URL=https://model.invalid/v1\n"
+        "WUWATERM_OPENAI_API_KEY=stub-key-value\n"
+        "WUWATERM_OPENAI_MODEL=stub-model\n"
+        "WUWATERM_API_PORT=8788\n",
+        encoding="utf-8",
+    )
+    (install_root / ".env").symlink_to(real_env)
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+
+    # Single-DB mode (no WUWATERM_API_KNOWLEDGE_DB_PATH): symlinked .env succeeds
+    # without invoking wuwaterm-builder, matching pre-PR baseline behaviour.
+    ok = run_setup(install_root, "--no-adopt")
+    assert ok.returncode == 0, ok.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+
+    # Once a non-empty WUWATERM_API_KNOWLEDGE_DB_PATH is present, symlinked .env fails closed.
+    (install_root / "docker.log").unlink()
+    with real_env.open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    refused = run_setup(install_root, "--no-adopt")
+    assert refused.returncode == 1
+    assert ".env must not be a symlink" in refused.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+@pytest.mark.parametrize(
+    ("sidecar_suffix", "dangling_symlink"),
+    [
+        ("-wal", False),
+        ("-shm", False),
+        ("-journal", False),
+        ("-wal", True),
+    ],
+)
+def test_configured_knowledge_destination_sidecars_fail_closed_before_reuse_or_build(
+    install_root, sidecar_suffix, dangling_symlink
+):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    kb_path = data_dir / "knowledge.db"
+    kb_path.write_text("previous-kb", encoding="utf-8")
+    sidecar_path = data_dir / f"knowledge.db{sidecar_suffix}"
+    if dangling_symlink:
+        sidecar_path.symlink_to(data_dir / "missing-sidecar-target")
+    else:
+        sidecar_path.write_text("leftover-sidecar", encoding="utf-8")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "sidecar" in result.stderr.lower()
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert f"data/knowledge.db{sidecar_suffix}" in result.stderr
+    assert kb_path.read_text(encoding="utf-8") == "previous-kb"
+    assert sidecar_path.is_symlink() if dangling_symlink else sidecar_path.exists()
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+def test_configured_knowledge_orphan_destination_sidecar_blocks_initial_build(install_root):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    wal_path = data_dir / "knowledge.db-wal"
+    wal_path.write_text("orphan-wal", encoding="utf-8")
+
+    result = run_setup(install_root, "--no-adopt")
+
+    assert result.returncode == 1
+    assert "data/knowledge.db-wal" in result.stderr
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert wal_path.exists()
+    assert not (data_dir / "knowledge.db").exists()
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)
+
+
+@pytest.mark.parametrize(
+    ("sidecar_suffix", "dangling_symlink"),
+    [
+        ("-wal", False),
+        ("-shm", False),
+        ("-journal", False),
+        ("-wal", True),
+    ],
+)
+def test_configured_knowledge_sidecar_before_promote_rejects_and_cleans_candidate(
+    install_root, sidecar_suffix, dangling_symlink
+):
+    write_env(install_root)
+    with (install_root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    data_dir = install_root / "data"
+    data_dir.mkdir()
+    (data_dir / "terms.db").write_text("existing-terms", encoding="utf-8")
+    kb_path = data_dir / "knowledge.db"
+    kb_path.write_text("previous-kb", encoding="utf-8")
+    (data_dir / "wutheringdata").mkdir()
+
+    result = run_setup(
+        install_root,
+        "--no-adopt",
+        env={
+            "STUB_KB_EXISTING_VERIFY_FAIL": "1",
+            "STUB_KB_BUILD_CONTENT": "rebuilt-kb",
+            "STUB_KB_BUILD_WRITE_CANDIDATE_SIDECARS": "1",
+            "STUB_KB_DROP_DEST_SIDECAR": f"data/knowledge.db{sidecar_suffix}",
+            "STUB_KB_DROP_DEST_SIDECAR_DANGLING": "1" if dangling_symlink else "0",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "sidecar" in result.stderr.lower()
+    assert "checkpoint" in result.stderr.lower()
+    assert "recover" in result.stderr.lower()
+    assert f"data/knowledge.db{sidecar_suffix}" in result.stderr
+    assert kb_path.read_text(encoding="utf-8") == "previous-kb"
+    sidecar_path = data_dir / f"knowledge.db{sidecar_suffix}"
+    assert sidecar_path.is_symlink() if dangling_symlink else sidecar_path.exists()
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate_file = data_dir / f"knowledge.candidate.db{suffix}"
+        assert not candidate_file.exists()
+        assert not candidate_file.is_symlink()
+    log = docker_log(install_root)
+    assert "wuwaterm-builder build-kb --atomic" in log
+    assert "up -d" not in log

@@ -1618,3 +1618,393 @@ def test_finish_handoff_keeps_its_published_entry_points() -> None:
     assert full.verify_handoff.__module__ == "component_handoff"
     assert full.verify_predecessor.__module__ == "component_handoff"
     assert not hasattr(component_handoff, "finish_handoff")
+
+
+# ------------------------------------ companion knowledge.db consistency guard
+
+def _make_companion_kb(kb_path: Path, terms_db_revision: str, *, schema_version: str = "1") -> Path:
+    import sqlite3
+
+    kb_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(kb_path) as conn:
+        conn.execute("CREATE TABLE kb_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO kb_metadata (key, value) VALUES (?, ?)",
+            ("kb_schema_version", schema_version),
+        )
+        conn.execute(
+            "INSERT INTO kb_metadata (key, value) VALUES (?, ?)",
+            ("terms_db_revision", terms_db_revision),
+        )
+        conn.commit()
+    return kb_path
+
+
+def _api_observation(data_dir: Path, container_id: str = "a" * 64) -> dict:
+    return {
+        "container": {"id": container_id},
+        "recipe": {
+            "mounts": [{"host": str(data_dir), "container": "/app/data", "read_only": True}],
+            "working_dir": "/app",
+        },
+    }
+
+
+def test_verify_companion_knowledge_skips_when_unset_or_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import component_full_db as full_db  # noqa: PLC0415
+    import component_observe as plain_observe  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    candidate = data_dir / "candidate.db"
+    make_database(candidate)
+    actual = _api_observation(data_dir)
+
+    for env_list in ([], ["WUWATERM_DB_PATH=/app/data/terms.db"], ["WUWATERM_API_KNOWLEDGE_DB_PATH="],
+                     ["WUWATERM_API_KNOWLEDGE_DB_PATH=   "]):
+        monkeypatch.setattr(plain_observe, "_inspect", lambda cid, e=env_list: {"Config": {"Env": e}})
+        full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=False)
+
+
+def test_verify_companion_knowledge_accepts_matching_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import component_full_db as full_db  # noqa: PLC0415
+    import component_observe as plain_observe  # noqa: PLC0415
+    from wuwaterm.knowledge_db import compute_terms_db_revision  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    candidate = data_dir / "candidate.db"
+    make_database(candidate)
+    revision = compute_terms_db_revision(candidate, immutable=True)
+    _make_companion_kb(data_dir / "knowledge.db", revision)
+    actual = _api_observation(data_dir)
+    monkeypatch.setattr(
+        plain_observe,
+        "_inspect",
+        lambda cid: {"Config": {"Env": ["WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db"]}},
+    )
+    full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=False)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "missing_revision", "mismatch", "corrupt", "sidecar", "symlink", "unmapped"],
+)
+def test_verify_companion_knowledge_fails_closed_and_degrades_when_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str
+) -> None:
+    import sqlite3
+    import component_full_db as full_db  # noqa: PLC0415
+    import component_observe as plain_observe  # noqa: PLC0415
+    from wuwaterm.knowledge_db import compute_terms_db_revision  # noqa: PLC0415
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    candidate = data_dir / "candidate.db"
+    make_database(candidate)
+    revision = compute_terms_db_revision(candidate, immutable=True)
+    kb_path = data_dir / "knowledge.db"
+    env_value = "/app/data/knowledge.db"
+
+    if case == "missing":
+        pass
+    elif case == "missing_revision":
+        with sqlite3.connect(kb_path) as conn:
+            conn.execute("CREATE TABLE kb_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "INSERT INTO kb_metadata (key, value) VALUES (?, ?)",
+                ("kb_schema_version", "1"),
+            )
+            conn.commit()
+    elif case == "mismatch":
+        _make_companion_kb(kb_path, "0" * 64)
+    elif case == "corrupt":
+        kb_path.write_bytes(b"not-a-sqlite-db")
+    elif case == "sidecar":
+        _make_companion_kb(kb_path, revision)
+        (data_dir / "knowledge.db-wal").write_bytes(b"wal")
+    elif case == "symlink":
+        other = tmp_path / "other.db"
+        _make_companion_kb(other, revision)
+        kb_path.symlink_to(other)
+    elif case == "unmapped":
+        env_value = "/unmounted/knowledge.db"
+
+    actual = _api_observation(data_dir)
+    monkeypatch.setattr(
+        plain_observe,
+        "_inspect",
+        lambda cid: {"Config": {"Env": [f"WUWATERM_API_KNOWLEDGE_DB_PATH={env_value}"]}},
+    )
+
+    with pytest.raises(full_db.CompanionKnowledgeError) as exc_info:
+        full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=False)
+    message = str(exc_info.value)
+    assert "wuwaterm build-kb --data-dir <data-dir> --db " in message
+    assert "--terms-db <candidate> --atomic" in message
+    assert "--allow-knowledge-degrade" in message
+    assert "vps-update.sh" not in message
+    if case not in ("symlink", "unmapped"):
+        assert str(kb_path) in message
+    if case == "missing_revision":
+        assert "unreadable or corrupt" in message
+        assert "file is missing" not in message
+    elif case == "missing":
+        assert "file is missing" in message
+
+    full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=True)
+    captured = capsys.readouterr()
+    assert "--allow-knowledge-degrade" in captured.err
+    assert "dictionary-only" in captured.err
+
+
+def _setup_api_prepare_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kb_env_value: str | None,
+    kb_revision_mode: str = "match",
+) -> tuple[Path, Path, dict]:
+    """Wire a minimal real-DB + real-candidate-discard fixture for ``full.prepare``."""
+    import component_full_db as full_db  # noqa: PLC0415
+    import component_observe as plain_observe  # noqa: PLC0415
+    import component_operations as plain_ops  # noqa: PLC0415
+    import component_recovery as plain_recovery  # noqa: PLC0415
+    import component_terminal as plain_terminal  # noqa: PLC0415
+    import deployment_admission as plain_admission  # noqa: PLC0415
+    from wuwaterm.knowledge_db import compute_terms_db_revision  # noqa: PLC0415
+
+    root = tmp_path.resolve()
+    base_journal = full_journal.__wrapped__(root)
+    (root / ".deployments").mkdir(parents=True, exist_ok=True)
+    data_dir = root / "data"
+    data_dir.mkdir(exist_ok=True)
+    state_api = root / "state-api"
+    state_api.mkdir(exist_ok=True)
+    devices_db = state_api / "devices.db"
+    devices_db.write_bytes(b"devices")
+    devices_stat = devices_db.stat()
+
+    old_db_path = data_dir / "terms.db"
+    old_db_binding = make_database(old_db_path)
+    candidate_src = root / "incoming-candidate.db"
+    make_database(candidate_src)
+    cand_rev = compute_terms_db_revision(candidate_src, immutable=True)
+
+    if kb_revision_mode == "match":
+        _make_companion_kb(data_dir / "knowledge.db", cand_rev)
+    elif kb_revision_mode == "mismatch":
+        _make_companion_kb(data_dir / "knowledge.db", "f" * 64)
+
+    journal = _schema5_journal(base_journal)
+    old_manifest = copy.deepcopy(journal["before"]["manifest"])
+    old_manifest["schema_version"] = manifest.MANIFEST_SCHEMA_VERSION
+    old_manifest["database"] = old_db_binding
+    old_manifest["api_identity"] = {
+        "path": str(devices_db),
+        "device": devices_stat.st_dev,
+        "inode": devices_stat.st_ino,
+    }
+    old_manifest["components"]["telegram"] = None
+    api_component = old_manifest["components"]["api"]
+    api_component["provenance"] = {
+        "kind": "completed-artifact",
+        "bundle_sha256": "a" * 64,
+        "acquisition_sha256": "b" * 64,
+        "authority": "local-source",
+        "native_image_id": api_component["image"]["id"],
+    }
+    snapshot = manifest.read_recipe_snapshot(root, api_component["recipe"]["sha256"])
+    snapshot["mounts"] = [
+        {"host": str(data_dir), "container": "/app/data", "read_only": True},
+        {"host": str(state_api), "container": "/app/state-api", "read_only": False},
+    ]
+    snapshot["environment_overrides"] = [
+        {"name": "WUWATERM_DB_PATH", "mode": "literal", "value": "/app/data/terms.db"},
+        {"name": "WUWATERM_API_STATE_DIR", "mode": "literal", "value": "/app/state-api"},
+    ]
+    # In real Compose deployments WUWATERM_API_KNOWLEDGE_DB_PATH arrives via
+    # env_file (.env), so it appears in the live container's Config.Env rather
+    # than environment_overrides.
+    env_list = [
+        "WUWATERM_DB_PATH=/app/data/terms.db",
+        "WUWATERM_API_STATE_DIR=/app/state-api",
+    ]
+    if kb_env_value is not None:
+        env_list.append(f"WUWATERM_API_KNOWLEDGE_DB_PATH={kb_env_value}")
+    snap_path, snap_digest = manifest.write_recipe_snapshot(root, snapshot)
+    api_component["recipe"] = {key: snapshot[key] for key in manifest._RECIPE_FIELDS}
+    api_component["recipe"].update(snapshot_path=snap_path, sha256=snap_digest)
+
+    api_container = copy.deepcopy(journal["before"]["containers"]["api"])
+    prior_record = {
+        "kind": "component-runtime",
+        "transaction_id": old_manifest["deployment_id"],
+        "status": "committed",
+        "target": {
+            "manifest": old_manifest,
+            "containers": {"api": api_container, "telegram": None},
+        },
+        "before": {
+            "manifest": old_manifest,
+            "containers": {"api": api_container, "telegram": None},
+        },
+    }
+    predecessor_raw = b"terminal-predecessor\n"
+    actual = {
+        "container": copy.deepcopy(api_container),
+        "recipe": copy.deepcopy(snapshot),
+        "path_settings": {
+            "WUWATERM_DB_PATH": "/app/data/terms.db",
+            "WUWATERM_API_STATE_DIR": "/app/state-api",
+            "WUWATERM_API_DEVICE_DB_PATH": None,
+        },
+    }
+    source = copy.deepcopy(journal["source"])
+    commit = source["commit"]
+    tree = source["tree"]
+    compose_path = root / "docker-compose"
+    compose_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    (root / ".deploy_commit").write_text(commit + "\n", encoding="utf-8")
+    (root / ".deploy_current").write_text(old_manifest["deployment_id"] + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(plain_admission, "_physical_root", lambda p: root)
+    monkeypatch.setattr(plain_admission, "require_lock", lambda p: None)
+    monkeypatch.setattr(plain_admission, "admit_component", lambda *a, **kw: None)
+    monkeypatch.setattr(full_db, "_verify_candidate", lambda r, p, i: dict(full_db.VERIFICATION))
+    monkeypatch.setattr(plain_ops, "_compose_binary", lambda p: compose_path)
+    monkeypatch.setattr(plain_terminal, "verify_terminal_for_full4", lambda r, compose_path: (predecessor_raw, prior_record))
+    monkeypatch.setattr(plain_terminal, "_prepare_predecessor", lambda r, c, for_full4=True: predecessor_raw)
+    monkeypatch.setattr(full.adoption, "inspect_deployment", lambda r: {"binding": "recorded", "manifest": old_manifest})
+    monkeypatch.setattr(
+        plain_recovery,
+        "safe_git",
+        lambda r, *args, **kw: (commit if "commit" in args[-1] else tree).encode("ascii"),
+    )
+    monkeypatch.setattr(plain_recovery, "_load_packager", lambda p: None)
+    monkeypatch.setattr(plain_recovery, "_verify_clean_source", lambda r, c, t: None)
+    monkeypatch.setattr(plain_recovery, "prepare_source", lambda r, c, t, compose_path: copy.deepcopy(source))
+    monkeypatch.setattr(plain_recovery, "_verify_bound_compose", lambda r, s: compose_path)
+    monkeypatch.setattr(plain_ops, "_snapshot", lambda r, c: copy.deepcopy(snapshot))
+    monkeypatch.setattr(plain_ops, "_observed", lambda cid, s, k: copy.deepcopy(actual))
+    monkeypatch.setattr(plain_ops, "_recipe_matches", lambda a, s: None)
+    monkeypatch.setattr(plain_ops, "_same_container_binding", lambda a, b: True)
+    monkeypatch.setattr(plain_ops, "_image", lambda iid: {"Config": {"Env": []}})
+    monkeypatch.setattr(
+        plain_ops,
+        "_effective_environment",
+        lambda s, img, cp, r: plain_ops._env_map(env_list),
+    )
+    monkeypatch.setattr(plain_observe, "_inspect", lambda cid: {"Config": {"Env": list(env_list)}})
+    monkeypatch.setattr(plain_ops, "_verify_live_topology", lambda *a, **kw: None)
+    return root, candidate_src, {"compose_path": compose_path}
+
+
+def test_prepare_single_db_and_matching_companion_kb_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = {"selection": "none", "artifacts": {}, "recipes": {}}
+
+    root1 = tmp_path / "single"
+    root1.mkdir()
+    root1, cand1, ctx1 = _setup_api_prepare_fixture(
+        root1, monkeypatch, kb_env_value=None, kb_revision_mode="none"
+    )
+    j1 = full.prepare(root1, cand1, request, compose_path=ctx1["compose_path"])
+    assert j1["schema_version"] == full.SCHEMA_VERSION
+    assert j1["phase"] == "prepared"
+
+    root2 = tmp_path / "dual-ok"
+    root2.mkdir()
+    root2, cand2, ctx2 = _setup_api_prepare_fixture(
+        root2, monkeypatch,
+        kb_env_value="/app/data/knowledge.db", kb_revision_mode="match",
+    )
+    j2 = full.prepare(root2, cand2, request, compose_path=ctx2["compose_path"])
+    assert j2["schema_version"] == full.SCHEMA_VERSION
+    assert j2["phase"] == "prepared"
+
+
+def test_prepare_mismatched_companion_kb_fails_closed_and_discards_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = {"selection": "none", "artifacts": {}, "recipes": {}}
+    root, cand, ctx = _setup_api_prepare_fixture(
+        tmp_path, monkeypatch,
+        kb_env_value="/app/data/knowledge.db", kb_revision_mode="mismatch",
+    )
+
+    with pytest.raises(full.CompanionKnowledgeFullError) as exc_info:
+        full.prepare(root, cand, request, compose_path=ctx["compose_path"], allow_knowledge_degrade=False)
+    msg = str(exc_info.value)
+    expected_kb = str(root / "data" / "knowledge.db")
+    assert f"wuwaterm build-kb --data-dir <data-dir> --db {expected_kb} --terms-db <candidate> --atomic" in msg
+    assert "--allow-knowledge-degrade" in msg
+    assert "vps-update.sh" not in msg
+    # No journal was published and the prepared candidate + claim were completely discarded.
+    assert not (root / ".deployments" / full.JOURNAL_NAME).exists()
+    cand_dir = root / ".deployments" / "component-full-candidates"
+    claims_dir = root / ".deployments" / "component-full-db-claims"
+    assert not cand_dir.exists() or list(cand_dir.iterdir()) == []
+    assert not claims_dir.exists() or list(claims_dir.iterdir()) == []
+
+    # With explicit --allow-knowledge-degrade, preparation warns on stderr and succeeds.
+    journal = full.prepare(
+        root, cand, request, compose_path=ctx["compose_path"], allow_knowledge_degrade=True
+    )
+    captured = capsys.readouterr()
+    assert "--allow-knowledge-degrade" in captured.err
+    assert journal["schema_version"] == full.SCHEMA_VERSION
+    assert journal["phase"] == "prepared"
+
+
+def test_cli_full_update_forwards_allow_knowledge_degrade_and_surfaces_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import component_deployment as deployment  # noqa: PLC0415
+    import component_full as plain_full  # noqa: PLC0415
+    import component_recovery as plain_recovery  # noqa: PLC0415
+
+    seen: list[bool] = []
+    monkeypatch.setattr(runtime.admission, "admit_component", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime, "capsule_execution_ready", lambda *, full=False: True)
+    monkeypatch.setattr(plain_recovery, "_verify_bound_compose", lambda r, s: tmp_path / "compose")
+
+    def fake_prepare(root, candidate_db, request, *, compose_path, expected_sha=None,
+                     allow_knowledge_degrade=False):
+        seen.append(allow_knowledge_degrade)
+        if not allow_knowledge_degrade:
+            raise plain_full.CompanionKnowledgeFullError(
+                "companion knowledge.db is incompatible with the candidate terms.db (terms_db_revision mismatch); "
+                "either (1) build and place a matching knowledge.db at /srv/data/knowledge.db first with "
+                "`wuwaterm build-kb --data-dir <data-dir> --db /srv/data/knowledge.db --terms-db <candidate> --atomic` "
+                "and re-run `full-update`, or "
+                "(2) pass `--allow-knowledge-degrade` to proceed with dictionary-only degradation"
+            )
+        return {"transaction_id": "20261128T000000Z-" + "a" * 32, "source": {"commit": "a" * 40}}
+
+    monkeypatch.setattr(plain_full, "prepare", fake_prepare)
+    monkeypatch.setattr(plain_full, "update", lambda root, journal, compose_path: {"status": "committed"})
+
+    base_argv = [
+        "--root", str(tmp_path), "full-update",
+        "--candidate-db", str(tmp_path / "cand.db"),
+        "--compose-executable", str(tmp_path / "compose"),
+    ]
+    rc_fail = deployment.main(base_argv, runtime=runtime)
+    err_fail = capsys.readouterr().err
+    assert rc_fail == 1
+    assert "wuwaterm build-kb --data-dir <data-dir> --db /srv/data/knowledge.db --terms-db <candidate> --atomic" in err_fail
+    assert "--allow-knowledge-degrade" in err_fail
+    assert "vps-update.sh" not in err_fail
+
+    rc_ok = deployment.main([*base_argv, "--allow-knowledge-degrade"], runtime=runtime)
+    out_ok = capsys.readouterr().out
+    assert rc_ok == 0
+    assert '"status": "committed"' in out_ok
+    assert seen == [False, True]

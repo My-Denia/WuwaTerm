@@ -80,10 +80,11 @@ add any combination of client surfaces.
                         backend and fails closed): issues a dedicated telegram
                         device token (state-telegram/device.token, mode 0600),
                         writes state-telegram/telegram.env (mode 0600) with
-                        WUWATERM_CORE_API_URL and WUWATERM_CORE_API_TOKEN,
-                        verifies image.oci.tar against SHA256SUMS, mounts
-                        data/ read-only and state-telegram/state/ read-write,
-                        and starts/health-checks wuwaterm-telegram labeled
+                        WUWATERM_CORE_MODE=http, WUWATERM_CORE_API_URL and
+                        WUWATERM_CORE_API_TOKEN, verifies image.oci.tar against
+                        SHA256SUMS, mounts data/ read-only and
+                        state-telegram/state/ read-write, and starts/health-
+                        checks wuwaterm-telegram labeled
                         org.wuwaterm.managed-by=setup.sh. Requires
                         TELEGRAM_BOT_TOKEN in .env (or already in
                         state-telegram/telegram.env).
@@ -117,11 +118,12 @@ add any combination of client surfaces.
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
 WUWATERM_API_KNOWLEDGE_DB_PATH (optional, e.g. /app/data/knowledge.db under
-Compose) mounts a companion read-only entity knowledge database bound to
-data/terms.db's revision; verify it with:
-  python scripts/verify_knowledge_db.py data/knowledge.db --terms-db data/terms.db
-Missing or revision-mismatched knowledge.db degrades safely to dictionary-only
-mode without blocking wuwaterm-api startup.
+Compose) enables a companion read-only entity knowledge database bound to
+data/terms.db's revision. When set in .env, setup.sh verifies an existing file
+against data/terms.db or builds, verifies, and atomically installs it; when
+unset or empty, single-DB behaviour is unchanged. Missing or revision-mismatched
+knowledge.db at API runtime degrades safely to dictionary-only mode without
+blocking wuwaterm-api startup.
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release tag to install
 (default: the tag contracts/products.json of this checkout records, v0.6.1 here;
 the script's own constant when that file is absent).
@@ -272,12 +274,168 @@ ensure_layout() {
     chmod 600 "$code_root/.env"
 }
 
+# Read WUWATERM_API_KNOWLEDGE_DB_PATH from .env as plain data (without shell
+# evaluation), stripping optional quotes, leading `export `, and unquoted
+# trailing `#` comments (aligned with scripts/full_update.py::_parse_env_var).
+env_kb_raw_value() {
+    [ -f "$code_root/.env" ] || return 1
+    awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            sub(/^[ \t]+/, "", line)
+            sub(/[ \t]+$/, "", line)
+            if (line == "" || substr(line, 1, 1) == "#") next
+            if (substr(line, 1, 7) == "export ") {
+                line = substr(line, 8)
+                sub(/^[ \t]+/, "", line)
+            }
+            eq = index(line, "=")
+            if (eq == 0) next
+            name = substr(line, 1, eq - 1)
+            sub(/[ \t]+$/, "", name)
+            if (name != "WUWATERM_API_KNOWLEDGE_DB_PATH") next
+            val = substr(line, eq + 1)
+            sub(/^[ \t]+/, "", val)
+            sub(/[ \t]+$/, "", val)
+            first = substr(val, 1, 1)
+            if (first == "\"" || first == "\047") {
+                rest = substr(val, 2)
+                endq = index(rest, first)
+                if (endq > 0) {
+                    trailing = substr(rest, endq + 1)
+                    sub(/^[ \t]+/, "", trailing)
+                    if (trailing == "" || substr(trailing, 1, 1) == "#") {
+                        val = substr(rest, 1, endq - 1)
+                        sub(/^[ \t]+/, "", val)
+                        sub(/[ \t]+$/, "", val)
+                    }
+                }
+            } else if (first == "#") {
+                val = ""
+            } else {
+                if (match(val, /[ \t]+#/)) {
+                    val = substr(val, 1, RSTART - 1)
+                    sub(/[ \t]+$/, "", val)
+                }
+            }
+            found = 1
+            result = val
+        }
+        END {
+            if (found) printf "%s", result
+            else exit 1
+        }
+    ' "$code_root/.env"
+}
+
+# Resolve and validate WUWATERM_API_KNOWLEDGE_DB_PATH from .env.
+# Sets kb_configured (0/1), kb_relpath (data/<rel>), kb_host_path, kb_path_error.
+# Returns 0 when disabled or valid, 1 when configured to an invalid/unsafe path.
+# Unset or explicit empty values leave single-DB behaviour untouched even if a
+# leftover data/knowledge.db exists on disk.
+resolve_knowledge_db_path() {
+    kb_configured=0
+    kb_relpath=
+    kb_host_path=
+    kb_path_error=
+    if ! kb_raw=$(env_kb_raw_value); then
+        return 0
+    fi
+    if [ -z "$kb_raw" ]; then
+        return 0
+    fi
+    kb_configured=1
+    if [ -L "$code_root/.env" ]; then
+        kb_path_error=".env must not be a symlink when WUWATERM_API_KNOWLEDGE_DB_PATH is configured"
+        return 1
+    fi
+    case "$kb_raw" in
+        /app/data/*) kb_relpath="data/${kb_raw#/app/data/}" ;;
+        data/*) kb_relpath="$kb_raw" ;;
+        *)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must be under /app/data/ or data/ (got: $kb_raw)"
+            return 1 ;;
+    esac
+    if [ "${#kb_relpath}" -gt 200 ]; then
+        kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH exceeds 200 characters"
+        return 1
+    fi
+    case "$kb_relpath" in
+        *[[:space:]]*|*[[:cntrl:]]*|*\\*)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH contains invalid whitespace, control or backslash characters"
+            return 1 ;;
+    esac
+    kb_rest=${kb_relpath#data/}
+    case "$kb_rest" in
+        ""|/*|*/|*//*)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH contains an empty or malformed path segment: $kb_relpath"
+            return 1 ;;
+    esac
+    kb_first_seg=${kb_rest%%/*}
+    case "$kb_first_seg" in
+        candidates|deployment-backups|wutheringdata)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must not point inside data/$kb_first_seg/"
+            return 1 ;;
+    esac
+    case "$kb_relpath" in
+        data/terms.db|data/terms.candidate.db|data/knowledge.candidate.db)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must not point to $kb_relpath"
+            return 1 ;;
+        *-wal|*-shm|*-journal)
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must not point to a SQLite sidecar file"
+            return 1 ;;
+    esac
+    if [ -L "$code_root/data" ]; then
+        kb_path_error="data/ must not be a symlink when WUWATERM_API_KNOWLEDGE_DB_PATH is configured"
+        return 1
+    fi
+    kb_cursor="$code_root/data"
+    kb_remaining=$kb_rest
+    while [ -n "$kb_remaining" ]; do
+        case "$kb_remaining" in
+            */*)
+                kb_seg=${kb_remaining%%/*}
+                kb_remaining=${kb_remaining#*/}
+                kb_is_leaf=0 ;;
+            *)
+                kb_seg=$kb_remaining
+                kb_remaining=
+                kb_is_leaf=1 ;;
+        esac
+        case "$kb_seg" in
+            ""|"."|"..")
+                kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must not contain '.' or '..' segments"
+                return 1 ;;
+        esac
+        kb_cursor="$kb_cursor/$kb_seg"
+        if [ -L "$kb_cursor" ]; then
+            kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH must not cross or target a symlink: $kb_relpath"
+            return 1
+        fi
+        if [ "$kb_is_leaf" = 0 ]; then
+            if [ -e "$kb_cursor" ] && [ ! -d "$kb_cursor" ]; then
+                kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH parent is not a directory: $kb_relpath"
+                return 1
+            fi
+        else
+            if [ -e "$kb_cursor" ] && [ ! -f "$kb_cursor" ]; then
+                kb_path_error="WUWATERM_API_KNOWLEDGE_DB_PATH target must be a regular file: $kb_relpath"
+                return 1
+            fi
+        fi
+    done
+    kb_host_path="$code_root/$kb_relpath"
+    return 0
+}
+
 validate_config() {
     # Sentence translation is the product; exact lookup alone needs no model,
     # but a configuration that cannot translate is not a finished install.
     require_env WUWATERM_OPENAI_BASE_URL
     require_env WUWATERM_OPENAI_API_KEY
     require_env WUWATERM_OPENAI_MODEL
+    resolve_knowledge_db_path || fail "$kb_path_error"
     if [ -n "$telegram_dir" ]; then
         require_env TELEGRAM_BOT_TOKEN
         warn_if_empty OWNER_USER_ID
@@ -357,29 +515,126 @@ api_port() {
     printf '%s' "${value:-8788}"
 }
 
-build_data() {
-    if [ -f "$code_root/data/terms.db" ]; then
-        printf 'setup: data/terms.db already present; keeping it.\n'
-        return 0
-    fi
-    printf 'setup: data/terms.db is missing; building it from the pinned upstream source.\n'
-    printf 'setup: this fetches roughly a gigabyte and can fail part-way; re-running resumes it.\n'
+ensure_builder_image() {
+    [ "${builder_ready:-0}" = 1 ] && return 0
     if [ "$build_local" = 1 ]; then
         compose build wuwaterm-builder
     else
         compose pull wuwaterm-builder \
             || fail "could not pull the official builder image $image_tag; publish that release or pass --build-local"
     fi
-    compose run --rm wuwaterm-builder refresh-data
-    compose run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
-    compose run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
-    [ -f "$code_root/data/terms.candidate.db" ] \
-        || fail "the builder did not produce data/terms.candidate.db"
-    if [ -L "$code_root/data/terms.db" ] || [ -e "$code_root/data/terms.db" ]; then
-        fail "data/terms.db appeared while building; refusing to overwrite it"
+    builder_ready=1
+}
+
+cleanup_kb_candidate() {
+    [ -n "${kb_candidate_host:-}" ] || return 0
+    rm -f \
+        "$kb_candidate_host" \
+        "${kb_candidate_host}-wal" \
+        "${kb_candidate_host}-shm" \
+        "${kb_candidate_host}-journal"
+}
+
+reject_kb_destination_sidecars() {
+    kb_found_sidecars=
+    for kb_sc_suffix in -wal -shm -journal; do
+        kb_sc_path="${kb_host_path}${kb_sc_suffix}"
+        if [ -e "$kb_sc_path" ] || [ -L "$kb_sc_path" ]; then
+            if [ -n "$kb_found_sidecars" ]; then
+                kb_found_sidecars="${kb_found_sidecars}, ${kb_relpath}${kb_sc_suffix}"
+            else
+                kb_found_sidecars="${kb_relpath}${kb_sc_suffix}"
+            fi
+        fi
+    done
+    if [ -n "$kb_found_sidecars" ]; then
+        cleanup_kb_candidate
+        fail "refusing to reuse or promote $kb_relpath while leftover SQLite sidecar file(s) exist ($kb_found_sidecars); stop any writer process and safely checkpoint or recover the database before retrying"
     fi
-    mv "$code_root/data/terms.candidate.db" "$code_root/data/terms.db"
-    printf 'setup: data/terms.db is in place.\n'
+}
+
+build_data() {
+    builder_ready=0
+    data_refreshed=0
+    # Stage 1: terminology database (terms.db).
+    if [ -f "$code_root/data/terms.db" ]; then
+        printf 'setup: data/terms.db already present; keeping it.\n'
+    else
+        printf 'setup: data/terms.db is missing; building it from the pinned upstream source.\n'
+        printf 'setup: this fetches roughly a gigabyte and can fail part-way; re-running resumes it.\n'
+        ensure_builder_image
+        compose run --rm wuwaterm-builder refresh-data
+        data_refreshed=1
+        compose run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
+        compose run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
+        [ -f "$code_root/data/terms.candidate.db" ] \
+            || fail "the builder did not produce data/terms.candidate.db"
+        if [ -L "$code_root/data/terms.db" ] || [ -e "$code_root/data/terms.db" ]; then
+            fail "data/terms.db appeared while building; refusing to overwrite it"
+        fi
+        mv "$code_root/data/terms.candidate.db" "$code_root/data/terms.db"
+        printf 'setup: data/terms.db is in place.\n'
+    fi
+
+    # Stage 2: optional companion knowledge database (only when explicitly configured in .env).
+    kb_candidate_host=
+    resolve_knowledge_db_path || fail "$kb_path_error"
+    [ "$kb_configured" = 1 ] || return 0
+    reject_kb_destination_sidecars
+    ensure_builder_image
+    if [ -f "$kb_host_path" ]; then
+        if compose run --rm \
+            -e WUWATERM_DB_PATH=/app/data/terms.db \
+            -e "WUWATERM_KNOWLEDGE_DB_PATH=/app/$kb_relpath" \
+            wuwaterm-builder verify-kb; then
+            printf 'setup: %s already present and verified against data/terms.db; keeping it.\n' "$kb_relpath"
+            return 0
+        fi
+        printf 'setup: %s failed verification against data/terms.db; rebuilding it.\n' "$kb_relpath"
+    else
+        printf 'setup: %s is missing; building companion knowledge database against data/terms.db.\n' "$kb_relpath"
+    fi
+    if [ "$data_refreshed" != 1 ] && [ ! -d "$code_root/data/wutheringdata" ]; then
+        printf 'setup: data/wutheringdata is missing; refreshing pinned upstream source for %s.\n' "$kb_relpath"
+        compose run --rm wuwaterm-builder refresh-data
+        data_refreshed=1
+    fi
+    kb_candidate_host="$code_root/data/knowledge.candidate.db"
+    cleanup_kb_candidate
+    if ! compose run --rm \
+        -e WUWATERM_DB_PATH=/app/data/terms.db \
+        -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+        wuwaterm-builder build-kb --atomic; then
+        cleanup_kb_candidate
+        fail "the builder failed to build $kb_relpath"
+    fi
+    if ! compose run --rm \
+        -e WUWATERM_DB_PATH=/app/data/terms.db \
+        -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+        wuwaterm-builder verify-kb; then
+        cleanup_kb_candidate
+        fail "the built candidate for $kb_relpath failed verify-kb against data/terms.db"
+    fi
+    if [ -L "$kb_candidate_host" ] || [ ! -f "$kb_candidate_host" ]; then
+        cleanup_kb_candidate
+        fail "the builder did not produce a regular file at data/knowledge.candidate.db"
+    fi
+    if ! resolve_knowledge_db_path; then
+        cleanup_kb_candidate
+        fail "$kb_path_error"
+    fi
+    kb_parent=$(dirname -- "$kb_host_path")
+    mkdir -p "$kb_parent"
+    if [ -L "$kb_parent" ] || [ -L "$kb_host_path" ] || { [ -e "$kb_host_path" ] && [ ! -f "$kb_host_path" ]; }; then
+        cleanup_kb_candidate
+        fail "refusing to promote companion knowledge database across unsafe target: $kb_relpath"
+    fi
+    reject_kb_destination_sidecars
+    if ! mv -f "$kb_candidate_host" "$kb_host_path"; then
+        cleanup_kb_candidate
+        fail "could not promote data/knowledge.candidate.db to $kb_relpath"
+    fi
+    printf 'setup: %s is in place.\n' "$kb_relpath"
 }
 
 # Print nothing secret: the caller only learns the device id and where the
@@ -788,6 +1043,7 @@ write_telegram_http_env() {
         umask 077
         exec >"$scratch"
         printf '# Written by deploy/setup.sh for WuwaTerm-Telegram (Core HTTP mode).\n'
+        printf 'WUWATERM_CORE_MODE=http\n'
         printf 'WUWATERM_CORE_API_URL=http://127.0.0.1:%s\n' "$(api_port)"
         printf 'WUWATERM_CORE_API_TOKEN=%s\n' "$token"
         printf 'WUWATERM_STATE_DIR=/app/state\n'
@@ -1721,9 +1977,22 @@ report_status() {
     else
         printf 'data:         data/terms.db missing\n'
     fi
-    if [ -f "$code_root/data/knowledge.db" ]; then
-        printf 'knowledge:    data/knowledge.db present (%s bytes)\n' \
-            "$(wc -c <"$code_root/data/knowledge.db" | tr -d ' ')"
+    if resolve_knowledge_db_path; then
+        if [ "$kb_configured" = 1 ]; then
+            if [ -f "$kb_host_path" ]; then
+                printf 'knowledge:    %s present (%s bytes, configured)\n' \
+                    "$kb_relpath" "$(wc -c <"$kb_host_path" | tr -d ' ')"
+            else
+                printf 'knowledge:    %s missing (configured)\n' "$kb_relpath"
+            fi
+        elif [ -f "$code_root/data/knowledge.db" ]; then
+            printf 'knowledge:    data/knowledge.db present (%s bytes, not configured)\n' \
+                "$(wc -c <"$code_root/data/knowledge.db" | tr -d ' ')"
+        else
+            printf 'knowledge:    not configured\n'
+        fi
+    else
+        printf 'knowledge:    invalid configuration (%s)\n' "$kb_path_error"
     fi
     api_state=$(container_state wuwaterm-api)
     printf 'api:          %s\n' "${api_state:-not installed}"

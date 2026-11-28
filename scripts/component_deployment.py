@@ -63,6 +63,12 @@ def main(argv: list[str] | None = None, *, runtime: ModuleType) -> int:
     full_update.add_argument("--telegram-artifact", type=Path, help="registered completed-artifact acquisition receipt")
     full_update.add_argument("--compose-executable", type=Path, required=True)
     full_update.add_argument("--expected-sha")
+    full_update.add_argument(
+        "--allow-knowledge-degrade",
+        action="store_true",
+        default=False,
+        help="proceed even if companion knowledge.db is missing or mismatched with the candidate terms.db",
+    )
     for command in (update, full_update):
         for name in ("api", "telegram"):
             command.add_argument(f"--{name}-compose-file", action="append", default=[])
@@ -389,9 +395,12 @@ def main(argv: list[str] | None = None, *, runtime: ModuleType) -> int:
                 request = ({"selection": args.components, "receipts": receipts, "recipes": recipes} if receipts else
                            {"selection": args.components, "artifacts": artifacts, "recipes": recipes})
                 journal = (full.prepare(root, args.candidate_db, request, compose_path=args.compose_executable,
-                                        expected_sha=args.expected_sha) if is_full else
+                                        expected_sha=args.expected_sha,
+                                        allow_knowledge_degrade=args.allow_knowledge_degrade) if is_full else
                            prepare.prepare_update(root, request, args.compose_executable))
             except (full.FullError, prepare.PrepareError, recovery.RecoveryError, transaction.TransactionError) as exc:
+                if is_full and isinstance(exc, full.CompanionKnowledgeFullError):
+                    raise runtime.JournalError(f"full update preparation failed: {exc}") from exc
                 raise runtime.JournalError("full update preparation failed" if is_full else "runtime update preparation failed") from exc
             if args.expected_sha is not None and (
                 runtime._match(args.expected_sha, runtime._HEX40, "expected source commit") != journal["source"]["commit"]

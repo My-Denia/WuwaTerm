@@ -84,6 +84,10 @@ _ROLLBACK = ("rollback-stop-readers", "rollback-copyback", "rollback-restore-db"
              "rollback-containers", "rollback-pointers", "rolled-back")
 
 
+class CompanionKnowledgeFullError(FullError):
+    """Non-secret operator guidance when companion knowledge.db blocks full-update."""
+
+
 def _prepare_request(request: Any) -> tuple[list[str], dict[str, Any], dict[str, dict[str, Any]]]:
     """Validate one FULL request: completed artifacts, never producer receipts.
 
@@ -135,7 +139,8 @@ def _discard_prepared_candidate(prepared: tuple[Path, str] | None) -> None:
 
 
 def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_path: Path,
-            expected_sha: str | None = None) -> dict[str, Any]:
+            expected_sha: str | None = None,
+            allow_knowledge_degrade: bool = False) -> dict[str, Any]:
     """Construct a FULL3 journal from the adopted deployment and real DB input."""
     import component_build as build  # noqa: PLC0415
     import component_full_db as full_db  # noqa: PLC0415
@@ -183,6 +188,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
         old_permissions = full_db.permissions(Path(old["database"]["path"]))
         before: dict[str, Any] = {"api": None, "telegram": None}
         snapshots: dict[str, Any] = {}
+        api_actual: dict[str, Any] | None = None
         key = os.urandom(32)
         for name in ("api", "telegram"):
             component = old["components"][name]
@@ -201,10 +207,21 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
                     transaction._env_map(observe._inspect(actual["container"]["id"])["Config"].get("Env"))):
                 _fail("installed environment cannot be reproduced")
             before[name], snapshots[name] = actual["container"], snapshot
+            if name == "api":
+                api_actual = actual
         identifier = manifest.new_deployment_id()
         prepared = (root, identifier)
         candidate_path = Path(os.path.abspath(os.fspath(candidate_db)))
         candidate = full_db.prepare_candidate(root, candidate_path, identifier)
+        if api_actual is not None:
+            try:
+                full_db.verify_companion_knowledge_compatibility(
+                    api_actual,
+                    root / candidate["path"],
+                    allow_degrade=allow_knowledge_degrade,
+                )
+            except full_db.CompanionKnowledgeError as exc:
+                raise CompanionKnowledgeFullError(str(exc)) from exc
         target = copy.deepcopy(old)
         target.update(deployment_id=identifier,
                       deployment_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
