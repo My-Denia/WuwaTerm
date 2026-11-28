@@ -237,3 +237,50 @@ def test_synthetic_hybrid_eval_with_fake_encoder_passes_strict_gates(
         check=False,
     )
     assert bad_proc.returncode == 2
+
+
+def test_eval_rag_offline_forwards_onnx_pooling_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOnnxEncoder:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.model_id = str(kwargs.get("model_id", "stub"))
+            self.dim = int(kwargs.get("dim") or 16)
+
+        def encode_queries(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+        def encode_passages(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+    monkeypatch.setattr(eval_rag_offline, "OnnxInt8TextEncoder", _StubOnnxEncoder)
+    onnx_model = tmp_path / "model.int8.onnx"
+    onnx_model.write_bytes(b"stub")
+
+    for pooling in ("mean", "cls", "last_token"):
+        captured.clear()
+        args = eval_rag_offline._parse_args(
+            [
+                "--synthetic",
+                "--mode",
+                "hybrid",
+                "--onnx-model",
+                str(onnx_model),
+                "--onnx-pooling",
+                pooling,
+                "--vec-dim",
+                "16",
+            ]
+        )
+        encoder = eval_rag_offline._resolve_encoder_from_args(args)
+        assert encoder is not None
+        assert captured["pooling"] == pooling
+        assert captured["dim"] == 16
+
+    with pytest.raises(SystemExit):
+        eval_rag_offline._parse_args(
+            ["--synthetic", "--mode", "hybrid", "--onnx-pooling", "invalid"]
+        )

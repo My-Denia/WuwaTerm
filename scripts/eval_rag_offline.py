@@ -1464,6 +1464,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional HuggingFace tokenizers JSON path for --onnx-model.",
     )
     parser.add_argument(
+        "--onnx-pooling",
+        choices=("mean", "cls", "last_token"),
+        default="mean",
+        help="Token pooling strategy for --onnx-model (default: mean).",
+    )
+    parser.add_argument(
         "--model-id",
         type=str,
         default=None,
@@ -1535,6 +1541,7 @@ def _resolve_encoder_from_args(args: argparse.Namespace) -> VectorEncoder | None
             dim=args.vec_dim,
             query_prefix=args.query_prefix,
             passage_prefix=args.passage_prefix,
+            pooling=args.onnx_pooling,
         )
     raise ValueError(
         "--mode hybrid requires either --fake-encoder or --onnx-model"

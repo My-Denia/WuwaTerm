@@ -31,9 +31,11 @@ from wuwaterm.knowledge_db import (  # noqa: E402
 )
 from wuwaterm.retrieval_vector import (  # noqa: E402
     DEFAULT_VECTOR_DIM,
+    SUPPORTED_ONNX_POOLINGS,
     DeterministicHashEncoder,
     Int8MemmapVectorBackend,
     OnnxInt8TextEncoder,
+    OnnxPoolingMode,
     QuantizationMode,
     SqliteVecBackend,
     VectorBackendUnavailableError,
@@ -156,6 +158,7 @@ def build_knowledge_vectors(
     model_id: str | None = None,
     onnx_model_path: str | Path | None = None,
     onnx_tokenizer_path: str | Path | None = None,
+    onnx_pooling: OnnxPoolingMode = "mean",
     query_prefix: str = "",
     passage_prefix: str = "",
     batch_size: int = 64,
@@ -190,6 +193,8 @@ def build_knowledge_vectors(
     elif encoder_kind == "onnx":
         if onnx_model_path is None:
             raise ValueError("--onnx-model is required when --encoder onnx")
+        if onnx_pooling not in SUPPORTED_ONNX_POOLINGS:
+            raise ValueError(f"unsupported onnx_pooling: {onnx_pooling!r}")
         active_encoder = OnnxInt8TextEncoder(
             model_path=onnx_model_path,
             tokenizer_path=onnx_tokenizer_path,
@@ -197,6 +202,7 @@ def build_knowledge_vectors(
             dim=dim,
             query_prefix=query_prefix,
             passage_prefix=passage_prefix,
+            pooling=onnx_pooling,
         )
     else:
         raise ValueError(f"unsupported encoder kind: {encoder_kind!r}")
@@ -294,6 +300,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to HuggingFace tokenizers tokenizer.json (default: sibling of --onnx-model).",
     )
     parser.add_argument(
+        "--onnx-pooling",
+        choices=("mean", "cls", "last_token"),
+        default="mean",
+        help="Token pooling strategy for --encoder onnx (default: mean).",
+    )
+    parser.add_argument(
         "--query-prefix",
         type=str,
         default="",
@@ -344,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             model_id=args.model_id,
             onnx_model_path=args.onnx_model,
             onnx_tokenizer_path=args.onnx_tokenizer,
+            onnx_pooling=args.onnx_pooling,
             query_prefix=args.query_prefix,
             passage_prefix=args.passage_prefix,
             batch_size=args.batch_size,

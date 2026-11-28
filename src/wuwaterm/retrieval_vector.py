@@ -38,7 +38,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, TypeGuard, runtime_checkable
 
 from .domain_knowledge import (
     DEFAULT_MAX_CANDIDATES,
@@ -65,6 +65,14 @@ DEFAULT_VECTOR_DIM = 512
 DEFAULT_RRF_K = 60
 SUPPORTED_QUANTIZATIONS: frozenset[str] = frozenset({"int8", "fp32"})
 QuantizationMode = Literal["int8", "fp32"]
+SUPPORTED_ONNX_POOLINGS: frozenset[str] = frozenset({"mean", "cls", "last_token"})
+OnnxPoolingMode = Literal["mean", "cls", "last_token"]
+_CANDIDATE_PAD_TOKENS: tuple[str, ...] = (
+    "<pad>",
+    "[PAD]",
+    "<|endoftext|>",
+    "<|pad|>",
+)
 
 _LATIN_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")
 _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff]+")
@@ -1082,6 +1090,74 @@ class DeterministicHashEncoder:
         return [self._encode_one(text) for text in texts]
 
 
+def _is_valid_token_id(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _resolve_padding_config(
+    tokenizer: Any,
+    *,
+    pad_id: int | None = None,
+    pad_token: str | None = None,
+) -> tuple[int, str]:
+    """Resolve padding ``(pad_id, pad_token)`` from explicit args or tokenizer metadata."""
+    if pad_id is not None and not _is_valid_token_id(pad_id):
+        raise ValueError("pad_id must be a non-negative integer")
+    if pad_token is not None and not pad_token:
+        raise ValueError("pad_token must be non-empty when provided")
+
+    existing_padding = getattr(tokenizer, "padding", None)
+    cfg_id: int | None = None
+    cfg_tok: str | None = None
+    if isinstance(existing_padding, Mapping):
+        raw_id = existing_padding.get("pad_id")
+        raw_tok = existing_padding.get("pad_token")
+        if _is_valid_token_id(raw_id):
+            cfg_id = int(raw_id)
+        if isinstance(raw_tok, str) and raw_tok:
+            cfg_tok = raw_tok
+
+    if pad_id is not None and pad_token is not None:
+        return int(pad_id), pad_token
+
+    token_to_id = getattr(tokenizer, "token_to_id", None)
+    id_to_token = getattr(tokenizer, "id_to_token", None)
+
+    if pad_token is not None:
+        if callable(token_to_id):
+            resolved_id = token_to_id(pad_token)
+            if _is_valid_token_id(resolved_id):
+                return int(resolved_id), pad_token
+        if cfg_tok == pad_token and cfg_id is not None:
+            return cfg_id, pad_token
+        return 0, pad_token
+
+    if pad_id is not None:
+        resolved_tok: str | None = None
+        if callable(id_to_token):
+            cand = id_to_token(int(pad_id))
+            if isinstance(cand, str) and cand:
+                resolved_tok = cand
+        if resolved_tok is None and cfg_id == int(pad_id) and cfg_tok is not None:
+            resolved_tok = cfg_tok
+        return int(pad_id), resolved_tok or "[PAD]"
+
+    if cfg_id is not None and cfg_tok is not None:
+        return cfg_id, cfg_tok
+
+    if callable(token_to_id):
+        for candidate in _CANDIDATE_PAD_TOKENS:
+            cand_id = token_to_id(candidate)
+            if _is_valid_token_id(cand_id):
+                return int(cand_id), candidate
+
+    if cfg_id is not None:
+        return cfg_id, "[PAD]"
+    if cfg_tok is not None:
+        return 0, cfg_tok
+    return 0, "[PAD]"
+
+
 class OnnxInt8TextEncoder:
     """Optional CPU ONNX Runtime text encoder with MRL truncation & L2 norm.
 
@@ -1099,9 +1175,17 @@ class OnnxInt8TextEncoder:
         max_length: int = 256,
         query_prefix: str = "",
         passage_prefix: str = "",
-        pooling: Literal["mean", "cls"] = "mean",
+        pooling: OnnxPoolingMode = "mean",
+        pad_id: int | None = None,
+        pad_token: str | None = None,
         providers: Sequence[str] = ("CPUExecutionProvider",),
     ) -> None:
+        if pooling not in SUPPORTED_ONNX_POOLINGS:
+            raise ValueError(
+                f"unsupported pooling mode {pooling!r}; "
+                f"expected one of {sorted(SUPPORTED_ONNX_POOLINGS)}"
+            )
+
         try:
             ort_mod = importlib.import_module("onnxruntime")
             tok_mod = importlib.import_module("tokenizers")
@@ -1131,8 +1215,20 @@ class OnnxInt8TextEncoder:
         self._ort = ort_mod
         self._np = np_mod
         self._tokenizer = tok_mod.Tokenizer.from_file(str(tok_file))
+        resolved_pad_id, resolved_pad_token = _resolve_padding_config(
+            self._tokenizer, pad_id=pad_id, pad_token=pad_token
+        )
         self._tokenizer.enable_truncation(max_length=max(8, int(max_length)))
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+        pad_kwargs: dict[str, Any] = {
+            "pad_id": resolved_pad_id,
+            "pad_token": resolved_pad_token,
+        }
+        existing_padding = getattr(self._tokenizer, "padding", None)
+        if isinstance(existing_padding, Mapping):
+            direction = existing_padding.get("direction")
+            if direction in ("left", "right"):
+                pad_kwargs["direction"] = direction
+        self._tokenizer.enable_padding(**pad_kwargs)
         self._session = ort_mod.InferenceSession(
             str(model_file), providers=list(providers)
         )
@@ -1156,7 +1252,9 @@ class OnnxInt8TextEncoder:
         self._model_id = model_id
         self._query_prefix = query_prefix
         self._passage_prefix = passage_prefix
-        self._pooling = pooling
+        self._pooling: OnnxPoolingMode = pooling
+        self._pad_id = resolved_pad_id
+        self._pad_token = resolved_pad_token
 
     @property
     def model_id(self) -> str:
@@ -1165,6 +1263,18 @@ class OnnxInt8TextEncoder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def pooling(self) -> OnnxPoolingMode:
+        return self._pooling
+
+    @property
+    def pad_id(self) -> int:
+        return self._pad_id
+
+    @property
+    def pad_token(self) -> str:
+        return self._pad_token
 
     def _encode_batch(self, texts: Sequence[str], prefix: str) -> list[list[float]]:
         if not texts:
@@ -1184,14 +1294,36 @@ class OnnxInt8TextEncoder:
             feeds["token_type_ids"] = self._np.asarray(
                 [enc.type_ids for enc in encodings], dtype=self._np.int64
             )
+        if "position_ids" in self._input_names:
+            pos = self._np.maximum(self._np.cumsum(attention_mask, axis=1) - 1, 0)
+            feeds["position_ids"] = pos.astype(self._np.int64)
 
         outputs = self._session.run(None, feeds)
         hidden = outputs[0]
         if hidden.ndim == 2:
             pooled = hidden
         elif hidden.ndim == 3:
-            if self._pooling == "cls":
-                pooled = hidden[:, 0, :]
+            if self._pooling in ("cls", "last_token"):
+                seq_len = attention_mask.shape[1]
+                if seq_len == 0:
+                    pooled = self._np.zeros(
+                        (hidden.shape[0], hidden.shape[2]), dtype=self._np.float32
+                    )
+                else:
+                    hidden_f32 = hidden.astype(self._np.float32)
+                    valid_mask = attention_mask > 0
+                    if self._pooling == "cls":
+                        # First valid (non-pad) token per sequence; handles both right and left padding.
+                        token_indices = self._np.argmax(valid_mask, axis=1)
+                    else:
+                        # Last valid (non-pad) token per sequence; handles both right and left padding.
+                        token_indices = (seq_len - 1) - self._np.argmax(
+                            valid_mask[:, ::-1], axis=1
+                        )
+                    batch_indices = self._np.arange(hidden_f32.shape[0])
+                    selected = hidden_f32[batch_indices, token_indices, :]
+                    has_valid = valid_mask.any(axis=1)[:, None]
+                    pooled = self._np.where(has_valid, selected, 0.0)
             else:
                 mask = attention_mask[:, :, None].astype(self._np.float32)
                 denom = self._np.maximum(mask.sum(axis=1), 1e-9)
