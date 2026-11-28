@@ -520,12 +520,31 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
 ```
 
+When using the optional companion entity knowledge base
+(`WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db`), build and verify it
+against the same candidate `terms.db` so their `terms_db_revision` stays
+matched:
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder build-kb --atomic
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder verify-kb
+```
+
 **Source path:**
 
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
 .venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu --require-free-text-exclusions --require-free-text-zh-exclusions
+# Optional companion knowledge.db bound to the same terms.candidate.db revision:
+.venv/bin/python -m wuwaterm.cli build-kb --data-dir data/wutheringdata --db data/knowledge.candidate.db --terms-db data/terms.candidate.db --profile arikatsu --atomic
+.venv/bin/python scripts/verify_knowledge_db.py data/knowledge.candidate.db --terms-db data/terms.candidate.db
 ```
 
 On either path the refresh fetches roughly a gigabyte over the network and can
@@ -546,6 +565,8 @@ line**, so the exit status is the verdict: zero means verified. On a first insta
 
 ```bash
 mv data/terms.candidate.db data/terms.db
+# If you also built the optional companion knowledge base:
+mv data/knowledge.candidate.db data/knowledge.db
 ```
 
 On an install that is already serving, do not do that by hand while the service
@@ -907,12 +928,24 @@ move the data pin or the schema version:
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
+# If WUWATERM_API_KNOWLEDGE_DB_PATH is enabled, rebuild and verify the companion DB against the same candidate:
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder build-kb --atomic
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder verify-kb
 ```
 
-On the source path the same three steps are the source-path build commands from
+On the source path the same steps are the source-path build commands from
 [Build The Terminology Database](#build-the-terminology-database).
 
-Stop the service, promote the verified candidate over `data/terms.db`, start
+Stop the service, promote the verified candidate over `data/terms.db` (and
+`data/knowledge.candidate.db` over `data/knowledge.db` in the same stop window
+when using the companion knowledge base so their `terms_db_revision` stays
+matched), start
 again — on the source path that means starting the API process again, in
 its terminal or under its supervisor — and re-check `/readyz`. Take
 the backup below first: promotion is the one step in this document that

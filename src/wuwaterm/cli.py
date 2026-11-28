@@ -9,6 +9,10 @@ from .builder import build_database, build_database_atomic
 from .constants import DEFAULT_SOURCE_PROFILE_NAME, source_profile_choices
 from .data_source import refresh_data
 from .db import category_counts, connect
+from .knowledge_builder import (
+    build_knowledge_database,
+    build_knowledge_database_atomic,
+)
 from .lookup import TermService
 from .sentence import SentenceTranslator, resolve_provider_profile_from_env
 
@@ -46,6 +50,17 @@ def main(argv: list[str] | None = None) -> int:
         help="build in a same-directory temp file, then replace the target db",
     )
 
+    p_build_kb = sub.add_parser("build-kb")
+    p_build_kb.add_argument("--data-dir", required=True)
+    p_build_kb.add_argument("--db", required=True)
+    p_build_kb.add_argument("--terms-db", required=True)
+    p_build_kb.add_argument("--profile", choices=source_profile_choices())
+    p_build_kb.add_argument(
+        "--atomic",
+        action="store_true",
+        help="build in a same-directory temp file, then replace the target knowledge db",
+    )
+
     p_counts = sub.add_parser("counts")
     p_counts.add_argument("--db", required=True)
 
@@ -67,6 +82,23 @@ def main(argv: list[str] | None = None) -> int:
         builder = build_database_atomic if args.atomic else build_database
         count = builder(args.data_dir, args.db, profile_name=args.profile)
         print(f"built {count} extracted records into {args.db}")
+        return 0
+    if args.command == "build-kb":
+        kb_builder = (
+            build_knowledge_database_atomic if args.atomic else build_knowledge_database
+        )
+        stats = kb_builder(
+            args.data_dir,
+            args.db,
+            terms_db_path=args.terms_db,
+            profile_name=args.profile,
+        )
+        print(
+            f"built {stats.entities} entities "
+            f"({stats.aliases} aliases, {stats.contexts} contexts, "
+            f"{stats.relations} relations, {stats.short_ngrams} short_ngrams, "
+            f"{stats.fts_rows} fts_rows) into {args.db}"
+        )
         return 0
     if args.command == "counts":
         with connect(args.db) as conn:

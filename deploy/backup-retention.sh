@@ -1,10 +1,11 @@
 # Retention for data/deployment-backups. POSIX sh, sourced by deploy/vps-update.sh.
 #
-# A full deployment writes up to three files there, each named by its deployment
+# A full deployment writes up to four files there, each named by its deployment
 # id, <UTC time>-<pid> (YYYYmmddTHHMMSSZ-<pid>; `deployment_id` in vps-update.sh):
-#   terms.<id>.<sha256>.db   the database it replaced
-#   db-diff.<id>.json        what its candidate changed in that database
-#   <id>.deploy_commit       the commit pointer it replaced
+#   terms.<id>.<sha256>.db      the terminology database it replaced
+#   knowledge.<id>.<sha256>.db  the companion knowledge database it replaced (when active)
+#   db-diff.<id>.json           what its candidate changed in that database
+#   <id>.deploy_commit          the commit pointer it replaced
 # A snapshot is every such file that shares one id. Any other name, a symlink and
 # a directory are not snapshot files: they are never counted and never touched.
 
@@ -12,8 +13,8 @@
 # or fail when NAME is not one.
 backup_snapshot_id() {
   case "$1" in
-    terms.*.db)
-      bs_rest=${1#terms.}
+    terms.*.db|knowledge.*.db)
+      bs_rest=${1#*.}
       bs_rest=${bs_rest%.db}
       bs_id=${bs_rest%.*}
       bs_sha=${bs_rest##*.}

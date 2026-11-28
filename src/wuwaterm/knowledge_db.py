@@ -234,7 +234,9 @@ def connect_knowledge_db_read_only(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def compute_terms_db_revision(terms_db_path: str | Path) -> str:
+def compute_terms_db_revision(
+    terms_db_path: str | Path, *, immutable: bool = False
+) -> str:
     """Compute the canonical SHA-256 revision of a ``terms.db`` file.
 
     Matches ``wuwaterm.lookup.dictionary_revision`` bit-for-bit without
@@ -243,9 +245,20 @@ def compute_terms_db_revision(terms_db_path: str | Path) -> str:
     path = Path(terms_db_path)
     if not path.is_file():
         raise KnowledgeBaseError(f"terms database does not exist: {path}")
+    if immutable and path.is_symlink():
+        raise KnowledgeBaseError(f"terms database must not be a symlink: {path}")
+    if immutable and any(
+        path.with_name(path.name + suffix).exists()
+        or path.with_name(path.name + suffix).is_symlink()
+        for suffix in ("-wal", "-shm", "-journal")
+    ):
+        raise KnowledgeBaseError(f"terms database sidecar exists: {path}")
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    if immutable:
+        uri += "&immutable=1"
     try:
         conn = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro",
+            uri,
             uri=True,
             check_same_thread=False,
         )

@@ -2,6 +2,7 @@
 set -eu
 
 DB_PATH="${WUWATERM_DB_PATH:-/app/data/terms.db}"
+KB_PATH="${WUWATERM_KNOWLEDGE_DB_PATH:-/app/data/knowledge.db}"
 DATA_DIR="${WUWATERM_DATA_DIR:-/app/data/wutheringdata}"
 SOURCE_PROFILE="${WUWATERM_SOURCE_PROFILE:-arikatsu}"
 COMMAND="${1:-verify-db}"
@@ -29,6 +30,12 @@ case "$COMMAND" in
       --require-free-text-exclusions \
       --require-free-text-zh-exclusions \
       "$@"
+    ;;
+  build-kb)
+    exec python -m wuwaterm.cli build-kb --data-dir "$DATA_DIR" --db "$KB_PATH" --terms-db "$DB_PATH" --profile "$SOURCE_PROFILE" "$@"
+    ;;
+  verify-kb)
+    exec python scripts/verify_knowledge_db.py "$KB_PATH" --terms-db "$DB_PATH" "$@"
     ;;
   *)
     exec "$COMMAND" "$@"

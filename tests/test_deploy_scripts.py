@@ -306,6 +306,8 @@ def test_runtime_entrypoint_forwards_api_arguments():
         ["refresh-data", "--help"],
         ["build-db", "--atomic", "--help"],
         ["verify-db", "--help"],
+        ["build-kb", "--atomic", "--help"],
+        ["verify-kb", "--help"],
     ],
 )
 def test_builder_entrypoint_forwards_extra_arguments_to_subcommands(args):

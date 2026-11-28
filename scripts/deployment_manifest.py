@@ -21,6 +21,11 @@ sys.path.insert(0, str(CODE_ROOT / "src"))
 from scripts import deployment_admission  # noqa: E402
 from wuwaterm.constants import get_source_profile  # noqa: E402
 from wuwaterm.db import SCHEMA_VERSION  # noqa: E402
+from wuwaterm.knowledge_db import (  # noqa: E402
+    KB_SCHEMA_VERSION,
+    KnowledgeBaseError,
+    compute_terms_db_revision,
+)
 
 # Where data/, .deployments/ and .deploy_commit live: the checkout itself, or
 # the base directory above `releases/rN`.
@@ -29,6 +34,7 @@ ROOT = deployment_admission.state_root(CODE_ROOT)
 
 MANIFEST_SCHEMA_VERSION = 1
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ManifestError(RuntimeError):
@@ -157,6 +163,41 @@ def read_db_provenance(
     return {key: metadata[key] for key in PROVENANCE_KEYS}
 
 
+def read_kb_terms_db_revision(path: Path, *, immutable: bool = False) -> str:
+    """Read ``kb_metadata.terms_db_revision`` from a companion ``knowledge.db``."""
+    if not path.is_file():
+        raise ManifestError(f"knowledge database is missing: {path}")
+    if immutable and path.is_symlink():
+        raise ManifestError(f"knowledge database must not be a symlink: {path}")
+    if immutable and any(
+        path.with_name(path.name + suffix).exists()
+        or path.with_name(path.name + suffix).is_symlink()
+        for suffix in ("-wal", "-shm", "-journal")
+    ):
+        raise ManifestError(f"knowledge database sidecar exists: {path}")
+    database_uri = f"{path.resolve().as_uri()}?mode=ro"
+    if immutable:
+        database_uri += "&immutable=1"
+    try:
+        with closing(sqlite3.connect(database_uri, uri=True)) as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM kb_metadata WHERE key IN "
+                "('kb_schema_version', 'terms_db_revision')"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise ManifestError(f"cannot read knowledge database metadata: {exc}") from exc
+    metadata = {str(key): str(value) for key, value in rows}
+    if metadata.get("kb_schema_version") != KB_SCHEMA_VERSION:
+        raise ManifestError(
+            "knowledge database schema version mismatch: "
+            f"expected {KB_SCHEMA_VERSION!r}, got {metadata.get('kb_schema_version')!r}"
+        )
+    revision = metadata.get("terms_db_revision", "")
+    if not SHA256_RE.fullmatch(revision):
+        raise ManifestError("knowledge database terms_db_revision is missing or invalid")
+    return revision
+
+
 def _validate_timestamp(value: str) -> None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -178,6 +219,9 @@ def build_manifest(
     backup_path: str,
     deployment_utc: str,
     immutable: bool = False,
+    kb_path: Path | None = None,
+    kb_display_path: str | None = None,
+    kb_backup_path: str | None = None,
 ) -> dict[str, Any]:
     if not COMMIT_RE.fullmatch(source_commit):
         raise ManifestError("source commit must be a 40-character lowercase hex SHA")
@@ -189,7 +233,7 @@ def build_manifest(
         raise ManifestError("image ref, id and digest must be non-empty")
     _validate_timestamp(deployment_utc)
     metadata = read_db_provenance(db_path, immutable=immutable)
-    return {
+    payload: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "source_commit": source_commit,
         "image": {
@@ -206,6 +250,25 @@ def build_manifest(
         "deployment_utc": deployment_utc,
         "backup_path": backup_path,
     }
+    if kb_path is not None:
+        display = kb_display_path if kb_display_path else "data/knowledge.db"
+        backup = kb_backup_path if kb_backup_path else "none"
+        kb_revision = read_kb_terms_db_revision(kb_path, immutable=immutable)
+        try:
+            terms_revision = compute_terms_db_revision(db_path, immutable=immutable)
+        except KnowledgeBaseError as exc:
+            raise ManifestError(str(exc)) from exc
+        if kb_revision != terms_revision:
+            raise ManifestError(
+                "knowledge database terms_db_revision mismatch against terms.db"
+            )
+        payload["knowledge_database"] = {
+            "path": display,
+            "sha256": sha256_file(kb_path),
+            "terms_db_revision": kb_revision,
+            "backup_path": backup,
+        }
+    return payload
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -226,6 +289,8 @@ def verify_manifest(
     image_digest: str | None,
     db_path: Path,
     immutable: bool = False,
+    kb_path: Path | None = None,
+    require_no_kb: bool = False,
 ) -> dict[str, Any]:
     payload = _load_manifest(path)
     required_top = {
@@ -236,7 +301,8 @@ def verify_manifest(
         "deployment_utc",
         "backup_path",
     }
-    if set(payload) != required_top:
+    allowed_top = required_top | {"knowledge_database"}
+    if not (required_top <= set(payload) <= allowed_top):
         raise ManifestError(f"manifest fields mismatch: got {sorted(payload)}")
     if payload["schema_version"] != MANIFEST_SCHEMA_VERSION:
         raise ManifestError("manifest schema version mismatch")
@@ -263,6 +329,50 @@ def verify_manifest(
         db_path, require_active_profile=False, immutable=immutable
     ):
         raise ManifestError("manifest database provenance mismatch")
+
+    if "knowledge_database" in payload:
+        if require_no_kb:
+            raise ManifestError("manifest unexpectedly includes knowledge_database")
+        kb_section = payload["knowledge_database"]
+        if not isinstance(kb_section, dict) or set(kb_section) != {
+            "path",
+            "sha256",
+            "terms_db_revision",
+            "backup_path",
+        }:
+            raise ManifestError("manifest knowledge_database fields mismatch")
+        if (
+            type(kb_section["path"]) is not str
+            or not kb_section["path"]
+            or type(kb_section["backup_path"]) is not str
+            or not kb_section["backup_path"]
+            or type(kb_section["sha256"]) is not str
+            or not SHA256_RE.fullmatch(kb_section["sha256"])
+            or type(kb_section["terms_db_revision"]) is not str
+            or not SHA256_RE.fullmatch(kb_section["terms_db_revision"])
+        ):
+            raise ManifestError("manifest knowledge_database values invalid")
+        try:
+            terms_revision = compute_terms_db_revision(db_path, immutable=immutable)
+        except KnowledgeBaseError as exc:
+            raise ManifestError(str(exc)) from exc
+        if kb_section["terms_db_revision"] != terms_revision:
+            raise ManifestError(
+                "manifest knowledge_database terms_db_revision mismatch against terms.db"
+            )
+        if kb_path is not None:
+            if kb_section["sha256"] != sha256_file(kb_path):
+                raise ManifestError("manifest knowledge_database hash mismatch")
+            if (
+                read_kb_terms_db_revision(kb_path, immutable=immutable)
+                != kb_section["terms_db_revision"]
+            ):
+                raise ManifestError(
+                    "manifest knowledge_database terms_db_revision mismatch"
+                )
+    elif kb_path is not None:
+        raise ManifestError("manifest is missing knowledge_database binding")
+
     return payload
 
 
@@ -329,6 +439,9 @@ def main() -> int:
     create.add_argument("--db-display-path", default="data/terms.db")
     create.add_argument("--backup-path", required=True)
     create.add_argument("--deployment-utc", required=True)
+    create.add_argument("--kb", type=Path, default=None)
+    create.add_argument("--kb-display-path", default=None)
+    create.add_argument("--kb-backup-path", default="none")
     create.add_argument("--immutable", action="store_true")
 
     verify = subparsers.add_parser("verify")
@@ -337,6 +450,7 @@ def main() -> int:
     verify.add_argument("--image-id", required=True)
     verify.add_argument("--image-digest")
     verify.add_argument("--db", required=True, type=Path)
+    verify.add_argument("--kb", type=Path, default=None)
     verify.add_argument("--immutable", action="store_true")
 
     publish_pointer = subparsers.add_parser("publish-pointer")
@@ -365,6 +479,9 @@ def main() -> int:
                 # database and companion files as potential write paths.
                 paths += (args.db, *(args.db.with_name(args.db.name + suffix)
                                     for suffix in ("-wal", "-shm", "-journal")))
+                if args.kb is not None:
+                    paths += (args.kb, *(args.kb.with_name(args.kb.name + suffix)
+                                         for suffix in ("-wal", "-shm", "-journal")))
             deployment_admission.require_root_paths(ROOT, *paths)
         if args.command == "create":
             payload = build_manifest(
@@ -378,16 +495,29 @@ def main() -> int:
                 backup_path=args.backup_path,
                 deployment_utc=args.deployment_utc,
                 immutable=args.immutable,
+                kb_path=args.kb,
+                kb_display_path=args.kb_display_path,
+                kb_backup_path=args.kb_backup_path,
             )
             if args.path.exists():
-                verify_manifest(
+                verified = verify_manifest(
                     args.path,
                     source_commit=args.source_commit,
                     image_id=args.image_id,
                     image_digest=args.image_digest,
                     db_path=args.db,
                     immutable=args.immutable,
+                    kb_path=args.kb,
+                    require_no_kb=args.kb is None,
                 )
+                if args.kb is not None:
+                    expected_display = (
+                        args.kb_display_path
+                        if args.kb_display_path
+                        else "data/knowledge.db"
+                    )
+                    if verified["knowledge_database"]["path"] != expected_display:
+                        raise ManifestError("manifest knowledge_database path mismatch")
             else:
                 write_manifest(args.path, payload)
         elif args.command == "verify":
@@ -401,6 +531,7 @@ def main() -> int:
                 image_digest=args.image_digest,
                 db_path=args.db,
                 immutable=True,
+                kb_path=args.kb,
             )
         elif args.command == "publish-pointer":
             publish_commit_pointer(args.path, args.source_commit)

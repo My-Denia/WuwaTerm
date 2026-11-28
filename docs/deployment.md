@@ -139,7 +139,7 @@ The Compose file has two image roles across two services:
   [API resource settings on an adopted deployment](#api-resource-settings-on-an-adopted-deployment).
 - `wuwaterm-builder` builds the `builder` target (under `profiles: ["builder"]`).
   It has the data-build toolchain, mounts `data/` writable, and runs
-  `refresh-data`, `build-db`, and `verify-db`.
+  `refresh-data`, `build-db`, `verify-db`, `build-kb`, and `verify-kb`.
 
 The runtime image accepts `api` and `device`, refuses `bot` (retired after
 `v0.16.0`) and data-builder commands (exit 64), and ships without the
@@ -162,6 +162,15 @@ export WUWATERM_STATE_ROOT=/opt/wuwaterm
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
+# Optional companion knowledge.db bound to the same terms.candidate.db revision:
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder build-kb --atomic
+docker compose -f deploy/docker-compose.yml run --rm \
+  -e WUWATERM_DB_PATH=/app/data/terms.candidate.db \
+  -e WUWATERM_KNOWLEDGE_DB_PATH=/app/data/knowledge.candidate.db \
+  wuwaterm-builder verify-kb
 ```
 
 Do not move this candidate over `data/terms.db` manually. The transactional
@@ -1022,41 +1031,54 @@ wrote the journal is not necessarily `current`. Before any stop the updater:
 2. rebuilds the mutable local builder image from that exact clean checkout,
    then proves the builder container has none of the runtime secret variables;
 3. refreshes source data, builds a unique candidate, and runs the strong DB
-   verifier against that candidate;
+   verifier against that candidate; when `.env` sets
+   `WUWATERM_API_KNOWLEDGE_DB_PATH` (under `/app/data/...`) or
+   `data/knowledge.db` already exists, it also builds and verifies a companion
+   `knowledge.candidate.db` bound to that exact `terms.candidate.db` revision
+   via `wuwaterm-builder build-kb --atomic` and `verify-kb` before stopping any
+   container;
 4. builds an immutable `wuwaterm-runtime:<source-commit>` image and verifies its
    `org.opencontainers.image.revision` label.
 
-It then snapshots the old database and commit pointer, tags the old image for
-rollback, stops the runtime, promotes the candidate, validates/migrates state,
-starts the exact validated image, and runs `scripts/deploy_smoke.py` with
-diagnostic message sending explicitly disabled. Only after smoke and running
+It then snapshots the old database (and old companion `knowledge.db` when
+active) and commit pointer, tags the old image for
+rollback, stops the runtime, promotes the candidate (both `terms.db` and
+companion `knowledge.db` together when active), validates/migrates state,
+starts the exact validated image, verifies `/readyz` (and live `knowledge.db`
+hash and `terms_db_revision` match against `terms.db` when active). Only after
+readiness, companion verification, and running
 image-ID checks pass does it create and read back
 `.deployments/<source-commit>.json`, then atomically publish `.deploy_commit`;
 `current` is switched and old releases are pruned after that.
 The manifest contains source commit, image ref/ID/digest/revision, DB SHA-256,
-DB source profile/commit/game/resource/changelist, deployment UTC, and backup
-path. It is mode read-only and never overwritten with different content.
+DB source profile/commit/game/resource/changelist, deployment UTC, backup
+path, and (when a companion knowledge base is active) an optional
+`knowledge_database` block recording its `path`, `sha256`,
+`terms_db_revision`, and `backup_path` under the same `schema_version`. It is
+mode read-only and never overwritten with different content.
 Re-running the same source commit is accepted only when its image and database
 binding is byte-for-byte identical; a different rebuild must use a new source
 commit instead of deleting or rewriting the historical manifest.
 
 Any post-promotion state/start/smoke/manifest/pointer failure restores the old
-DB, recreates the runtime from the tagged old image, and restores or removes
-the commit pointer. Rollback image tags and manifests are retained.
+DB (and old companion `knowledge.db`, or removes a newly promoted one when none
+existed before), recreates the runtime from the tagged old image, and restores
+or removes the commit pointer. Rollback image tags and manifests are retained.
 
 `data/deployment-backups` keeps the newest five snapshots. A snapshot is the
 files of one full deployment, all named by its deployment id
 `<YYYYmmddTHHMMSSZ>-<pid>`: `terms.<id>.<sha256>.db` (the database it
-replaced), `db-diff.<id>.json` and `<id>.deploy_commit` (the pointer it
-replaced). After a full deployment has committed, `deploy/backup-retention.sh`
-removes the files of every older snapshot, one `backup retention: removed
-<path>` line each, and always keeps the snapshot that deployment just wrote.
-Newest means the later time in the id, then the larger pid as a number; file
-mtimes are never read. Only those three name forms are ever removed: any other
-file, a symlink or a directory in that directory is left alone. A failed or
-rolled-back deployment prunes nothing (its own snapshot stays until a later
-success pushes it out), `--runtime-only` writes no snapshot and prunes nothing,
-and a prune that fails warns without failing the deployment.
+replaced), `knowledge.<id>.<sha256>.db` (the companion knowledge database it
+replaced, when active), `db-diff.<id>.json` and `<id>.deploy_commit` (the
+pointer it replaced). After a full deployment has committed,
+`deploy/backup-retention.sh` removes the files of every older snapshot, one
+`backup retention: removed <path>` line each, and always keeps the snapshot
+that deployment just wrote. Newest means the later time in the id, then the
+larger pid as a number; file mtimes are never read. Only those four name forms
+are ever removed: any other file, a symlink or a directory in that directory is
+left alone. A failed or rolled-back deployment prunes nothing (its own snapshot
+stays until a later success pushes it out), `--runtime-only` writes no snapshot
+and prunes nothing, and a prune that fails warns without failing the deployment.
 
 Rolling back to the previous release needs the database as it was before the
 deployment that made the current release. That is the snapshot that deployment
