@@ -118,7 +118,6 @@
               "input_too_long",
               "llm_unavailable",
               "llm_budget_exhausted",
-              "knowledge_unavailable",
               "internal"
             ],
             "title": "Code",
@@ -169,6 +168,55 @@
           "status"
         ],
         "title": "HealthResponseBody",
+        "type": "object"
+      },
+      "KnowledgeErrorDetailBody": {
+        "properties": {
+          "code": {
+            "description": "Enumerated failure classification for /v1/knowledge/query.",
+            "enum": [
+              "unauthorized",
+              "forbidden",
+              "rate_limited",
+              "payload_too_large",
+              "invalid_request",
+              "input_too_long",
+              "llm_unavailable",
+              "llm_budget_exhausted",
+              "knowledge_unavailable",
+              "internal"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Short operator-facing text.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "KnowledgeErrorDetailBody",
+        "type": "object"
+      },
+      "KnowledgeErrorResponseBody": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/KnowledgeErrorDetailBody"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "title": "KnowledgeErrorResponseBody",
         "type": "object"
       },
       "KnowledgeHitBody": {
@@ -2830,11 +2878,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponseBody"
+                  "$ref": "#/components/schemas/KnowledgeErrorResponseBody"
                 }
               }
             },
-            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+            "description": "The companion knowledge base is unavailable (`knowledge_unavailable`) or a credential-store dependency is temporarily unavailable (`internal`). Retryable."
           },
           "504": {
             "content": {

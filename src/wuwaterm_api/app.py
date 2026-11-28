@@ -1272,7 +1272,6 @@ ErrorCode = Literal[
     "input_too_long",
     "llm_unavailable",
     "llm_budget_exhausted",
-    "knowledge_unavailable",
     "internal",
 ]
 
@@ -1284,6 +1283,32 @@ class ErrorDetailBody(BaseModel):
 
 class ErrorResponseBody(BaseModel):
     error: ErrorDetailBody
+    request_id: str
+
+
+KnowledgeErrorCode = Literal[
+    "unauthorized",
+    "forbidden",
+    "rate_limited",
+    "payload_too_large",
+    "invalid_request",
+    "input_too_long",
+    "llm_unavailable",
+    "llm_budget_exhausted",
+    "knowledge_unavailable",
+    "internal",
+]
+
+
+class KnowledgeErrorDetailBody(BaseModel):
+    code: KnowledgeErrorCode = Field(
+        description="Enumerated failure classification for /v1/knowledge/query."
+    )
+    message: str = Field(description="Short operator-facing text.")
+
+
+class KnowledgeErrorResponseBody(BaseModel):
+    error: KnowledgeErrorDetailBody
     request_id: str
 
 
@@ -1311,6 +1336,18 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
             "Request exceeded the server time budget. Classified as `internal`:"
             " the enumerated code set is closed, so the HTTP status is what"
             " distinguishes a timeout from a genuine 500."
+        ),
+    },
+}
+
+KNOWLEDGE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **ERROR_RESPONSES,
+    503: {
+        "model": KnowledgeErrorResponseBody,
+        "description": (
+            "The companion knowledge base is unavailable (`knowledge_unavailable`) "
+            "or a credential-store dependency is temporarily unavailable (`internal`). "
+            "Retryable."
         ),
     },
 }
@@ -3033,7 +3070,7 @@ def _register_routes(app: FastAPI) -> None:
         f"{prefix}/knowledge/query",
         response_model=KnowledgeQueryResponseBody,
         tags=["knowledge"],
-        responses=ERROR_RESPONSES,
+        responses=KNOWLEDGE_ERROR_RESPONSES,
     )
     async def create_knowledge_query(
         request: Request,

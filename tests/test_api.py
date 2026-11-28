@@ -1540,7 +1540,6 @@ def test_error_codes_and_statuses_are_pinned():
         "input_too_long": 422,
         "llm_unavailable": 503,
         "llm_budget_exhausted": 503,
-        "knowledge_unavailable": 503,
         "internal": 500,
     }
 

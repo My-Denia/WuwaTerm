@@ -38,8 +38,14 @@ STATUS_BY_CODE: dict[str, int] = {
     ERROR_INPUT_TOO_LONG: 422,
     ERROR_LLM_UNAVAILABLE: 503,
     ERROR_LLM_BUDGET_EXHAUSTED: 503,
-    ERROR_KNOWLEDGE_UNAVAILABLE: 503,
     ERROR_INTERNAL: 500,
+}
+
+# Endpoint-specific error statuses kept out of the frozen core ErrorDetailBody
+# enum (STATUS_BY_CODE) so `/v1/reviews` and legacy contract schemas stay
+# byte-identical.
+ENDPOINT_STATUS_BY_CODE: dict[str, int] = {
+    ERROR_KNOWLEDGE_UNAVAILABLE: 503,
 }
 
 # Short, stable, operator-facing wording per code.
@@ -69,7 +75,11 @@ class ApiError(Exception):
     ) -> None:
         self.code = code
         self.message = message or MESSAGE_BY_CODE.get(code, MESSAGE_BY_CODE[ERROR_INTERNAL])
-        self.status_code = status_code or STATUS_BY_CODE.get(code, 500)
+        self.status_code = (
+            status_code
+            or STATUS_BY_CODE.get(code)
+            or ENDPOINT_STATUS_BY_CODE.get(code, 500)
+        )
         super().__init__(f"{code}: {self.message}")
 
 
