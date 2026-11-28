@@ -223,16 +223,18 @@ def test_products_json_preserves_full_previous_and_archived_release_digests() ->
     by_id = {p["id"]: p for p in manifest["products"]}
 
     # Every moved previous_release keeps its full asset digests and detailed note,
-    # and the displaced older releases are archived intact with all 13 asset digests.
+    # and the displaced older releases are archived intact with all 29 asset digests.
     expected_previous = {
         "core": ("v0.15.0", 4),
-        "windows": ("v0.8.0", 3),
-        "web": ("v0.6.0", 6),
+        "telegram": ("v0.6.1", 7),
+        "windows": ("v0.9.0", 3),
+        "web": ("v0.7.0", 6),
     }
     expected_archived = {
-        "core": ("v0.14.1", 4),
-        "windows": ("v0.7.1", 3),
-        "web": ("v0.5.1", 6),
+        "core": [("v0.14.1", 4)],
+        "telegram": [("v0.6.0", 7)],
+        "windows": [("v0.8.0", 3), ("v0.7.1", 3)],
+        "web": [("v0.6.0", 6), ("v0.5.1", 6)],
     }
 
     for pid, (tag, asset_count) in expected_previous.items():
@@ -245,14 +247,16 @@ def test_products_json_preserves_full_previous_and_archived_release_digests() ->
         assert len(prev["note"]) > 200
 
     total_archived_digests = 0
-    for pid, (tag, asset_count) in expected_archived.items():
+    for pid, entries in expected_archived.items():
         archived = by_id[pid]["archived_releases"]
-        assert isinstance(archived, list) and len(archived) >= 1
-        entry = next(item for item in archived if item["tag"] == tag)
-        assert len(entry["asset_sha256"]) == asset_count
-        assert all(
-            isinstance(v, str) and len(v) == 64 for v in entry["asset_sha256"].values()
-        )
-        total_archived_digests += len(entry["asset_sha256"])
+        assert isinstance(archived, list) and len(archived) >= len(entries)
+        for tag, asset_count in entries:
+            entry = next(item for item in archived if item["tag"] == tag)
+            assert len(entry["asset_sha256"]) == asset_count
+            assert all(
+                isinstance(v, str) and len(v) == 64
+                for v in entry["asset_sha256"].values()
+            )
+            total_archived_digests += len(entry["asset_sha256"])
 
-    assert total_archived_digests == 13
+    assert total_archived_digests == 29

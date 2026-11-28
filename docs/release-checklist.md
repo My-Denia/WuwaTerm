@@ -202,17 +202,18 @@ release. That boundary has not moved.
   published, using its actual asset names and SHA-256 values; do not invent an
   asset name or SHA-256 for a release that does not exist yet. Leave the
   `products.telegram` entry on its published release.
-  `products.telegram` records the published Telegram `v0.6.1`, because the
+  `products.telegram` records the published Telegram `v0.7.0`, because the
   installer takes its default Telegram release from that entry.
-  `products.web` records the published Web `v0.7.0`, because the installer
+  `products.web` records the published Web `v0.8.0`, because the installer
   takes its default Web release from that entry; `products.windows` records the
-  published Windows `v0.9.0`.
+  published Windows `v0.10.0`.
 - The Telegram release a checkout of this tag prints comes from
   `products.telegram.release.tag` in `contracts/products.json`, falling back to
   `DEFAULT_TELEGRAM_VERSION` in `deploy/setup.sh` only when that file cannot be
   read. Before publishing, verify that recorded tag, that constant and
-  `docs/self-hosting.md` name the same published release: `main` and the
-  `v0.16.0` tag record and print `v0.6.1`, while the `v0.15.0`, `v0.14.1` and
+  `docs/self-hosting.md` name the same published release: `main` records and
+  uses `v0.7.0` (pinning Core `v0.16.0` and adding pure HTTP Core mode), the
+  `v0.16.0` tag records and prints `v0.6.1`, while the `v0.15.0`, `v0.14.1` and
   `v0.14.0` tags record and print `v0.6.0` (both pin Core `v0.13.0`), while the
   `v0.13.0` tag records `v0.5.0` (pinning Core `v0.12.0`) and the `v0.10.2`,
   `v0.10.3`, `v0.11.0` and `v0.12.0` tags record `v0.4.1` (pinning Core
@@ -222,7 +223,7 @@ release. That boundary has not moved.
   `setup.sh`, the `v0.10.2`–`v0.12.0` tags, frozen before `v0.5.0` was
   published, keep `v0.4.1`, and the `v0.10.1` tag keeps `v0.4.0` (which pins Core
   `v0.10.0`). An install from those frozen tags
-  therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.6.1`) or runs
+  therefore names the newer release (`WUWATERM_TELEGRAM_VERSION=v0.7.0`) or runs
   from `main`. The `v0.10.0` tag, frozen before Telegram `v0.4.0` was published,
   keeps `v0.3.1`; that is what the `v0.9.2` tag records too, which pins Core
   `v0.9.1`. Clones of `v0.9.1` and `v0.9.0` record `v0.3.0` (pinning Core
@@ -232,7 +233,7 @@ release. That boundary has not moved.
   `DEFAULT_WEB_VERSION` in `deploy/setup.sh` and the `Web vX 发布页` link in
   the top section of `docs/products.md` name one published release, and
   `test_release_defaults_match_the_recorded_snapshot_and_the_guide` fails when
-  they differ. `main` records and installs Web `v0.7.0`, the `v0.16.0` tag
+  they differ. `main` records and installs Web `v0.8.0`, the `v0.16.0` tag
   records and installs Web `v0.6.0`, the `v0.15.0` tag
   records and installs Web `v0.5.1`, the `v0.14.1` tag records
   and installs Web `v0.5.0`, the `v0.14.0` tag records and installs Web `v0.4.5`,
@@ -242,11 +243,11 @@ release. That boundary has not moved.
   `v0.10.2` tags' frozen snapshots record and install `v0.4.1`,
   so those tag checkouts need no Web override; the `v0.10.0` tag's frozen
   snapshot records `v0.3.1`, so an install from that tag passes
-  `WUWATERM_WEB_VERSION=v0.7.0` or runs from `main`. A clone of `v0.9.0`
+  `WUWATERM_WEB_VERSION=v0.8.0` or runs from `main`. A clone of `v0.9.0`
   records Web `v0.2.0`, which rejects manuscript v3 files, and needs
   `WUWATERM_WEB_VERSION=v0.3.1` to pair the tagged Core with a manuscript-v3
   Web. `docs/self-hosting.md` and `README.md` say the same.
-- Windows product: [v0.9.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.9.0), released independently.
+- Windows product: [v0.10.0](https://github.com/My-Denia/WuwaTerm-Windows/releases/tag/v0.10.0), released independently.
 - Supported source profile: `arikatsu`
 - Supported game data version:
   `GameVer 3.7.0 | ResVer 3.7.8 | Changelist 8975829`
@@ -396,20 +397,23 @@ The 0.8.0 capability checks still apply to this release:
   (`13faa392cd6f4826d2115ae8ad04117a95577ffe`) and Windows `v0.7.1`
   (`1ada119a0ff9284359fff2740f887140f6324545`), the `v0.16.0` tag pins Web
   `v0.6.0` (`eed5d30e26c6446dbff49aa63905ec3ba2db9677`) and Windows `v0.8.0`
-  (`97c659e22b97f05b9a817c0740ca19d4add63441`), while `main` after `v0.16.0`
-  moved them to Web `v0.7.0` (`df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0`) and
-  Windows `v0.9.0` (`e6835f38dfcc0ac217bc0cc8c608ad6570668428`); the `v0.14.0` tag pins Web
+  (`97c659e22b97f05b9a817c0740ca19d4add63441`), commits `77eb78eb`..`02c731e8`
+  pinned Web `v0.7.0` (`df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0`) and Windows
+  `v0.9.0` (`e6835f38dfcc0ac217bc0cc8c608ad6570668428`), and `main` now pins
+  Web `v0.8.0` (`c3c64e07d67c64adedaa551e53e1b0e31a898e0e`) and Windows
+  `v0.10.0` (`866b6c4efc0730e19b70a2d35bbc4ecd8612af47`); the `v0.14.0` tag pins Web
   `v0.4.3` (`ba8d01b26e7dd7d0ca3c1e28a61a847d5dc5a131`) and Windows `v0.6.3`
   (`d0bd6c4b2b4c6e55315dc1b804d379c02aebb854`). `ci_pins` in
   `contracts/products.json` names the same revisions as the pins `main`
   carries.
 - Telegram pins an exact Core wheel; do not claim it reaches users until its
-  own lock is moved and released. Telegram 0.6.1 pins the published Core
-  `v0.13.0` wheel and is deployed, so the 0.13.0 library reaches Telegram users
-  through that product's own release. A later Core release, `v0.16.0` included,
-  reaches Telegram users only after WuwaTerm-Telegram moves its lock to the new
-  tag and
-  releases, which this checklist does not assume.
+  own lock is moved and released. Telegram `0.7.0` pins the published Core
+  `v0.16.0` wheel (not yet deployed to the owner VPS, where `wuwaterm-telegram`
+  still runs `0.6.1` on Core `0.13.0`), and also supports pure HTTP Core mode
+  (`WUWATERM_CORE_MODE=http`). A later Core release, `v0.17.0` included,
+  reaches Telegram users' pinned in-process wheel only after WuwaTerm-Telegram
+  moves its lock to the new tag and releases, which this checklist does not
+  assume.
 
 The installer and Web checks from 0.7.x still apply to this release:
 

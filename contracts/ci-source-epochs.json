@@ -9,10 +9,95 @@
   "consumers": {
     "web_repository": "My-Denia/WuwaTerm-Web",
     "legacy_web_revision": "6cbba41bb934d44d1dde1b94f1b50d6d845af599",
-    "split_web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+    "split_web_revision": "c3c64e07d67c64adedaa551e53e1b0e31a898e0e",
     "windows_repository": "My-Denia/WuwaTerm-Windows",
-    "split_windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+    "split_windows_revision": "866b6c4efc0730e19b70a2d35bbc4ecd8612af47",
     "historical_split_pins": [
+      {
+        "source_commit": "02c731e81c7c14e90ee7588a039b6ace43b2b552",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "722344e74562d0e4b2efd1593d0b50cc12a99183",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "0aa403d5615381cb9018c4b5770ae896819f415c",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "96c840281fb1a102ba9b8d9118feb29f779ccdca",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "fcc113a32b6314aa6290c4a103ee1c4f9c343bd7",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "c1d5f6e8221abbf6d6a6dfb7b08b90da5579ba95",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "23dba6c85033991982998d5422f132b86b4d3a58",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "93c33af7fefc2f622afe294208ff8140c98d55f0",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "fab4ec1e8cfdb19ece5f53b16e68ce020f50bd80",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "fbf433e2d441c2282ff26f3b450dfd800b3a3856",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "2daa4c2694149e5d995ddd17712389ecf5dc19b2",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "313e95be2d29f601ac01215a5fc1e653759e271a",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "edc7e24ee4501eec6c302206244df4566af2b76e",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "5a881ee74aa7900ee90bb0c6f88b7fa015c3da61",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "3222bd118628597a84c1e4507a154df5ce322352",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "aceac90c31aea9c556ebc14031a9dcb3248c765a",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
+      {
+        "source_commit": "77eb78eb91d5f2de0ec907b998cd0330ce21edc1",
+        "web_revision": "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "windows_revision": "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+      },
       {
         "source_commit": "3144f7b0c5e793826ebea0985b68499b37d8c191",
         "web_revision": "eed5d30e26c6446dbff49aa63905ec3ba2db9677",

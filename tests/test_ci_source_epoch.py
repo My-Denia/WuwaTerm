@@ -183,14 +183,29 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     for source in (successor, synthetic_merge):
         result = epoch.resolve(source, config)
         assert result["source_epoch"] == "split"
-        assert result["web_revision"] == "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0"
-        assert result["windows_revision"] == "e6835f38dfcc0ac217bc0cc8c608ad6570668428"
+        assert result["web_revision"] == "c3c64e07d67c64adedaa551e53e1b0e31a898e0e"
+        assert result["windows_revision"] == "866b6c4efc0730e19b70a2d35bbc4ecd8612af47"
         assert result["required_jobs"][-1] == "API to Windows contract"
     # Newer split CONTROL does not change the target's legacy source epoch.
     assert epoch.resolve(LAST, config)["source_epoch"] == "legacy"
 
 
 @pytest.mark.parametrize(("source", "expected_web", "expected_windows"), [
+    (
+        "02c731e81c7c14e90ee7588a039b6ace43b2b552",
+        "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+    ),
+    (
+        "fcc113a32b6314aa6290c4a103ee1c4f9c343bd7",
+        "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+    ),
+    (
+        "77eb78eb91d5f2de0ec907b998cd0330ce21edc1",
+        "df0a4d0ca578f35c5cdbecf6ec9672bdbf74f5a0",
+        "e6835f38dfcc0ac217bc0cc8c608ad6570668428",
+    ),
     (
         "3144f7b0c5e793826ebea0985b68499b37d8c191",
         "eed5d30e26c6446dbff49aa63905ec3ba2db9677",
