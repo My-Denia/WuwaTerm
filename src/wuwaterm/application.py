@@ -1232,6 +1232,7 @@ def build_translator(
     en_zh_protocol: bool = False,
     provider_profile: ProviderProfile | None = None,
     knowledge_db_path: str | Path | None = None,
+    knowledge_runtime: KnowledgeRuntime | None = None,
 ) -> SentenceTranslator:
     """Create a term-locking translator with adapter-owned LLM budgets.
 
@@ -1251,6 +1252,7 @@ def build_translator(
         en_zh_protocol=en_zh_protocol,
         provider_profile=resolved_profile,
         knowledge_db_path=knowledge_db_path,
+        knowledge_runtime=knowledge_runtime,
     )
 
 
