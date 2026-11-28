@@ -22,6 +22,8 @@ FLOOR = "13f601871566d89b372ecf31b45345f5387b601c"
 OPTIONAL = "0c7be297472c6051b7190974f803b3c6e03d7b63"
 PUBLIC = "1c4400aad98578c9abed0429ab30f39c13fed3d8"
 LAST = "64e293cf53ba9106a4a67639fd5c6b0857e6c384"
+RETIRED_PARENT = "c1d5f6e8221abbf6d6a6dfb7b08b90da5579ba95"
+RETIRED = "fcc113a32b6314aa6290c4a103ee1c4f9c343bd7"
 FEATURE = "f8a9008d7adf60006ca210c750aa97f5de386a26"
 PR_HEAD = "8f0aa8ce565226466c05b8c5138bb95144f9383d"
 
@@ -90,6 +92,12 @@ def test_real_milestones_and_last_bundled_are_inclusive(config):
     assert last["web_revision"] == "6cbba41bb934d44d1dde1b94f1b50d6d845af599"
     assert last["windows_revision"] is None
     assert last["required_jobs"][-1] == config["jobs"]["legacy_windows"]
+    pre_retired = epoch.resolve(RETIRED_PARENT, config)
+    assert (pre_retired["source_epoch"], pre_retired["telegram_mode"], pre_retired["telegram_optional"],
+            pre_retired["public_interface_smoke"], pre_retired["manuscript_interop"]) == ("split", "optional", True, True, False)
+    retired = epoch.resolve(RETIRED, config)
+    assert (retired["source_epoch"], retired["telegram_mode"], retired["telegram_optional"],
+            retired["public_interface_smoke"], retired["manuscript_interop"]) == ("split", "retired", False, True, False)
 
 
 def test_telegram_mode_three_states_and_retired_milestone(config, temporary_git_objects):
@@ -170,8 +178,8 @@ def test_strict_descendant_and_synchronized_pr_merge_select_split(config, tempor
     feature_head = commit(split_tree, sibling)
     with pytest.raises(ValueError, match="disconnected"):
         epoch.resolve(feature_head, config)
-    successor = commit(split_tree, LAST)
-    synthetic_merge = commit(split_tree, LAST, feature_head)
+    successor = commit(split_tree, RETIRED)
+    synthetic_merge = commit(split_tree, RETIRED, feature_head)
     for source in (successor, synthetic_merge):
         result = epoch.resolve(source, config)
         assert result["source_epoch"] == "split"
@@ -263,17 +271,17 @@ def test_actual_pr_event_source_includes_last_bundled_main(config):
 ])
 def test_split_missing_required_layout_rejected(config, temporary_git_objects, path):
     commit, change_tree = temporary_git_objects
-    source = commit(change_tree("HEAD", path), LAST)
+    source = commit(change_tree("HEAD", path), RETIRED)
     with pytest.raises(ValueError):
         epoch.resolve(source, config)
 
 
 def test_wrong_consumer_pin_rejected(config, temporary_git_objects):
     commit, change_tree = temporary_git_objects
-    source = commit(change_tree("HEAD", "contracts/web-ref.txt", "0" * 40 + "\n"), LAST)
+    source = commit(change_tree("HEAD", "contracts/web-ref.txt", "0" * 40 + "\n"), RETIRED)
     with pytest.raises(ValueError, match="wrong source Web pin"):
         epoch.resolve(source, config)
-    source = commit(change_tree("HEAD", "contracts/windows-ref.txt", "0" * 40 + "\n"), LAST)
+    source = commit(change_tree("HEAD", "contracts/windows-ref.txt", "0" * 40 + "\n"), RETIRED)
     with pytest.raises(ValueError, match="wrong source Windows pin"):
         epoch.resolve(source, config)
 
@@ -385,6 +393,7 @@ def test_legacy_missing_required_layout_rejected(config, temporary_git_objects, 
     source = commit(change_tree(LAST, path), LAST)
     control = copy.deepcopy(config)
     control["last_legacy_source"] = source
+    control["retired_telegram_milestone"] = None
     with pytest.raises(ValueError):
         epoch.resolve(source, control)
 
@@ -397,6 +406,7 @@ def test_missing_actual_interop_or_optional_sdk_is_not_downgraded(config, tempor
     source = commit(tree, LAST)
     control = copy.deepcopy(config)
     control["last_legacy_source"] = source
+    control["retired_telegram_milestone"] = None
     with pytest.raises(ValueError, match="missing actual manuscript"):
         epoch.resolve(source, control)
 
