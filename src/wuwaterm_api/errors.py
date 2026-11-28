@@ -20,6 +20,7 @@ from wuwaterm.application import (
     ERROR_INPUT_TOO_LONG,
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
+    ERROR_KNOWLEDGE_UNAVAILABLE,
     ERROR_LLM_BUDGET_EXHAUSTED,
     ERROR_LLM_UNAVAILABLE,
     ERROR_PAYLOAD_TOO_LARGE,
@@ -40,6 +41,13 @@ STATUS_BY_CODE: dict[str, int] = {
     ERROR_INTERNAL: 500,
 }
 
+# Endpoint-specific error statuses kept out of the frozen core ErrorDetailBody
+# enum (STATUS_BY_CODE) so `/v1/reviews` and legacy contract schemas stay
+# byte-identical.
+ENDPOINT_STATUS_BY_CODE: dict[str, int] = {
+    ERROR_KNOWLEDGE_UNAVAILABLE: 503,
+}
+
 # Short, stable, operator-facing wording per code.
 MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_UNAUTHORIZED: "missing or invalid device credential",
@@ -50,6 +58,7 @@ MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_INPUT_TOO_LONG: "input text is longer than the translation limit",
     ERROR_LLM_UNAVAILABLE: "translation provider is unavailable",
     ERROR_LLM_BUDGET_EXHAUSTED: "translation call budget is exhausted",
+    ERROR_KNOWLEDGE_UNAVAILABLE: "domain knowledge base is unavailable",
     ERROR_INTERNAL: "internal error",
 }
 
@@ -66,7 +75,11 @@ class ApiError(Exception):
     ) -> None:
         self.code = code
         self.message = message or MESSAGE_BY_CODE.get(code, MESSAGE_BY_CODE[ERROR_INTERNAL])
-        self.status_code = status_code or STATUS_BY_CODE.get(code, 500)
+        self.status_code = (
+            status_code
+            or STATUS_BY_CODE.get(code)
+            or ENDPOINT_STATUS_BY_CODE.get(code, 500)
+        )
         super().__init__(f"{code}: {self.message}")
 
 

@@ -261,6 +261,7 @@ class _ServeNumericRaw:
 class ApiSettings:
     db_path: Path
     device_db_path: Path
+    knowledge_db_path: Path | None = None
     # False when an operator named the store explicitly. Only the default
     # layout can have inherited the pre-move path, so only the default layout
     # is checked for one.
@@ -292,6 +293,7 @@ class ApiSettings:
     def from_env(cls) -> "ApiSettings":
         state_dir = _env_path("WUWATERM_API_STATE_DIR", DEFAULT_STATE_DIR)
         device_db = os.getenv("WUWATERM_API_DEVICE_DB_PATH")
+        knowledge_db = os.getenv("WUWATERM_API_KNOWLEDGE_DB_PATH")
         numeric_raw = _ServeNumericRaw(
             port=(os.getenv("WUWATERM_API_PORT") or "").strip(),
             llm_timeout_seconds=(
@@ -325,6 +327,11 @@ class ApiSettings:
                 Path(device_db.strip())
                 if device_db and device_db.strip()
                 else state_dir / DEVICE_DB_FILENAME
+            ),
+            knowledge_db_path=(
+                Path(knowledge_db.strip())
+                if knowledge_db and knowledge_db.strip()
+                else None
             ),
             device_db_is_default=not (device_db and device_db.strip()),
             # Deliberately NOT validated here. from_env() is called by EVERY

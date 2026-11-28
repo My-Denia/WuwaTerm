@@ -220,7 +220,11 @@ def connect_knowledge_db_read_only(db_path: str | Path) -> sqlite3.Connection:
             f"knowledge database does not exist or is not a file: {path}"
         )
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
     except sqlite3.Error as exc:
         raise KnowledgeBaseError(
             f"cannot open knowledge database read-only: {exc}"
@@ -240,7 +244,11 @@ def compute_terms_db_revision(terms_db_path: str | Path) -> str:
     if not path.is_file():
         raise KnowledgeBaseError(f"terms database does not exist: {path}")
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
     except sqlite3.Error as exc:
         raise KnowledgeBaseError(f"cannot open terms database: {exc}") from exc
     with closing(conn):
@@ -494,6 +502,23 @@ class KnowledgeBaseReader:
                 f"expected {self._expected_terms_db_revision!r}, "
                 f"got {actual_revision!r}"
             )
+        try:
+            existing_tables = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        except sqlite3.Error as exc:
+            raise KnowledgeBaseError(
+                f"failed inspecting sqlite_master from {self._db_path}: {exc}"
+            ) from exc
+        missing_tables = EXPECTED_KB_LOGICAL_TABLES - existing_tables
+        if missing_tables:
+            raise KnowledgeBaseError(
+                "knowledge database is missing required tables: "
+                f"{sorted(missing_tables)!r}"
+            )
         return metadata
 
     @property
@@ -649,23 +674,40 @@ class KnowledgeBaseReader:
         extracted: list[tuple[str, tuple[tuple[int, int], ...]]],
         *,
         per_probe_limit: int,
+        categories: frozenset[str] | None = None,
     ) -> set[str]:
         """Phase 1 (bounded): discover candidate entity IDs from FTS5."""
         discovered: set[str] = set()
+        ordered_categories = sorted(categories) if categories else []
+        category_placeholders = ",".join("?" for _ in ordered_categories)
         for probe_raw, _probe_spans in extracted:
             phrase = _quote_fts5_phrase(probe_raw)
             for fts_query in (f"{{surface zh en}} : {phrase}", f"context_gloss : {phrase}"):
                 try:
-                    rows = self._conn.execute(
-                        """
-                        SELECT entity_id
-                        FROM kb_fts_trigram
-                        WHERE kb_fts_trigram MATCH ?
-                        ORDER BY bm25(kb_fts_trigram) ASC, entity_id ASC
-                        LIMIT ?
-                        """,
-                        (fts_query, per_probe_limit),
-                    ).fetchall()
+                    if ordered_categories:
+                        rows = self._conn.execute(
+                            f"""
+                            SELECT kb_fts_trigram.entity_id
+                            FROM kb_fts_trigram
+                            JOIN kb_entities ON kb_entities.entity_id = kb_fts_trigram.entity_id
+                            WHERE kb_fts_trigram MATCH ?
+                              AND kb_entities.entity_type IN ({category_placeholders})
+                            ORDER BY bm25(kb_fts_trigram) ASC, kb_fts_trigram.entity_id ASC
+                            LIMIT ?
+                            """,
+                            (fts_query, *ordered_categories, per_probe_limit),
+                        ).fetchall()
+                    else:
+                        rows = self._conn.execute(
+                            """
+                            SELECT entity_id
+                            FROM kb_fts_trigram
+                            WHERE kb_fts_trigram MATCH ?
+                            ORDER BY bm25(kb_fts_trigram) ASC, entity_id ASC
+                            LIMIT ?
+                            """,
+                            (fts_query, per_probe_limit),
+                        ).fetchall()
                 except sqlite3.OperationalError:
                     continue
                 for row in rows:
@@ -823,6 +865,7 @@ class KnowledgeBaseReader:
         locked_surfaces: Collection[str] = (),
         reference_surfaces: Collection[str] = (),
         anchor_surfaces: Collection[str] = (),
+        categories: Collection[str] | None = None,
         use_graph: bool = True,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         max_scalars: int = DEFAULT_MAX_SCALARS,
@@ -841,6 +884,11 @@ class KnowledgeBaseReader:
         )
         if not text or not text.strip():
             return (), empty_graph_outcome
+        category_filter: frozenset[str] | None = (
+            frozenset(categories) if categories is not None else None
+        )
+        if category_filter is not None and not category_filter:
+            return (), empty_graph_outcome
 
         # Phase 1: Bounded candidate discovery across alias, short-ngram, and FTS5.
         alias_hits = self._query_exact_aliases(text)
@@ -849,7 +897,9 @@ class KnowledgeBaseReader:
         per_probe_limit = max(max(max_candidates, 8) * 4, 32)
         fts_discovered_ids = (
             self._discover_fts_candidate_ids(
-                fts_probes, per_probe_limit=per_probe_limit
+                fts_probes,
+                per_probe_limit=per_probe_limit,
+                categories=category_filter,
             )
             if fts_probes
             else set()
@@ -1000,6 +1050,7 @@ class KnowledgeBaseReader:
             ranked_candidates,
             locked_surfaces=locked_surfaces,
             reference_surfaces=reference_surfaces,
+            categories=category_filter,
             max_candidates=max_candidates,
             max_scalars=max_scalars,
         )
@@ -1012,6 +1063,7 @@ class KnowledgeBaseReader:
         locked_surfaces: Collection[str] = (),
         reference_surfaces: Collection[str] = (),
         anchor_surfaces: Collection[str] = (),
+        categories: Collection[str] | None = None,
         use_graph: bool = True,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         max_scalars: int = DEFAULT_MAX_SCALARS,
@@ -1027,6 +1079,7 @@ class KnowledgeBaseReader:
             locked_surfaces=locked_surfaces,
             reference_surfaces=reference_surfaces,
             anchor_surfaces=anchor_surfaces,
+            categories=categories,
             use_graph=use_graph,
             max_candidates=max_candidates,
             max_scalars=max_scalars,

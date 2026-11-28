@@ -261,7 +261,7 @@ translation logic of its own.
 
 | Presentation | Responsibility | Module |
 |--------------|----------------|--------|
-| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/v1/capabilities`, `/v1/reviews`, `/v1/semantic-reviews`, `/v1/structure-checks`, `/v1/auth/status`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
+| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/v1/dictionary`, `/v1/capabilities`, `/v1/knowledge/query`, `/v1/reviews`, `/v1/semantic-reviews`, `/v1/structure-checks`, `/v1/auth/status`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
 | Middleware | Server-minted request id, body size/arrival cap, request time budget | `src/wuwaterm_api/app.py` |
 | Identity | Device store, scopes, revocation, credential pool | `src/wuwaterm_api/auth.py` |
 | Error vocabulary | Enumerated codes and their HTTP statuses | `src/wuwaterm_api/errors.py` |
@@ -291,6 +291,9 @@ knowledge_builder (offline KB build)   scripts/verify_knowledge_db.py
   `-> knowledge_db (read-only KB) <----'
         |-> entity_graph (read-only 1-hop graph)
         `-> domain_knowledge (pure matching, lock_eligible=False)
+knowledge_runtime (thread-safe revision-checked runtime + query)
+  |-> knowledge_db / lookup / domain_knowledge
+  `<- sentence / application  (HTTP adapter reaches it only via application)
 scripts/build_knowledge_vectors.py
   `-> retrieval_vector (optional dense vector backend, fail-closed)
         `-> domain_knowledge (pure matching, lock_eligible=False)
@@ -298,8 +301,8 @@ scripts/build_knowledge_vectors.py
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `lookup`, `native_kernel`, `normalize`, `models`, `retrieval_vector`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
-| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `lookup`, `retrieval_vector`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
+| Domain core | `attribution_candidates`, `domain_knowledge`, `entity_graph`, `fuzzy_index`, `knowledge_db`, `knowledge_runtime`, `lookup`, `native_kernel`, `normalize`, `models`, `retrieval_vector`, `review`, `cjk_span`, `document_anchor`, `english_plural`, `protected_text`, `segmentation`, `semantic_review_contract`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `term_matching`, `term_preparation`, `termbase`, `text_spans` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
+| Pure matching (subset of Domain core) | `attribution_candidates`, `domain_knowledge`, `fuzzy_index`, `native_kernel`, `term_matching`, `term_preparation`, `cjk_span`, `document_anchor`, `protected_text`, `segmentation`, `english_plural`, `single_char_context`, `skill_references`, `structural_checks`, `term_classification`, `termbase`, `text_spans` | `db`, `entity_graph`, `knowledge_db`, `knowledge_runtime`, `lookup`, `retrieval_vector`, `review`, `sqlite3` (including under `TYPE_CHECKING`) |
 | Domain + provider | `sentence`, `provider_capabilities`, `translation_plan` (plan, policy, `ProviderProfile`, `SegmentExecutionBudget`, `OperationExecutionBudget`, `TranslationRequestSpec`, request/operation identity), `llm_transport` (chat-completion HTTP transport: env resolution, one POST path, error mapping, transport-level execution-budget choke point, redacted per-attempt log), `semantic_review` (semantic-review-v1 engine: prompt, JSON parsing, anchoring, `term_effect`) | presentation and Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `constants`, `exclusion_metadata` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -316,8 +319,14 @@ from mandatory placeholder locks: `domain_knowledge` sits in `PURE_MATCHING`
 joint span-coverage and single-character CJK gating, and budget caps;
 `knowledge_db` sits in `DOMAIN_CORE` (forbidden to `PURE_MATCHING`) as the
 read-only SQLite companion schema and Lexical RAG reader bound fail-closed to
-`terms_db_revision`; `retrieval_vector` sits in `DOMAIN_CORE` (also forbidden to
-`PURE_MATCHING`) as the optional pluggable vector backend and deterministic RRF
+`terms_db_revision`; `knowledge_runtime` sits in `DOMAIN_CORE` (also forbidden
+to `PURE_MATCHING`) as the thread-safe runtime cache that re-validates
+`terms_db_revision` on `terms.db` or `knowledge.db` changes, degrades safely
+with sanitized warnings (never leaking paths), dynamically controls
+`knowledge-retrieval-v1`, backs `POST /v1/knowledge/query`, and feeds both
+plain-text and `translate_protected_async` visible-text soft RAG retrieval
+through `application` and `sentence`; `retrieval_vector` sits in `DOMAIN_CORE`
+(also forbidden to `PURE_MATCHING`) as the optional pluggable vector backend and deterministic RRF
 fuser, defaulting to zero third-party ML dependencies (INT8 memmap over stdlib
 `mmap` when `numpy` is absent) and degrading fail-closed to pure Lexical RAG on
 missing/mismatched `knowledge_db_sha256` or `terms_db_revision`; `knowledge_builder`
@@ -524,7 +533,7 @@ Channel path is always auto-detected direction; it does not accept command
 |------|-----|
 | Exact dictionary hit (`lookup_exact` + early returns in the shared pipeline) | Official string from SQLite |
 | Fuzzy dictionary short answers (`_fuzzy_dictionary_answer`) | DB-only |
-| `GET /v1/terms`, `GET /v1/meta`, `GET /v1/capabilities`, `POST /v1/reviews`, `POST /v1/structure-checks`, `/healthz`, `/readyz` | Dictionary reads, deterministic pair review and structure checks ([ADR 0022](adr/0022-deterministic-structure-checks.md)), and probes only |
+| `GET /v1/terms`, `GET /v1/meta`, `GET /v1/dictionary`, `GET /v1/capabilities`, `POST /v1/knowledge/query`, `POST /v1/reviews`, `POST /v1/structure-checks`, `/healthz`, `/readyz` | Dictionary reads, read-only companion knowledge retrieval (`knowledge-retrieval-v1`), deterministic pair review and structure checks ([ADR 0022](adr/0022-deterministic-structure-checks.md)), and probes only |
 | Unauthorized / rate-limited / malformed HTTP requests | Rejected before translation work |
 | LLM env incomplete | Core HTTP API refuses with `llm_unavailable` (`503`); offline `SentenceTranslator` library/CLI callers fall back to deterministic term substitution without inventing terms |
 

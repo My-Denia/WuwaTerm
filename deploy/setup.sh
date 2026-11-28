@@ -116,6 +116,12 @@ add any combination of client surfaces.
 
 Environment: WUWATERM_IMAGE_TAG is honoured; WUWATERM_WEB_NODE_IMAGE overrides
 the Node image used to run a Web package (default node:24-alpine).
+WUWATERM_API_KNOWLEDGE_DB_PATH (optional, e.g. /app/data/knowledge.db under
+Compose) mounts a companion read-only entity knowledge database bound to
+data/terms.db's revision; verify it with:
+  python scripts/verify_knowledge_db.py data/knowledge.db --terms-db data/terms.db
+Missing or revision-mismatched knowledge.db degrades safely to dictionary-only
+mode without blocking wuwaterm-api startup.
 WUWATERM_TELEGRAM_VERSION selects the WuwaTerm-Telegram release tag to install
 (default: the tag contracts/products.json of this checkout records, v0.6.1 here;
 the script's own constant when that file is absent).
@@ -1714,6 +1720,10 @@ report_status() {
             "$(wc -c <"$code_root/data/terms.db" | tr -d ' ')"
     else
         printf 'data:         data/terms.db missing\n'
+    fi
+    if [ -f "$code_root/data/knowledge.db" ]; then
+        printf 'knowledge:    data/knowledge.db present (%s bytes)\n' \
+            "$(wc -c <"$code_root/data/knowledge.db" | tr -d ' ')"
     fi
     api_state=$(container_state wuwaterm-api)
     printf 'api:          %s\n' "${api_state:-not installed}"

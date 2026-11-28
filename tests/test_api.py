@@ -1566,6 +1566,7 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/v1/auth/status",
         "/v1/capabilities",
         "/v1/dictionary",
+        "/v1/knowledge/query",
         "/v1/meta",
         "/v1/reviews",
         "/v1/semantic-reviews",

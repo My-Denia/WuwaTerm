@@ -85,6 +85,13 @@ from . import structural_checks as _structural_checks
 from .document_anchor import DocumentAnchor as DocumentAnchor
 from .document_anchor import extract_document_anchor as extract_document_anchor
 from .domain_knowledge import DomainKnowledgeCandidate as DomainKnowledgeCandidate
+from .knowledge_runtime import (
+    DomainKnowledgeQueryResult as DomainKnowledgeQueryResult,
+    KnowledgeBaseStatus as KnowledgeBaseStatus,
+    KnowledgeQueryMode as KnowledgeQueryMode,
+    KnowledgeRuntime as KnowledgeRuntime,
+    KnowledgeUnavailableError as KnowledgeUnavailableError,
+)
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -160,6 +167,7 @@ ERROR_INVALID_REQUEST = "invalid_request"
 ERROR_INPUT_TOO_LONG = "input_too_long"
 ERROR_LLM_UNAVAILABLE = "llm_unavailable"
 ERROR_LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"
+ERROR_KNOWLEDGE_UNAVAILABLE = "knowledge_unavailable"
 ERROR_INTERNAL = "internal"
 
 TRANSLATION_ERROR_CODES = frozenset(
@@ -172,6 +180,7 @@ TRANSLATION_ERROR_CODES = frozenset(
         ERROR_INPUT_TOO_LONG,
         ERROR_LLM_UNAVAILABLE,
         ERROR_LLM_BUDGET_EXHAUSTED,
+        ERROR_KNOWLEDGE_UNAVAILABLE,
         ERROR_INTERNAL,
     }
 )
@@ -219,8 +228,9 @@ def _safe_business_reason(value: object) -> str | None:
 # --------------------------------------------------------------------------
 
 
-KnowledgeRetrievalMode = Literal["off", "lexical", "hybrid"]
+KnowledgeRetrievalMode = Literal["auto", "off", "lexical", "hybrid"]
 KNOWLEDGE_RETRIEVAL_MODES: tuple[KnowledgeRetrievalMode, ...] = (
+    "auto",
     "off",
     "lexical",
     "hybrid",
@@ -289,9 +299,12 @@ class TranslationContext:
       background candidates (default empty). They render strictly as read-only
       background references, never enter ``LockedSentence.locks``, and require
       ``lock_eligible is False``.
-    * ``retrieval_mode`` — reserved knob for domain knowledge retrieval
-      (``off`` | ``lexical`` | ``hybrid``); ignored unless enabled by the
-      runtime capability set.
+    * ``retrieval_mode`` — opt-in knob for domain knowledge retrieval
+      (``auto`` | ``off`` | ``lexical`` | ``hybrid``). ``auto`` uses a mounted,
+      revision-matched companion ``knowledge.db`` when available (no-op when
+      unmounted); ``off`` disables KB retrieval for this request; ``lexical``
+      and ``hybrid`` fail closed unless the server has the corresponding
+      capability.
     """
 
     before: ContextBefore | None = None
@@ -299,7 +312,7 @@ class TranslationContext:
     document_anchor: DocumentAnchor | None = None
     user_glossary_references: tuple[UserGlossaryReference, ...] = ()
     domain_knowledge_candidates: tuple[DomainKnowledgeCandidate, ...] = ()
-    retrieval_mode: KnowledgeRetrievalMode = "off"
+    retrieval_mode: KnowledgeRetrievalMode = "auto"
 
 
 PROTECTED_MAX_STRUCTURES = 256
@@ -651,6 +664,33 @@ def _strip_separators(text: str) -> str:
     return text[start:end]
 
 
+def _effective_retrieval_mode(
+    explicit_mode: KnowledgeRetrievalMode,
+    context: TranslationContext | None,
+) -> KnowledgeRetrievalMode:
+    if explicit_mode != "auto":
+        return explicit_mode
+    if context is not None:
+        return context.retrieval_mode
+    return "auto"
+
+
+def _retrieval_mode_error(
+    mode: KnowledgeRetrievalMode,
+    translator: SentenceTranslator,
+) -> str | None:
+    if mode not in KNOWLEDGE_RETRIEVAL_MODES:
+        return "retrieval_mode is not valid"
+    if mode == "hybrid":
+        return f"{CAPABILITY_HYBRID_RAG} capability is not enabled"
+    if mode == "lexical":
+        checker = getattr(translator, "knowledge_retrieval_available", None)
+        available = bool(checker()) if callable(checker) else False
+        if not available:
+            return f"{CAPABILITY_KNOWLEDGE_RETRIEVAL} capability is not enabled"
+    return None
+
+
 async def _translate_long_plain_text(
     translator: SentenceTranslator,
     text: str,
@@ -660,6 +700,7 @@ async def _translate_long_plain_text(
     before_llm_call: LlmCallGuard | None = None,
     on_segment: Callable[[object, str], None] | None = None,
     execution_budget: OperationExecutionBudget | None = None,
+    retrieval_mode: KnowledgeRetrievalMode = "auto",
 ) -> TranslationOutcome:
     """Translate segment by segment, keeping every separator verbatim.
 
@@ -689,6 +730,7 @@ async def _translate_long_plain_text(
     domain_knowledge = (
         context.domain_knowledge_candidates if context is not None else ()
     )
+    effective_mode = _effective_retrieval_mode(retrieval_mode, context)
     with op_budget.activate():
         for segment in segments:
             core = text[segment.core_start : segment.core_end]
@@ -715,6 +757,7 @@ async def _translate_long_plain_text(
                         document_anchor=document_anchor,
                         user_glossary_references=glossary,
                         domain_knowledge_candidates=domain_knowledge,
+                        retrieval_mode=effective_mode,
                     ),
                     execution_budget=op_budget,
                 )
@@ -741,7 +784,12 @@ async def _translate_plain_async(
     context: TranslationContext | None = None,
     source_text: str | None = None,
     execution_budget: OperationExecutionBudget | None = None,
+    retrieval_mode: KnowledgeRetrievalMode = "auto",
 ) -> TranslationOutcome:
+    effective_mode = _effective_retrieval_mode(retrieval_mode, context)
+    mode_kwargs: dict[str, object] = (
+        {"retrieval_mode": effective_mode} if effective_mode != "auto" else {}
+    )
     try:
         if context is None:
             translated = await translator.translate_async(
@@ -750,6 +798,7 @@ async def _translate_plain_async(
                 propagate_errors=True,
                 before_llm_call=before_llm_call,
                 execution_budget=execution_budget,
+                **mode_kwargs,  # type: ignore[arg-type]
             )
         else:
             translated = await translator.translate_async(
@@ -759,6 +808,7 @@ async def _translate_plain_async(
                 before_llm_call=before_llm_call,
                 context=context,
                 execution_budget=execution_budget,
+                **mode_kwargs,  # type: ignore[arg-type]
             )
     except LLMTranslationError as exc:
         return _llm_failure_outcome(exc, to_chinese)
@@ -784,8 +834,23 @@ async def translate_request_async(
     offload: Offload | None = None,
     execution_budget: OperationExecutionBudget | None = None,
     allow_dictionary_fallback: bool = False,
+    retrieval_mode: KnowledgeRetrievalMode = "auto",
 ) -> TranslationOutcome:
     """Run the shared dictionary-first pipeline for one job."""
+    effective_mode = _effective_retrieval_mode(retrieval_mode, request.context)
+    if effective_mode in ("lexical", "hybrid") or effective_mode not in KNOWLEDGE_RETRIEVAL_MODES:
+        mode_error = (
+            _retrieval_mode_error(effective_mode, translator)
+            if offload is None
+            else await offload(_retrieval_mode_error, effective_mode, translator)
+        )
+        if mode_error is not None:
+            return TranslationOutcome(
+                kind=KIND_ERROR,
+                text=mode_error,
+                to_chinese=bool(request.forced_to_chinese),
+                error_code=ERROR_INVALID_REQUEST,
+            )
     if offload is None:
         stage = _dictionary_stage(service, translator, request, input_limit)
     else:
@@ -809,6 +874,7 @@ async def translate_request_async(
             context=request.context,
             before_llm_call=before_llm_call,
             execution_budget=execution_budget,
+            retrieval_mode=effective_mode,
         )
         if allow_dictionary_fallback and outcome.kind == KIND_LLM and not llm_configured():
             return TranslationOutcome(
@@ -896,6 +962,7 @@ async def translate_request_async(
             # SentenceTranslator.prepare_text_keeping_paragraphs).
             source_text=request.text if request.context is not None else None,
             execution_budget=op_budget,
+            retrieval_mode=effective_mode,
         )
         if allow_dictionary_fallback and outcome.kind == KIND_LLM and not llm_configured():
             return TranslationOutcome(
@@ -934,6 +1001,7 @@ async def translate_protected_request_async(
     before_llm_call: LlmCallGuard | None = None,
     offload: Offload | None = None,
     execution_budget: OperationExecutionBudget | None = None,
+    retrieval_mode: KnowledgeRetrievalMode = "auto",
 ) -> ProtectedTranslationOutcome:
     """Translate visible segments with opaque structural boundaries preserved."""
     if len(request.visible_segments) != len(request.structures) + 1:
@@ -947,6 +1015,22 @@ async def translate_protected_request_async(
         raise ValueError(
             f"visible_context must be at most {PROTECTED_MAX_VISIBLE_CONTEXT_SCALARS} scalars"
         )
+    effective_mode = _effective_retrieval_mode(retrieval_mode, request.context)
+    if effective_mode in ("lexical", "hybrid") or effective_mode not in KNOWLEDGE_RETRIEVAL_MODES:
+        mode_error = (
+            _retrieval_mode_error(effective_mode, translator)
+            if offload is None
+            else await offload(_retrieval_mode_error, effective_mode, translator)
+        )
+        if mode_error is not None:
+            return ProtectedTranslationOutcome(
+                kind=KIND_ERROR,
+                text=mode_error,
+                translated_segments=(),
+                to_chinese=bool(request.forced_to_chinese),
+                protected_used=False,
+                error_code=ERROR_INVALID_REQUEST,
+            )
     if sum(len(segment) for segment in request.visible_segments) > LLM_INPUT_CHAR_LIMIT:
         return ProtectedTranslationOutcome(
             kind=KIND_ERROR,
@@ -982,6 +1066,9 @@ async def translate_protected_request_async(
         if execution_budget is not None
         else OperationExecutionBudget.for_segments(1)
     )
+    mode_kwargs: dict[str, object] = (
+        {"retrieval_mode": effective_mode} if effective_mode != "auto" else {}
+    )
     with op_budget.activate():
         try:
             translated_protected = await translator.translate_protected_async(
@@ -990,6 +1077,7 @@ async def translate_protected_request_async(
                 context=request.context,
                 before_llm_call=before_llm_call,
                 execution_budget=op_budget,
+                **mode_kwargs,  # type: ignore[arg-type]
             )
         except LLMTranslationError as exc:
             business_reason = _safe_business_reason(getattr(exc, "reason", None))
@@ -1042,6 +1130,7 @@ async def translate_protected_request_async(
                     before_llm_call=before_llm_call,
                     offload=offload,
                     execution_budget=op_budget,
+                    retrieval_mode=effective_mode,
                 )
                 return ProtectedTranslationOutcome(
                     kind=plain.kind,
@@ -1537,7 +1626,58 @@ CAPABILITY_KNOWLEDGE_RETRIEVAL: Literal["knowledge-retrieval-v1"] = (
 CAPABILITY_HYBRID_RAG: Literal["hybrid-rag-v1"] = "hybrid-rag-v1"
 
 
-def service_capabilities() -> tuple[ServiceCapability, ...]:
+def build_knowledge_runtime(
+    knowledge_db_path: str | Path | None = None,
+    *,
+    logger: logging.Logger | None = None,
+) -> KnowledgeRuntime:
+    """Create a thread-safe, revision-checked companion ``knowledge.db`` runtime."""
+    return KnowledgeRuntime(knowledge_db_path, logger=logger)
+
+
+def query_domain_knowledge(
+    service: TermService,
+    source: KnowledgeRuntime | str | Path | None,
+    query: str,
+    *,
+    top_k: int = 5,
+    mode: KnowledgeQueryMode = "lexical",
+    categories: Sequence[str] | None = None,
+    hybrid_rag_available: bool = False,
+) -> DomainKnowledgeQueryResult:
+    """Read-only domain knowledge retrieval entry point for adapters.
+
+    Adapters must call this rather than importing ``knowledge_db`` or
+    ``entity_graph`` directly. Every returned hit enforces ``lock_eligible=False``.
+    """
+    if isinstance(source, KnowledgeRuntime):
+        return source.query_domain_knowledge(
+            service,
+            query,
+            top_k=top_k,
+            mode=mode,
+            categories=categories,
+            hybrid_rag_available=hybrid_rag_available,
+        )
+    runtime = KnowledgeRuntime(source)
+    try:
+        return runtime.query_domain_knowledge(
+            service,
+            query,
+            top_k=top_k,
+            mode=mode,
+            categories=categories,
+            hybrid_rag_available=hybrid_rag_available,
+        )
+    finally:
+        runtime.close()
+
+
+def service_capabilities(
+    *,
+    knowledge_retrieval_available: bool = False,
+    hybrid_rag_available: bool = False,
+) -> tuple[ServiceCapability, ...]:
     """Optional capabilities this process can serve right now, sorted by name.
 
     A capability is listed only when it actually works, so a client can turn a
@@ -1546,8 +1686,9 @@ def service_capabilities() -> tuple[ServiceCapability, ...]:
     ``structure-check-v1`` need no model, so they are always listed.
     ``long-text-translation-v1``, ``protected-translation-v1`` and
     ``translation-context-v1`` need a configured model; ``semantic-review-v1``
-    also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``. Reserved snapshot/knowledge
-    capabilities are omitted until enabled.
+    also needs ``WUWATERM_SEMANTIC_REVIEW_ENABLED``. ``knowledge-retrieval-v1``
+    is listed only when a revision-matched companion ``knowledge.db`` is ready
+    right now (zero-argument calls stay 100% backward compatible).
     """
     capabilities: list[ServiceCapability] = [
         REVIEW_FEATURE_AMBIGUOUS_MENTION,
@@ -1555,6 +1696,10 @@ def service_capabilities() -> tuple[ServiceCapability, ...]:
         CAPABILITY_DICTIONARY_IDENTITY,
         CAPABILITY_STRUCTURE_CHECK,
     ]
+    if knowledge_retrieval_available:
+        capabilities.append(CAPABILITY_KNOWLEDGE_RETRIEVAL)
+        if hybrid_rag_available:
+            capabilities.append(CAPABILITY_HYBRID_RAG)
     if llm_configured():
         capabilities.extend(
             (

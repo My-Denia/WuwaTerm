@@ -4,7 +4,8 @@
 Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     attribution_candidates, domain_knowledge, entity_graph,
-                   fuzzy_index, knowledge_db, lookup, native_kernel, normalize,
+                   fuzzy_index, knowledge_db, knowledge_runtime, lookup,
+                   native_kernel, normalize,
                    models, retrieval_vector, review, cjk_span, document_anchor,
                    protected_text, english_plural, segmentation,
                    semantic_review_contract, single_char_context,
@@ -118,6 +119,7 @@ DOMAIN_CORE = frozenset(
         "entity_graph",
         "fuzzy_index",
         "knowledge_db",
+        "knowledge_runtime",
         "lookup",
         "native_kernel",
         "normalize",
@@ -175,7 +177,15 @@ PURE_MATCHING = frozenset(
 )
 # Storage and storage-coupled domain modules forbidden to PURE_MATCHING.
 PURE_MATCHING_FORBIDDEN_STORAGE = frozenset(
-    {"db", "entity_graph", "knowledge_db", "lookup", "retrieval_vector", "review"}
+    {
+        "db",
+        "entity_graph",
+        "knowledge_db",
+        "knowledge_runtime",
+        "lookup",
+        "retrieval_vector",
+        "review",
+    }
 )
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
