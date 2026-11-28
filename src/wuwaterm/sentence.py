@@ -275,6 +275,7 @@ class SentenceTranslator:
         en_zh_protocol: bool = False,
         provider_profile: ProviderProfile | None = None,
         knowledge_db_path: str | Path | None = None,
+        knowledge_runtime: KnowledgeRuntime | None = None,
     ):
         self.service = TermService(db_path) if service is None else service
         self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
@@ -286,12 +287,26 @@ class SentenceTranslator:
             if provider_profile is None
             else provider_profile
         )
-        self._knowledge_db_path: Path | None = (
+        explicit_kb_path: Path | None = (
             Path(knowledge_db_path) if knowledge_db_path is not None else None
         )
-        self._knowledge_runtime = KnowledgeRuntime(
-            self._knowledge_db_path, logger=LOGGER
-        )
+        if knowledge_runtime is not None:
+            if (
+                explicit_kb_path is not None
+                and knowledge_runtime.path != explicit_kb_path
+            ):
+                raise ValueError(
+                    "knowledge_db_path conflicts with injected knowledge_runtime"
+                )
+            self._knowledge_runtime = knowledge_runtime
+            self._knowledge_db_path = knowledge_runtime.path
+            self._owns_knowledge_runtime = False
+        else:
+            self._knowledge_db_path = explicit_kb_path
+            self._knowledge_runtime = KnowledgeRuntime(
+                self._knowledge_db_path, logger=LOGGER
+            )
+            self._owns_knowledge_runtime = True
         self._llm_slots: asyncio.Semaphore | None = None
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
         self._llm_client: httpx.AsyncClient | None = None
@@ -316,16 +331,18 @@ class SentenceTranslator:
         return self._knowledge_runtime.status(self.service).available
 
     def close_knowledge_reader(self) -> None:
-        """Close any cached read-only companion ``knowledge.db`` reader."""
-        self._knowledge_runtime.close()
+        """Close any cached read-only companion ``knowledge.db`` reader owned here."""
+        if self._owns_knowledge_runtime:
+            self._knowledge_runtime.close()
 
     def __del__(self) -> None:
-        runtime = getattr(self, "_knowledge_runtime", None)
-        if runtime is not None:
-            try:
-                runtime.close()
-            except Exception:
-                pass
+        if getattr(self, "_owns_knowledge_runtime", False):
+            runtime = getattr(self, "_knowledge_runtime", None)
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except Exception:
+                    pass
 
     def _effective_retrieval_mode(
         self,

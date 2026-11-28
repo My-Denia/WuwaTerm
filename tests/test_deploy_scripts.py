@@ -2039,3 +2039,78 @@ def test_full_update_prepare_refuses_a_recorded_host_with_no_serving_surface():
     armed = text.index("_write_journal_atomic(journal)", guard)
     assert guard < armed
 
+
+def test_compose_does_not_override_knowledge_db_path_from_env_file(tmp_path: Path):
+    """wuwaterm-api must inherit WUWATERM_API_KNOWLEDGE_DB_PATH from env_file, not blank it."""
+    compose_path = ROOT / "deploy" / "docker-compose.yml"
+    text = compose_path.read_text(encoding="utf-8")
+    api_section = text.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    env_section = api_section.split("    environment:\n", 1)[1].split("    volumes:\n", 1)[0]
+
+    assert f"- {STATE_ROOT}/.env" in api_section
+    assert "WUWATERM_API_KNOWLEDGE_DB_PATH:" not in env_section
+
+    docker_bin = shutil.which("docker")
+    if docker_bin is None:
+        return
+    probe = subprocess.run(
+        [docker_bin, "compose", "version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return
+
+    base_env = {k: v for k, v in os.environ.items() if k != "WUWATERM_API_KNOWLEDGE_DB_PATH"}
+    base_env["WUWATERM_STATE_ROOT"] = str(tmp_path)
+
+    (tmp_path / ".env").write_text(
+        "WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n",
+        encoding="utf-8",
+    )
+    with_kb = subprocess.run(
+        [docker_bin, "compose", "-f", str(compose_path), "config", "--format", "json"],
+        env=base_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    resolved_env = json.loads(with_kb.stdout)["services"]["wuwaterm-api"]["environment"]
+    assert resolved_env.get("WUWATERM_API_KNOWLEDGE_DB_PATH") == "/app/data/knowledge.db"
+
+    (tmp_path / ".env").write_text(
+        "#WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n",
+        encoding="utf-8",
+    )
+    without_kb = subprocess.run(
+        [docker_bin, "compose", "-f", str(compose_path), "config", "--format", "json"],
+        env=base_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    resolved_empty = json.loads(without_kb.stdout)["services"]["wuwaterm-api"]["environment"]
+    assert not resolved_empty.get("WUWATERM_API_KNOWLEDGE_DB_PATH")
+
+
+@pytest.mark.parametrize("fail_step,expected_rc", [(None, 0), ("smoke", 97)])
+def test_vps_update_preserves_knowledge_db_path_in_env(
+    deploy_harness, fail_step: str | None, expected_rc: int
+):
+    """Normal upgrades and rollbacks must leave WUWATERM_API_KNOWLEDGE_DB_PATH in .env intact."""
+    root, env, _old_hash, _new_hash = deploy_harness
+    env_file = root / ".env"
+    original = env_file.read_text(encoding="utf-8")
+    updated = original + "WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n"
+    env_file.write_text(updated, encoding="utf-8")
+    env_file.chmod(0o600)
+    if fail_step is not None:
+        env["WUWATERM_FAIL_STEP"] = fail_step
+
+    result = _run_vps_update(root, env)
+
+    assert result.returncode == expected_rc, result.stdout + result.stderr
+    assert env_file.read_text(encoding="utf-8") == updated
+
+

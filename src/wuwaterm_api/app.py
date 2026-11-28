@@ -88,6 +88,7 @@ from wuwaterm.application import (
     STRUCTURE_CHECKS,
     STRUCTURE_RULES,
     ContextBefore,
+    KnowledgeRuntime,
     KnowledgeUnavailableError,
     LLMFailureDiagnostic,
     LlmCallBudget,
@@ -2381,6 +2382,7 @@ def create_app(
     device_store: DeviceStore | None = None,
     term_service=None,
     translator=None,
+    knowledge_runtime: KnowledgeRuntime | None = None,
 ) -> FastAPI:
     from .settings import (
         ApiSettings,
@@ -2390,6 +2392,7 @@ def create_app(
 
     resolved = settings or ApiSettings.from_env()
     validate_retired_web_setting(resolved.retired_web_enabled_raw)
+    app_owns_knowledge_runtime = False
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -2421,7 +2424,11 @@ def create_app(
                 if closer is not None:
                     await closer()
             finally:
-                kb_closer = getattr(app.state.knowledge_runtime, "close", None)
+                kb_closer = (
+                    getattr(app.state.knowledge_runtime, "close", None)
+                    if app_owns_knowledge_runtime
+                    else None
+                )
                 try:
                     if kb_closer is not None:
                         kb_closer()
@@ -2453,23 +2460,48 @@ def create_app(
         guard_legacy_default=resolved.device_db_is_default,
     )
     app.state.term_service = term_service or build_term_service(resolved.db_path)
-    app.state.translator = translator or build_translator(
-        resolved.db_path,
-        service=app.state.term_service,
-        timeout=resolved.llm_timeout_seconds,
-        max_concurrency=resolved.llm_max_concurrency,
-        en_zh_protocol=True,
-        knowledge_db_path=resolved.knowledge_db_path,
-    )
-    resolved_kb_path = (
-        resolved.knowledge_db_path
-        if resolved.knowledge_db_path is not None
-        else getattr(app.state.translator, "knowledge_db_path", None)
-    )
-    app.state.knowledge_runtime = build_knowledge_runtime(
-        resolved_kb_path, logger=LOGGER
-    )
-    if resolved_kb_path is not None:
+    if knowledge_runtime is not None:
+        app.state.knowledge_runtime = knowledge_runtime
+        app.state.translator = translator or build_translator(
+            resolved.db_path,
+            service=app.state.term_service,
+            timeout=resolved.llm_timeout_seconds,
+            max_concurrency=resolved.llm_max_concurrency,
+            en_zh_protocol=True,
+            knowledge_runtime=app.state.knowledge_runtime,
+        )
+    elif translator is None:
+        app.state.knowledge_runtime = build_knowledge_runtime(
+            resolved.knowledge_db_path, logger=LOGGER
+        )
+        app_owns_knowledge_runtime = True
+        app.state.translator = build_translator(
+            resolved.db_path,
+            service=app.state.term_service,
+            timeout=resolved.llm_timeout_seconds,
+            max_concurrency=resolved.llm_max_concurrency,
+            en_zh_protocol=True,
+            knowledge_runtime=app.state.knowledge_runtime,
+        )
+    else:
+        app.state.translator = translator
+        translator_kb_runtime = getattr(translator, "knowledge_runtime", None)
+        if isinstance(translator_kb_runtime, KnowledgeRuntime) and (
+            resolved.knowledge_db_path is None
+            or translator_kb_runtime.path == resolved.knowledge_db_path
+        ):
+            app.state.knowledge_runtime = translator_kb_runtime
+        else:
+            resolved_kb_path = (
+                resolved.knowledge_db_path
+                if resolved.knowledge_db_path is not None
+                else getattr(translator, "knowledge_db_path", None)
+            )
+            app.state.knowledge_runtime = build_knowledge_runtime(
+                resolved_kb_path, logger=LOGGER
+            )
+            app_owns_knowledge_runtime = True
+    if app.state.knowledge_runtime.path is not None:
         # Validate once at startup so missing or revision-mismatched files log a
         # sanitized warning immediately and degrade safely without blocking serve.
         app.state.knowledge_runtime.status(app.state.term_service)

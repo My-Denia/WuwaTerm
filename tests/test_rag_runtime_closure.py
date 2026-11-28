@@ -1230,3 +1230,148 @@ def test_missing_required_table_and_query_error_withdraw_capability(
     )
     assert recovered_query.status_code == 200
     assert any(hit["en"] == "Septimont" for hit in recovered_query.json()["hits"])
+
+
+def test_create_app_shares_single_knowledge_runtime_and_syncs_translation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _enable_llm(monkeypatch)
+    terms_db = tmp_path / "terms.db"
+    rev = _create_terms_db(terms_db)
+    kb_path = tmp_path / "knowledge.db"
+    _create_knowledge_db(kb_path, terms_db_revision=rev)
+
+    def _llm_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        user_msg = payload["messages"][1]["content"]
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": user_msg}}]}
+        )
+
+    settings = build_settings(
+        tmp_path, terms_db, knowledge_db_path=kb_path, max_body_bytes=64 * 1024
+    )
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    _, token = issue_device(store, "owner client", [SCOPE_META, SCOPE_TRANSLATE])
+    app = create_app(settings, device_store=store)
+    app.state.translator._llm_transport = httpx.MockTransport(_llm_handler)
+
+    # Single authoritative KnowledgeRuntime shared by app.state and translator.
+    assert app.state.knowledge_runtime is app.state.translator.knowledge_runtime
+    assert app.state.knowledge_runtime._reader is not None
+
+    # External runtime ownership: translator does not prematurely close the shared runtime.
+    app.state.translator.close_knowledge_reader()
+    assert app.state.knowledge_runtime._reader is not None
+    with pytest.raises(ValueError, match="conflicts"):
+        SentenceTranslator(
+            terms_db,
+            knowledge_db_path=tmp_path / "other.db",
+            knowledge_runtime=app.state.knowledge_runtime,
+        )
+
+    # Standalone translator retains backward-compatible ownership and closes its own reader.
+    standalone = SentenceTranslator(terms_db, knowledge_db_path=kb_path)
+    assert standalone.knowledge_base_status().available is True
+    assert standalone.knowledge_runtime._reader is not None
+    standalone.close_knowledge_reader()
+    assert standalone.knowledge_runtime._reader is None
+
+    # Healthy initially on both /v1/capabilities and /v1/knowledge/query.
+    caps_before = run(call(app, "GET", "/v1/capabilities", headers=bearer(token)))
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL in caps_before.json()["capabilities"]
+    query_before = run(
+        call(
+            app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "夜归"},
+            headers=bearer(token),
+        )
+    )
+    assert query_before.status_code == 200
+
+    # Failure triggered through the translation path withdraws capability & query immediately.
+    cached_reader = app.state.knowledge_runtime._reader
+    assert cached_reader is not None
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("simulated corrupt b-tree on translate")
+
+    monkeypatch.setattr(cached_reader, "query", _boom)
+
+    tr_resp = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "夜归与守岸人正在调查今州。", "direction": "zh2en"},
+            headers=bearer(token),
+        )
+    )
+    assert tr_resp.status_code == 200, tr_resp.text
+
+    caps_after = run(call(app, "GET", "/v1/capabilities", headers=bearer(token)))
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL not in caps_after.json()["capabilities"]
+    query_after = run(
+        call(
+            app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "夜归"},
+            headers=bearer(token),
+        )
+    )
+    assert query_after.status_code == 503
+    assert query_after.json()["error"]["code"] == ERROR_KNOWLEDGE_UNAVAILABLE
+
+    # Replacing knowledge.db with a fresh valid file restores both paths synchronously.
+    _create_knowledge_db(
+        kb_path,
+        terms_db_revision=rev,
+        extra_entities=(
+            EntitySpec(
+                "location:septimont",
+                "location",
+                "BinData/area.json",
+                "299",
+                "七丘",
+                "Septimont",
+                "official_authoritative",
+                "Arena city-state.",
+            ),
+        ),
+    )
+    caps_recovered = run(call(app, "GET", "/v1/capabilities", headers=bearer(token)))
+    assert CAPABILITY_KNOWLEDGE_RETRIEVAL in caps_recovered.json()["capabilities"]
+    query_recovered = run(
+        call(
+            app,
+            "POST",
+            "/v1/knowledge/query",
+            json={"query": "七丘"},
+            headers=bearer(token),
+        )
+    )
+    assert query_recovered.status_code == 200
+    assert any(hit["en"] == "Septimont" for hit in query_recovered.json()["hits"])
+
+    # Lifespan teardown closes the shared runtime exactly once (no double close).
+    close_calls = 0
+    real_close = app.state.knowledge_runtime.close
+
+    def _counted_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        real_close()
+
+    monkeypatch.setattr(app.state.knowledge_runtime, "close", _counted_close)
+
+    async def _run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    run(_run_lifespan())
+    assert close_calls == 1
+
