@@ -2241,3 +2241,33 @@ def test_symlink_knowledge_path_fails_closed_before_docker_work(install_root):
     assert "symlink" in result.stderr
     assert "wuwaterm-builder" not in docker_log(install_root)
     assert "up -d" not in docker_log(install_root)
+
+
+def test_symlinked_env_preserves_single_db_baseline_and_rejects_configured_kb(install_root):
+    real_env = install_root / ".env.target"
+    real_env.write_text(
+        "WUWATERM_OPENAI_BASE_URL=https://model.invalid/v1\n"
+        "WUWATERM_OPENAI_API_KEY=stub-key-value\n"
+        "WUWATERM_OPENAI_MODEL=stub-model\n"
+        "WUWATERM_API_PORT=8788\n",
+        encoding="utf-8",
+    )
+    (install_root / ".env").symlink_to(real_env)
+    (install_root / "data").mkdir()
+    (install_root / "data" / "terms.db").write_text("existing-terms", encoding="utf-8")
+
+    # Single-DB mode (no WUWATERM_API_KNOWLEDGE_DB_PATH): symlinked .env succeeds
+    # without invoking wuwaterm-builder, matching pre-PR baseline behaviour.
+    ok = run_setup(install_root, "--no-adopt")
+    assert ok.returncode == 0, ok.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+
+    # Once a non-empty WUWATERM_API_KNOWLEDGE_DB_PATH is present, symlinked .env fails closed.
+    (install_root / "docker.log").unlink()
+    with real_env.open("a", encoding="utf-8") as handle:
+        handle.write("WUWATERM_API_KNOWLEDGE_DB_PATH=/app/data/knowledge.db\n")
+    refused = run_setup(install_root, "--no-adopt")
+    assert refused.returncode == 1
+    assert ".env must not be a symlink" in refused.stderr
+    assert "wuwaterm-builder" not in docker_log(install_root)
+    assert "up -d" not in docker_log(install_root)

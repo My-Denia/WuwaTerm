@@ -585,7 +585,6 @@ def verify_companion_knowledge_compatibility(
     candidate_path: Path,
     *,
     allow_degrade: bool = False,
-    container_env: list[str] | None = None,
 ) -> None:
     """Verify companion ``knowledge.db`` against the candidate ``terms.db`` before mutation.
 
@@ -609,7 +608,7 @@ def verify_companion_knowledge_compatibility(
     import deployment_manifest  # noqa: PLC0415
     from wuwaterm.knowledge_db import KnowledgeBaseError, compute_terms_db_revision  # noqa: PLC0415
 
-    def _handle_incompatibility(reason: str) -> None:
+    def _handle_incompatibility(reason: str, *, host_kb_path: str | None = None) -> None:
         if allow_degrade:
             print(
                 f"component full-update: warning: companion knowledge.db check failed ({reason}); "
@@ -619,18 +618,17 @@ def verify_companion_knowledge_compatibility(
                 file=sys.stderr,
             )
             return
+        kb_target = host_kb_path if host_kb_path is not None else "<host-knowledge-db-path>"
         raise CompanionKnowledgeError(
             f"companion knowledge.db is incompatible with the candidate terms.db ({reason}); "
-            "either (1) build and place a matching knowledge.db first with "
-            "`wuwaterm build-kb --terms-db <candidate>` and re-run `full-update`, or "
+            f"either (1) build and place a matching knowledge.db at {kb_target} first with "
+            f"`wuwaterm build-kb --data-dir <data-dir> --db {kb_target} --terms-db <candidate> --atomic` "
+            "(or the `wuwaterm-builder build-kb` command in docs/deployment.md, using a path "
+            "accessible to the builder if --candidate-db is outside data/) and re-run `full-update`, or "
             "(2) pass `--allow-knowledge-degrade` to proceed with dictionary-only degradation"
         )
 
-    raw_env = (
-        container_env
-        if container_env is not None
-        else observe._inspect(actual["container"]["id"])["Config"].get("Env")
-    )
+    raw_env = observe._inspect(actual["container"]["id"])["Config"].get("Env")
     raw_kb_path = _extract_env_value(raw_env, "WUWATERM_API_KNOWLEDGE_DB_PATH")
     if raw_kb_path is None or not raw_kb_path.strip():
         return
@@ -667,7 +665,9 @@ def verify_companion_knowledge_compatibility(
         )
     except deployment_manifest.ManifestError as exc:
         detail = str(exc)
-        if "missing" in detail:
+        if detail.startswith("knowledge database is missing:") or (
+            not kb_host_path.is_symlink() and not kb_host_path.is_file()
+        ):
             reason = "companion knowledge.db file is missing"
         elif "symlink" in detail:
             reason = "companion knowledge.db must not be a symlink"
@@ -677,7 +677,7 @@ def verify_companion_knowledge_compatibility(
             reason = "companion knowledge.db schema version mismatch"
         else:
             reason = "companion knowledge.db is unreadable or corrupt"
-        _handle_incompatibility(reason)
+        _handle_incompatibility(reason, host_kb_path=kb_host_str)
         return
 
     try:
@@ -688,5 +688,6 @@ def verify_companion_knowledge_compatibility(
     if kb_revision != candidate_revision:
         _handle_incompatibility(
             f"terms_db_revision mismatch "
-            f"(knowledge.db={kb_revision[:12]}, candidate={candidate_revision[:12]})"
+            f"(knowledge.db={kb_revision[:12]}, candidate={candidate_revision[:12]})",
+            host_kb_path=kb_host_str,
         )

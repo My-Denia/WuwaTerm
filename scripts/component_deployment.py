@@ -399,7 +399,7 @@ def main(argv: list[str] | None = None, *, runtime: ModuleType) -> int:
                                         allow_knowledge_degrade=args.allow_knowledge_degrade) if is_full else
                            prepare.prepare_update(root, request, args.compose_executable))
             except (full.FullError, prepare.PrepareError, recovery.RecoveryError, transaction.TransactionError) as exc:
-                if is_full and isinstance(exc, full.FullError) and "--allow-knowledge-degrade" in str(exc):
+                if is_full and isinstance(exc, full.CompanionKnowledgeFullError):
                     raise runtime.JournalError(f"full update preparation failed: {exc}") from exc
                 raise runtime.JournalError("full update preparation failed" if is_full else "runtime update preparation failed") from exc
             if args.expected_sha is not None and (

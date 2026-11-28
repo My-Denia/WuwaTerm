@@ -84,6 +84,10 @@ _ROLLBACK = ("rollback-stop-readers", "rollback-copyback", "rollback-restore-db"
              "rollback-containers", "rollback-pointers", "rolled-back")
 
 
+class CompanionKnowledgeFullError(FullError):
+    """Non-secret operator guidance when companion knowledge.db blocks full-update."""
+
+
 def _prepare_request(request: Any) -> tuple[list[str], dict[str, Any], dict[str, dict[str, Any]]]:
     """Validate one FULL request: completed artifacts, never producer receipts.
 
@@ -217,7 +221,7 @@ def prepare(root: Path, candidate_db: Path, request: dict[str, Any], *, compose_
                     allow_degrade=allow_knowledge_degrade,
                 )
             except full_db.CompanionKnowledgeError as exc:
-                raise FullError(str(exc)) from exc
+                raise CompanionKnowledgeFullError(str(exc)) from exc
         target = copy.deepcopy(old)
         target.update(deployment_id=identifier,
                       deployment_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

@@ -1692,11 +1692,12 @@ def test_verify_companion_knowledge_accepts_matching_revision(
 
 @pytest.mark.parametrize(
     "case",
-    ["missing", "mismatch", "corrupt", "sidecar", "symlink", "unmapped"],
+    ["missing", "missing_revision", "mismatch", "corrupt", "sidecar", "symlink", "unmapped"],
 )
 def test_verify_companion_knowledge_fails_closed_and_degrades_when_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str
 ) -> None:
+    import sqlite3
     import component_full_db as full_db  # noqa: PLC0415
     import component_observe as plain_observe  # noqa: PLC0415
     from wuwaterm.knowledge_db import compute_terms_db_revision  # noqa: PLC0415
@@ -1711,6 +1712,14 @@ def test_verify_companion_knowledge_fails_closed_and_degrades_when_allowed(
 
     if case == "missing":
         pass
+    elif case == "missing_revision":
+        with sqlite3.connect(kb_path) as conn:
+            conn.execute("CREATE TABLE kb_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "INSERT INTO kb_metadata (key, value) VALUES (?, ?)",
+                ("kb_schema_version", "1"),
+            )
+            conn.commit()
     elif case == "mismatch":
         _make_companion_kb(kb_path, "0" * 64)
     elif case == "corrupt":
@@ -1735,9 +1744,17 @@ def test_verify_companion_knowledge_fails_closed_and_degrades_when_allowed(
     with pytest.raises(full_db.CompanionKnowledgeError) as exc_info:
         full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=False)
     message = str(exc_info.value)
-    assert "wuwaterm build-kb --terms-db <candidate>" in message
+    assert "wuwaterm build-kb --data-dir <data-dir> --db " in message
+    assert "--terms-db <candidate> --atomic" in message
     assert "--allow-knowledge-degrade" in message
     assert "vps-update.sh" not in message
+    if case not in ("symlink", "unmapped"):
+        assert str(kb_path) in message
+    if case == "missing_revision":
+        assert "unreadable or corrupt" in message
+        assert "file is missing" not in message
+    elif case == "missing":
+        assert "file is missing" in message
 
     full_db.verify_companion_knowledge_compatibility(actual, candidate, allow_degrade=True)
     captured = capsys.readouterr()
@@ -1922,10 +1939,11 @@ def test_prepare_mismatched_companion_kb_fails_closed_and_discards_candidate(
         kb_env_value="/app/data/knowledge.db", kb_revision_mode="mismatch",
     )
 
-    with pytest.raises(full.FullError) as exc_info:
+    with pytest.raises(full.CompanionKnowledgeFullError) as exc_info:
         full.prepare(root, cand, request, compose_path=ctx["compose_path"], allow_knowledge_degrade=False)
     msg = str(exc_info.value)
-    assert "wuwaterm build-kb --terms-db <candidate>" in msg
+    expected_kb = str(root / "data" / "knowledge.db")
+    assert f"wuwaterm build-kb --data-dir <data-dir> --db {expected_kb} --terms-db <candidate> --atomic" in msg
     assert "--allow-knowledge-degrade" in msg
     assert "vps-update.sh" not in msg
     # No journal was published and the prepared candidate + claim were completely discarded.
@@ -1961,10 +1979,11 @@ def test_cli_full_update_forwards_allow_knowledge_degrade_and_surfaces_guidance(
                      allow_knowledge_degrade=False):
         seen.append(allow_knowledge_degrade)
         if not allow_knowledge_degrade:
-            raise plain_full.FullError(
+            raise plain_full.CompanionKnowledgeFullError(
                 "companion knowledge.db is incompatible with the candidate terms.db (terms_db_revision mismatch); "
-                "either (1) build and place a matching knowledge.db first with "
-                "`wuwaterm build-kb --terms-db <candidate>` and re-run `full-update`, or "
+                "either (1) build and place a matching knowledge.db at /srv/data/knowledge.db first with "
+                "`wuwaterm build-kb --data-dir <data-dir> --db /srv/data/knowledge.db --terms-db <candidate> --atomic` "
+                "and re-run `full-update`, or "
                 "(2) pass `--allow-knowledge-degrade` to proceed with dictionary-only degradation"
             )
         return {"transaction_id": "20261128T000000Z-" + "a" * 32, "source": {"commit": "a" * 40}}
@@ -1980,7 +1999,7 @@ def test_cli_full_update_forwards_allow_knowledge_degrade_and_surfaces_guidance(
     rc_fail = deployment.main(base_argv, runtime=runtime)
     err_fail = capsys.readouterr().err
     assert rc_fail == 1
-    assert "wuwaterm build-kb --terms-db <candidate>" in err_fail
+    assert "wuwaterm build-kb --data-dir <data-dir> --db /srv/data/knowledge.db --terms-db <candidate> --atomic" in err_fail
     assert "--allow-knowledge-degrade" in err_fail
     assert "vps-update.sh" not in err_fail
 

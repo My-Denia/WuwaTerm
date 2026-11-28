@@ -279,7 +279,6 @@ ensure_layout() {
 # trailing `#` comments (aligned with scripts/full_update.py::_parse_env_var).
 env_kb_raw_value() {
     [ -f "$code_root/.env" ] || return 1
-    [ ! -L "$code_root/.env" ] || return 1
     awk '
         {
             line = $0
@@ -340,11 +339,6 @@ resolve_knowledge_db_path() {
     kb_relpath=
     kb_host_path=
     kb_path_error=
-    if [ -L "$code_root/.env" ]; then
-        kb_configured=1
-        kb_path_error=".env must not be a symlink"
-        return 1
-    fi
     if ! kb_raw=$(env_kb_raw_value); then
         return 0
     fi
@@ -352,6 +346,10 @@ resolve_knowledge_db_path() {
         return 0
     fi
     kb_configured=1
+    if [ -L "$code_root/.env" ]; then
+        kb_path_error=".env must not be a symlink when WUWATERM_API_KNOWLEDGE_DB_PATH is configured"
+        return 1
+    fi
     case "$kb_raw" in
         /app/data/*) kb_relpath="data/${kb_raw#/app/data/}" ;;
         data/*) kb_relpath="$kb_raw" ;;

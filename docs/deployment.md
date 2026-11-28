@@ -275,8 +275,17 @@ database before writing any transaction journal or stopping containers:
   `terms_db_revision` does not match the candidate `terms.db`, preparation fails
   closed before creating a journal (and discards its owned candidate copy). Two
   exits are supported on an adopted host:
-  1. Build and place a matching `knowledge.db` first with
-     `wuwaterm build-kb --terms-db <candidate>` and re-run `full-update`, or
+  1. Build and place a matching `knowledge.db` at the host path reported in the
+     error first with
+     `wuwaterm build-kb --data-dir <data-dir> --db <host-kb-path> --terms-db <candidate> --atomic`
+     (or the `wuwaterm-builder build-kb` container command above, passing a path
+     accessible under `/app/data` when `--candidate-db` sits outside `data/`)
+     and re-run `full-update`. Note: because the schema-5 transaction journal
+     manages `terms.db` only, if you replace `knowledge.db` ahead of time via
+     this exit and `full-update` subsequently rolls back to the old `terms.db`,
+     `knowledge.db` is not restored automatically and `wuwaterm-api` safely
+     degrades to dictionary-only mode until you rebuild or restore a matching
+     `knowledge.db`.
   2. Pass `--allow-knowledge-degrade` to `full-update` to print a warning and
      proceed; `wuwaterm-api` then degrades safely to dictionary-only mode until
      a matching `knowledge.db` is installed.
